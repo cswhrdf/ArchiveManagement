@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="960" viewBox="0 0 1440 960" role="img" aria-labelledby="title desc">
+  <title id="title">Archive Management desktop interface design</title>
+  <desc id="desc">A dark desktop archive manager interface showing games, backup timeline, branch relationships, actions, and scheduler status.</desc>
+  <defs>
+    <linearGradient id="canvas" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101a2d"/>
+      <stop offset="1" stop-color="#0b1120"/>
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1c314d"/>
+      <stop offset="1" stop-color="#193b3e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000000" flood-opacity="0.22"/>
+    </filter>
+    <filter id="smallShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.18"/>
+    </filter>
+    <style>
+      .font { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+      .title { fill: #f4f7fb; font-size: 28px; font-weight: 700; }
+      .h2 { fill: #f4f7fb; font-size: 18px; font-weight: 700; }
+      .body { fill: #d2dbea; font-size: 14px; }
+      .muted { fill: #8291aa; font-size: 12px; }
+      .tiny { fill: #8291aa; font-size: 11px; }
+      .label { fill: #dce5f2; font-size: 12px; font-weight: 600; }
+      .nav { fill: #aebbd0; font-size: 14px; }
+      .nav-active { fill: #ffffff; font-size: 14px; font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="960" fill="url(#canvas)"/>
+  <rect x="0" y="0" width="1440" height="64" fill="#0a1120"/>
+  <rect x="0" y="63" width="1440" height="1" fill="#25334b"/>
+
+  <!-- top bar -->
+  <g class="font">
+    <rect x="28" y="19" width="26" height="26" rx="7" fill="#55d6be"/>
+    <path d="M35 27h12v4H35zm0 7h9v4h-9z" fill="#0b1825"/>
+    <text x="68" y="39" fill="#f4f7fb" font-size="17" font-weight="700">ARCHIVE</text>
+    <text x="151" y="39" fill="#55d6be" font-size="17" font-weight="700">/</text>
+    <text x="166" y="39" fill="#9aa9bd" font-size="17">存档管理</text>
+    <text x="1120" y="38" class="muted">上次同步  2026/09/06  09:42</text>
+    <circle cx="1327" cy="32" r="15" fill="#18273b" stroke="#314765"/>
+    <path d="M1322 32h10M1327 27v10" stroke="#aebbd0" stroke-width="1.5"/>
+    <circle cx="1382" cy="32" r="15" fill="#213342" stroke="#55d6be"/>
+    <path d="M1377 31a5 5 0 1 1 10 0c0 4-5 6-5 6s-5-2-5-6z" fill="none" stroke="#55d6be" stroke-width="1.5"/>
+  </g>
+
+  <!-- sidebar -->
+  <rect x="0" y="64" width="286" height="896" fill="#0d1728"/>
+  <rect x="285" y="64" width="1" height="896" fill="#25334b"/>
+  <g class="font">
+    <text x="28" y="105" class="muted">我的游戏</text>
+    <rect x="22" y="124" width="242" height="58" rx="10" fill="#183c45" stroke="#55d6be" stroke-width="1.2"/>
+    <rect x="34" y="136" width="36" height="36" rx="8" fill="#d15b3e"/>
+    <path d="M43 148c0-5 4-8 9-8s9 3 9 8v8c0 5-4 8-9 8s-9-3-9-8z" fill="#f2bf74"/>
+    <circle cx="48" cy="152" r="2" fill="#223044"/><circle cx="57" cy="152" r="2" fill="#223044"/>
+    <text x="82" y="149" class="nav-active">星际拓荒</text>
+    <text x="82" y="167" class="tiny">3 个存档位置 · 42 个备份</text>
+    <rect x="22" y="191" width="242" height="58" rx="10" fill="#111e31"/>
+    <rect x="34" y="203" width="36" height="36" rx="8" fill="#405685"/>
+    <path d="M44 211h16v19H44z" fill="none" stroke="#d6e3ff" stroke-width="2"/><path d="M47 207h10" stroke="#d6e3ff" stroke-width="2"/>
+    <text x="82" y="218" class="nav">山海旅人</text>
+    <text x="82" y="236" class="tiny">1 个存档位置 · 8 个备份</text>
+    <rect x="22" y="258" width="242" height="58" rx="10" fill="#111e31"/>
+    <rect x="34" y="270" width="36" height="36" rx="8" fill="#3b806e"/>
+    <path d="M43 291l9-15 9 15z" fill="none" stroke="#d8fff3" stroke-width="2"/><path d="M48 291h9" stroke="#d8fff3" stroke-width="2"/>
+    <text x="82" y="285" class="nav">无尽太空</text>
+    <text x="82" y="303" class="tiny">未配置存档位置</text>
+
+    <rect x="22" y="338" width="242" height="40" rx="8" fill="#14243a"/>
+    <circle cx="43" cy="358" r="9" fill="none" stroke="#55d6be" stroke-width="1.7"/><path d="M43 353v10m-5-5h10" stroke="#55d6be" stroke-width="1.7"/>
+    <text x="62" y="363" class="nav">添加游戏</text>
+    <text x="28" y="422" class="muted">工作区</text>
+    <text x="48" y="462" class="nav">⌁  全部备份</text>
+    <text x="48" y="502" class="nav">◷  定时任务</text>
+    <text x="48" y="542" class="nav">⚙  设置</text>
+    <rect x="22" y="874" width="242" height="56" rx="10" fill="#111e31"/>
+    <circle cx="48" cy="902" r="8" fill="#55d6be"/><circle cx="48" cy="902" r="3" fill="#0d1728"/>
+    <text x="68" y="899" class="label">备份服务正常</text>
+    <text x="68" y="917" class="tiny">磁盘剩余 186 GB</text>
+  </g>
+
+  <!-- content -->
+  <g class="font">
+    <text x="326" y="116" class="title">星际拓荒</text>
+    <text x="326" y="143" class="body">保存你的探索进度，随时回到任意一个分岔点。</text>
+    <rect x="1178" y="96" width="104" height="38" rx="8" fill="#55d6be" filter="url(#smallShadow)"/>
+    <path d="M1197 108v14m-5-5 5 5 5-5" stroke="#092329" stroke-width="2" fill="none"/>
+    <text x="1215" y="120" fill="#092329" font-size="13" font-weight="700">导出游戏</text>
+    <rect x="1294" y="96" width="112" height="38" rx="8" fill="#1c2c43" stroke="#38506d"/>
+    <path d="M1314 107l2 2 3-2 3 2 3-2 2 4-2 2v4l2 2-2 4-3-2-3 2-3-2-3 2-2-4 2-2v-4l-2-2z" fill="none" stroke="#b9c8db" stroke-width="1.5" stroke-linejoin="round"/>
+    <circle cx="1322" cy="115" r="3" fill="none" stroke="#b9c8db" stroke-width="1.4"/>
+    <text x="1338" y="120" fill="#d7e1ef" font-size="13">游戏设置</text>
+
+    <!-- hero summary -->
+    <rect x="326" y="170" width="1080" height="150" rx="14" fill="url(#hero)" stroke="#315769" filter="url(#shadow)"/>
+    <rect x="350" y="194" width="102" height="102" rx="12" fill="#d15b3e"/>
+    <path d="M368 244c0-19 15-35 34-35s34 16 34 35-15 35-34 35-34-16-34-35z" fill="#f2bf74"/>
+    <path d="M385 237l17-17 17 17-9 3-8-7-8 7z" fill="#223044"/><circle cx="392" cy="249" r="3" fill="#223044"/><circle cx="412" cy="249" r="3" fill="#223044"/>
+    <text x="484" y="211" class="muted">当前游戏</text>
+    <text x="484" y="239" fill="#f4f7fb" font-size="22" font-weight="700">星际拓荒</text>
+    <text x="484" y="266" class="body">主存档位置  ·  D:\Games\OuterWilds\save</text>
+    <circle cx="487" cy="289" r="5" fill="#55d6be"/><text x="501" y="294" class="label">路径已验证</text>
+    <line x1="800" y1="198" x2="800" y2="292" stroke="#416073"/>
+    <text x="836" y="217" class="muted">最近备份</text><text x="836" y="244" class="h2">今天 09:40</text><text x="836" y="267" class="tiny">手动触发 · 128 MB</text>
+    <text x="1080" y="217" class="muted">备份总数</text><text x="1080" y="244" class="h2">42 个节点</text><text x="1080" y="267" class="tiny">3 条分支 · 7 天活跃</text>
+    <rect x="1252" y="212" width="126" height="60" rx="10" fill="#15373b" stroke="#3a857d"/>
+    <text x="1270" y="232" class="tiny" fill="#8ee8d4">下次自动备份</text><text x="1270" y="255" fill="#b8fff0" font-size="16" font-weight="700">今天 12:00</text>
+
+    <!-- toolbar -->
+    <rect x="326" y="345" width="1080" height="58" rx="10" fill="#111e31" stroke="#253a55"/>
+    <rect x="348" y="356" width="120" height="36" rx="7" fill="#24464e"/>
+    <text x="380" y="380" fill="#b8fff0" font-size="13" font-weight="700">时间线</text>
+    <rect x="468" y="356" width="120" height="36" rx="7" fill="#111e31"/>
+    <text x="501" y="380" class="nav">分支树</text>
+    <line x1="620" y1="362" x2="620" y2="386" stroke="#31445f"/>
+    <text x="648" y="380" class="muted">筛选</text>
+    <rect x="696" y="356" width="182" height="36" rx="7" fill="#0c1627" stroke="#30425c"/>
+    <text x="712" y="379" class="tiny">全部来源   ▾</text>
+    <rect x="890" y="356" width="182" height="36" rx="7" fill="#0c1627" stroke="#30425c"/>
+    <text x="906" y="379" class="tiny">最近 30 天   ▾</text>
+    <rect x="1194" y="356" width="190" height="36" rx="7" fill="#d97852" filter="url(#smallShadow)"/>
+    <path d="M1215 367v14m-5-5 5 5 5-5M1210 365h10" stroke="#26140e" stroke-width="1.8" fill="none"/>
+    <text x="1234" y="380" fill="#26140e" font-size="13" font-weight="700">立即创建备份</text>
+
+    <!-- timeline panel -->
+    <rect x="326" y="427" width="710" height="477" rx="12" fill="#101b2d" stroke="#253a55"/>
+    <text x="350" y="463" class="h2">备份时间线</text><text x="350" y="486" class="muted">按创建时间倒序排列，点击节点查看文件快照</text>
+    <line x1="387" y1="524" x2="387" y2="860" stroke="#314762" stroke-width="2"/>
+    <circle cx="387" cy="540" r="8" fill="#55d6be" stroke="#9effee" stroke-width="3"/>
+    <rect x="416" y="512" width="584" height="94" rx="10" fill="#17343a" stroke="#3d867e"/>
+    <text x="438" y="539" class="label">今天 09:40</text><rect x="534" y="522" width="78" height="22" rx="11" fill="#3a3342"/><text x="548" y="537" fill="#e1c8ed" font-size="11">手动</text>
+    <text x="438" y="566" class="h2">离开量子月亮前</text><text x="438" y="589" class="tiny">分支：主线  ·  128 MB  ·  SHA-256 已验证</text>
+    <circle cx="387" cy="638" r="7" fill="#d97852"/>
+    <rect x="416" y="612" width="584" height="82" rx="10" fill="#142238" stroke="#2a405d"/>
+    <text x="438" y="638" class="label">昨天 21:15</text><rect x="535" y="621" width="78" height="22" rx="11" fill="#3a3342"/><text x="550" y="636" fill="#e1c8ed" font-size="11">手动</text>
+    <text x="438" y="666" class="body">尝试黑棘入口 · 主线</text><text x="752" y="666" class="tiny">125 MB  ·  已验证</text>
+    <circle cx="387" cy="726" r="7" fill="#637a9b"/>
+    <rect x="416" y="700" width="584" height="82" rx="10" fill="#142238" stroke="#2a405d"/>
+    <text x="438" y="726" class="label">昨天 18:00</text><rect x="535" y="709" width="78" height="22" rx="11" fill="#29384a"/><text x="550" y="724" fill="#b8c9df" font-size="11">自动</text>
+    <text x="438" y="754" class="body">每日自动备份 · 主线</text><text x="752" y="754" class="tiny">124 MB  ·  已验证</text>
+    <circle cx="387" cy="814" r="7" fill="#637a9b"/>
+    <rect x="416" y="788" width="584" height="82" rx="10" fill="#142238" stroke="#2a405d"/>
+    <text x="438" y="814" class="label">2026/09/04 22:31</text><rect x="635" y="797" width="78" height="22" rx="11" fill="#29384a"/><text x="650" y="812" fill="#b8c9df" font-size="11">自动</text>
+    <text x="438" y="842" class="body">每日自动备份 · 分支「黑棘」</text><text x="752" y="842" class="tiny">122 MB  ·  已验证</text>
+
+    <!-- right rail -->
+    <rect x="1060" y="427" width="346" height="226" rx="12" fill="#101b2d" stroke="#253a55"/>
+    <text x="1084" y="463" class="h2">选中备份</text>
+    <text x="1084" y="492" class="body">离开量子月亮前</text><text x="1084" y="515" class="muted">今天 09:40  ·  主线</text>
+    <line x1="1084" y1="536" x2="1382" y2="536" stroke="#263b57"/>
+    <text x="1084" y="562" class="tiny">内容摘要</text><text x="1084" y="586" class="label">1,248 个文件</text><text x="1242" y="586" class="label">128 MB</text>
+    <rect x="1084" y="605" width="138" height="32" rx="7" fill="#d97852"/><text x="1120" y="626" fill="#26140e" font-size="12" font-weight="700">恢复到此节点</text>
+    <rect x="1232" y="605" width="150" height="32" rx="7" fill="#1b2b41" stroke="#38506d"/><text x="1261" y="626" fill="#cbd7e6" font-size="12">从此处创建分支</text>
+
+    <rect x="1060" y="675" width="346" height="229" rx="12" fill="#101b2d" stroke="#253a55"/>
+    <text x="1084" y="712" class="h2">定时任务</text>
+    <circle cx="1089" cy="744" r="5" fill="#55d6be"/><text x="1104" y="749" class="body">每日自动备份</text><text x="1284" y="749" class="tiny">运行中</text>
+    <rect x="1084" y="766" width="298" height="8" rx="4" fill="#1d3049"/><rect x="1084" y="766" width="212" height="8" rx="4" fill="#55d6be"/>
+    <text x="1084" y="798" class="tiny">下次运行</text><text x="1284" y="798" class="label">今天 12:00</text>
+    <text x="1084" y="826" class="tiny">备份目标</text><text x="1200" y="826" class="tiny">本地备份目录</text>
+    <text x="1084" y="854" class="tiny">快捷键</text><rect x="1200" y="839" width="68" height="24" rx="5" fill="#1e2e44" stroke="#3b5270"/><text x="1219" y="855" fill="#d7e1ef" font-size="11">Ctrl  Alt  S</text>
+    <text x="1084" y="881" fill="#55d6be" font-size="12">编辑任务设置  →</text>
+  </g>
+</svg>

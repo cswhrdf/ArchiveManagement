@@ -6,15 +6,22 @@
 
 要求：Python >= 3.12 与 [uv](https://docs.astral.sh/uv/).
 
-```powershell
+```shell
 uv sync --locked          # 安装依赖（含 dev 组）并安装本包
 uv run archive-management init --root .\dev-data   # 初始化目录/配置/数据库
 uv run archive-management doctor --root .\dev-data # 健康检查
+uv run pre-commit install # 安装 Git 提交钩子
+```
+
+启动UI
+```shell
+uv run archive-management gui --root .\dev-data    # 启动图形界面（演示数据）
+uv run archive-management gui --smoke 1            # GUI 冒烟自检（自动关闭）
 ```
 
 质量门禁（与 pre-commit 及 CI 一致）：
 
-```powershell
+```shell
 uv run ruff check .
 uv run black --check .
 uv run mypy src

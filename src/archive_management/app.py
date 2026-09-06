@@ -60,6 +60,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="打印路径、配置与数据库健康状态",
         parents=[common],
     )
+    gui_parser = subparsers.add_parser(
+        "gui",
+        help="启动图形界面(默认深色主题,可切换浅色)",
+        parents=[common],
+    )
+    gui_parser.add_argument(
+        "--smoke",
+        type=float,
+        default=None,
+        help="启动后自动关闭的延时秒数,用于界面冒烟自检",
+    )
     return parser
 
 
@@ -80,6 +91,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _run_init(paths, force=bool(getattr(args, "force", False)))
     if command == "doctor":
         return _run_doctor(paths)
+    if command == "gui":
+        return _run_gui(paths, smoke=args.smoke)
     parser.error(f"未知命令: {command}")
     return 1
 
@@ -141,6 +154,18 @@ def _run_doctor(paths: ApplicationPaths) -> int:
     except Exception as exc:
         print(f"数据库 : 不可用 -> {exc}")
     return 0
+
+
+def _run_gui(paths: ApplicationPaths, *, smoke: float | None) -> int:
+    """启动图形界面;无图形环境或缺少 tkinter 时给出清晰错误."""
+    try:
+        from archive_management.ui.main_window import run_gui
+
+        return run_gui(smoke_seconds=smoke, display_name=APP_DISPLAY_NAME)
+    except Exception as exc:
+        logger.error("GUI 启动失败: %s", exc)
+        print(f"无法启动图形界面:{exc}\nGUI 需要可用的桌面环境与 tkinter。")
+        return 2
 
 
 def main() -> None:
