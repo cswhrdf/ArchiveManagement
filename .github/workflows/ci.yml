@@ -7,7 +7,7 @@ on:
 
 jobs:
   quality:
-    name: Lint, Type Check & Test (${{ matrix.os }})
+    name: 代码检查、类型检查与测试 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -16,10 +16,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -39,12 +39,14 @@ jobs:
         run: uv run mypy src
 
       - name: Pytest with coverage
-        run: uv run pytest --cov --cov-report=term --cov-report=xml:coverage.xml
+        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}
-          path: coverage.xml
+          path: |
+            coverage.xml
+            htmlcov/
           if-no-files-found: ignore
