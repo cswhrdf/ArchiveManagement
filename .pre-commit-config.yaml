@@ -1,0 +1,32 @@
+# 提交前质量门禁（PLAN 9）
+# 通过 uv 运行以保证与开发环境一致的依赖版本.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (autofix)
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: black-check
+        name: black check
+        entry: uv run black .
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false

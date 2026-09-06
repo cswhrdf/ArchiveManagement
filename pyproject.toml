@@ -1,0 +1,169 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "archive-management"
+version = "0.0.1"
+description = "用于分支、备份、恢复和导出游戏存档的桌面工具"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+    { name = "晓航", email = "52796446+cswhrdf@users.noreply.github.com" },
+]
+dependencies = [
+    "apscheduler>=3.10",
+    "customtkinter>=5.2.2",
+    "httpx>=0.27",
+    "keyring>=25",
+    "platformdirs>=4",
+    "psutil>=6",
+    "pydantic>=2.8",
+    "pynput>=1.7",
+    "send2trash>=1.8",
+]
+
+[project.scripts]
+archive-management = "archive_management.app:main"
+
+[project.urls]
+Homepage = "https://github.com/cswhrdf/ArchiveManagement"
+Documentation = "https://github.com/cswhrdf/ArchiveManagement/wiki"
+Repository = "https://github.com/cswhrdf/ArchiveManagement"
+BugTracker = "https://github.com/cswhrdf/ArchiveManagement/issues"
+Changelog = "https://github.com/cswhrdf/ArchiveManagement/releases"
+
+[dependency-groups]
+dev = [
+    "black>=25",
+    "mypy>=1.20",
+    "pre-commit>=4",
+    "pyinstaller>=6",
+    "pytest>=8",
+    "pytest-cov>=7",
+    "ruff>=0.16",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/archive_management"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/archive_management"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src", "tests"]
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "S",
+    "D",
+    "N",
+    "ANN",
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "RUF",
+    "C90",
+    "PT",
+]
+ignore = [
+    "D100",  # 忽略 module docstring
+    "D104",  # 忽略 package docstring
+    "ANN401",  # 允许 typing.Any 这种例外
+]
+
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "D",
+    "ANN",
+    "S101",
+    "PT011",
+]
+[tool.ruff.lint.isort]
+known-first-party = ["archive_management"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+skip-magic-trailing-comma = false
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+strict_equality = true
+strict_concatenate = true
+allow_redefinition = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+]
+markers = [
+    "integration: tests that use the filesystem or other infrastructure",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/archive_management"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+show_missing = true
+skip_covered = true
+# 阶段 A 以骨架与核心模块为主, 随里程碑实现逐步上调.
+fail_under = 70
