@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from archive_management.i18n import tr
+
 
 class ViewKind(StrEnum):
     """备份视图类型."""
@@ -42,8 +44,12 @@ class GameSummary:
     def list_detail(self) -> str:
         """列表项下方的说明文字."""
         if not self.has_locations:
-            return "未配置存档位置"
-        return f"{self.location_count} 个存档位置 · {self.backup_count} 个备份"
+            return tr("game.no_locations_short")
+        return tr(
+            "game.locations_detail",
+            count=self.location_count,
+            backups=self.backup_count,
+        )
 
 
 @dataclass(frozen=True)
@@ -79,7 +85,7 @@ class BackupItem:
     @property
     def kind_label(self) -> str:
         """节点来源标签(自动/手动)."""
-        return "自动" if self.auto else "手动"
+        return tr("backup.kind_auto") if self.auto else tr("backup.kind_manual")
 
 
 @dataclass(frozen=True)

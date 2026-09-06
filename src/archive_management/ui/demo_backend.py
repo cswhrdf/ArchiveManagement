@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 
 from archive_management.exceptions import ArchiveManagementError
+from archive_management.i18n import tr
 from archive_management.ui.models import (
     BackupItem,
     GameDetail,
@@ -181,7 +182,9 @@ class DemoArchiveService:
         try:
             return _DETAILS[game_id]
         except KeyError as exc:
-            raise ArchiveManagementError(f"未知游戏: {game_id}") from exc
+            raise ArchiveManagementError(
+                tr("error.unknown_game", game_id=game_id)
+            ) from exc
 
     def list_backups(self, game_id: str) -> list[BackupItem]:
         """返回某游戏的备份节点, 含本会话新增节点."""
@@ -234,36 +237,38 @@ class DemoArchiveService:
         self._simulate()
         self._require_locations(game_id)
         self._extra_backups[game_id] = self._extra_backups.get(game_id, 0) + 1
-        return f"备份完成:{self._name_of(game_id)} 已保存当前状态"
+        return tr("result.backup_done", name=self._name_of(game_id))
 
     def run_restore(self, game_id: str, backup_id: str) -> str:
         """恢复到指定节点; 特定节点刻意失败以演示错误路径."""
         self._simulate()
         if backup_id == _FAIL_RESTORE_ID:
-            raise ArchiveManagementError("恢复中断:检测到游戏进程正在运行,已取消操作")
-        return f"已恢复「{backup_id}」到 {self._name_of(game_id)}"
+            raise ArchiveManagementError(tr("error.restore_busy"))
+        return tr(
+            "result.restore_done", backup_id=backup_id, name=self._name_of(game_id)
+        )
 
     def run_create_branch(self, game_id: str, backup_id: str, branch_name: str) -> str:
         """从指定节点创建分支."""
         self._simulate()
-        return f"已从 {backup_id} 创建分支「{branch_name}」"
+        return tr("result.branch_done", backup_id=backup_id, branch_name=branch_name)
 
     def run_export(self, game_id: str) -> str:
         """导出选中游戏."""
         self._simulate()
-        return f"已导出 {self._name_of(game_id)}"
+        return tr("result.export_done", name=self._name_of(game_id))
 
     # -- 内部 ---------------------------------------------------------------
 
     def _require_locations(self, game_id: str) -> None:
         if not self._game(game_id).has_locations:
-            raise ArchiveManagementError("该游戏未配置存档位置,无法备份")
+            raise ArchiveManagementError(tr("error.no_locations_backup"))
 
     def _game(self, game_id: str) -> GameSummary:
         for game in _GAMES:
             if game.game_id == game_id:
                 return game
-        raise ArchiveManagementError(f"未知游戏: {game_id}")
+        raise ArchiveManagementError(tr("error.unknown_game", game_id=game_id))
 
     def _name_of(self, game_id: str) -> str:
         return self._game(game_id).name

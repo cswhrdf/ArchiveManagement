@@ -2,7 +2,7 @@
 
 布局对应 ``docs/archive-management-ui*.svg``:顶部工具栏、左侧游戏/工作区
 栏、标题行与概要卡、视图工具条、时间线/分支主面板与右侧 rail、底部反馈
-状态条。主题切换不改变布局与操作语义。
+状态条。主题切换不改变布局与操作语义;界面文案统一从 i18n 配置加载。
 """
 
 from __future__ import annotations
@@ -10,10 +10,12 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Literal
 
 import customtkinter as ctk
 
+from archive_management.i18n import tr
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.dialogs import (
@@ -40,6 +42,7 @@ _TONE_COLORS: dict[str, str] = {
     "default": "#405685",
 }
 _WINDOW_MIN = (1080, 720)
+_RAIL_WIDTH = 350
 
 
 class ArchiveApp(ctk.CTk):
@@ -67,11 +70,15 @@ class ArchiveApp(ctk.CTk):
         self._backup_id: str | None = None
         self._items: list[BackupItem] = []
         self._busy = False
+        self._cards: dict[str, ctk.CTkFrame] = {}
 
         self._messages: queue.Queue[tuple[Literal["ok", "err"], str]] = queue.Queue()
         self._pending_ok: Callable[[str], None] | None = None
         self._sync_labels: list[ctk.CTkLabel] = []
-        self._last_feedback: tuple[FeedbackKind, str] = (FeedbackKind.INFO, "就绪")
+        self._last_feedback: tuple[FeedbackKind, str] = (
+            FeedbackKind.INFO,
+            tr("status.ready"),
+        )
         self._verified = True
         self.title(title)
         self.minsize(*_WINDOW_MIN)
@@ -106,7 +113,7 @@ class ArchiveApp(ctk.CTk):
             self._main, bg_key="sidebar", border_key="border", corner_radius=0
         )
         sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.configure(width=270)
+        sidebar.configure(width=272)
         sidebar.grid_propagate(False)
         self._build_sidebar(sidebar)
 
@@ -122,7 +129,7 @@ class ArchiveApp(ctk.CTk):
         logo.grid(row=0, column=0, padx=(18, 12), pady=11)
         self.kit.register(lambda p: logo.configure(fg_color=p.accent))
         brand = self.kit.label(
-            parent, "ARCHIVE / 存档管理", style="primary", size=16, weight="bold"
+            parent, tr("topbar.brand"), style="primary", size=16, weight="bold"
         )
         brand.grid(row=0, column=1, padx=(0, 8), pady=10)
 
@@ -132,7 +139,7 @@ class ArchiveApp(ctk.CTk):
 
         self.theme_btn = self.kit.button(
             parent,
-            "浅色主题",
+            tr("theme.to_light"),
             style="ghost",
             command=self._on_toggle_theme,
             width=96,
@@ -142,12 +149,12 @@ class ArchiveApp(ctk.CTk):
 
     def _build_sidebar(self, parent: ctk.CTkFrame) -> None:
         parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(2, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
 
         section = self.kit.label(
-            parent, "我的游戏", style="muted", size=12, weight="bold"
+            parent, tr("sidebar.my_games"), style="muted", size=12, weight="bold"
         )
-        section.grid(row=0, column=0, padx=22, pady=(18, 6), sticky="w")
+        section.grid(row=0, column=0, padx=22, pady=(18, 8), sticky="w")
 
         self._games_container = ctk.CTkScrollableFrame(
             parent, fg_color="transparent", scrollbar_button_color="#314765"
@@ -160,28 +167,41 @@ class ArchiveApp(ctk.CTk):
             )
         )
 
-        add_game = ctk.CTkFrame(parent, corner_radius=8, fg_color="transparent")
-        add_game.grid(row=2, column=0, padx=16, pady=(6, 4), sticky="ew")
-        self._add_game_label = self.kit.label(
-            add_game, "+  添加游戏", style="body", size=13, weight="bold"
+        add_game = ctk.CTkFrame(parent, corner_radius=8, cursor="hand2")
+        add_game.grid(row=2, column=0, padx=22, pady=(10, 2), sticky="ew")
+        add_game.grid_columnconfigure(0, weight=1)
+        self.kit.register(
+            lambda p: add_game.configure(
+                fg_color=p.raised, border_width=1, border_color=p.border
+            )
         )
-        self._add_game_label.pack(fill="x", padx=10, pady=7)
+        self._add_game_label = self.kit.label(
+            add_game,
+            tr("sidebar.add_game"),
+            style="body",
+            size=13,
+            weight="bold",
+            anchor="center",
+        )
+        self._add_game_label.grid(row=0, column=0, pady=9)
         self._add_game_label.bind("<Button-1>", lambda _e: self._on_add_game())
-        self.kit.register(lambda p: add_game.configure(fg_color=p.raised))
 
-        work = self.kit.label(parent, "工作区", style="muted", size=12, weight="bold")
+        work = self.kit.label(
+            parent, tr("sidebar.workspace"), style="muted", size=12, weight="bold"
+        )
         work.grid(row=3, column=0, padx=22, pady=(14, 4), sticky="w")
 
-        nav = self.kit.frame(parent, bg_key="sidebar", corner_radius=0)
-        nav.grid(row=4, column=0, sticky="ew", padx=10, pady=2)
+        nav = ctk.CTkFrame(parent, fg_color="transparent")
+        nav.grid(row=4, column=0, sticky="ew", padx=16, pady=2)
+        self.kit.register(lambda p: nav.configure(fg_color="transparent"))
         nav_items = [
-            ("全部备份", "查看所有游戏的全部备份时间线"),
-            ("定时任务", "查看右侧定时任务状态卡片"),
-            ("设置", "打开设置对话框"),
+            (tr("sidebar.nav_all"), tr("sidebar.nav_all_hint")),
+            (tr("sidebar.nav_scheduled"), tr("sidebar.nav_scheduled_hint")),
+            (tr("sidebar.nav_settings"), tr("sidebar.nav_settings_hint")),
         ]
         for text, message in nav_items:
             row = self.kit.label(nav, text, style="body", size=14)
-            row.pack(fill="x", padx=14, pady=4)
+            row.pack(fill="x", padx=12, pady=4)
             row.bind("<Button-1>", lambda _e, m=message, t=text: self._on_nav(t, m))
 
         self._status_card = self.kit.frame(parent, bg_key="raised", border_key="border")
@@ -199,7 +219,7 @@ class ArchiveApp(ctk.CTk):
 
     def _build_content(self) -> None:
         self._content.grid_columnconfigure(0, weight=1)
-        self._content.grid_rowconfigure(2, weight=1)
+        self._content.grid_rowconfigure(3, weight=1)
 
         header = self.kit.frame(self._content, bg_key="background", corner_radius=0)
         header.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 4))
@@ -212,7 +232,7 @@ class ArchiveApp(ctk.CTk):
         self._subtitle_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
         self._export_btn = self.kit.button(
             header,
-            "导出游戏",
+            tr("action.export"),
             style="accent",
             command=self._on_export,
             width=104,
@@ -221,7 +241,7 @@ class ArchiveApp(ctk.CTk):
         self._export_btn.grid(row=0, column=1, rowspan=2, padx=(8, 6))
         self._settings_btn = self.kit.button(
             header,
-            "游戏设置",
+            tr("action.game_settings"),
             style="ghost",
             command=self._on_game_settings,
             width=112,
@@ -236,7 +256,7 @@ class ArchiveApp(ctk.CTk):
         self._build_hero()
 
         toolbar = self.kit.frame(self._content, bg_key="raised", border_key="border")
-        toolbar.grid(row=2, column=0, sticky="new", padx=24)
+        toolbar.grid(row=2, column=0, sticky="ew", padx=24)
         self._build_toolbar(toolbar)
 
         body = self.kit.frame(self._content, bg_key="background", corner_radius=0)
@@ -249,96 +269,211 @@ class ArchiveApp(ctk.CTk):
             self, bg_key="raised", border_key="border", corner_radius=0
         )
         statusbar.grid(row=2, column=0, sticky="ew")
-        self._feedback_label = self.kit.label(statusbar, "就绪", style="muted", size=12)
+        self._feedback_label = self.kit.label(
+            statusbar, tr("status.ready"), style="muted", size=12
+        )
         self._feedback_label.pack(side="left", padx=18, pady=4)
         self.kit.register(lambda p: self._restyle_feedback(p))
 
     def _build_hero(self) -> None:
-        for col in range(4):
-            self._hero.grid_columnconfigure(col, weight=1)
+        self._hero.grid_columnconfigure(0, weight=1)
+        self._hero.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(self._hero, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(24, 8), pady=14)
+
         self._hero_tile = ctk.CTkLabel(
-            self._hero,
+            left,
             text="",
-            width=92,
-            height=92,
+            width=84,
+            height=84,
             corner_radius=12,
             fg_color=self._tone_color(None),
             text_color="#ffffff",
-            font=ctk.CTkFont(size=30, weight="bold"),
+            font=ctk.CTkFont(size=28, weight="bold"),
         )
-        self._hero_tile.grid(row=0, column=0, rowspan=3, padx=24, pady=18)
+        self._hero_tile.pack(side="left")
+
+        info = ctk.CTkFrame(left, fg_color="transparent")
+        info.pack(side="left", fill="y", padx=(18, 0))
+        self.kit.label(info, tr("hero.current_game"), style="muted", size=11).pack(
+            anchor="w", pady=(2, 0)
+        )
         self._hero_name_label = self.kit.label(
-            self._hero, "", style="primary", size=20, weight="bold"
+            info, "", style="primary", size=20, weight="bold"
         )
-        self._hero_name_label.grid(row=0, column=1, sticky="sw", padx=(0, 10))
-        self._hero_location_label = self.kit.label(
-            self._hero, "", style="body", size=13
+        self._hero_name_label.pack(anchor="w", pady=(2, 0))
+        self._hero_location_label = self.kit.label(info, "", style="body", size=13)
+        self._hero_location_label.pack(anchor="w", pady=(3, 0))
+        self._hero_verified_label = ctk.CTkLabel(
+            info, text="", font=ctk.CTkFont(size=12, weight="bold")
         )
-        self._hero_location_label.grid(row=1, column=1, sticky="w", padx=(0, 10))
-        self._hero_verified_label = self.kit.label(
-            self._hero, "", style="primary", size=12, weight="bold"
-        )
-        self._hero_verified_label.grid(
-            row=2, column=1, sticky="w", padx=(0, 10), pady=(4, 14)
-        )
+        self._hero_verified_label.pack(anchor="w", pady=(6, 0))
         self.kit.register(
             lambda p: self._hero_verified_label.configure(
                 text_color=p.success if self._verified else p.danger
             )
         )
 
-        self._stat_recent = self.kit.label(self._hero, "", style="muted", size=12)
-        self._stat_recent.grid(row=0, column=2, sticky="sw", padx=10)
+        stats = ctk.CTkFrame(self._hero, fg_color="transparent")
+        stats.grid(row=0, column=1, sticky="e", padx=(8, 24), pady=14)
+
+        recent = ctk.CTkFrame(stats, fg_color="transparent")
+        recent.pack(side="left", padx=(0, 24))
+        self.kit.label(recent, tr("hero.recent"), style="muted", size=11).pack(
+            anchor="w"
+        )
         self._stat_recent_value = self.kit.label(
-            self._hero, "", style="h2", size=18, weight="bold"
+            recent, "", style="primary", size=17, weight="bold"
         )
-        self._stat_recent_value.grid(row=1, column=2, sticky="w", padx=10)
-        self._stat_recent_sub = self.kit.label(self._hero, "", style="muted", size=11)
-        self._stat_recent_sub.grid(row=2, column=2, sticky="w", padx=10, pady=(2, 14))
+        self._stat_recent_value.pack(anchor="w", pady=(2, 0))
+        self._stat_recent_sub = self.kit.label(recent, "", style="muted", size=11)
+        self._stat_recent_sub.pack(anchor="w", pady=(2, 0))
 
-        self._stat_total = self.kit.label(self._hero, "", style="muted", size=12)
-        self._stat_total.grid(row=0, column=3, sticky="sw", padx=10)
+        total = ctk.CTkFrame(stats, fg_color="transparent")
+        total.pack(side="left", padx=(0, 24))
+        self.kit.label(total, tr("hero.total"), style="muted", size=11).pack(anchor="w")
         self._stat_total_value = self.kit.label(
-            self._hero, "", style="h2", size=18, weight="bold"
+            total, "", style="primary", size=17, weight="bold"
         )
-        self._stat_total_value.grid(row=1, column=3, sticky="w", padx=10)
-        self._stat_total_sub = self.kit.label(self._hero, "", style="muted", size=11)
-        self._stat_total_sub.grid(row=2, column=3, sticky="w", padx=10, pady=(2, 14))
+        self._stat_total_value.pack(anchor="w", pady=(2, 0))
+        self._stat_total_sub = self.kit.label(total, "", style="muted", size=11)
+        self._stat_total_sub.pack(anchor="w", pady=(2, 0))
 
-    def _build_toolbar(self, parent: ctk.CTkFrame) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        seg = ctk.CTkSegmentedButton(
-            parent,
-            values=["时间线", "分支树"],
-            command=lambda v: self._on_view_change(str(v)),
-            font=ctk.CTkFont(size=13, weight="bold"),
-        )
-        seg.set("时间线")
-        seg.grid(row=0, column=0, padx=14, pady=10, sticky="w")
+        chip = ctk.CTkFrame(stats, corner_radius=10)
+        chip.pack(side="left", padx=(4, 0))
         self.kit.register(
-            lambda p: seg.configure(
-                selected_color=p.accent_soft,
-                selected_hover_color=p.accent_soft,
-                unselected_color=p.raised,
-                unselected_hover_color=p.item_hover,
-                text_color=p.accent_soft_text,
+            lambda p: chip.configure(
+                fg_color=p.accent_soft,
+                border_color=p.accent_soft_border,
+                border_width=1,
             )
         )
+        self._stat_next_caption = ctk.CTkLabel(
+            chip, text=tr("hero.next_auto"), font=ctk.CTkFont(size=11), anchor="w"
+        )
+        self._stat_next_caption.pack(anchor="w", padx=12, pady=(10, 0))
+        self.kit.register(
+            lambda p: self._stat_next_caption.configure(text_color=p.success)
+        )
+        self._stat_next_value = ctk.CTkLabel(
+            chip, text="", font=ctk.CTkFont(size=16, weight="bold"), anchor="w"
+        )
+        self._stat_next_value.pack(anchor="w", padx=12, pady=(2, 10))
+        self.kit.register(
+            lambda p: self._stat_next_value.configure(text_color=p.accent_soft_text)
+        )
+
+    def _build_toolbar(self, parent: ctk.CTkFrame) -> None:
+        parent.grid_columnconfigure(5, weight=1)
+        self._tab_widgets: dict[ViewKind, ctk.CTkButton] = {}
+
+        timeline_btn = self._new_tab(parent, ViewKind.TIMELINE, tr("view.timeline"))
+        timeline_btn.grid(row=0, column=0, padx=(16, 2), pady=10)
+        self._tab_widgets[ViewKind.TIMELINE] = timeline_btn
+        branch_btn = self._new_tab(parent, ViewKind.BRANCH, tr("view.branch"))
+        branch_btn.grid(row=0, column=1, padx=(0, 2), pady=10)
+        self._tab_widgets[ViewKind.BRANCH] = branch_btn
+        self.kit.register(lambda p: self._paint_tabs(p))
+
+        self.kit.label(parent, tr("filter.label"), style="muted", size=12).grid(
+            row=0, column=2, padx=(16, 8), pady=10, sticky="w"
+        )
+        self._filter_source = self._new_combo(
+            parent,
+            [tr("filter.all_sources"), tr("filter.manual"), tr("filter.auto")],
+            tr("filter.all_sources"),
+        )
+        self._filter_source.grid(row=0, column=3, padx=(0, 8), pady=10)
+        self._filter_period = self._new_combo(
+            parent,
+            [
+                tr("filter.last_week"),
+                tr("filter.last_month"),
+                tr("filter.all_time"),
+            ],
+            tr("filter.last_month"),
+        )
+        self._filter_period.grid(row=0, column=4, pady=10)
+
         self._backup_btn = self.kit.button(
             parent,
-            "立即创建备份",
+            tr("action.backup_now"),
             style="danger",
             command=self._on_backup,
             width=150,
             height=36,
         )
-        self._backup_btn.grid(row=0, column=1, padx=14, pady=10)
+        self._backup_btn.grid(row=0, column=6, padx=14, pady=10, sticky="e")
+
+    def _new_tab(
+        self, parent: ctk.CTkFrame, view: ViewKind, text: str
+    ) -> ctk.CTkButton:
+        """创建一个视图切换按钮."""
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            width=120,
+            height=36,
+            corner_radius=7,
+            command=lambda: self._switch_view(view),
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+
+    def _new_combo(
+        self, parent: ctk.CTkFrame, values: list[str], initial: str
+    ) -> ctk.CTkComboBox:
+        """创建一个带主题重绘的下拉框."""
+        combo = ctk.CTkComboBox(
+            parent,
+            values=values,
+            state="readonly",
+            width=176,
+            height=36,
+            corner_radius=7,
+            command=self._on_filter_change,
+            font=ctk.CTkFont(size=12),
+        )
+        combo.set(initial)
+        self.kit.register(lambda p: self._paint_combo(combo, p))
+        return combo
+
+    def _paint_tabs(self, palette: Palette) -> None:
+        for view, button in self._tab_widgets.items():
+            if view == self._view:
+                button.configure(
+                    fg_color=palette.accent_soft,
+                    hover_color=palette.accent_soft,
+                    text_color=palette.accent_soft_text,
+                    border_width=0,
+                )
+            else:
+                button.configure(
+                    fg_color=palette.raised,
+                    hover_color=palette.item_hover,
+                    text_color=palette.text_body,
+                    border_width=0,
+                )
+
+    def _paint_combo(self, combo: ctk.CTkComboBox, palette: Palette) -> None:
+        combo.configure(
+            fg_color=palette.input_bg,
+            border_color=palette.border,
+            button_color=palette.raised,
+            button_hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            dropdown_fg_color=palette.panel,
+            dropdown_hover_color=palette.item_hover,
+            dropdown_text_color=palette.text_body,
+        )
 
     def _build_body(self, parent: ctk.CTkFrame) -> None:
-        parent.grid_columnconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
 
+        # 左侧: 备份时间线 / 分支树 主面板
         self._list_panel = self.kit.frame(parent, bg_key="panel", border_key="border")
-        self._list_panel.grid(row=0, column=1, sticky="nsew")
+        self._list_panel.grid(row=0, column=0, sticky="nsew")
         self._list_panel.grid_columnconfigure(0, weight=1)
         self._list_panel.grid_rowconfigure(2, weight=1)
         self._list_title = self.kit.label(
@@ -355,87 +490,117 @@ class ArchiveApp(ctk.CTk):
             lambda p: self._list_scroll.configure(scrollbar_button_color=p.border)
         )
 
+        # 右侧 rail: 选中备份 + 定时任务
         rail = self.kit.frame(parent, bg_key="background", corner_radius=0)
-        rail.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        rail.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        rail.configure(width=_RAIL_WIDTH)
+        rail.grid_propagate(False)
         rail.grid_columnconfigure(0, weight=1)
         rail.grid_rowconfigure(0, weight=1)
         rail.grid_rowconfigure(1, weight=1)
+        self._build_selected_panel(rail)
+        self._build_task_panel(rail)
 
-        self._selected_panel = self.kit.frame(rail, bg_key="panel", border_key="border")
-        self._selected_panel.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
-        self._selected_panel.grid_columnconfigure(0, weight=1)
-        selected_title = self.kit.label(
-            self._selected_panel, "选中备份", style="h2", size=15, weight="bold"
+    def _build_selected_panel(self, parent: ctk.CTkFrame) -> None:
+        panel = self.kit.frame(parent, bg_key="panel", border_key="border")
+        panel.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(7, weight=1)
+
+        self.kit.label(panel, tr("sel.title"), style="h2", size=15, weight="bold").grid(
+            row=0, column=0, padx=18, pady=(16, 4), sticky="w"
         )
-        selected_title.grid(row=0, column=0, padx=18, pady=(16, 2), sticky="w")
         self._selected_name = self.kit.label(
-            self._selected_panel, "", style="body", size=14, weight="bold"
+            panel, "", style="body", size=14, weight="bold"
         )
-        self._selected_name.grid(row=1, column=0, padx=18, pady=2, sticky="w")
-        self._selected_meta = self.kit.label(
-            self._selected_panel, "", style="muted", size=12
+        self._selected_name.grid(row=1, column=0, padx=18, pady=(0, 2), sticky="w")
+        self._selected_meta = self.kit.label(panel, "", style="muted", size=12)
+        self._selected_meta.grid(row=2, column=0, padx=18, pady=(0, 4), sticky="w")
+
+        line = ctk.CTkFrame(panel, height=1, fg_color="transparent")
+        line.grid(row=3, column=0, sticky="ew", padx=18, pady=(4, 6))
+        self.kit.register(lambda p: line.configure(fg_color=p.border))
+
+        self.kit.label(panel, tr("sel.summary"), style="muted", size=11).grid(
+            row=4, column=0, padx=18, pady=(0, 2), sticky="w"
         )
-        self._selected_meta.grid(row=2, column=0, padx=18, pady=2, sticky="w")
-        self._selected_files = self.kit.label(
-            self._selected_panel, "", style="body", size=12
-        )
-        self._selected_files.grid(row=3, column=0, padx=18, pady=(10, 2), sticky="w")
+        self._selected_files = self.kit.label(panel, "", style="body", size=12)
+        self._selected_files.grid(row=5, column=0, padx=18, pady=(0, 4), sticky="w")
+
+        actions = ctk.CTkFrame(panel, fg_color="transparent")
+        actions.grid(row=6, column=0, padx=18, pady=(6, 0), sticky="w")
         self._restore_btn = self.kit.button(
-            self._selected_panel,
-            "恢复到此节点",
+            actions,
+            tr("action.restore"),
             style="danger",
             command=self._on_restore,
-            width=150,
+            width=138,
+            height=32,
         )
-        self._restore_btn.grid(row=4, column=0, padx=18, pady=(8, 4), sticky="w")
+        self._restore_btn.pack(side="left", padx=(0, 8))
         self._branch_btn = self.kit.button(
-            self._selected_panel,
-            "从此处创建分支",
+            actions,
+            tr("action.branch"),
             style="ghost",
             command=self._on_branch,
             width=150,
+            height=32,
         )
-        self._branch_btn.grid(row=5, column=0, padx=18, pady=(0, 12), sticky="w")
+        self._branch_btn.pack(side="left")
 
-        self._task_panel = self.kit.frame(rail, bg_key="panel", border_key="border")
-        self._task_panel.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-        self._task_panel.grid_columnconfigure(0, weight=1)
-        task_title = self.kit.label(
-            self._task_panel, "定时任务", style="h2", size=15, weight="bold"
-        )
-        task_title.grid(row=0, column=0, padx=18, pady=(16, 4), sticky="w")
+    def _build_task_panel(self, parent: ctk.CTkFrame) -> None:
+        panel = self.kit.frame(parent, bg_key="panel", border_key="border")
+        panel.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(7, weight=1)
+
+        self.kit.label(
+            panel, tr("task.title"), style="h2", size=15, weight="bold"
+        ).grid(row=0, column=0, padx=18, pady=(16, 8), sticky="w")
         self._task_name_label = self.kit.label(
-            self._task_panel, "", style="body", size=13, weight="bold"
+            panel, "", style="body", size=13, weight="bold"
         )
         self._task_name_label.grid(row=1, column=0, padx=18, sticky="w")
-        self._task_state_label = self.kit.label(
-            self._task_panel, "", style="muted", size=12
+        self._task_state_label = self.kit.label(panel, "", style="muted", size=12)
+        self._task_state_label.grid(row=1, column=1, padx=(0, 18), sticky="e")
+
+        self._task_progress = ctk.CTkProgressBar(panel, height=8, corner_radius=4)
+        self._task_progress.grid(
+            row=2, column=0, columnspan=2, padx=18, pady=(8, 12), sticky="ew"
         )
-        self._task_state_label.grid(row=2, column=0, padx=18, sticky="w")
-        self._task_progress = ctk.CTkProgressBar(
-            self._task_panel, height=8, corner_radius=4
-        )
-        self._task_progress.grid(row=3, column=0, padx=18, pady=6, sticky="ew")
         self.kit.register(
             lambda p: self._task_progress.configure(
                 fg_color=p.input_bg, progress_color=p.accent
             )
         )
-        self._task_next = self.kit.label(self._task_panel, "", style="muted", size=12)
-        self._task_next.grid(row=4, column=0, padx=18, sticky="w")
-        self._task_shortcut = self.kit.label(
-            self._task_panel, "", style="muted", size=12
+
+        self.kit.label(panel, tr("task.next"), style="muted", size=12).grid(
+            row=3, column=0, padx=18, sticky="w"
         )
-        self._task_shortcut.grid(row=5, column=0, padx=18, pady=(2, 6), sticky="w")
+        self._task_next = self.kit.label(panel, "", style="body", size=12)
+        self._task_next.grid(row=3, column=1, padx=(0, 18), sticky="e")
+
+        self.kit.label(panel, tr("task.target"), style="muted", size=12).grid(
+            row=4, column=0, padx=18, pady=(6, 0), sticky="w"
+        )
+        self._task_target = self.kit.label(panel, "", style="muted", size=12)
+        self._task_target.grid(row=4, column=1, padx=(0, 18), pady=(6, 0), sticky="e")
+
+        self.kit.label(panel, tr("task.shortcut"), style="muted", size=12).grid(
+            row=5, column=0, padx=18, pady=(6, 0), sticky="w"
+        )
+        self._task_shortcut = self.kit.label(panel, "", style="body", size=11)
+        self._task_shortcut.grid(row=5, column=1, padx=(0, 18), pady=(6, 0), sticky="e")
+
         edit_btn = self.kit.button(
-            self._task_panel,
-            "编辑任务设置  →",
+            panel,
+            tr("task.edit"),
             style="ghost",
             command=self._on_edit_task,
-            width=130,
+            width=150,
             height=28,
         )
-        edit_btn.grid(row=6, column=0, padx=18, pady=(4, 14), sticky="w")
+        edit_btn.grid(row=6, column=0, columnspan=2, padx=18, pady=(10, 0), sticky="w")
 
     # ---------------------------------------------------------------- 数据装载
 
@@ -466,11 +631,7 @@ class ArchiveApp(ctk.CTk):
             )
 
     def _build_game_row(self, game: GameSummary) -> ctk.CTkFrame:
-        row = ctk.CTkFrame(
-            self._games_container,
-            corner_radius=10,
-            fg_color=self.p.item_hover if False else self.p.raised,
-        )
+        row = ctk.CTkFrame(self._games_container, corner_radius=10)
         row.grid_columnconfigure(1, weight=1)
         icon = ctk.CTkLabel(
             row,
@@ -482,7 +643,7 @@ class ArchiveApp(ctk.CTk):
             text_color="#ffffff",
             font=ctk.CTkFont(size=15, weight="bold"),
         )
-        icon.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=10)
+        icon.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=8)
         name = ctk.CTkLabel(
             row,
             text=game.name,
@@ -490,7 +651,7 @@ class ArchiveApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=self.p.text_primary,
         )
-        name.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(9, 0))
+        name.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
         detail = ctk.CTkLabel(
             row,
             text=game.list_detail,
@@ -498,7 +659,7 @@ class ArchiveApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color=self.p.text_muted,
         )
-        detail.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+        detail.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 7))
         self.kit.register(
             lambda p, r=row, n=name, d=detail: self._paint_row(r, n, d, p, game)
         )
@@ -514,25 +675,28 @@ class ArchiveApp(ctk.CTk):
     ) -> None:
         selected = game.game_id == self._game_id
         if selected:
-            row.configure(fg_color=palette.item_active)
+            row.configure(
+                fg_color=palette.item_active,
+                border_width=1,
+                border_color=palette.accent,
+            )
             name.configure(text_color=palette.text_primary)
-            detail.configure(text_color=palette.text_muted)
         else:
-            row.configure(fg_color=palette.raised)
+            row.configure(fg_color=palette.raised, border_width=0)
             name.configure(text_color=palette.text_body)
-            detail.configure(text_color=palette.text_muted)
+        detail.configure(text_color=palette.text_muted)
 
     def _refresh_sync(self) -> None:
         for label in self._sync_labels:
-            label.configure(text="上次同步  2026/09/06  09:42")
+            label.configure(text=tr("topbar.sync", stamp="2026/09/06  09:42"))
 
     def _show_empty_list(self) -> None:
-        self._list_title.configure(text="备份")
-        self._list_sub.configure(text="当前没有可展示的游戏,请先添加游戏。")
+        self._list_title.configure(text=tr("list.fallback_title"))
+        self._list_sub.configure(text=tr("list.no_games"))
         for child in self._list_scroll.winfo_children():
             child.destroy()
         empty = self.kit.label(
-            self._list_scroll, "空状态:暂无备份记录", style="muted", size=13
+            self._list_scroll, tr("list.empty_all"), style="muted", size=13
         )
         empty.pack(padx=10, pady=16)
 
@@ -556,66 +720,74 @@ class ArchiveApp(ctk.CTk):
         self._update_actions()
         self.kit.apply(self.p)
         if self._game is not None and not self._game.has_locations:
-            self._feedback(
-                FeedbackKind.INFO, "该游戏未配置存档位置,请先手动添加存档路径。"
-            )
+            self._feedback(FeedbackKind.INFO, tr("game.no_locations_hint"))
 
     def _render_hero(self, detail: GameDetail) -> None:
         self._verified = detail.location_verified
         self._hero_name_label.configure(text=detail.name)
-        location = detail.main_location or detail.location_note
-        self._hero_location_label.configure(
-            text=f"{detail.location_note}  ·  {location}"
-        )
+        if detail.main_location:
+            location = f"{detail.location_note}  ·  {detail.main_location}"
+        else:
+            location = detail.location_note
+        self._hero_location_label.configure(text=location)
         self._hero_verified_label.configure(
-            text="路径已验证" if self._verified else "路径未验证/未配置"
+            text=tr("hero.verified") if self._verified else tr("hero.unverified")
         )
-        self._stat_recent.configure(text="最近备份")
         self._stat_recent_value.configure(text=detail.last_backup_label)
         self._stat_recent_sub.configure(text=detail.last_backup_sub)
-        self._stat_total.configure(text="备份总数")
         self._stat_total_value.configure(text=detail.total_backups_label)
         self._stat_total_sub.configure(text=detail.total_backups_sub)
+        self._stat_next_value.configure(text=detail.next_backup_label)
 
     def _render_toolbar_header(self, detail: GameDetail) -> None:
         self._title_label.configure(text=detail.name)
         self._subtitle_label.configure(text=detail.subtitle)
 
     def _render_task(self, task: TaskStatus) -> None:
-        state = "运行中" if task.running else "已暂停"
-        self._task_name_label.configure(text=f"{task.task_name}    {state}")
-        self._task_state_label.configure(text="自动备份服务")
+        state = tr("task.running") if task.running else tr("task.paused")
+        self._task_name_label.configure(text=task.task_name)
+        self._task_state_label.configure(text=state)
         self._task_progress.set(task.progress)
-        self._task_next.configure(
-            text=f"下次运行  {task.next_run_label}    目标  {task.target_label}"
+        self._task_next.configure(text=task.next_run_label)
+        self._task_target.configure(text=task.target_label)
+        self._task_shortcut.configure(text=task.shortcut_label)
+        self._status_title.configure(text=tr("status.service_ok"))
+        self._status_sub.configure(
+            text=tr("status.disk", free="186 GB", shortcut=task.shortcut_label)
         )
-        self._task_shortcut.configure(
-            text=f"快捷键  {task.shortcut_label}    主题  {self._theme}"
-        )
-        self._status_title.configure(text="备份服务正常")
-        self._status_sub.configure(text=f"磁盘剩余 186 GB · {task.shortcut_label}")
 
     def _render_list(self) -> None:
         game_id = self._game_id or ""
         self._items = self.backend.list_backups(game_id)
+        ordered = timeline_order(self._items)
         if self._view == ViewKind.TIMELINE:
-            ordered = timeline_order(self._items)
-            title, sub = "备份时间线", "按创建时间倒序排列,点击节点查看文件快照"
+            title, sub = tr("list.timeline_title"), tr("list.timeline_sub")
         else:
-            ordered = timeline_order(self._items)
-            title, sub = "分支树", "树形关系视图(阶段 D 接入完整分支关系)"
+            title, sub = tr("list.branch_title"), tr("list.branch_sub")
         self._list_title.configure(text=title)
         self._list_sub.configure(text=sub)
+
+        items = self._apply_filters(ordered)
+        if self._backup_id is not None and not any(
+            item.backup_id == self._backup_id for item in items
+        ):
+            self._backup_id = None
+            self._render_selected(None)
+
         for child in self._list_scroll.winfo_children():
             child.destroy()
-        if not ordered:
+        if not items:
             empty = self.kit.label(
-                self._list_scroll, "空状态:暂无备份记录", style="muted", size=13
+                self._list_scroll,
+                tr("list.empty_filtered"),
+                style="muted",
+                size=13,
             )
             empty.pack(padx=10, pady=16)
             return
-        self._cards: dict[str, ctk.CTkFrame] = {}
-        for item in ordered:
+
+        self._cards = {}
+        for item in items:
             card = self._build_backup_card(item)
             card.pack(fill="x", padx=4, pady=3)
             self._cards[item.backup_id] = card
@@ -625,6 +797,21 @@ class ArchiveApp(ctk.CTk):
             )
         if self._backup_id and self._backup_id in self._cards:
             self._paint_cards()
+
+    def _apply_filters(self, items: list[BackupItem]) -> list[BackupItem]:
+        """按来源与时间范围筛选备份节点."""
+        source = self._filter_source.get()
+        if source == tr("filter.auto"):
+            items = [item for item in items if item.auto]
+        elif source == tr("filter.manual"):
+            items = [item for item in items if not item.auto]
+
+        period = self._filter_period.get()
+        if period != tr("filter.all_time"):
+            days = 7 if period == tr("filter.last_week") else 30
+            threshold = datetime.now() - timedelta(days=days)
+            items = [item for item in items if item.created_dt >= threshold]
+        return items
 
     def _build_backup_card(self, item: BackupItem) -> ctk.CTkFrame:
         card = ctk.CTkFrame(self._list_scroll, corner_radius=10)
@@ -679,10 +866,14 @@ class ArchiveApp(ctk.CTk):
     ) -> None:
         selected = item.backup_id == self._backup_id
         if selected:
-            card.configure(fg_color=palette.accent_soft)
+            card.configure(
+                fg_color=palette.accent_soft,
+                border_width=1,
+                border_color=palette.accent_soft_border,
+            )
             title.configure(text_color=palette.accent_soft_text)
         else:
-            card.configure(fg_color=palette.raised)
+            card.configure(fg_color=palette.raised, border_width=0)
             title.configure(text_color=palette.text_primary)
         when.configure(text_color=palette.text_body)
         detail.configure(text_color=palette.text_muted)
@@ -706,8 +897,8 @@ class ArchiveApp(ctk.CTk):
 
     def _render_selected(self, item: BackupItem | None) -> None:
         if item is None:
-            self._selected_name.configure(text="未选择节点")
-            self._selected_meta.configure(text="在左侧列表点击一个备份节点")
+            self._selected_name.configure(text=tr("sel.none"))
+            self._selected_meta.configure(text=tr("sel.hint"))
             self._selected_files.configure(text="")
             self._restore_btn.configure(state="disabled")
             self._branch_btn.configure(state="disabled")
@@ -716,11 +907,22 @@ class ArchiveApp(ctk.CTk):
         self._selected_meta.configure(
             text=f"{item.created_label}  ·  {item.branch_label}"
         )
-        self._selected_files.configure(
-            text=f"内容摘要:{item.size_label} · SHA-256 已验证"
-        )
+        self._selected_files.configure(text=tr("sel.digest", size=item.size_label))
 
     # ---------------------------------------------------------------- 操作
+
+    def _switch_view(self, view: ViewKind) -> None:
+        """切换时间线/分支树视图并刷新列表."""
+        if view == self._view:
+            return
+        self._view = view
+        self._render_list()
+        self.kit.apply(self.p)
+
+    def _on_filter_change(self, _value: str) -> None:
+        """筛选条件变化时刷新列表."""
+        self._render_list()
+        self._update_actions()
 
     def _update_actions(self) -> None:
         busy = self._busy
@@ -741,7 +943,9 @@ class ArchiveApp(ctk.CTk):
         if game is None or self._busy:
             return
         self._set_busy(True)
-        self._feedback(FeedbackKind.PENDING, f"正在创建「{game.name}」的备份…")
+        self._feedback(
+            FeedbackKind.PENDING, tr("action.backup_pending", name=game.name)
+        )
 
         def work() -> str:
             return self.backend.run_backup_now(game.game_id)
@@ -760,19 +964,16 @@ class ArchiveApp(ctk.CTk):
         confirmed = confirm_dialog(
             self,
             self.p,
-            title="恢复确认",
-            message=(
-                f"将把「{game.name}」恢复到备份节点,当前原始目录将被覆盖。"
-                "此操作不可逆,是否继续?"
-            ),
-            confirm_text="确认恢复",
+            title=tr("dialog.restore_title"),
+            message=tr("dialog.restore_message", name=game.name),
+            confirm_text=tr("dialog.restore_confirm"),
         )
         if not confirmed:
-            self._feedback(FeedbackKind.INFO, "已取消恢复")
+            self._feedback(FeedbackKind.INFO, tr("action.restore_canceled"))
             return
         self._set_busy(True)
         backup_id = self._backup_id
-        self._feedback(FeedbackKind.PENDING, "正在恢复备份…")
+        self._feedback(FeedbackKind.PENDING, tr("action.restore_pending"))
 
         def work() -> str:
             return self.backend.run_restore(game.game_id, backup_id)
@@ -787,13 +988,20 @@ class ArchiveApp(ctk.CTk):
         game = self._game
         if game is None or self._backup_id is None or self._busy:
             return
-        branch_name = ask_branch_name(self, title="创建分支", text="请输入分支名称:")
+        branch_name = ask_branch_name(
+            self,
+            self.p,
+            title=tr("dialog.branch_title"),
+            text=tr("dialog.branch_prompt"),
+        )
         if not branch_name:
-            self._feedback(FeedbackKind.INFO, "已取消创建分支")
+            self._feedback(FeedbackKind.INFO, tr("action.branch_canceled"))
             return
         self._set_busy(True)
         backup_id = self._backup_id
-        self._feedback(FeedbackKind.PENDING, f"正在创建分支「{branch_name}」…")
+        self._feedback(
+            FeedbackKind.PENDING, tr("action.branch_pending", branch=branch_name)
+        )
 
         def work() -> str:
             return self.backend.run_create_branch(game.game_id, backup_id, branch_name)
@@ -809,7 +1017,9 @@ class ArchiveApp(ctk.CTk):
         if game is None or self._busy:
             return
         self._set_busy(True)
-        self._feedback(FeedbackKind.PENDING, f"正在导出「{game.name}」…")
+        self._feedback(
+            FeedbackKind.PENDING, tr("action.export_pending", name=game.name)
+        )
 
         def work() -> str:
             return self.backend.run_export(game.game_id)
@@ -826,24 +1036,18 @@ class ArchiveApp(ctk.CTk):
         ctk.set_appearance_mode(self._theme)
         self.p = Palette.for_theme(self._theme)
         self.configure(fg_color=self.p.background)
-        self.theme_btn.configure(
-            text="深色主题" if self._theme == "light" else "浅色主题"
+        theme_text = (
+            tr("theme.to_dark") if self._theme == "light" else tr("theme.to_light")
         )
+        self.theme_btn.configure(text=theme_text)
         self.kit.apply(self.p)
-        self._feedback(
-            FeedbackKind.INFO,
-            f"已切换到{('浅色' if self._theme == 'light' else '深色')}主题",
-        )
-
-    def _on_view_change(self, label: str) -> None:
-        self._view = ViewKind.TIMELINE if label == "时间线" else ViewKind.BRANCH
-        self._render_list()
+        self._feedback(FeedbackKind.INFO, tr("theme.switched", theme=theme_text))
 
     def _on_add_game(self) -> None:
-        self._feedback(FeedbackKind.INFO, "添加游戏将在阶段 C 实现")
+        self._feedback(FeedbackKind.INFO, tr("action.add_game_soon"))
 
     def _on_nav(self, name: str, message: str) -> None:
-        if name == "设置":
+        if name == tr("sidebar.nav_settings"):
             self._open_settings()
         else:
             self._feedback(FeedbackKind.INFO, message)
@@ -856,16 +1060,19 @@ class ArchiveApp(ctk.CTk):
 
     def _open_settings(self) -> None:
         task = self.backend.task_status()
+        state = tr("task.running") if task.running else tr("task.paused")
         info_dialog(
             self,
             self.p,
-            title="设置",
-            message=(
-                f"主题:{self._theme}\n"
-                f"定时任务:{task.task_name}({'运行中' if task.running else '已暂停'})\n"
-                f"下次运行:{task.next_run_label}\n"
-                f"快捷键:{task.shortcut_label}\n\n"
-                "完整设置(主题、快捷键、备份目录、调度器)将在后续阶段接入。"
+            title=tr("dialog.settings_title"),
+            message=tr(
+                "dialog.settings_message",
+                theme=self._theme,
+                task=task.task_name,
+                state=state,
+                next_run=task.next_run_label,
+                shortcut=task.shortcut_label,
+                note=tr("dialog.settings_note"),
             ),
         )
 
