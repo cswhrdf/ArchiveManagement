@@ -67,3 +67,39 @@ def test_task_status_reports_theme(service: DemoArchiveService) -> None:
     status = service.task_status()
     assert status.running is True
     assert status.theme_name == "light"
+
+
+def test_get_detail_unknown_game_raises(service: DemoArchiveService) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.get_detail("missing-game")
+
+
+def test_backup_unknown_game_raises(service: DemoArchiveService) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.run_backup_now("missing-game")
+
+
+def test_restore_unknown_game_raises(service: DemoArchiveService) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.run_restore("missing-game", "b1")
+
+
+def test_export_unknown_game_raises(service: DemoArchiveService) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.run_export("missing-game")
+
+
+def test_create_branch_message_contains_name(service: DemoArchiveService) -> None:
+    message = service.run_create_branch("outer-wilds", "b1", "分支X")
+    assert "分支X" in message
+
+
+def test_export_message_contains_game_name(service: DemoArchiveService) -> None:
+    message = service.run_export("outer-wilds")
+    assert "星际拓荒" in message
+
+
+def test_simulate_delay_sleeps_when_configured() -> None:
+    slow = DemoArchiveService(delay=0.001)
+    slow.run_backup_now("outer-wilds")
+    assert slow.list_backups("outer-wilds")

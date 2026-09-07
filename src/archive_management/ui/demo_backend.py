@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
@@ -23,7 +23,7 @@ _FAIL_RESTORE_ID = "b2"
 
 
 def _dt(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
-    return datetime(year, month, day, hour, minute)
+    return datetime(year, month, day, hour, minute, tzinfo=UTC)
 
 
 _GAMES: list[GameSummary] = [

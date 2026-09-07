@@ -38,7 +38,19 @@ jobs:
       - name: Mypy type check
         run: uv run mypy src
 
-      - name: Pytest with coverage
+      - name: Install Xvfb (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      # Linux 无真实显示, GUI 冒烟测试需要虚拟显示(Xvfb)才能执行;
+      # 否则 main_window/dialogs/widgets 等 GUI 代码不参与覆盖, 导致
+      # 覆盖率远低于 Windows, 触发 coverage fail_under 阈值.
+      - name: Pytest with coverage (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html
+
+      - name: Pytest with coverage (Windows)
+        if: runner.os == 'Windows'
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html
 
       - name: Upload coverage report

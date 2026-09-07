@@ -78,34 +78,32 @@ extend-exclude = ["build", "dist", ".venv"]
 
 [tool.ruff.lint]
 select = [
-    "S",
-    "D",
-    "N",
+    "A",
     "ANN",
+    "B",
+    "C90",
+    "D",
+    "DTZ",
     "E4",
     "E7",
     "E9",
     "F",
     "I",
-    "UP",
-    "B",
-    "SIM",
-    "RUF",
-    "C90",
+    "N",
+    "PERF",
+    "PTH",
     "PT",
+    "RET",
+    "RUF",
+    "S",
+    "SIM",
+    "UP",
 ]
 ignore = [
+    "ANN401",  # 允许 typing.Any 这种例外
     "D100",  # 忽略 module docstring
     "D104",  # 忽略 package docstring
-    "ANN401",  # 允许 typing.Any 这种例外
 ]
-
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.lint.mccabe]
-max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
@@ -114,8 +112,15 @@ max-complexity = 10
     "S101",
     "PT011",
 ]
+
 [tool.ruff.lint.isort]
 known-first-party = ["archive_management"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.format]
 quote-style = "double"

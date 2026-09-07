@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from importlib.resources import files
 
+import pytest
+
+from archive_management import i18n as i18n_module
 from archive_management.i18n import available_locales, current_locale, tr
 
 
@@ -34,3 +37,33 @@ def test_tr_missing_key_returns_key() -> None:
 
 def test_zh_and_en_catalogs_have_same_keys() -> None:
     assert _keys("zh-CN") == _keys("en")
+
+
+def test_set_locale_unsupported_raises_and_keeps_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(i18n_module, "available_locales", lambda: ("zh-CN",))
+    with pytest.raises(ValueError):
+        i18n_module.set_locale("en")
+    assert i18n_module.current_locale() == "zh-CN"
+
+
+def test_tr_returns_raw_text_when_placeholder_missing() -> None:
+    raw = tr("game.locations_detail", count=3)
+    assert "{backups}" in raw
+
+
+def test_read_raises_when_resource_is_not_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(i18n_module.json, "loads", lambda *_a, **_k: ["not", "dict"])
+    with pytest.raises(ValueError):
+        i18n_module._read("zh-CN")
+
+
+def test_read_raises_on_non_string_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(i18n_module.json, "loads", lambda *_a, **_k: {"key": 1})
+    with pytest.raises(ValueError):
+        i18n_module._read("zh-CN")

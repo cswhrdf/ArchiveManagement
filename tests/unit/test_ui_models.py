@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from archive_management.ui.models import (
     BackupItem,
@@ -10,12 +10,13 @@ from archive_management.ui.models import (
     GameSummary,
     ViewKind,
     can_backup,
+    group_by_parent,
     timeline_order,
 )
 
 
 def _dt(*, day: int, hour: int, minute: int) -> datetime:
-    return datetime(2026, 9, day, hour, minute)
+    return datetime(2026, 9, day, hour, minute, tzinfo=UTC)
 
 
 def _item(backup_id: str, created_dt: datetime) -> BackupItem:
@@ -76,6 +77,15 @@ def test_timeline_order_stable_for_equal_timestamps() -> None:
     ]
     ordered = timeline_order(items)
     assert len(ordered) == 3
+
+
+def test_group_by_parent_orders_descending() -> None:
+    items = [
+        _item("old", _dt(day=4, hour=8, minute=0)),
+        _item("new", _dt(day=6, hour=9, minute=40)),
+    ]
+    ordered = group_by_parent(items)
+    assert [item.backup_id for item in ordered] == ["new", "old"]
 
 
 def test_view_kind_values() -> None:

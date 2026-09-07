@@ -6,6 +6,8 @@ import io
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import pytest
+
 from archive_management import app as app_module
 from archive_management.infrastructure.database import Database
 
@@ -55,3 +57,38 @@ def test_default_command_runs_init(tmp_path: Path) -> None:
     code, _ = _run_with_output(["--root", str(tmp_path)])
     assert code == 0
     assert (tmp_path / "data" / "archive-management.db").is_file()
+
+
+def test_gui_command_returns_two_when_gui_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import archive_management.ui.main_window as main_window
+
+    def _boom(*_args: object, **_kwargs: object) -> int:
+        raise RuntimeError("no display")
+
+    monkeypatch.setattr(main_window, "run_gui", _boom)
+    code = app_module.run(["gui", "--root", str(tmp_path), "--smoke", "0"])
+    assert code == 2
+
+
+def test_gui_command_returns_zero_when_gui_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import archive_management.ui.main_window as main_window
+
+    monkeypatch.setattr(main_window, "run_gui", lambda *_a, **_k: 0)
+    code = app_module.run(["gui", "--root", str(tmp_path)])
+    assert code == 0
+
+
+def test_main_module_entrypoint_version(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import runpy
+
+    monkeypatch.setattr("sys.argv", ["archive-management", "--version"])
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_module("archive_management.__main__", run_name="__main__")
+    capsys.readouterr()
+    assert excinfo.value.code == 0

@@ -35,10 +35,11 @@ def _read(locale: str) -> dict[str, str]:
 def available_locales() -> tuple[str, ...]:
     """返回资源目录中可用的 locale 列表."""
     base = files(_PACKAGE).joinpath(*_RESOURCE_DIR)
-    locales: list[str] = []
-    for entry in base.iterdir():
-        if entry.name.endswith(".json"):
-            locales.append(entry.name[: -len(".json")])
+    locales = [
+        entry.name[: -len(".json")]
+        for entry in base.iterdir()
+        if entry.name.endswith(".json")
+    ]
     return tuple(sorted(locales))
 
 

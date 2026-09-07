@@ -10,7 +10,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import customtkinter as ctk
@@ -809,7 +809,7 @@ class ArchiveApp(ctk.CTk):
         period = self._filter_period.get()
         if period != tr("filter.all_time"):
             days = 7 if period == tr("filter.last_week") else 30
-            threshold = datetime.now() - timedelta(days=days)
+            threshold = datetime.now(UTC) - timedelta(days=days)
             items = [item for item in items if item.created_dt >= threshold]
         return items
 
