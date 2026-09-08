@@ -15,14 +15,17 @@ from typing import Literal
 
 import customtkinter as ctk
 
+from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
+from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.dialogs import (
     ask_branch_name,
+    ask_text,
     confirm_dialog,
     info_dialog,
 )
+from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
     BackupItem,
     FeedbackKind,
@@ -1044,7 +1047,24 @@ class ArchiveApp(ctk.CTk):
         self._feedback(FeedbackKind.INFO, tr("theme.switched", theme=theme_text))
 
     def _on_add_game(self) -> None:
-        self._feedback(FeedbackKind.INFO, tr("action.add_game_soon"))
+        """添加游戏: 询问名称后写入后端并选中."""
+        if self._busy:
+            return
+        name = ask_text(
+            self,
+            self.p,
+            title=tr("dialog.add_game_title"),
+            text=tr("dialog.add_game_prompt"),
+        )
+        if not name:
+            return
+        try:
+            summary = self.backend.add_game(name)
+        except ArchiveManagementError as exc:
+            self._feedback(FeedbackKind.ERROR, str(exc))
+            return
+        self._feedback(FeedbackKind.SUCCESS, tr("result.game_added", name=summary.name))
+        self._refresh_after_manage(select=summary.game_id)
 
     def _on_nav(self, name: str, message: str) -> None:
         if name == tr("sidebar.nav_settings"):
@@ -1053,10 +1073,47 @@ class ArchiveApp(ctk.CTk):
             self._feedback(FeedbackKind.INFO, message)
 
     def _on_game_settings(self) -> None:
-        self._open_settings()
+        self._open_manage_game()
 
     def _on_edit_task(self) -> None:
         self._open_settings()
+
+    def _open_manage_game(self) -> None:
+        """打开当前游戏的管理窗口(重命名/停用/删除/管理存档位置)."""
+        game = self._game
+        if game is None:
+            self._feedback(FeedbackKind.INFO, tr("manage.require_game"))
+            return
+        backup_path = self.backend.task_status().target_label
+        ManageGameWindow(
+            self,
+            backend=self.backend,
+            palette=self.p,
+            game_id=game.game_id,
+            name=game.name,
+            enabled=game.enabled,
+            backup_location=backup_path,
+            on_change=lambda: self._refresh_after_manage(),
+        )
+
+    def _refresh_after_manage(self, *, select: str | None = None) -> None:
+        """游戏或存档位置变更后重载列表并保持/恢复选中."""
+        games = self.backend.list_games()
+        self._render_game_list(games)
+        if select is not None:
+            self._select_game(select)
+            return
+        if self._game_id is not None and any(
+            game.game_id == self._game_id for game in games
+        ):
+            self._select_game(self._game_id)
+            return
+        if games:
+            self._select_game(games[0].game_id)
+        else:
+            self._game_id = None
+            self._game = None
+            self._show_empty_list()
 
     def _open_settings(self) -> None:
         task = self.backend.task_status()
@@ -1159,9 +1216,16 @@ def run_gui(
     *,
     smoke_seconds: float | None = None,
     display_name: str = "ArchiveManagement",
+    paths: ApplicationPaths | None = None,
 ) -> int:
-    """启动演示后端并进入主循环,返回退出码."""
-    backend: ArchiveService = DemoArchiveService(delay=0.4)
+    """启动基于 SQLite 的真实后端并进入主循环, 返回退出码."""
+    from archive_management.infrastructure.database import Database
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    paths = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
+    database = Database(paths.database_path)
+    database.migrate()
+    backend: ArchiveService = SqlArchiveService(database, backup_root=paths.backup_root)
     app = ArchiveApp(backend, title=display_name, smoke_seconds=smoke_seconds)
     app.mainloop()
     return 0

@@ -10,8 +10,10 @@ from typing import Any
 
 import pytest
 
-from archive_management.ui import widgets
+import archive_management.ui.widgets as widgets
 from archive_management.ui.palette import DARK
+
+pytestmark = [pytest.mark.ui, pytest.mark.critical]
 
 
 class _FakeCtkWidget:
@@ -28,22 +30,23 @@ class _FakeCtkWidget:
 @pytest.fixture
 def kit(monkeypatch: pytest.MonkeyPatch) -> widgets.UiKit:
     """把 ctk 控件替换为假实现, 返回空的 UiKit."""
+    ctk = widgets.ctk
     monkeypatch.setattr(
-        widgets.ctk,
+        ctk,
         "CTkFrame",
         lambda master=None, **kwargs: _FakeCtkWidget(master=master, **kwargs),
     )
     monkeypatch.setattr(
-        widgets.ctk,
+        ctk,
         "CTkLabel",
         lambda master=None, **kwargs: _FakeCtkWidget(master=master, **kwargs),
     )
     monkeypatch.setattr(
-        widgets.ctk,
+        ctk,
         "CTkButton",
         lambda master=None, **kwargs: _FakeCtkWidget(master=master, **kwargs),
     )
-    monkeypatch.setattr(widgets.ctk, "CTkFont", lambda **_kwargs: object())
+    monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
     return widgets.UiKit()
 
 

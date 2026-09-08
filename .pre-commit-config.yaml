@@ -8,25 +8,22 @@ repos:
         entry: uv run ruff check --fix
         language: system
         types: [python]
-        pass_filenames: false
 
       - id: black-check
         name: black check
-        entry: uv run black .
+        entry: uv run black --check
         language: system
         types: [python]
-        pass_filenames: false
 
       - id: mypy
         name: mypy
-        entry: uv run mypy src
+        entry: uv run mypy --disable-error-code attr-defined
         language: system
         types: [python]
-        pass_filenames: false
 
       - id: pytest
-        name: pytest
-        entry: uv run pytest
+        name: pytest (blocker+critical)
+        entry: uv run pytest --min-severity=critical
         language: system
         types: [python]
         pass_filenames: false

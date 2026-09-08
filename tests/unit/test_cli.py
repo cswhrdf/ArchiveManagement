@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from archive_management import app as app_module
+import archive_management.app as app_module
 from archive_management.infrastructure.database import Database
+
+pytestmark = [pytest.mark.cli, pytest.mark.critical]
 
 
 def _run_with_output(argv: list[str]) -> tuple[int, str]:

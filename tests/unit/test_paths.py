@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from archive_management.infrastructure.paths import ApplicationPaths
+
+pytestmark = [pytest.mark.paths, pytest.mark.critical]
 
 _DB_NAME = "archive-management.db"
 

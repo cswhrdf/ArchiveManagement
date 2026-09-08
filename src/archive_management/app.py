@@ -161,7 +161,7 @@ def _run_gui(paths: ApplicationPaths, *, smoke: float | None) -> int:
     try:
         from archive_management.ui.main_window import run_gui
 
-        return run_gui(smoke_seconds=smoke, display_name=APP_DISPLAY_NAME)
+        return run_gui(smoke_seconds=smoke, display_name=APP_DISPLAY_NAME, paths=paths)
     except Exception as exc:
         logger.error("GUI 启动失败: %s", exc)
         print(f"无法启动图形界面:{exc}\nGUI 需要可用的桌面环境与 tkinter。")

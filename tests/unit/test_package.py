@@ -7,6 +7,8 @@ from importlib.metadata import PackageNotFoundError
 
 import pytest
 
+pytestmark = [pytest.mark.package, pytest.mark.smoke, pytest.mark.critical]
+
 _SUBPACKAGES = (
     "archive_management.application",
     "archive_management.domain",

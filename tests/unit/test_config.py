@@ -10,6 +10,8 @@ import pytest
 from archive_management.config import AppConfig, load_config, parse_config, save_config
 from archive_management.exceptions import ConfigurationError
 
+pytestmark = [pytest.mark.config, pytest.mark.critical]
+
 
 def test_missing_file_yields_default(tmp_path: Path) -> None:
     config = load_config(tmp_path / "not-there.json")

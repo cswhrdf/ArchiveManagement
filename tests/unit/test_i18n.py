@@ -10,6 +10,8 @@ import pytest
 from archive_management import i18n as i18n_module
 from archive_management.i18n import available_locales, current_locale, tr
 
+pytestmark = [pytest.mark.i18n, pytest.mark.critical]
+
 
 def _keys(locale: str) -> set[str]:
     base = files("archive_management").joinpath("resources", "i18n")
@@ -56,7 +58,11 @@ def test_tr_returns_raw_text_when_placeholder_missing() -> None:
 def test_read_raises_when_resource_is_not_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(i18n_module.json, "loads", lambda *_a, **_k: ["not", "dict"])
+    monkeypatch.setattr(
+        i18n_module.json,
+        "loads",
+        lambda *_a, **_k: ["not", "dict"],
+    )
     with pytest.raises(ValueError):
         i18n_module._read("zh-CN")
 
@@ -64,6 +70,10 @@ def test_read_raises_when_resource_is_not_object(
 def test_read_raises_on_non_string_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(i18n_module.json, "loads", lambda *_a, **_k: {"key": 1})
+    monkeypatch.setattr(
+        i18n_module.json,
+        "loads",
+        lambda *_a, **_k: {"key": 1},
+    )
     with pytest.raises(ValueError):
         i18n_module._read("zh-CN")

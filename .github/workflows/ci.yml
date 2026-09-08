@@ -7,7 +7,7 @@ on:
 
 jobs:
   quality:
-    name: 代码检查、类型检查与测试 (${{ matrix.os }})
+    name: 代码质量检查 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -38,6 +38,40 @@ jobs:
       - name: Mypy type check
         run: uv run mypy src
 
+  pytest:
+    name: Pytest 测试与报告 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Allure 3 CLI
+        run: npm install --global allure@3
+
+      - name: Check Allure version
+        run: allure --version
+
       - name: Install Xvfb (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y xvfb
@@ -47,11 +81,15 @@ jobs:
       # 覆盖率远低于 Windows, 触发 coverage fail_under 阈值.
       - name: Pytest with coverage (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html
+        run: xvfb-run -a uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
 
       - name: Pytest with coverage (Windows)
         if: runner.os == 'Windows'
-        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html
+        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
+
+      - name: Generate Allure 3 report
+        if: always()
+        run: allure generate allure-results --output allure-report
 
       - name: Upload coverage report
         if: always()
@@ -61,4 +99,14 @@ jobs:
           path: |
             coverage.xml
             htmlcov/
+          if-no-files-found: ignore
+
+      - name: Upload Allure report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-report-${{ matrix.os }}
+          path: |
+            allure-results/
+            allure-report/
           if-no-files-found: ignore

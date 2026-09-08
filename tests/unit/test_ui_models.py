@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from archive_management.ui.models import (
     BackupItem,
     FeedbackKind,
     GameSummary,
+    LocationItem,
     ViewKind,
     can_backup,
     group_by_parent,
     timeline_order,
 )
+
+pytestmark = [pytest.mark.ui, pytest.mark.critical]
 
 
 def _dt(*, day: int, hour: int, minute: int) -> datetime:
@@ -96,3 +101,33 @@ def test_view_kind_values() -> None:
 def test_feedback_kind_values() -> None:
     assert FeedbackKind.SUCCESS.value == "success"
     assert FeedbackKind.ERROR.value == "error"
+
+
+def test_game_list_detail_when_disabled() -> None:
+    from archive_management.i18n import tr
+
+    game = GameSummary(
+        game_id="g",
+        name="Demo",
+        has_locations=True,
+        location_count=2,
+        backup_count=3,
+        enabled=False,
+    )
+    assert game.list_detail == tr("game.disabled_short")
+
+
+def test_location_item_fields() -> None:
+    item = LocationItem(
+        location_id="1",
+        game_id="2",
+        path=r"C:\Games\save",
+        path_kind="directory",
+        source="manual",
+        is_primary=True,
+        ok=True,
+        note="已校验",
+    )
+    assert item.location_id == "1"
+    assert item.path_kind == "directory"
+    assert item.is_primary is True

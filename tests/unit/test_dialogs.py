@@ -11,9 +11,11 @@ from typing import Any
 
 import pytest
 
+import archive_management.ui.dialogs as dialogs
 from archive_management.i18n import tr
-from archive_management.ui import dialogs
 from archive_management.ui.palette import DARK
+
+pytestmark = [pytest.mark.dialogs, pytest.mark.ui, pytest.mark.critical]
 
 
 class _FakeWidget:
@@ -39,6 +41,12 @@ class _FakeWidget:
         return self._value
 
     def bind(self, _sequence: str, _callback: Any) -> None:
+        return None
+
+    def insert(self, _index: str, _text: str) -> None:
+        return None
+
+    def delete(self, _first: str, _last: str) -> None:
         return None
 
     def click(self) -> None:
@@ -138,6 +146,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
     buttons: list[_FakeWidget] = []
     entries: list[_FakeWidget] = []
     parent = _FakeParent(buttons, windows, entries)
+    ctk = dialogs.ctk
 
     def make_window(master: Any = None, **kwargs: Any) -> _FakeWindow:
         window = _FakeWindow(master=master, **kwargs)
@@ -155,20 +164,20 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
         entries.append(entry)
         return entry
 
-    monkeypatch.setattr(dialogs.ctk, "CTkToplevel", make_window)
+    monkeypatch.setattr(ctk, "CTkToplevel", make_window)
     monkeypatch.setattr(
-        dialogs.ctk,
+        ctk,
         "CTkLabel",
         lambda master=None, **kwargs: _FakeWidget(master=master, **kwargs),
     )
     monkeypatch.setattr(
-        dialogs.ctk,
+        ctk,
         "CTkFrame",
         lambda master=None, **kwargs: _FakeWidget(master=master, **kwargs),
     )
-    monkeypatch.setattr(dialogs.ctk, "CTkButton", make_button)
-    monkeypatch.setattr(dialogs.ctk, "CTkEntry", make_entry)
-    monkeypatch.setattr(dialogs.ctk, "CTkFont", lambda **_kwargs: object())
+    monkeypatch.setattr(ctk, "CTkButton", make_button)
+    monkeypatch.setattr(ctk, "CTkEntry", make_entry)
+    monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
     return parent
 
 
@@ -234,3 +243,29 @@ def test_ask_branch_name_cancel_returns_none(harness: _FakeParent) -> None:
     harness.click_text = tr("dialog.cancel")
     harness.entry_value = "分支X"
     assert dialogs.ask_branch_name(harness, DARK, title="分支", text="名称") is None
+
+
+def test_ask_text_returns_input_with_browse(harness: _FakeParent) -> None:
+    harness.click_text = tr("dialog.confirm")
+    harness.entry_value = "  我的游戏  "
+    result = dialogs.ask_text(
+        harness,
+        DARK,
+        title=tr("dialog.add_game_title"),
+        text="请输入名称",
+        browse=lambda: None,
+    )
+    assert result == "我的游戏"
+    assert tr("dialog.browse") in {button.text for button in harness.buttons}
+
+
+def test_ask_text_empty_returns_none(harness: _FakeParent) -> None:
+    harness.click_text = tr("dialog.confirm")
+    harness.entry_value = "   "
+    assert dialogs.ask_text(harness, DARK, title="t", text="请输入名称") is None
+
+
+def test_ask_text_cancel_returns_none(harness: _FakeParent) -> None:
+    harness.click_text = tr("dialog.cancel")
+    harness.entry_value = "任意"
+    assert dialogs.ask_text(harness, DARK, title="t", text="请输入名称") is None

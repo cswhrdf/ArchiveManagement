@@ -10,6 +10,8 @@ import pytest
 
 from archive_management.infrastructure.database import Database
 
+pytestmark = [pytest.mark.database, pytest.mark.critical]
+
 EXPECTED_TABLES = {
     "games",
     "save_locations",

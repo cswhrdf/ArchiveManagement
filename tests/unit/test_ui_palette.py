@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from archive_management.ui.palette import (
     DARK,
     DEFAULT_THEME,
@@ -9,6 +11,8 @@ from archive_management.ui.palette import (
     THEME_NAMES,
     Palette,
 )
+
+pytestmark = [pytest.mark.ui, pytest.mark.critical]
 
 _COLOR_FIELDS = (
     "background",

@@ -9,6 +9,8 @@ from pydantic import ValidationError
 
 from archive_management.domain import BackupFileEntry, BackupNode, Game, SaveLocation
 
+pytestmark = [pytest.mark.domain, pytest.mark.critical]
+
 
 def _utc() -> datetime:
     return datetime.now(UTC)

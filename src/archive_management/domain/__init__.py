@@ -14,8 +14,14 @@ from archive_management.domain.entities import (
     SaveSource,
     ScheduledJob,
 )
+from archive_management.domain.steam_data import (
+    STEAM_DATA_FORMAT_VERSION,
+    SteamDataFile,
+    SteamGameEntry,
+)
 
 __all__ = [
+    "STEAM_DATA_FORMAT_VERSION",
     "BackupFileEntry",
     "BackupNode",
     "FileKind",
@@ -28,4 +34,6 @@ __all__ = [
     "SaveLocation",
     "SaveSource",
     "ScheduledJob",
+    "SteamDataFile",
+    "SteamGameEntry",
 ]

@@ -42,6 +42,7 @@ dev = [
     "pyinstaller>=6",
     "pytest>=8",
     "pytest-cov>=7",
+    "allure-pytest>=2.13",
     "ruff>=0.16",
 ]
 
@@ -149,7 +150,27 @@ addopts = [
     "--import-mode=importlib",
 ]
 markers = [
+    "backend: tests for an application backend implementation",
+    "blocker: highest-severity tests (run by local pre-commit)",
+    "cli: tests for command-line entry points",
+    "config: tests for configuration parsing and persistence",
+    "critical: high-severity core tests (run by local pre-commit)",
+    "database: tests for database access and persistence",
+    "dialogs: tests for dialog behavior",
+    "discovery: tests for game or save-location discovery",
+    "domain: tests for domain models and validation",
+    "i18n: tests for localization behavior",
     "integration: tests that use the filesystem or other infrastructure",
+    "minor: low-severity tests (skipped by local pre-commit)",
+    "no_severity: tests without an assigned severity",
+    "normal: standard tests run in CI only",
+    "package: tests for package imports and metadata",
+    "paths: tests for filesystem path handling",
+    "repository: tests for repository operations",
+    "smoke: smoke tests for startup or package availability",
+    "steam: tests for Steam data integration",
+    "trivial: cosmetic tests (skipped by local pre-commit)",
+    "ui: tests for user-interface behavior",
 ]
 
 [tool.coverage.run]

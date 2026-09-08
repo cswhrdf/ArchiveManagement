@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from archive_management.domain import PathKind, SaveSource
 from archive_management.i18n import tr
 
 
@@ -39,10 +40,13 @@ class GameSummary:
     location_count: int
     backup_count: int
     tone: str = "blue"  # 头像色块基调,由窗口映射到调色板
+    enabled: bool = True
 
     @property
     def list_detail(self) -> str:
         """列表项下方的说明文字."""
+        if not self.enabled:
+            return tr("game.disabled_short")
         if not self.has_locations:
             return tr("game.no_locations_short")
         return tr(
@@ -66,6 +70,20 @@ class GameDetail:
     total_backups_label: str
     total_backups_sub: str
     next_backup_label: str
+
+
+@dataclass(frozen=True)
+class LocationItem:
+    """存档位置管理列表中的单条数据."""
+
+    location_id: str
+    game_id: str
+    path: str
+    path_kind: PathKind
+    source: SaveSource
+    is_primary: bool
+    ok: bool
+    note: str  # 状态说明(可用或具体校验错误)
 
 
 @dataclass(frozen=True)
