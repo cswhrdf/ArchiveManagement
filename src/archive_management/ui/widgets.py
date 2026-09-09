@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import tkinter as tk
 from collections.abc import Callable
 from typing import Literal
 
@@ -15,24 +16,39 @@ from archive_management.ui.palette import Palette
 
 _PaletteKey = str
 _Repaint = Callable[..., None]
+_Unsubscribe = Callable[[], None]
 
 LabelStyle = Literal["primary", "body", "muted", "h2"]
 ButtonStyle = Literal["accent", "danger", "ghost", "soft"]
 
 
 class UiKit:
-    """创建并登记控件,主题切换时重绘所有登记项."""
+    """创建并登记控件,主题切换时重绘所有登记项.
+
+    动态重建的控件(如列表卡片)应在销毁前调用 ``register`` 返回的退订
+    函数, 避免重绘已销毁控件导致 ``TclError``。
+    """
 
     def __init__(self) -> None:
         """初始化空的重绘登记表."""
-        self._repaints: list[_Repaint] = []
+        self._repaints: list[tuple[int, _Repaint]] = []
+        self._active: set[int] = set()
+        self._next_token = 0
         self._buttons: dict[ctk.CTkButton, ButtonStyle] = {}
 
     # -- 登记 ---------------------------------------------------------------
 
-    def register(self, repaint: _Repaint) -> None:
-        """登记一个主题重绘回调."""
-        self._repaints.append(repaint)
+    def register(self, repaint: _Repaint) -> _Unsubscribe:
+        """登记一个主题重绘回调, 返回退订函数(控件销毁前应调用)."""
+        self._next_token += 1
+        token = self._next_token
+        self._repaints.append((token, repaint))
+        self._active.add(token)
+
+        def unsubscribe() -> None:
+            self._active.discard(token)
+
+        return unsubscribe
 
     # -- 基础控件 -----------------------------------------------------------
 
@@ -109,9 +125,18 @@ class UiKit:
     # -- 重绘 ---------------------------------------------------------------
 
     def apply(self, palette: Palette) -> None:
-        """用给定调色板重绘全部登记控件."""
-        for repaint in self._repaints:
-            repaint(palette)
+        """用给定调色板重绘全部登记控件.
+
+        已退订或已销毁(引发 ``TclError``)的控件会被安全跳过。
+        """
+        for token, repaint in list(self._repaints):
+            if token not in self._active:
+                continue
+            try:
+                repaint(palette)
+            except tk.TclError:
+                # 控件已被销毁或根窗口关闭: 忽略并退订, 防止持续报错.
+                self._active.discard(token)
 
     # -- 内部 ---------------------------------------------------------------
 

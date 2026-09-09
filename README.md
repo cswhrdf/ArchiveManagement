@@ -35,7 +35,7 @@ uv run pytest --cov
 GitHub Actions 会运行全部测试，并生成覆盖率报告和 Allure 报告。手动生成 Allure 结果可使用：
 
 ```shell
-uv run pytest --alluredir=allure-results
+uv run pytest --alluredir=allure-results --clean-alluredir
 npx --yes allure@3 generate allure-results --output allure-report
 allure open
 ```

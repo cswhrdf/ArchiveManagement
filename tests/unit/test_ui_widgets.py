@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import tkinter as tk
 from typing import Any
 
 import pytest
@@ -96,3 +97,33 @@ def test_button_registers_and_repaints(kit: widgets.UiKit) -> None:
     assert button.kwargs["width"] == 88
     assert button.kwargs["height"] == 30
     assert button.kwargs["fg_color"] == DARK.accent
+
+
+def test_register_returns_unsubscribe_skips_inactive(kit: widgets.UiKit) -> None:
+    calls: list[Any] = []
+    kit.register(lambda p: calls.append("kept"))
+    unsubscribe = kit.register(lambda p: calls.append("removed"))
+    kit.apply(DARK)
+    assert calls == ["kept", "removed"]
+    unsubscribe()
+    kit.apply(DARK)
+    assert calls == ["kept", "removed", "kept"]
+
+
+def test_register_unsubscribe_is_idempotent(kit: widgets.UiKit) -> None:
+    calls: list[Any] = []
+    unsubscribe = kit.register(lambda p: calls.append("x"))
+    unsubscribe()
+    unsubscribe()
+    kit.apply(DARK)
+    assert calls == []
+
+
+def test_apply_skips_repaint_raising_tcl_error(kit: widgets.UiKit) -> None:
+    """重绘已销毁控件抛 TclError 时应被跳过而非中断整批重绘."""
+    painted: list[str] = []
+    kit.register(lambda p: painted.append("before"))
+    kit.register(lambda _p: (_ for _ in ()).throw(tk.TclError("bad window path")))
+    kit.register(lambda p: painted.append("after"))
+    kit.apply(DARK)
+    assert painted == ["before", "after"]

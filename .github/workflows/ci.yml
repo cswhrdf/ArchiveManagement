@@ -5,6 +5,10 @@ on:
     branches: [main, dev]
   pull_request:
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   quality:
     name: 代码质量检查 (${{ matrix.os }})
@@ -76,9 +80,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
-      # Linux 无真实显示, GUI 冒烟测试需要虚拟显示(Xvfb)才能执行;
-      # 否则 main_window/dialogs/widgets 等 GUI 代码不参与覆盖, 导致
-      # 覆盖率远低于 Windows, 触发 coverage fail_under 阈值.
       - name: Pytest with coverage (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run -a uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
@@ -87,9 +88,77 @@ jobs:
         if: runner.os == 'Windows'
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
 
-      - name: Generate Allure 3 report
+      - name: Resolve previous successful run
+        id: prev-run
+        uses: actions/github-script@v9
+        env:
+          ARTIFACT_NAME: allure-history-${{ matrix.os }}
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 30,
+            });
+            const candidates = runs.data.workflow_runs.filter(
+              (r) =>
+                r.name === "CI" &&
+                r.id !== context.runId &&
+                r.status === "completed" &&
+                r.conclusion === "success",
+            );
+            for (const candidate of candidates) {
+              const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: candidate.id,
+                per_page: 100,
+              });
+              const history = artifacts.data.artifacts.find(
+                (artifact) =>
+                  artifact.name === process.env.ARTIFACT_NAME &&
+                  !artifact.expired,
+              );
+              if (history) {
+                core.setOutput("run_id", String(candidate.id));
+                break;
+              }
+            }
+
+      - name: Download previous Allure history
+        if: steps.prev-run.outputs.run_id != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-history-${{ matrix.os }}
+          run-id: ${{ steps.prev-run.outputs.run_id }}
+          path: .
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Allure report (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p .allure
+          cat > .allure/allurerc.json <<'JSON'
+          {"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}
+          JSON
+          allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+
+      - name: Generate Allure report (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .allure | Out-Null
+          Set-Content -Path .allure/allurerc.json -Encoding ascii -Value '{"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}'
+          allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+
+      - name: Upload Allure history for next run
         if: always()
-        run: allure generate allure-results --output allure-report
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-history-${{ matrix.os }}
+          path: .allure/history.jsonl
+          if-no-files-found: ignore
 
       - name: Upload coverage report
         if: always()

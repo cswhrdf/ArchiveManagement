@@ -74,6 +74,8 @@ class ArchiveApp(ctk.CTk):
         self._items: list[BackupItem] = []
         self._busy = False
         self._cards: dict[str, ctk.CTkFrame] = {}
+        self._row_unregisters: list[Callable[[], None]] = []
+        self._card_unregisters: list[Callable[[], None]] = []
 
         self._messages: queue.Queue[tuple[Literal["ok", "err"], str]] = queue.Queue()
         self._pending_ok: Callable[[str], None] | None = None
@@ -619,6 +621,9 @@ class ArchiveApp(ctk.CTk):
         self._refresh_sync()
 
     def _render_game_list(self, games: list[GameSummary]) -> None:
+        for unsubscribe in self._row_unregisters:
+            unsubscribe()
+        self._row_unregisters = []
         for child in self._games_container.winfo_children():
             child.destroy()
         for game in games:
@@ -663,8 +668,10 @@ class ArchiveApp(ctk.CTk):
             text_color=self.p.text_muted,
         )
         detail.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 7))
-        self.kit.register(
-            lambda p, r=row, n=name, d=detail: self._paint_row(r, n, d, p, game)
+        self._row_unregisters.append(
+            self.kit.register(
+                lambda p, r=row, n=name, d=detail: self._paint_row(r, n, d, p, game)
+            )
         )
         return row
 
@@ -777,6 +784,9 @@ class ArchiveApp(ctk.CTk):
             self._backup_id = None
             self._render_selected(None)
 
+        for unsubscribe in self._card_unregisters:
+            unsubscribe()
+        self._card_unregisters = []
         for child in self._list_scroll.winfo_children():
             child.destroy()
         if not items:
@@ -850,9 +860,11 @@ class ArchiveApp(ctk.CTk):
             text_color=self.p.text_muted,
         )
         detail.grid(row=2, column=0, columnspan=3, padx=12, pady=(0, 10), sticky="w")
-        self.kit.register(
-            lambda p, c=card, w=when, t=title, d=detail, b=badge, i=item: self._paint_card(
-                c, w, t, d, b, p, i
+        self._card_unregisters.append(
+            self.kit.register(
+                lambda p, c=card, w=when, t=title, d=detail, b=badge, i=item: self._paint_card(
+                    c, w, t, d, b, p, i
+                )
             )
         )
         return card
