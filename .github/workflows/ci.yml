@@ -78,7 +78,17 @@ jobs:
 
       - name: Install Xvfb (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        shell: bash
+        run: |
+          # The hosted runner may have a stale Google Chrome index. It is unrelated to Xvfb
+          # and can make apt-get update fail with a Hash Sum mismatch.
+          while IFS= read -r -d '' source; do
+            if grep -q 'dl.google.com/linux/chrome' "$source"; then
+              sudo mv "$source" "${source}.disabled"
+            fi
+          done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
+          sudo apt-get update
+          sudo apt-get install -y xvfb
 
       - name: Pytest with coverage (Linux)
         if: runner.os == 'Linux'
@@ -87,6 +97,9 @@ jobs:
       - name: Pytest with coverage (Windows)
         if: runner.os == 'Windows'
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
+
+      - name: Attach coverage report to Allure
+        run: uv run python scripts/create_allure_coverage.py
 
       - name: Resolve previous successful run
         id: prev-run
@@ -131,7 +144,7 @@ jobs:
         with:
           name: allure-history-${{ matrix.os }}
           run-id: ${{ steps.prev-run.outputs.run_id }}
-          path: .
+          path: .allure
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate Allure report (Linux)
