@@ -9,6 +9,7 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Any
 
+import customtkinter as ctk
 import pytest
 
 import archive_management.ui.widgets as widgets
@@ -31,7 +32,6 @@ class _FakeCtkWidget:
 @pytest.fixture
 def kit(monkeypatch: pytest.MonkeyPatch) -> widgets.UiKit:
     """把 ctk 控件替换为假实现, 返回空的 UiKit."""
-    ctk = widgets.ctk
     monkeypatch.setattr(
         ctk,
         "CTkFrame",
@@ -49,6 +49,54 @@ def kit(monkeypatch: pytest.MonkeyPatch) -> widgets.UiKit:
     )
     monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
     return widgets.UiKit()
+
+
+class _FakeScrollableFrame(_FakeCtkWidget):
+    """假滚动容器: 记录主题重绘时对内部 canvas 背景的更新."""
+
+    def __init__(self, master: Any = None, **kwargs: Any) -> None:
+        super().__init__(master=master, **kwargs)
+        self.canvas_bg: str | None = None
+
+
+@pytest.fixture
+def scroll_kit(monkeypatch: pytest.MonkeyPatch) -> widgets.UiKit:
+    """把 CTkScrollableFrame 替换为假实现, 返回空的 UiKit."""
+    monkeypatch.setattr(
+        ctk,
+        "CTkScrollableFrame",
+        lambda master=None, **kwargs: _FakeScrollableFrame(master=master, **kwargs),
+    )
+    return widgets.UiKit()
+
+
+def test_scroll_frame_repaints_background_on_theme_change(
+    scroll_kit: widgets.UiKit,
+) -> None:
+    """回归: 滚动列表的背景必须跟随主题, 否则浅/深色切换后颜色错位.
+
+    CustomTkinter 只在构造时把内层 canvas 的背景取为父容器当时的颜色,
+    因此 ``scroll_frame`` 必须在每次重绘时用调色板重设 ``fg_color``。
+    """
+    frame = scroll_kit.scroll_frame(scroll_kit, bg_key="panel")
+    scroll_kit.apply(DARK)
+
+    assert frame.kwargs["fg_color"] == DARK.panel
+    assert frame.kwargs["scrollbar_button_color"] == DARK.border
+
+
+def test_scroll_frame_ignores_destroyed_widget(
+    scroll_kit: widgets.UiKit,
+) -> None:
+    """回归: 已销毁的滚动容器不应让重绘抛出 TclError."""
+    frame = scroll_kit.scroll_frame(scroll_kit, bg_key="sidebar")
+
+    def boom(**_kwargs: Any) -> None:
+        raise tk.TclError("bad window path name")
+
+    frame.configure = boom
+    scroll_kit.apply(DARK)
+    scroll_kit.apply(DARK)
 
 
 def test_frame_recolored_with_border(kit: widgets.UiKit) -> None:

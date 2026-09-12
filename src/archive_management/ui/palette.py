@@ -22,6 +22,10 @@ class Palette:
     sidebar: str  # 左侧栏背景
     panel: str  # 普通卡片/面板背景
     raised: str  # 工具栏等较高层级背景
+    card: str  # 列表项/备份卡片背景(需与 well/panel 明确区分)
+    card_border: str  # 列表项/备份卡片描边
+    card_hover: str  # 列表项/备份卡片悬停背景
+    well: str  # 列表滚动区背景(卡片在其中以“凹槽”方式呈现)
     input_bg: str  # 输入/下拉控件背景
     border: str  # 面板描边
     text_primary: str  # 标题等强文本
@@ -57,6 +61,10 @@ DARK = Palette(
     sidebar="#0d1728",
     panel="#101b2d",
     raised="#111e31",
+    card="#1a2942",
+    card_border="#2f4767",
+    card_hover="#223657",
+    well="#0c1524",
     input_bg="#0c1627",
     border="#253a55",
     text_primary="#f4f7fb",
@@ -85,6 +93,10 @@ LIGHT = Palette(
     sidebar="#ffffff",
     panel="#ffffff",
     raised="#ffffff",
+    card="#ffffff",
+    card_border="#cdd8e3",
+    card_hover="#eef4f8",
+    well="#f1f4f8",
     input_bg="#f6f8f9",
     border="#d6dee6",
     text_primary="#1b2735",

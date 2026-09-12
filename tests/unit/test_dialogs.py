@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypedDict
 
+import customtkinter as ctk
 import pytest
 
 import archive_management.ui.dialogs as dialogs
@@ -27,6 +28,8 @@ class _FakeWidget:
         self.text = kwargs.get("text")
         self.command: Callable[[], None] | None = kwargs.get("command")
         self._value: str = kwargs.get("text", "")
+        # 测试用 harness 预置过内容时, 对话框自身的 initial 回填不再覆盖它.
+        self._preset = False
 
     def configure(self, **kwargs: Any) -> None:
         self.kwargs.update(kwargs)
@@ -43,15 +46,29 @@ class _FakeWidget:
     def bind(self, _sequence: str, _callback: Any) -> None:
         return None
 
-    def insert(self, _index: str, _text: str) -> None:
-        return None
+    def insert(self, _index: str, text: str) -> None:
+        # 真实 Tk 的 insert 不会清空已有内容; 空串插入视为无操作,
+        # 这样测试可以通过 harness 预置“用户输入”.
+        if self._preset or not text:
+            return
+        self._value = text
 
     def delete(self, _first: str, _last: str) -> None:
+        self._value = ""
+
+    def select_range(self, _start: str | int, _end: str | int) -> None:
         return None
 
     def click(self) -> None:
         if self.command is not None:
             self.command()
+
+
+class _FakeTextbox(_FakeWidget):
+    """假多行文本框: 只保留最后写入的内容."""
+
+    def get(self, _start: str = "1.0", _end: str = "end") -> str:
+        return self._value
 
 
 class _FakeWindow(_FakeWidget):
@@ -116,6 +133,9 @@ class _FakeParent(_FakeWidget):
         self.click_text: str | None = None
         self.wait_called = False
         self.entry_value = ""
+        # 一次对话框含多个输入框时按顺序取值(优先于 entry_value).
+        self.entry_values: list[str] = []
+        self.textbox_value = ""
 
     def winfo_rootx(self) -> int:
         return 100
@@ -146,7 +166,6 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
     buttons: list[_FakeWidget] = []
     entries: list[_FakeWidget] = []
     parent = _FakeParent(buttons, windows, entries)
-    ctk = dialogs.ctk
 
     def make_window(master: Any = None, **kwargs: Any) -> _FakeWindow:
         window = _FakeWindow(master=master, **kwargs)
@@ -160,9 +179,21 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
 
     def make_entry(master: Any = None, **kwargs: Any) -> _FakeWidget:
         entry = _FakeWidget(master=master, **kwargs)
-        entry._value = parent.entry_value
+        if parent.entry_values:
+            entry._value = parent.entry_values.pop(0)
+            entry._preset = True
+        elif parent.entry_value:
+            entry._value = parent.entry_value
+            entry._preset = True
         entries.append(entry)
         return entry
+
+    def make_textbox(master: Any = None, **kwargs: Any) -> _FakeTextbox:
+        box = _FakeTextbox(master=master, **kwargs)
+        if parent.textbox_value:
+            box._value = parent.textbox_value
+            box._preset = True
+        return box
 
     monkeypatch.setattr(ctk, "CTkToplevel", make_window)
     monkeypatch.setattr(
@@ -177,6 +208,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
     )
     monkeypatch.setattr(ctk, "CTkButton", make_button)
     monkeypatch.setattr(ctk, "CTkEntry", make_entry)
+    monkeypatch.setattr(ctk, "CTkTextbox", make_textbox)
     monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
     return parent
 
@@ -269,3 +301,115 @@ def test_ask_text_cancel_returns_none(harness: _FakeParent) -> None:
     harness.click_text = tr("dialog.cancel")
     harness.entry_value = "任意"
     assert dialogs.ask_text(harness, DARK, title="t", text="请输入名称") is None
+
+
+# ------------------------------------------- 单窗口编辑(名称+描述 / 周期+保留份数)
+
+
+class _EditArgs(TypedDict):
+    """edit_backup_dialog 的公共参数(limit 单独传, 便于用例覆盖)."""
+
+    title: str
+    name_label: str
+    desc_label: str
+    desc_prompt: str
+
+
+def _edit_args() -> _EditArgs:
+    return {
+        "title": tr("dialog.rename_title"),
+        "name_label": tr("dialog.rename_label"),
+        "desc_label": tr("dialog.describe_label"),
+        "desc_prompt": tr("dialog.describe_prompt", limit=200),
+    }
+
+
+def test_edit_backup_dialog_returns_name_and_description(
+    harness: _FakeParent,
+) -> None:
+    """名称与描述在同一个窗口内提交, 只需一次交互."""
+    harness.click_text = tr("dialog.schedule_save")
+    harness.entry_value = "  离开量子月亮前  "
+    harness.textbox_value = "  第一次通关前的存档  "
+
+    result = dialogs.edit_backup_dialog(harness, DARK, **_edit_args(), limit=200)
+
+    assert result == ("离开量子月亮前", "第一次通关前的存档")
+    assert len(harness.windows) == 1
+    assert harness.windows[0].destroyed is True
+
+
+def test_edit_backup_dialog_prefills_existing_values(
+    harness: _FakeParent,
+) -> None:
+    """已有名称与描述会回填到同一个窗口."""
+    harness.click_text = tr("dialog.schedule_save")
+    result = dialogs.edit_backup_dialog(
+        harness,
+        DARK,
+        **_edit_args(),
+        initial_name="初始存档",
+        initial_desc="第一次启动时的存档",
+    )
+    assert result == ("初始存档", "第一次启动时的存档")
+
+
+def test_edit_backup_dialog_cancel_returns_none(harness: _FakeParent) -> None:
+    harness.click_text = tr("dialog.cancel")
+    harness.entry_value = "新名字"
+    assert dialogs.edit_backup_dialog(harness, DARK, **_edit_args()) is None
+
+
+def test_edit_backup_dialog_rejects_over_limit_description(
+    harness: _FakeParent,
+) -> None:
+    """描述超限时不提交且窗口保持打开(不做静默截断)."""
+    harness.click_text = tr("dialog.schedule_save")
+    harness.textbox_value = "x" * 201
+
+    assert dialogs.edit_backup_dialog(harness, DARK, **_edit_args(), limit=200) is None
+    assert harness.windows[0].destroyed is False
+
+
+class _ScheduleArgs(TypedDict):
+    """schedule_dialog 的公共参数."""
+
+    title: str
+    interval_label: str
+    interval_prompt: str
+    keep_label: str
+    keep_prompt: str
+
+
+def _schedule_args() -> _ScheduleArgs:
+    return {
+        "title": tr("dialog.schedule_title"),
+        "interval_label": tr("dialog.schedule_interval_label"),
+        "interval_prompt": tr("dialog.schedule_prompt", current="未配置"),
+        "keep_label": tr("dialog.keep_auto_label"),
+        "keep_prompt": tr("dialog.keep_auto_prompt", max=20),
+    }
+
+
+def test_schedule_dialog_returns_interval_and_keep(harness: _FakeParent) -> None:
+    """周期与保留份数在同一个窗口内提交."""
+    harness.click_text = tr("dialog.schedule_save")
+    harness.entry_values = ["  2h  ", " 5 "]
+
+    result = dialogs.schedule_dialog(harness, DARK, **_schedule_args())
+
+    assert result == ("2h", "5")
+    assert harness.windows[0].destroyed is True
+
+
+def test_schedule_dialog_allows_empty_interval(harness: _FakeParent) -> None:
+    """留空周期表示取消定时备份, 由调用方解析."""
+    harness.click_text = tr("dialog.schedule_save")
+    harness.entry_values = ["", "3"]
+
+    assert dialogs.schedule_dialog(harness, DARK, **_schedule_args()) == ("", "3")
+
+
+def test_schedule_dialog_cancel_returns_none(harness: _FakeParent) -> None:
+    harness.click_text = tr("dialog.cancel")
+    assert dialogs.schedule_dialog(harness, DARK, **_schedule_args()) is None

@@ -33,7 +33,7 @@ def test_init_creates_database_and_config(tmp_path: Path) -> None:
     assert "初始化完成" in output
 
     database = Database(tmp_path / "data" / "archive-management.db")
-    assert database.schema_version() == 1
+    assert database.schema_version() == database.latest_schema_version()
     assert (tmp_path / "config" / "config.json").is_file()
     assert (tmp_path / "data" / "backups").is_dir()
 
@@ -44,7 +44,7 @@ def test_init_is_idempotent(tmp_path: Path) -> None:
     assert first == 0
     assert second == 0
     database = Database(tmp_path / "data" / "archive-management.db")
-    assert database.schema_version() == 1
+    assert database.schema_version() == database.latest_schema_version()
 
 
 def test_doctor_reports_database(tmp_path: Path) -> None:
@@ -52,7 +52,10 @@ def test_doctor_reports_database(tmp_path: Path) -> None:
     code, output = _run_with_output(["doctor", "--root", str(tmp_path)])
     assert code == 0
     assert "数据库" in output
-    assert "schema 1/1" in output
+    latest = Database(
+        tmp_path / "data" / "archive-management.db"
+    ).latest_schema_version()
+    assert f"schema {latest}/{latest}" in output
 
 
 def test_default_command_runs_init(tmp_path: Path) -> None:

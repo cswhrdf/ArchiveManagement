@@ -46,9 +46,11 @@ def test_restore_of_failing_node_raises(service: DemoArchiveService) -> None:
         service.run_restore("outer-wilds", "b2")
 
 
-def test_restore_success(service: DemoArchiveService) -> None:
+def test_restore_success_moves_current_node(service: DemoArchiveService) -> None:
     message = service.run_restore("outer-wilds", "b1")
-    assert "已恢复" in message
+    assert "当前节点" in message
+    current = [item for item in service.list_backups("outer-wilds") if item.is_current]
+    assert [item.backup_id for item in current] == ["b1"]
 
 
 def test_backup_creates_new_node(service: DemoArchiveService) -> None:
@@ -68,8 +70,9 @@ def test_theme_cycle(service: DemoArchiveService) -> None:
 def test_task_status_reports_theme(service: DemoArchiveService) -> None:
     service.set_theme("light")
     status = service.task_status()
-    assert status.running is True
+    assert status.running is False
     assert status.theme_name == "light"
+    assert status.schedule_text == "1d"
 
 
 def test_get_detail_unknown_game_raises(service: DemoArchiveService) -> None:

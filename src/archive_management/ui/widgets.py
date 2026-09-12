@@ -69,6 +69,29 @@ class UiKit:
         self.register(lambda p: self._recolor_frame(frame, p, bg_key, border_key))
         return frame
 
+    def scroll_frame(
+        self,
+        parent: ctk.CTkBaseClass,
+        *,
+        bg_key: str,
+        corner_radius: int = 0,
+        scrollbar_key: str = "border",
+    ) -> ctk.CTkScrollableFrame:
+        """创建并登记一个随主题重绘的滚动容器.
+
+        CustomTkinter 只在构造时把内层 canvas 的背景取为父容器当时的颜色,
+        主题切换后不会自动更新, 因此这里显式用调色板重设 ``fg_color``,
+        让列表区域的背景与卡片一起跟随主题(修复浅色/深色错位).
+        """
+        frame = ctk.CTkScrollableFrame(
+            parent,
+            fg_color="transparent",
+            corner_radius=corner_radius,
+            scrollbar_button_color="#314765",
+        )
+        self.register(lambda p: self._recolor_scroll(frame, p, bg_key, scrollbar_key))
+        return frame
+
     def label(
         self,
         parent: ctk.CTkBaseClass,
@@ -150,6 +173,19 @@ class UiKit:
         frame.configure(fg_color=getattr(palette, bg_key))
         if border_key is not None:
             frame.configure(border_color=getattr(palette, border_key))
+
+    @staticmethod
+    def _recolor_scroll(
+        frame: ctk.CTkScrollableFrame,
+        palette: Palette,
+        bg_key: str,
+        scrollbar_key: str,
+    ) -> None:
+        # configure(fg_color=...) 会同时更新内层 Frame 与 canvas 的背景.
+        frame.configure(
+            fg_color=getattr(palette, bg_key),
+            scrollbar_button_color=getattr(palette, scrollbar_key),
+        )
 
     def _paint_button(
         self,

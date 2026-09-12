@@ -10,6 +10,14 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from archive_management.application.backup import MAX_NOTE_LENGTH
+from archive_management.domain import (
+    DEFAULT_KEEP_AUTO,
+    BackupNode,
+    DeletionMode,
+    DeletionPlan,
+    plan_deletion,
+)
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.services.pathcheck import normalize_path
@@ -64,7 +72,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
             created_dt=_dt(2026, 9, 6, 9, 40),
             created_label="今天 09:40",
             auto=False,
-            branch_label="分支:主线",
+            branch_label="主线",
             size_label="128 MB",
             verified=True,
             sub="手动保存的探索节点",
@@ -79,26 +87,43 @@ _BACKUPS: dict[str, list[BackupItem]] = {
             size_label="125 MB",
             verified=True,
             sub="演示:此节点恢复会失败",
+            parent_id="b1",
         ),
         BackupItem(
             backup_id="b3",
-            title="每日自动备份",
+            title="",
             created_dt=_dt(2026, 9, 5, 18, 0),
             created_label="昨天 18:00",
             auto=True,
             branch_label="主线",
             size_label="124 MB",
             verified=True,
+            parent_id="b2",
         ),
         BackupItem(
             backup_id="b4",
-            title="每日自动备份",
+            title="",
             created_dt=_dt(2026, 9, 4, 22, 31),
             created_label="2026/09/04 22:31",
             auto=True,
-            branch_label="分支「黑棘」",
+            branch_label="主线",
             size_label="122 MB",
             verified=True,
+            parent_id="b3",
+        ),
+        BackupItem(
+            backup_id="b5",
+            title="黑棘",
+            created_dt=_dt(2026, 9, 6, 11, 5),
+            created_label="今天 11:05",
+            auto=False,
+            branch_label="分支:黑棘",
+            size_label="126 MB",
+            verified=True,
+            sub="从黑棘入口开始的另一条线",
+            parent_id="b3",
+            is_branch=True,
+            branch_name="黑棘",
         ),
     ],
     "shanhai": [
@@ -121,6 +146,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
             branch_label="主线",
             size_label="8 MB",
             verified=True,
+            parent_id="s1",
         ),
     ],
 }
@@ -172,13 +198,22 @@ class DemoArchiveService:
         """用内存数据构造演示后端; ``delay`` 控制模拟耗时."""
         self._delay = delay
         self._theme = "dark"
-        self._extra_backups: dict[str, int] = {}
+        self._schedule_text = "1d"
+        self._keep_auto = 3
+        self._revision = 0
+        self._items: dict[str, list[BackupItem]] = {
+            game_id: list(items) for game_id, items in _BACKUPS.items()
+        }
+        self._current: dict[str, str | None] = {}
         self._meta: dict[str, GameSummary] = {game.game_id: game for game in _GAMES}
         self._details = dict(_DETAILS)
         self._locations: dict[str, list[LocationItem]] = {}
         self._next_game_id = 1
         self._next_location_id = 1
         for game in _GAMES:
+            existing = self._items.get(game.game_id, [])
+            self._current[game.game_id] = existing[-1].backup_id if existing else None
+            self._items.setdefault(game.game_id, [])
             primary = self._details[game.game_id].main_location
             if primary:
                 self._locations[game.game_id] = [
@@ -208,38 +243,136 @@ class DemoArchiveService:
         return self._details[game_id]
 
     def list_backups(self, game_id: str) -> list[BackupItem]:
-        """返回某游戏的备份节点, 含本会话新增节点."""
-        items = list(_BACKUPS.get(game_id, []))
-        extra = self._extra_backups.get(game_id, 0)
-        if extra:
-            created = _dt(2026, 9, 6, 10, 0 + extra)
-            items.append(
-                BackupItem(
-                    backup_id=f"new-{extra}",
-                    title=f"手动备份 #{extra}",
-                    created_dt=created,
-                    created_label="刚刚",
-                    auto=False,
-                    branch_label="主线",
-                    size_label="1 MB",
-                    verified=True,
-                    sub="本会话创建",
-                )
-            )
-        return items
+        """返回某游戏的备份节点, 并标记当前节点."""
+        self._require_game(game_id)
+        current = self._effective_current(game_id)
+        return [
+            replace(item, is_current=item.backup_id == current)
+            for item in self._items.get(game_id, [])
+        ]
 
-    def task_status(self) -> TaskStatus:
-        """返回定时任务状态."""
+    def task_status(self, game_id: str | None = None) -> TaskStatus:
+        """返回定时任务状态(演示数据不区分游戏)."""
+        del game_id
         return TaskStatus(
-            running=True,
-            task_name="每日自动备份",
-            progress=0.7,
+            running=False,
+            task_name=(
+                tr("task.every", interval=self._schedule_text, keep=self._keep_auto)
+                if self._schedule_text
+                else tr("task.unscheduled")
+            ),
+            progress=0.0,
             next_run_label="今天 12:00",
             target_label="本地备份目录",
             shortcut_label="Ctrl Alt S",
             theme_name=self._theme,
             backend_ok=True,
+            schedule_text=self._schedule_text,
+            keep_auto=self._keep_auto,
+            revision=self._revision,
         )
+
+    def set_schedule(
+        self,
+        game_id: str,
+        interval_text: str,
+        *,
+        enabled: bool = True,
+        keep_auto: int = DEFAULT_KEEP_AUTO,
+    ) -> TaskStatus:
+        """记录演示用的定时备份周期与自动备份保留份数."""
+        self._require_game(game_id)
+        self._schedule_text = interval_text.strip() if enabled else ""
+        self._keep_auto = max(1, keep_auto)
+        return self.task_status(game_id)
+
+    def plan_delete(self, game_id: str, backup_id: str) -> DeletionPlan:
+        """按分支树计算删除计划."""
+        nodes, mapping = self._nodes_of(game_id)
+        try:
+            return plan_deletion(nodes, mapping[backup_id])
+        except KeyError as exc:
+            raise ArchiveManagementError(
+                tr("error.unknown_backup", backup_id=backup_id)
+            ) from exc
+
+    def run_delete_backup(self, game_id: str, backup_id: str) -> str:
+        """按分支树删除备份(同线路节点上移, 分支根节点连带子分支)."""
+        self._simulate()
+        self._require_game(game_id)
+        plan = self.plan_delete(game_id, backup_id)
+        _nodes, mapping = self._nodes_of(game_id)
+        reverse = {value: key for key, value in mapping.items()}
+        removed = {
+            reverse[node_id] for node_id in plan.removed_ids if node_id in reverse
+        }
+        if plan.mode is DeletionMode.SHIFT and plan.shifted_child_id is not None:
+            child_id = reverse.get(plan.shifted_child_id)
+            parent_id = (
+                None if plan.new_parent_id is None else reverse.get(plan.new_parent_id)
+            )
+            items = self._items[game_id]
+            self._items[game_id] = [
+                (
+                    replace(item, parent_id=parent_id)
+                    if item.backup_id == child_id
+                    else item
+                )
+                for item in items
+            ]
+        self._items[game_id] = [
+            item for item in self._items[game_id] if item.backup_id not in removed
+        ]
+        if self._current.get(game_id) in removed:
+            # 当前节点被删除: 优先回退到父节点, 否则落到剩余的最新备份,
+            # 使列表里始终能看到"接下来的备份挂在哪里".
+            fallback = reverse.get(plan.new_parent_id) if plan.new_parent_id else None
+            remaining = {item.backup_id for item in self._items[game_id]}
+            self._current[game_id] = (
+                fallback if fallback in remaining else self._effective_current(game_id)
+            )
+        self._revision += 1
+        if plan.mode is DeletionMode.CASCADE:
+            return tr("result.delete_cascade", count=plan.removed_count)
+        if plan.mode is DeletionMode.SHIFT:
+            return tr("result.delete_shift")
+        return tr("result.delete_single")
+
+    def rename_backup(
+        self, game_id: str, backup_id: str, *, title: str, note: str
+    ) -> BackupItem:
+        """修改演示备份的名称与描述."""
+        self._require_game(game_id)
+        clean_note = note.strip()
+        if len(clean_note) > MAX_NOTE_LENGTH:
+            raise ArchiveManagementError(
+                tr("error.note_too_long", limit=MAX_NOTE_LENGTH)
+            )
+        items = self._items.get(game_id, [])
+        updated: BackupItem | None = None
+        result: list[BackupItem] = []
+        for item in items:
+            if item.backup_id == backup_id:
+                updated = replace(
+                    item, title=title.strip() or item.title, sub=clean_note
+                )
+                result.append(updated)
+            else:
+                result.append(item)
+        if updated is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_backup", backup_id=backup_id)
+            )
+        self._items[game_id] = result
+        self._revision += 1
+        return updated
+
+    def cancel_active(self) -> bool:
+        """演示后端没有可取消的后台操作."""
+        return False
+
+    def shutdown(self) -> None:
+        """演示后端无需释放资源."""
 
     # -- 主题 ---------------------------------------------------------------
     def current_theme(self) -> str:
@@ -258,23 +391,71 @@ class DemoArchiveService:
         self._simulate()
         self._require_game(game_id)
         self._require_locations(game_id)
-        self._extra_backups[game_id] = self._extra_backups.get(game_id, 0) + 1
+        items = self._items[game_id]
+        created = _dt(2026, 9, 6, 10, len(items))
+        items.append(
+            BackupItem(
+                backup_id=f"new-{len(items) + 1}",
+                title=tr("backup.title_manual"),
+                created_dt=created,
+                created_label="刚刚",
+                auto=False,
+                branch_label=tr("backup.mainline"),
+                size_label="1 MB",
+                verified=True,
+                sub="本会话创建",
+                parent_id=self._current.get(game_id),
+            )
+        )
+        self._current[game_id] = items[-1].backup_id
+        self._revision += 1
         return tr("result.backup_done", name=self._name_of(game_id))
 
     def run_restore(self, game_id: str, backup_id: str) -> str:
-        """恢复到指定节点; 特定节点刻意失败以演示错误路径."""
+        """把当前节点切换到指定备份; 特定节点刻意失败以演示错误路径."""
         self._simulate()
         self._require_game(game_id)
         if backup_id == _FAIL_RESTORE_ID:
             raise ArchiveManagementError(tr("error.restore_busy"))
+        items = {item.backup_id: item for item in self._items.get(game_id, [])}
+        node = items.get(backup_id)
+        if node is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_backup", backup_id=backup_id)
+            )
+        self._current[game_id] = backup_id
+        self._revision += 1
         return tr(
-            "result.restore_done", backup_id=backup_id, name=self._name_of(game_id)
+            "result.restore_done",
+            name=self._name_of(game_id),
+            backup_id=backup_id,
+            title=node.title,
         )
 
     def run_create_branch(self, game_id: str, backup_id: str, branch_name: str) -> str:
         """从指定节点创建分支."""
         self._simulate()
         self._require_game(game_id)
+        items = self._items[game_id]
+        created = _dt(2026, 9, 6, 11, len(items))
+        items.append(
+            BackupItem(
+                backup_id=f"branch-{len(items) + 1}",
+                title=branch_name,
+                created_dt=created,
+                created_label="刚刚",
+                auto=False,
+                branch_label=tr("backup.branch_label", branch=branch_name),
+                size_label="1 MB",
+                verified=True,
+                sub="",
+                parent_id=backup_id,
+                is_branch=True,
+                branch_name=branch_name,
+            )
+        )
+        self._current[game_id] = items[-1].backup_id
+        self._revision += 1
         return tr("result.branch_done", backup_id=backup_id, branch_name=branch_name)
 
     def run_export(self, game_id: str) -> str:
@@ -312,6 +493,8 @@ class DemoArchiveService:
             next_backup_label="—",
         )
         self._locations[game_id] = []
+        self._items[game_id] = []
+        self._current[game_id] = None
         return summary
 
     def update_game(self, game_id: str, name: str) -> GameSummary:
@@ -328,6 +511,8 @@ class DemoArchiveService:
         self._meta.pop(game_id)
         self._details.pop(game_id)
         self._locations.pop(game_id, None)
+        self._items.pop(game_id, None)
+        self._current.pop(game_id, None)
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
         """启用或停用一个游戏."""
@@ -438,6 +623,39 @@ class DemoArchiveService:
     def _require_locations(self, game_id: str) -> None:
         if not self._locations[game_id]:
             raise ArchiveManagementError(tr("error.no_locations_backup"))
+
+    def _effective_current(self, game_id: str) -> str | None:
+        """返回有效的当前节点: 指针缺失或已删除时回退到最新备份."""
+        items = self._items.get(game_id, [])
+        pointer = self._current.get(game_id)
+        if pointer is not None and any(item.backup_id == pointer for item in items):
+            return pointer
+        return items[-1].backup_id if items else None
+
+    def _nodes_of(self, game_id: str) -> tuple[list[BackupNode], dict[str, int]]:
+        """把演示备份项转换为领域节点, 返回节点表与"展示 id -> 领域 id"映射.
+
+        演示数据用字符串 id(如 ``b1``), 而删除计划需要在整型 id 上做纯计算,
+        因此这里做一次稳定映射, 复用与真实后端相同的分支树规则.
+        """
+        self._require_game(game_id)
+        items = self._items.get(game_id, [])
+        mapping = {item.backup_id: index for index, item in enumerate(items, start=1)}
+        nodes = [
+            BackupNode(
+                id=mapping[item.backup_id],
+                game_id=0,
+                parent_id=(
+                    None if item.parent_id is None else mapping.get(item.parent_id)
+                ),
+                node_kind=(
+                    "branch" if item.is_branch else ("auto" if item.auto else "manual")
+                ),
+                branch_name=item.branch_name or None,
+            )
+            for item in items
+        ]
+        return nodes, mapping
 
     def _require_game(self, game_id: str) -> None:
         if game_id not in self._meta:

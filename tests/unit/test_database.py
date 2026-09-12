@@ -48,9 +48,9 @@ def test_fresh_database_has_no_schema(tmp_path: Path) -> None:
 def test_migrate_creates_all_tables(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     version = database.migrate()
-    assert version == 1
-    assert database.latest_schema_version() == 1
-    assert database.schema_version() == 1
+    assert version == database.latest_schema_version()
+    assert database.latest_schema_version() >= 1
+    assert database.schema_version() == database.latest_schema_version()
     assert _table_names(database) >= EXPECTED_TABLES
 
 
@@ -58,11 +58,11 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     database.migrate()
     database.migrate()
-    assert database.schema_version() == 1
+    assert database.schema_version() == database.latest_schema_version()
     with database.connect() as connection:
         count = connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()
     assert count is not None
-    assert int(count[0]) == 1
+    assert int(count[0]) == database.latest_schema_version()
 
 
 def test_session_commits_changes(tmp_path: Path) -> None:

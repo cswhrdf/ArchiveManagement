@@ -61,6 +61,9 @@ class BackupNode(_RowModel):
     node_kind: NodeKind = "manual"
     branch_name: str | None = None
     created_at: datetime | None = None
+    # 备份名称(用户可编辑); 为空时展示层回退到分支名或类型默认名.
+    title: str = ""
+    # 备份描述/备注(用户可编辑, 长度上限由用例校验).
     note: str = ""
     content_hash: str | None = None
     # 相对应用备份根目录的路径, 保证备份存储可整体迁移.
@@ -88,6 +91,8 @@ class ScheduledJob(_RowModel):
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     last_error: str | None = None
+    # 自动备份是特殊备份: 只保留最近 N 份(默认 3, 允许用户自定义).
+    keep_auto: int = Field(default=3, ge=1, le=50)
 
 
 class Operation(_RowModel):

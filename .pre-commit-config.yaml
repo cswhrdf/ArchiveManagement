@@ -17,7 +17,7 @@ repos:
 
       - id: mypy
         name: mypy
-        entry: uv run mypy --disable-error-code attr-defined
+        entry: uv run mypy
         language: system
         types: [python]
 

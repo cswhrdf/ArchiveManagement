@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-from importlib.metadata import PackageNotFoundError
 
 import pytest
 
@@ -36,17 +35,7 @@ def test_display_name_available() -> None:
     assert APP_DISPLAY_NAME
 
 
-def test_package_version_falls_back_when_uninstalled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_package_version_matches_source_version() -> None:
     import archive_management.packaging as pkg
 
-    def _raise(_name: str) -> str:
-        raise PackageNotFoundError(_name)
-
-    monkeypatch.setattr(pkg, "_distribution_version", _raise)
-    pkg.package_version.cache_clear()
-    try:
-        assert pkg.package_version() == "0.0.0.dev0"
-    finally:
-        pkg.package_version.cache_clear()
+    assert pkg.package_version() == pkg.__version__

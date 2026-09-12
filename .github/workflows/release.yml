@@ -1,0 +1,108 @@
+name: Build Windows Package
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - closed
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要构建的分支或提交,例如 dev"
+        required: false
+        default: master
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && (github.event.pull_request.head.ref == 'dev' || startsWith(github.event.pull_request.head.ref, 'bugfix/'))) }}
+    name: 构建 Windows 发布包
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.event.pull_request.merge_commit_sha || github.sha }}
+
+      - name: Resolve build metadata
+        id: build
+        shell: pwsh
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          PR_SOURCE_REF: ${{ github.event.pull_request.head.ref }}
+          DEFAULT_REF: ${{ github.ref_name }}
+        run: |
+          $ref = if ($env:INPUT_REF) {
+            $env:INPUT_REF
+          } elseif ($env:PR_SOURCE_REF) {
+            $env:PR_SOURCE_REF
+          } else {
+            $env:DEFAULT_REF
+          }
+          $source = Get-Content src/archive_management/packaging.py -Raw
+          $match = [regex]::Match($source, '__version__\s*=\s*"([^"]+)"')
+          if (-not $match.Success) {
+            throw "Could not find __version__ in packaging.py"
+          }
+          $version = $match.Groups[1].Value
+          $safe_ref = $ref -replace '[^A-Za-z0-9._-]', '-'
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "label=$safe_ref-build-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run build checks
+        run: |
+          uv run ruff check .
+          uv run black --check .
+          uv run mypy src
+          uv run pytest --cov
+
+      - name: Build onedir and onefile packages
+        run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
+
+      - name: Prepare build files
+        shell: pwsh
+        env:
+          BUILD_LABEL: ${{ steps.build.outputs.label }}
+          BUILD_VERSION: ${{ steps.build.outputs.version }}
+          BUILD_REF: ${{ steps.build.outputs.ref }}
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path dist/ArchiveManagement/* -DestinationPath "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.zip"
+          Copy-Item "dist/ArchiveManagement-onefile.exe" "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.exe"
+          $files = Get-ChildItem release -File
+          $hashes = foreach ($file in $files) {
+            $hash = Get-FileHash $file.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLowerInvariant())  $($file.Name)"
+          }
+          $hashes | Set-Content release/SHA256SUMS.txt -Encoding ascii
+          @{
+            application = "ArchiveManagement"
+            version = $env:BUILD_VERSION
+            ref = $env:BUILD_REF
+            platform = "windows-x64"
+            commit = "${{ github.sha }}"
+            built_at = (Get-Date).ToUniversalTime().ToString("o")
+          } | ConvertTo-Json | Set-Content release/build-metadata.json -Encoding utf8
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ArchiveManagement-${{ steps.build.outputs.label }}-windows-x64
+          path: release/

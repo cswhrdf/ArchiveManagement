@@ -138,8 +138,14 @@ def ask_branch_name(
     *,
     title: str,
     text: str,
+    initial: str = "",
+    confirm_text: str | None = None,
 ) -> str | None:
-    """询问分支名称;取消或内容为空返回 None."""
+    """询问分支名称;取消或内容为空返回 None.
+
+    ``initial`` 用作预填名称(创建分支时默认给一个可直接确认的名字).
+    """
+    ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
     window = ctk.CTkToplevel(parent)
     window.title(title)
     window.resizable(False, False)
@@ -163,8 +169,10 @@ def ask_branch_name(
         border_color=palette.border,
         text_color=palette.text_body,
     )
+    entry.insert(0, initial)
     entry.pack(padx=24, pady=(0, 10))
     entry.focus_set()
+    entry.select_range(0, "end")
 
     result: list[str] = []
 
@@ -191,7 +199,7 @@ def ask_branch_name(
     cancel.pack(side="left", padx=(0, 10))
     ok = ctk.CTkButton(
         buttons,
-        text=tr("dialog.confirm"),
+        text=ok_text,
         width=96,
         height=32,
         fg_color=palette.accent,
@@ -215,10 +223,13 @@ def ask_text(
     initial: str = "",
     browse: Callable[[], str | None] | None = None,
     confirm_text: str | None = None,
+    allow_empty: bool = False,
 ) -> str | None:
     """询问一段文本(如游戏名或路径); 取消或内容为空返回 None.
 
     ``browse`` 非 None 时显示"浏览"按钮, 点击后把返回的路径填入输入框.
+    ``allow_empty`` 为 True 时允许提交空内容(返回 ``""``), 供"清空配置"
+    这类需要区分"取消"与"留空"的场景使用.
     """
     ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
     window = ctk.CTkToplevel(parent)
@@ -252,7 +263,7 @@ def ask_text(
 
     def submit() -> None:
         value = entry.get().strip()
-        if value:
+        if value or allow_empty:
             result.append(value)
             window.destroy()
 
@@ -303,6 +314,262 @@ def ask_text(
         command=submit,
     )
     ok.pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None
+
+
+def edit_backup_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    title: str,
+    name_label: str,
+    desc_label: str,
+    desc_prompt: str,
+    initial_name: str = "",
+    initial_desc: str = "",
+    limit: int = 200,
+) -> tuple[str, str] | None:
+    """在同一个窗口里编辑备份名称与描述; 取消返回 None.
+
+    ``limit`` 为描述的字数上限: 超限时不会提交并把计数器标红, 避免静默
+    截断用户输入(服务层还会再校验一次).
+    """
+    window = ctk.CTkToplevel(parent)
+    window.title(title)
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    section_font = ctk.CTkFont(size=12)
+    ctk.CTkLabel(
+        window,
+        text=title,
+        anchor="w",
+        font=ctk.CTkFont(size=14, weight="bold"),
+        text_color=palette.text_primary,
+    ).pack(padx=24, pady=(20, 12), anchor="w")
+
+    ctk.CTkLabel(
+        window,
+        text=name_label,
+        anchor="w",
+        font=section_font,
+        text_color=palette.text_muted,
+    ).pack(padx=24, anchor="w")
+    name_entry = ctk.CTkEntry(
+        window,
+        width=420,
+        fg_color=palette.input_bg,
+        border_color=palette.border,
+        text_color=palette.text_body,
+    )
+    name_entry.insert(0, initial_name)
+    name_entry.pack(padx=24, pady=(4, 12))
+    name_entry.focus_set()
+
+    ctk.CTkLabel(
+        window,
+        text=desc_label,
+        anchor="w",
+        font=section_font,
+        text_color=palette.text_muted,
+    ).pack(padx=24, anchor="w")
+    desc_box = ctk.CTkTextbox(
+        window,
+        width=420,
+        height=110,
+        wrap="word",
+        fg_color=palette.input_bg,
+        border_color=palette.border,
+        border_width=1,
+        text_color=palette.text_body,
+        font=ctk.CTkFont(size=12),
+    )
+    desc_box.insert("1.0", initial_desc)
+    desc_box.pack(padx=24, pady=(4, 4))
+    counter = ctk.CTkLabel(
+        window,
+        text="",
+        anchor="e",
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_muted,
+    )
+    counter.pack(padx=24, pady=(0, 10), anchor="e")
+    ctk.CTkLabel(
+        window,
+        text=desc_prompt,
+        anchor="w",
+        justify="left",
+        wraplength=420,
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_muted,
+    ).pack(padx=24, pady=(0, 12), anchor="w")
+
+    result: list[tuple[str, str]] = []
+
+    def current_desc() -> str:
+        return str(desc_box.get("1.0", "end")).strip()
+
+    def refresh_counter(_event: object = None) -> None:
+        length = len(current_desc())
+        counter.configure(
+            text=tr("dialog.counter", count=length, limit=limit),
+            text_color=palette.danger if length > limit else palette.text_muted,
+        )
+
+    def submit() -> None:
+        if len(current_desc()) > limit:
+            refresh_counter()
+            return
+        result.append((name_entry.get().strip(), current_desc()))
+        window.destroy()
+
+    name_entry.bind("<Return>", lambda _event: submit())
+    desc_box.bind("<KeyRelease>", refresh_counter)
+    refresh_counter()
+
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.schedule_save"),
+        width=96,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=submit,
+    ).pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None
+
+
+def schedule_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    title: str,
+    interval_label: str,
+    interval_prompt: str,
+    keep_label: str,
+    keep_prompt: str,
+    initial_interval: str = "",
+    initial_keep: str = "3",
+) -> tuple[str, str] | None:
+    """在同一个窗口里设置定期备份周期与自动备份保留份数; 取消返回 None.
+
+    周期与保留份数由调用方解析校验: 本函数只收集原始文本, 便于沿用既有
+    的错误反馈路径。
+    """
+    window = ctk.CTkToplevel(parent)
+    window.title(title)
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    section_font = ctk.CTkFont(size=12)
+    hint_font = ctk.CTkFont(size=11)
+    ctk.CTkLabel(
+        window,
+        text=title,
+        anchor="w",
+        font=ctk.CTkFont(size=14, weight="bold"),
+        text_color=palette.text_primary,
+    ).pack(padx=24, pady=(20, 12), anchor="w")
+
+    def section(text: str) -> None:
+        ctk.CTkLabel(
+            window,
+            text=text,
+            anchor="w",
+            font=section_font,
+            text_color=palette.text_muted,
+        ).pack(padx=24, anchor="w")
+
+    def hint(text: str) -> None:
+        ctk.CTkLabel(
+            window,
+            text=text,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+            font=hint_font,
+            text_color=palette.text_muted,
+        ).pack(padx=24, pady=(0, 12), anchor="w")
+
+    section(interval_label)
+    interval_entry = ctk.CTkEntry(
+        window,
+        width=420,
+        fg_color=palette.input_bg,
+        border_color=palette.border,
+        text_color=palette.text_body,
+    )
+    interval_entry.insert(0, initial_interval)
+    interval_entry.pack(padx=24, pady=(4, 6))
+    interval_entry.focus_set()
+    hint(interval_prompt)
+
+    section(keep_label)
+    keep_entry = ctk.CTkEntry(
+        window,
+        width=120,
+        fg_color=palette.input_bg,
+        border_color=palette.border,
+        text_color=palette.text_body,
+    )
+    keep_entry.insert(0, initial_keep)
+    keep_entry.pack(padx=24, pady=(4, 6), anchor="w")
+    hint(keep_prompt)
+
+    result: list[tuple[str, str]] = []
+
+    def submit() -> None:
+        result.append((interval_entry.get().strip(), keep_entry.get().strip()))
+        window.destroy()
+
+    interval_entry.bind("<Return>", lambda _event: submit())
+    keep_entry.bind("<Return>", lambda _event: submit())
+
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.schedule_save"),
+        width=96,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=submit,
+    ).pack(side="left")
 
     _center(parent, window)
     parent.wait_window(window)

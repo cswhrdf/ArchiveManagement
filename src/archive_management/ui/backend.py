@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from archive_management.domain import PathKind
+from archive_management.domain import DEFAULT_KEEP_AUTO, DeletionPlan, PathKind
 from archive_management.ui.models import (
     BackupItem,
     GameDetail,
@@ -34,8 +34,8 @@ class ArchiveService(Protocol):
         """返回某个游戏的备份节点(含时间线/分支视图所需信息)."""
         ...
 
-    def task_status(self) -> TaskStatus:
-        """返回定时任务与运行环境状态."""
+    def task_status(self, game_id: str | None = None) -> TaskStatus:
+        """返回定时任务与运行环境状态(可按游戏查看周期配置)."""
         ...
 
     def current_theme(self) -> str:
@@ -51,7 +51,7 @@ class ArchiveService(Protocol):
         ...
 
     def run_restore(self, game_id: str, backup_id: str) -> str:
-        """恢复到指定备份节点."""
+        """把当前节点切换到指定备份; 之后的备份/分支都从该节点继续."""
         ...
 
     def run_create_branch(self, game_id: str, backup_id: str, branch_name: str) -> str:
@@ -108,4 +108,39 @@ class ArchiveService(Protocol):
 
     def verify_location(self, location_id: str) -> LocationItem:
         """重新校验一个存档位置并返回最新状态."""
+        ...
+
+    # -- 备份、调度与生命周期(阶段 D) ------------------------------------
+
+    def set_schedule(
+        self,
+        game_id: str,
+        interval_text: str,
+        *,
+        enabled: bool = True,
+        keep_auto: int = DEFAULT_KEEP_AUTO,
+    ) -> TaskStatus:
+        """设置或取消某游戏的定期备份, 返回最新任务状态."""
+        ...
+
+    def plan_delete(self, game_id: str, backup_id: str) -> DeletionPlan:
+        """返回删除某备份的计划(是否需要二次确认由 mode 决定)."""
+        ...
+
+    def run_delete_backup(self, game_id: str, backup_id: str) -> str:
+        """按分支树删除备份: 同线路节点让后续上移, 分支根节点连带子分支."""
+        ...
+
+    def rename_backup(
+        self, game_id: str, backup_id: str, *, title: str, note: str
+    ) -> BackupItem:
+        """修改备份的名称与描述, 返回更新后的列表项."""
+        ...
+
+    def cancel_active(self) -> bool:
+        """请求取消当前正在进行的后台操作; 无进行中操作时返回 False."""
+        ...
+
+    def shutdown(self) -> None:
+        """释放后台资源(调度器、监听器); 幂等, 供应用退出时调用."""
         ...

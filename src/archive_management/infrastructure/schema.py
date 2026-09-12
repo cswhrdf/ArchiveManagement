@@ -117,7 +117,29 @@ _V1_STATEMENTS: Sequence[str] = (
     """,
 )
 
-SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = ((1, _V1_STATEMENTS),)
+# 版本 2(阶段 D 迭代): 备份命名与描述、每游戏的"当前节点"指针、自动备份保留份数.
+# 说明: SQLite 允许 ADD COLUMN 带 REFERENCES, 但该列默认值必须为 NULL,
+# 因此 current_backup_id 在重建节点时由用例显式维护.
+_V2_STATEMENTS: Sequence[str] = (
+    # 名称(可编辑)与描述(备注)分离: title 为空时回退到分支名或类型默认名.
+    """
+    ALTER TABLE backup_nodes ADD COLUMN title TEXT NOT NULL DEFAULT ''
+    """,
+    # "恢复到此节点"= 把当前节点指针移到这里, 之后的备份/分支都从该节点继续.
+    """
+    ALTER TABLE games ADD COLUMN current_backup_id INTEGER
+        REFERENCES backup_nodes(id) ON DELETE SET NULL
+    """,
+    # 自动备份是特殊备份: 只保留最近 N 份(默认 3), 允许用户自定义.
+    """
+    ALTER TABLE scheduled_jobs ADD COLUMN keep_auto INTEGER NOT NULL DEFAULT 3
+    """,
+)
+
+SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
+    (1, _V1_STATEMENTS),
+    (2, _V2_STATEMENTS),
+)
 
 
 def meta_table_sql() -> str:

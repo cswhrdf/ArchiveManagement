@@ -26,13 +26,22 @@ pytestmark = [
 
 def test_gui_smoke_build_theme_manage_and_destroy() -> None:
     """单窗口内验证构建、主题切换、管理窗口并销毁(避免同进程多 Tk 根)."""
+    from archive_management.services.hotkeys import (
+        GlobalHotkeyService,
+        UnavailableBackend,
+    )
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.main_window import ArchiveApp
     from archive_management.ui.manage_window import ManageGameWindow
     from archive_management.ui.palette import Palette
 
     try:
-        app = ArchiveApp(DemoArchiveService(delay=0), title="冒烟")
+        app = ArchiveApp(
+            DemoArchiveService(delay=0),
+            title="冒烟",
+            # 冒烟测试不注册系统级快捷键, 避免遗留键盘钩子.
+            hotkeys=GlobalHotkeyService(backend=UnavailableBackend("冒烟测试禁用")),
+        )
     except TclError as exc:
         pytest.skip(f"tk 环境不可用: {exc}")
 

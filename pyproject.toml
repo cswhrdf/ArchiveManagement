@@ -4,28 +4,39 @@ build-backend = "hatchling.build"
 
 [project]
 name = "archive-management"
-version = "0.0.1"
-description = "用于分支、备份、恢复和导出游戏存档的桌面工具"
-readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    "apscheduler~=3.11.3",
+    "customtkinter~=6.0.0",
+    "httpx~=0.28.1",
+    "keyring~=25.7.0",
+    "platformdirs~=4.11.8",
+    "psutil~=7.2.2",
+    "pydantic~=2.13.5",
+    "pynput~=1.8.2",
+    "send2trash~=2.1.0",
+]
 requires-python = ">=3.12"
-license = { file = "LICENSE" }
 authors = [
     { name = "晓航", email = "52796446+cswhrdf@users.noreply.github.com" },
 ]
-dependencies = [
-    "apscheduler>=3.10",
-    "customtkinter>=5.2.2",
-    "httpx>=0.27",
-    "keyring>=25",
-    "platformdirs>=4",
-    "psutil>=6",
-    "pydantic>=2.8",
-    "pynput>=1.7",
-    "send2trash>=1.8",
-]
+description = "用于分支、备份、恢复和导出游戏存档的桌面工具"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 
-[project.scripts]
-archive-management = "archive_management.app:main"
+[dependency-groups]
+dev = [
+    "black>=26",
+    "mypy>=2.3",
+    "pre-commit>=4",
+    "pyinstaller>=6",
+    "pytest>=9",
+    "pytest-cov>=7",
+    "allure-pytest>=2.16",
+    "ruff>=0.16",
+    "pytest-timeout>=2.4.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/cswhrdf/ArchiveManagement"
@@ -34,23 +45,22 @@ Repository = "https://github.com/cswhrdf/ArchiveManagement"
 BugTracker = "https://github.com/cswhrdf/ArchiveManagement/issues"
 Changelog = "https://github.com/cswhrdf/ArchiveManagement/releases"
 
-[dependency-groups]
-dev = [
-    "black>=25",
-    "mypy>=1.20",
-    "pre-commit>=4",
-    "pyinstaller>=6",
-    "pytest>=8",
-    "pytest-cov>=7",
-    "allure-pytest>=2.13",
-    "ruff>=0.16",
-]
+
+[project.scripts]
+archive-management = "archive_management.app:main"
+
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/archive_management"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/archive_management"]
+
+[tool.hatch.version]
+path = "src/archive_management/packaging.py"
+
+[tool.uv]
+package = false
 
 [tool.black]
 line-length = 88
@@ -144,10 +154,15 @@ disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
+# 每个用例都有最长执行时间: 卡住的用例会被计时器打断并打印各线程堆栈,
+# 避免整套测试长时间不结束. 个别慢用例可用 @pytest.mark.timeout(N) 覆盖.
 addopts = [
     "--strict-markers",
     "--strict-config",
     "--import-mode=importlib",
+    "--timeout=60",
+    "--timeout-method=thread",
 ]
 markers = [
     "backend: tests for an application backend implementation",

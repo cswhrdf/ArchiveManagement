@@ -248,10 +248,26 @@ timeline/
 3. 对 CustomTkinter、pynput、keyring 和可能的动态导入增加隐藏导入或运行时 hook，仅在实际缺失时添加，避免无依据地扩大包体积。
 4. 构建前执行 `uv sync --locked`、Ruff、Black、mypy 和 pytest；构建后在干净的 Windows 环境启动程序，验证 UI、快捷键、路径访问、备份/恢复和导入导出。
 5. 生成版本信息、SHA-256 校验文件和构建元数据；发布包不得包含 API Key、开发机绝对路径或测试数据。
-6. GitHub Actions 使用 Windows runner 构建并上传 `dist` 产物；只有主分支或版本标签触发正式发布，pull request 只构建验证不发布 Release。
+6. GitHub Actions 使用 Windows runner 构建并上传 `dist` 产物；`dev` 或 `bugfix/**` 分支的 Pull Request 合并到 `master` 后触发构建，正式 Release 的触发条件另行确定。
 7. 当前项目以 Windows 为首要发布平台，不把 macOS 构建纳入本阶段验收；Linux 可在后续阶段单独验证。
 
 打包验收标准：在未安装 Python 和项目依赖的干净 Windows 环境中，双击可执行文件能够启动；程序能创建用户数据目录，能执行一次备份、恢复和导入导出；杀毒软件误报、缺少资源、动态库加载失败等问题必须记录并在发布前处理。
+
+### 阶段 I-1：自动发布流程
+
+阶段 I 完成后，使用 `.github/workflows/release.yml` 执行自动构建：
+
+1. `dev` 或 `bugfix/**` 分支的 Pull Request 合并到 `master` 后触发；也支持手动指定分支或提交重新构建。
+2. 在 Windows runner 上运行完整质量检查，并使用 `packaging/archive-management.spec` 构建 onedir 与 onefile 产物。
+3. 直接读取 `packaging.py` 中的源码版本，不修改源码，不使用 Git tag 注入版本。
+4. 生成 Windows x64 压缩包、单文件可执行文件、SHA-256 校验文件和构建元数据。
+5. 自动上传 Actions artifact；正式 GitHub Release 的触发条件和版本生成方式待定。
+
+版本方案候选：
+
+- 稳定版本由提交者在 `packaging.py` 中手动维护，CI 只校验和读取版本；实现简单，适合正式发布。
+- CI 为分支构建生成不写回源码的版本标识，例如 `0.0.1.dev<run_number>`，用于测试包文件名和元数据；正式版本仍需单独确定。
+- 使用 Git tag 或专用版本发布工具生成正式版本；该方案暂不启用，因为当前不希望由 Git tag 修改源码版本。
 
 ## 7. 安全与可靠性要求
 

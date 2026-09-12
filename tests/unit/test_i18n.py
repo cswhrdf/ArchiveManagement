@@ -59,7 +59,7 @@ def test_read_raises_when_resource_is_not_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        i18n_module.json,
+        json,
         "loads",
         lambda *_a, **_k: ["not", "dict"],
     )
@@ -71,7 +71,7 @@ def test_read_raises_on_non_string_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        i18n_module.json,
+        json,
         "loads",
         lambda *_a, **_k: {"key": 1},
     )
