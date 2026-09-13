@@ -399,3 +399,148 @@ def group_by_parent(items: list[BackupItem]) -> list[BackupItem]:
 def can_backup(game: GameSummary | None) -> bool:
     """没有存档位置的游戏不允许立即备份."""
     return game is not None and game.has_locations
+
+
+# --------------------------------------------------------- 本地游戏探测(E-1)
+
+
+@dataclass(frozen=True)
+class ScanSummary:
+    """一次本机探测的结果摘要(探测窗口据此显示提示与计数)."""
+
+    monitored: int
+    active: int
+    total: int
+    added: int
+    updated: int
+    linked: int
+    unusable: int
+    errors: tuple[str, ...] = ()
+
+    @property
+    def label(self) -> str:
+        """主提示文案(强调新增与已知的候选数量)."""
+        return tr("discovery.scan_done", added=self.added, total=self.total)
+
+    @property
+    def detail(self) -> str:
+        """副提示文案: 监控目录数、路径不可用数与自动识别数量."""
+        parts = [
+            tr("discovery.scan_monitored", count=self.monitored, active=self.active),
+            tr("discovery.scan_unusable", count=self.unusable),
+        ]
+        if self.linked:
+            parts.append(tr("discovery.scan_linked", count=self.linked))
+        if self.errors:
+            parts.append(tr("discovery.scan_errors", count=len(self.errors)))
+        return " · ".join(parts)
+
+
+class DiscoveryPage(StrEnum):
+    """游戏发现窗口的页面(与顶部页签一一对应, 成员顺序即页签顺序)."""
+
+    CANDIDATES = "candidates"
+    MONITORED = "monitored"
+
+    @property
+    def label(self) -> str:
+        """返回页签文案."""
+        return tr(f"discovery.page_{self.value}")
+
+
+@dataclass(frozen=True)
+class MonitoredDirItem:
+    """监控目录列表中的单条数据."""
+
+    directory_id: str
+    path: str
+    enabled: bool
+    note: str
+    health: str  # ok/missing/not_directory/unreadable/unsafe
+    last_scan_label: str = ""
+
+    @property
+    def health_label(self) -> str:
+        """路径健康状态文案(扫描结果与列表共用)."""
+        return tr(f"discovery.health_{self.health}")
+
+    @property
+    def state_label(self) -> str:
+        """启用状态文案."""
+        return tr("discovery.dir_on") if self.enabled else tr("discovery.dir_off")
+
+    @property
+    def summary(self) -> str:
+        """列表行副标题: 路径 + 状态 + 上次扫描时间."""
+        parts = [self.state_label, self.health_label]
+        if self.note:
+            parts.append(self.note)
+        if self.last_scan_label:
+            parts.append(tr("discovery.dir_last_scan", stamp=self.last_scan_label))
+        return " · ".join(parts)
+
+
+class CandidateFilter(StrEnum):
+    """探测结果筛选(与下拉选项一一对应)."""
+
+    ALL = "all"
+    NEW = "new"
+    IMPORTED = "imported"
+    IGNORED = "ignored"
+
+    @property
+    def label(self) -> str:
+        """返回下拉框与日志中使用的展示文案."""
+        return tr(f"discovery.filter_{self.value}")
+
+
+@dataclass(frozen=True)
+class CandidateItem:
+    """探测结果列表中的单条数据."""
+
+    candidate_id: str
+    name: str
+    install_dir: str
+    source: str  # steam/epic/gog/battle_net/monitored/manual
+    confidence: str  # high/medium/low
+    status: str  # new/imported/ignored
+    health: str  # ok/missing/not_directory/unreadable/unsafe
+    detail: str = ""
+    game_id: str | None = None
+
+    @property
+    def source_label(self) -> str:
+        """来源平台文案."""
+        return tr(f"discovery.source_{self.source}")
+
+    @property
+    def confidence_label(self) -> str:
+        """可信度文案."""
+        return tr(f"discovery.confidence_{self.confidence}")
+
+    @property
+    def status_label(self) -> str:
+        """处理进度文案."""
+        return tr(f"discovery.status_{self.status}")
+
+    @property
+    def health_label(self) -> str:
+        """路径健康状态文案."""
+        return tr(f"discovery.health_{self.health}")
+
+    @property
+    def importable(self) -> bool:
+        """是否可以直接导入为游戏(路径可用且尚未处理)."""
+        return self.status == "new" and self.health == "ok"
+
+    @property
+    def summary(self) -> str:
+        """列表行副标题: 来源 + 可信度 + 状态 + 路径状态."""
+        return " · ".join(
+            (
+                self.source_label,
+                self.confidence_label,
+                self.status_label,
+                self.health_label,
+            )
+        )

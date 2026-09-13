@@ -14,7 +14,11 @@ from datetime import UTC, datetime
 from archive_management.domain import (
     BackupFileEntry,
     BackupNode,
+    CandidateStatus,
     Game,
+    GameCandidate,
+    MonitoredDirectory,
+    PathHealth,
     SaveLocation,
     ScheduledJob,
 )
@@ -702,3 +706,322 @@ class ScheduledJobRepository:
                 " last_error = ? WHERE id = ?",
                 (_dt_text(ran_at), _dt_text(next_run_at), error, job_id),
             )
+
+
+def _row_to_monitored(row: sqlite3.Row) -> MonitoredDirectory:
+    return MonitoredDirectory(
+        id=int(row["id"]),
+        path=str(row["path"]),
+        enabled=_as_bool(row["enabled"]),
+        note=str(row["note"] or ""),
+        created_at=_parse_dt(row["created_at"]),
+        last_scan_at=_parse_dt(row["last_scan_at"]),
+        last_scan_status=row["last_scan_status"],
+    )
+
+
+def _row_to_candidate(row: sqlite3.Row) -> GameCandidate:
+    return GameCandidate(
+        id=int(row["id"]),
+        name=str(row["name"]),
+        install_dir=str(row["install_dir"]),
+        source=str(row["source"]),  # type: ignore[arg-type]
+        confidence=str(row["confidence"]),  # type: ignore[arg-type]
+        reason_code=str(row["reason_code"] or ""),
+        detail=str(row["detail"] or ""),
+        found_at=_parse_dt(row["found_at"]),
+        status=str(row["status"]),  # type: ignore[arg-type]
+        health=str(row["health"]),  # type: ignore[arg-type]
+        game_id=None if row["game_id"] is None else int(row["game_id"]),
+    )
+
+
+class MonitoredDirectoryRepository:
+    """monitored_directories 表的行级访问(阶段 E-1)."""
+
+    def __init__(self, database: Database) -> None:
+        """绑定到指定的数据库封装."""
+        self._database = database
+
+    def list_all(self) -> list[MonitoredDirectory]:
+        """返回全部监控目录, 按路径排序(方法名不用 ``list`` 以免屏蔽内置类型)."""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, path, enabled, note, created_at, last_scan_at,"
+                " last_scan_status FROM monitored_directories ORDER BY path"
+            ).fetchall()
+        return [_row_to_monitored(row) for row in rows]
+
+    def get(self, directory_id: int) -> MonitoredDirectory | None:
+        """按 id 返回监控目录; 不存在返回 None."""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT id, path, enabled, note, created_at, last_scan_at,"
+                " last_scan_status FROM monitored_directories WHERE id = ?",
+                (directory_id,),
+            ).fetchone()
+        return _row_to_monitored(row) if row is not None else None
+
+    def add(self, directory: MonitoredDirectory) -> MonitoredDirectory:
+        """插入一条监控目录记录, 返回带 id 与创建时间的实体."""
+        created_at = _dt_text(directory.created_at) or iso_utc_now()
+        with self._database.session() as connection:
+            cursor = connection.execute(
+                "INSERT INTO monitored_directories (path, enabled, note, created_at,"
+                " last_scan_at, last_scan_status) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    directory.path,
+                    int(directory.enabled),
+                    directory.note,
+                    created_at,
+                    _dt_text(directory.last_scan_at),
+                    directory.last_scan_status,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise DatabaseError("插入监控目录失败: 未返回行 id")
+            directory_id = int(cursor.lastrowid)
+        return MonitoredDirectory(
+            id=directory_id,
+            path=directory.path,
+            enabled=directory.enabled,
+            note=directory.note,
+            created_at=_parse_dt(created_at),
+            last_scan_at=directory.last_scan_at,
+            last_scan_status=directory.last_scan_status,
+        )
+
+    def update(self, directory: MonitoredDirectory) -> MonitoredDirectory:
+        """按 id 更新路径/启用状态/备注; 缺少 id 时抛错."""
+        if directory.id is None:
+            raise ValueError("更新监控目录需要 id")
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE monitored_directories SET path = ?, enabled = ?, note = ?"
+                " WHERE id = ?",
+                (
+                    directory.path,
+                    int(directory.enabled),
+                    directory.note,
+                    directory.id,
+                ),
+            )
+        return directory
+
+    def delete(self, directory_id: int) -> None:
+        """删除一个监控目录(不删除磁盘内容, 也不删除已发现的候选)."""
+        with self._database.session() as connection:
+            connection.execute(
+                "DELETE FROM monitored_directories WHERE id = ?", (directory_id,)
+            )
+
+    def duplicate_of(
+        self, path: str, *, exclude_id: int | None = None
+    ) -> MonitoredDirectory | None:
+        """返回与给定路径(大小写不敏感)重复的监控目录.
+
+        编辑已存在的记录时用 ``exclude_id`` 排除自身, 避免把自己判为重复。
+        """
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT id, path, enabled, note, created_at, last_scan_at,"
+                " last_scan_status FROM monitored_directories"
+                " WHERE LOWER(RTRIM(path, '\\/')) = LOWER(RTRIM(?, '\\/'))"
+                " AND (? IS NULL OR id <> ?)",
+                (path, exclude_id, exclude_id),
+            ).fetchone()
+        return _row_to_monitored(row) if row is not None else None
+
+    def mark_scan(
+        self,
+        directory_id: int,
+        *,
+        status: str,
+        when: datetime,
+    ) -> None:
+        """记录一次扫描时间与结果状态."""
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE monitored_directories SET last_scan_at = ?,"
+                " last_scan_status = ? WHERE id = ?",
+                (_dt_text(when), status, directory_id),
+            )
+
+    def enabled_paths(self) -> list[str]:
+        """返回全部已启用监控目录的路径(参与扫描)."""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT path FROM monitored_directories WHERE enabled = 1"
+                " ORDER BY path"
+            ).fetchall()
+        return [str(row["path"]) for row in rows]
+
+
+class CandidateRepository:
+    """game_candidates 表的行级访问(阶段 E-1)."""
+
+    def __init__(self, database: Database) -> None:
+        """绑定到指定的数据库封装."""
+        self._database = database
+
+    def list_all(self, *, status: CandidateStatus | None = None) -> list[GameCandidate]:
+        """返回候选列表; 给定 ``status`` 时只返回该进度的候选."""
+        with self._database.connect() as connection:
+            if status is None:
+                rows = connection.execute(
+                    "SELECT id, name, install_dir, source, confidence, reason_code,"
+                    " detail, found_at, status, health, game_id"
+                    " FROM game_candidates ORDER BY name, id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id, name, install_dir, source, confidence, reason_code,"
+                    " detail, found_at, status, health, game_id"
+                    " FROM game_candidates WHERE status = ? ORDER BY name, id",
+                    (status,),
+                ).fetchall()
+        return [_row_to_candidate(row) for row in rows]
+
+    def get(self, candidate_id: int) -> GameCandidate | None:
+        """按 id 返回候选; 不存在返回 None."""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT id, name, install_dir, source, confidence, reason_code,"
+                " detail, found_at, status, health, game_id"
+                " FROM game_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+        return _row_to_candidate(row) if row is not None else None
+
+    def find_by_dir(self, install_dir: str) -> GameCandidate | None:
+        """按安装路径(大小写不敏感)查找候选, 用于去重."""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT id, name, install_dir, source, confidence, reason_code,"
+                " detail, found_at, status, health, game_id"
+                " FROM game_candidates"
+                " WHERE LOWER(RTRIM(install_dir, '\\/')) = LOWER(RTRIM(?, '\\/'))",
+                (install_dir,),
+            ).fetchone()
+        return _row_to_candidate(row) if row is not None else None
+
+    def upsert(self, candidate: GameCandidate) -> tuple[GameCandidate, bool]:
+        """按安装路径插入或刷新候选, 返回 ``(实体, 是否新建)``.
+
+        刷新只覆盖探测得到的字段(名称/来源/可信度/说明/路径状态); 用户的处理
+        进度(status)与已关联的游戏(game_id)保持不变, 否则每次扫描都会把用户
+        的"已忽略"决定撤销掉。
+        """
+        existing = self.find_by_dir(candidate.install_dir)
+        if existing is not None and existing.id is not None:
+            with self._database.session() as connection:
+                connection.execute(
+                    "UPDATE game_candidates SET name = ?, source = ?, confidence = ?,"
+                    " reason_code = ?, detail = ?, health = ? WHERE id = ?",
+                    (
+                        candidate.name,
+                        candidate.source,
+                        candidate.confidence,
+                        candidate.reason_code,
+                        candidate.detail,
+                        candidate.health,
+                        existing.id,
+                    ),
+                )
+            refreshed = candidate.model_copy(
+                update={
+                    "id": existing.id,
+                    "status": existing.status,
+                    "game_id": existing.game_id,
+                    "found_at": existing.found_at,
+                }
+            )
+            return (refreshed, False)
+        found_at = _dt_text(candidate.found_at) or iso_utc_now()
+        with self._database.session() as connection:
+            cursor = connection.execute(
+                "INSERT INTO game_candidates (name, install_dir, source, confidence,"
+                " reason_code, detail, found_at, status, health, game_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    candidate.name,
+                    candidate.install_dir,
+                    candidate.source,
+                    candidate.confidence,
+                    candidate.reason_code,
+                    candidate.detail,
+                    found_at,
+                    candidate.status,
+                    candidate.health,
+                    candidate.game_id,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise DatabaseError("插入候选游戏失败: 未返回行 id")
+            candidate_id = int(cursor.lastrowid)
+        return (
+            candidate.model_copy(
+                update={"id": candidate_id, "found_at": _parse_dt(found_at)}
+            ),
+            True,
+        )
+
+    def set_status(
+        self,
+        candidate_id: int,
+        status: CandidateStatus,
+        *,
+        game_id: int | None,
+    ) -> GameCandidate:
+        """更新候选的处理进度与关联的游戏.
+
+        ``game_id`` 是必填的关键字参数: 忽略候选时要传回原值, 否则会把"该候选
+        对应哪个游戏"这条信息清掉, 恢复时就无法再自动识别为已入库。
+        """
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE game_candidates SET status = ?, game_id = ? WHERE id = ?",
+                (status, game_id, candidate_id),
+            )
+        candidate = self.get(candidate_id)
+        if candidate is None:
+            raise DatabaseError(f"未知候选: {candidate_id}")
+        return candidate
+
+    def set_install_dir(self, candidate_id: int, install_dir: str) -> GameCandidate:
+        """修正候选的安装路径(用户手动纠正探测结果)."""
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE game_candidates SET install_dir = ? WHERE id = ?",
+                (install_dir, candidate_id),
+            )
+        candidate = self.get(candidate_id)
+        if candidate is None:
+            raise DatabaseError(f"未知候选: {candidate_id}")
+        return candidate
+
+    def set_health(self, candidate_id: int, health: PathHealth) -> None:
+        """更新候选路径的健康状态."""
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE game_candidates SET health = ? WHERE id = ?",
+                (health, candidate_id),
+            )
+
+    def delete(self, candidate_id: int) -> None:
+        """删除一条候选记录."""
+        with self._database.session() as connection:
+            connection.execute(
+                "DELETE FROM game_candidates WHERE id = ?", (candidate_id,)
+            )
+
+    def count_by_status(self) -> dict[str, int]:
+        """返回各处理进度下的候选数量(未出现的进度计 0)."""
+        counts = {"new": 0, "imported": 0, "ignored": 0}
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) FROM game_candidates GROUP BY status"
+            ).fetchall()
+        for row in rows:
+            counts[str(row[0])] = int(row[1])
+        return counts

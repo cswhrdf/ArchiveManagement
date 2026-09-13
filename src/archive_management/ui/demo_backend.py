@@ -27,9 +27,12 @@ from archive_management.services.pathcheck import normalize_path
 from archive_management.services.processes import ProcessProbe
 from archive_management.ui.models import (
     BackupItem,
+    CandidateItem,
     GameDetail,
     GameSummary,
     LocationItem,
+    MonitoredDirItem,
+    ScanSummary,
     ScheduleItem,
     TaskStatus,
 )
@@ -40,6 +43,11 @@ _FAIL_RESTORE_ID = "b2"
 
 def _dt(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
+
+
+def _now_label() -> str:
+    """返回当前时间的展示文本(演示扫描时间用)."""
+    return datetime.now().astimezone().strftime("%Y/%m/%d %H:%M")
 
 
 _GAMES: list[GameSummary] = [
@@ -199,6 +207,80 @@ _DETAILS: dict[str, GameDetail] = {
     ),
 }
 
+# 阶段 E-1 演示数据: 监控目录与探测到的候选游戏.
+_MONITORED_DIRS: tuple[MonitoredDirItem, ...] = (
+    MonitoredDirItem(
+        directory_id="dir-1",
+        path="D:\\Games",
+        enabled=True,
+        note="自定义游戏目录",
+        health="ok",
+        last_scan_label="2026/09/13 09:20",
+    ),
+    MonitoredDirItem(
+        directory_id="dir-2",
+        path="E:\\Portable Games",
+        enabled=False,
+        note="移动硬盘(已停用)",
+        health="missing",
+        last_scan_label="2026/09/11 21:05",
+    ),
+)
+
+_CANDIDATES: tuple[CandidateItem, ...] = (
+    CandidateItem(
+        candidate_id="cand-1",
+        name="星际拓荒",
+        install_dir="D:\\Steam\\steamapps\\common\\OuterWilds",
+        source="steam",
+        confidence="high",
+        status="imported",
+        health="ok",
+        detail="appmanifest_753640.acf",
+        game_id="outer-wilds",
+    ),
+    CandidateItem(
+        candidate_id="cand-2",
+        name="空洞骑士",
+        install_dir="D:\\Games\\HollowKnight",
+        source="monitored",
+        confidence="medium",
+        status="new",
+        health="ok",
+        detail="D:\\Games",
+    ),
+    CandidateItem(
+        candidate_id="cand-3",
+        name="泰拉瑞亚",
+        install_dir="D:\\Epic\\Terraria",
+        source="epic",
+        confidence="high",
+        status="new",
+        health="ok",
+        detail="terraria.item",
+    ),
+    CandidateItem(
+        candidate_id="cand-4",
+        name="巫师三",
+        install_dir="D:\\GOG\\Witcher3",
+        source="gog",
+        confidence="high",
+        status="new",
+        health="missing",
+        detail="1207664623",
+    ),
+    CandidateItem(
+        candidate_id="cand-5",
+        name="旧版工具",
+        install_dir="D:\\Games\\LegacyTool",
+        source="monitored",
+        confidence="medium",
+        status="ignored",
+        health="ok",
+        detail="D:\\Games",
+    ),
+)
+
 
 class DemoArchiveService:
     """基于内存演示数据的 :class:`ArchiveService` 实现."""
@@ -222,6 +304,14 @@ class DemoArchiveService:
         self._locations: dict[str, list[LocationItem]] = {}
         self._next_game_id = 1
         self._next_location_id = 1
+        # 阶段 E-1: 演示监控目录与探测结果(固定数据, 不触碰真实磁盘).
+        self._monitored_dirs: dict[str, MonitoredDirItem] = {
+            item.directory_id: item for item in _MONITORED_DIRS
+        }
+        self._candidates: dict[str, CandidateItem] = {
+            item.candidate_id: item for item in _CANDIDATES
+        }
+        self._next_dir_id = len(_MONITORED_DIRS) + 1
         for game in _GAMES:
             existing = self._items.get(game.game_id, [])
             self._current[game.game_id] = existing[-1].backup_id if existing else None
@@ -793,6 +883,158 @@ class DemoArchiveService:
         self._locations[item.game_id] = remaining
         self._revision += 1
         return tr("result.location_deleted", path=item.path, count=18)
+
+    # -- 本地游戏探测与监控目录(阶段 E-1) ---------------------------------
+
+    def list_monitored_directories(self) -> list[MonitoredDirItem]:
+        """返回演示监控目录(按添加顺序)."""
+        return list(self._monitored_dirs.values())
+
+    def add_monitored_directory(self, path: str, *, note: str = "") -> MonitoredDirItem:
+        """新增演示监控目录; 路径为空或重复时抛错."""
+        clean = path.strip()
+        if not clean:
+            raise ArchiveManagementError(tr("error.monitor_path_empty"))
+        if any(
+            item.path.rstrip("\\/").casefold() == clean.rstrip("\\/").casefold()
+            for item in self._monitored_dirs.values()
+        ):
+            raise ArchiveManagementError(tr("error.monitor_duplicate", path=clean))
+        directory_id = f"dir-{self._next_dir_id}"
+        self._next_dir_id += 1
+        item = MonitoredDirItem(
+            directory_id=directory_id,
+            path=clean,
+            enabled=True,
+            note=note.strip(),
+            health="ok",
+        )
+        self._monitored_dirs[directory_id] = item
+        self._revision += 1
+        return item
+
+    def update_monitored_directory(
+        self, directory_id: str, *, path: str | None = None, note: str | None = None
+    ) -> MonitoredDirItem:
+        """修改演示监控目录的路径或备注."""
+        item = self._require_directory(directory_id)
+        if path is not None and path.strip() != item.path:
+            others = [
+                entry
+                for key, entry in self._monitored_dirs.items()
+                if key != directory_id
+            ]
+            clean = path.strip()
+            if not clean:
+                raise ArchiveManagementError(tr("error.monitor_path_empty"))
+            if any(
+                entry.path.rstrip("\\/").casefold() == clean.rstrip("\\/").casefold()
+                for entry in others
+            ):
+                raise ArchiveManagementError(tr("error.monitor_duplicate", path=clean))
+            item = replace(item, path=clean)
+        if note is not None:
+            item = replace(item, note=note.strip())
+        self._monitored_dirs[directory_id] = item
+        return item
+
+    def set_monitored_enabled(
+        self, directory_id: str, enabled: bool
+    ) -> MonitoredDirItem:
+        """启用/停用一个演示监控目录."""
+        item = replace(self._require_directory(directory_id), enabled=enabled)
+        self._monitored_dirs[directory_id] = item
+        return item
+
+    def remove_monitored_directory(self, directory_id: str) -> None:
+        """删除一个演示监控目录."""
+        self._require_directory(directory_id)
+        self._monitored_dirs.pop(directory_id)
+        self._revision += 1
+
+    def scan_candidates(self) -> ScanSummary:
+        """模拟一次探测: 刷新扫描时间并返回结果摘要."""
+        active = [item for item in self._monitored_dirs.values() if item.enabled]
+        now = _now_label()
+        for directory_id, item in self._monitored_dirs.items():
+            health = "ok" if item.enabled else "missing"
+            self._monitored_dirs[directory_id] = replace(
+                item,
+                last_scan_label=now,
+                health=health if item.enabled else item.health,
+            )
+        candidates = list(self._candidates.values())
+        return ScanSummary(
+            monitored=len(self._monitored_dirs),
+            active=len(active),
+            total=len(candidates),
+            added=0,
+            updated=len(candidates),
+            linked=sum(1 for item in candidates if item.status == "imported"),
+            unusable=sum(1 for item in candidates if item.health != "ok"),
+        )
+
+    def list_candidates(self, *, status: str | None = None) -> list[CandidateItem]:
+        """返回演示探测结果(可按处理进度筛选)."""
+        items = list(self._candidates.values())
+        if status not in (None, "", "all"):
+            items = [item for item in items if item.status == status]
+        return items
+
+    def import_candidate(
+        self, candidate_id: str, *, name: str | None = None
+    ) -> GameSummary:
+        """把演示候选导入为游戏."""
+        item = self._require_candidate(candidate_id)
+        if item.status == "imported" and item.game_id is not None:
+            raise ArchiveManagementError(tr("error.candidate_imported"))
+        summary = self.add_game(name if name is not None else item.name)
+        self._candidates[candidate_id] = replace(
+            item, status="imported", game_id=summary.game_id
+        )
+        self._revision += 1
+        return summary
+
+    def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
+        """把演示候选标记为"已忽略"或恢复为"待处理"."""
+        item = self._require_candidate(candidate_id)
+        updated = replace(item, status="ignored" if ignored else "new")
+        self._candidates[candidate_id] = updated
+        return updated
+
+    def relocate_candidate(self, candidate_id: str, path: str) -> CandidateItem:
+        """修正演示候选的安装路径."""
+        item = self._require_candidate(candidate_id)
+        clean = path.strip()
+        if not clean:
+            raise ArchiveManagementError(tr("error.candidate_path_empty"))
+        updated = replace(item, install_dir=clean, health="ok")
+        self._candidates[candidate_id] = updated
+        return updated
+
+    def add_candidate_as_monitored(self, candidate_id: str) -> MonitoredDirItem:
+        """把演示候选所在的上一层目录加入监控列表."""
+        item = self._require_candidate(candidate_id)
+        parent = item.install_dir.rsplit("\\", 1)[0]
+        if parent == item.install_dir:
+            parent = item.install_dir.rsplit("/", 1)[0] or item.install_dir
+        return self.add_monitored_directory(parent, note=item.name)
+
+    def _require_directory(self, directory_id: str) -> MonitoredDirItem:
+        item = self._monitored_dirs.get(directory_id)
+        if item is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_monitored", directory_id=directory_id)
+            )
+        return item
+
+    def _require_candidate(self, candidate_id: str) -> CandidateItem:
+        item = self._candidates.get(candidate_id)
+        if item is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_candidate", candidate_id=candidate_id)
+            )
+        return item
 
     # -- 其它 ---------------------------------------------------------------
 

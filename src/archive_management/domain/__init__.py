@@ -8,6 +8,18 @@ from archive_management.domain.deletion import (
     descendant_ids,
     plan_deletion,
 )
+from archive_management.domain.discovery import (
+    CONFIDENCE_RANK,
+    SOURCE_RANK,
+    CandidateStatus,
+    Confidence,
+    DiscoverySource,
+    GameCandidate,
+    MonitoredDirectory,
+    PathHealth,
+    candidate_sort_key,
+    dedupe_candidates,
+)
 from archive_management.domain.entities import (
     BackupFileEntry,
     BackupNode,
@@ -35,15 +47,23 @@ from archive_management.domain.tree import (
 )
 
 __all__ = [
+    "CONFIDENCE_RANK",
     "DEFAULT_KEEP_AUTO",
+    "SOURCE_RANK",
     "STEAM_DATA_FORMAT_VERSION",
     "BackupFileEntry",
     "BackupNode",
+    "CandidateStatus",
+    "Confidence",
     "DeletionMode",
     "DeletionPlan",
+    "DiscoverySource",
     "FileKind",
     "Game",
+    "GameCandidate",
+    "MonitoredDirectory",
     "NodeKind",
+    "PathHealth",
     "PathKind",
     "SaveLocation",
     "SaveSource",
@@ -55,6 +75,8 @@ __all__ = [
     "auto_prune_ids",
     "branch_lineage",
     "build_tree",
+    "candidate_sort_key",
+    "dedupe_candidates",
     "descendant_ids",
     "keep_surviving",
     "plan_deletion",

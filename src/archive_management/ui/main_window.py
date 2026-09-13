@@ -13,7 +13,7 @@ import threading
 import tkinter as tk
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, Protocol
 
 import customtkinter as ctk
 
@@ -37,6 +37,7 @@ from archive_management.ui.dialogs import (
     info_dialog,
     restore_dialog,
 )
+from archive_management.ui.discovery_window import DiscoveryWindow
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
     BackupItem,
@@ -83,6 +84,18 @@ def _schedule_state(task: TaskStatus) -> str:
     )
 
 
+class _WorkspaceWindow(Protocol):
+    """工作区窗口的最小接口: 主窗口据此保证同一时间只开一个窗口.
+
+    游戏发现、定时任务与设置都是配置面板, 同时开多个会互相遮挡, 也容易在已经
+    过期的数据上操作; 因此它们共用同一个"窗口位置"。
+    """
+
+    def focus(self) -> bool:
+        """把窗口提到前台; 窗口已关闭时返回 False."""
+        ...
+
+
 class ArchiveApp(ctk.CTk):
     """存档管理主窗口."""
 
@@ -105,6 +118,9 @@ class ArchiveApp(ctk.CTk):
 
         self._game_id: str | None = None
         self._game: GameSummary | None = None
+        # 当前打开的工作区窗口(游戏发现/定时任务/设置): 三个入口共用一个位置.
+        self._active_window: _WorkspaceWindow | None = None
+        self._active_nav: str | None = None
         # 默认展示分支树(更直观地反映“从哪个节点继续”), 时间线作为第二视图.
         self._view = ViewKind.BRANCH
         self._backup_id: str | None = None
@@ -251,6 +267,7 @@ class ArchiveApp(ctk.CTk):
         nav.grid(row=4, column=0, sticky="ew", padx=16, pady=2)
         self.kit.register(lambda p: nav.configure(fg_color="transparent"))
         nav_items = [
+            (tr("sidebar.nav_discovery"), tr("sidebar.nav_discovery_hint")),
             (tr("sidebar.nav_scheduled"), tr("sidebar.nav_scheduled_hint")),
             (tr("sidebar.nav_settings"), tr("sidebar.nav_settings_hint")),
         ]
@@ -1577,17 +1594,54 @@ class ArchiveApp(ctk.CTk):
         self._refresh_after_manage(select=summary.game_id)
 
     def _on_nav(self, name: str, message: str) -> None:
-        if name == tr("sidebar.nav_settings"):
-            self._open_settings()
-        elif name == tr("sidebar.nav_scheduled"):
-            self._open_schedule_window()
-        else:
+        """工作区入口: 三个入口共用同一个窗口位置, 不会重复开窗."""
+        openers: dict[str, Callable[[], _WorkspaceWindow]] = {
+            tr("sidebar.nav_discovery"): self._open_discovery_window,
+            tr("sidebar.nav_scheduled"): self._open_schedule_window,
+            tr("sidebar.nav_settings"): self._open_settings,
+        }
+        opener = openers.get(name)
+        if opener is None:
             self._feedback(FeedbackKind.INFO, message)
+            return
+        self._open_workspace_window(name, opener)
 
-    def _open_schedule_window(self) -> None:
+    def _open_workspace_window(
+        self, nav: str, opener: Callable[[], _WorkspaceWindow]
+    ) -> None:
+        """打开工作区窗口; 已有窗口时只聚焦或给出提示, 不会重复开窗.
+
+        重复点击同一个入口会把已打开的窗口提到前台; 点击另一个入口则提示先关闭
+        当前窗口——同时开多个配置面板会互相遮挡, 也容易在过期的列表上操作。
+        窗口被用户关闭后(``focus()`` 返回 False)再次点击就正常开新窗口。
+        """
+        active = self._active_window
+        if active is not None and active.focus():
+            if self._active_nav != nav:
+                self._feedback(FeedbackKind.INFO, tr("sidebar.nav_busy"))
+            return
+        self._active_window = None
+        self._active_nav = None
+        created = opener()
+        if created is None:  # pragma: no cover - 替身或异常路径
+            return
+        self._active_window = created
+        self._active_nav = nav
+
+    def _open_discovery_window(self) -> DiscoveryWindow:
+        """打开本地游戏发现窗口(监控目录 + 探测结果)."""
+        log_action("ui.open_discovery", basic=True)
+        return DiscoveryWindow(
+            self,
+            backend=self.backend,
+            palette=self.p,
+            on_change=self._refresh_after_manage,
+        )
+
+    def _open_schedule_window(self) -> ScheduleWindow:
         """打开全局定时任务窗口(可新增/编辑/删除每个游戏的定时备份)."""
         log_action("ui.open_schedules", basic=True)
-        ScheduleWindow(
+        return ScheduleWindow(
             self,
             backend=self.backend,
             palette=self.p,
@@ -1639,10 +1693,10 @@ class ArchiveApp(ctk.CTk):
             # 最后一个游戏被删掉: 连概要区一起回到空状态.
             self._show_empty_list()
 
-    def _open_settings(self) -> None:
+    def _open_settings(self) -> SettingsWindow:
         """打开设置窗口(主题切换、快捷键说明; 不包含定时任务配置)."""
         log_action("ui.open_settings", basic=True, theme=self._theme)
-        SettingsWindow(
+        return SettingsWindow(
             self,
             palette=self.p,
             theme=self._theme,

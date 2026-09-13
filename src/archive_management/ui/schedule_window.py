@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import tkinter as tk
 from collections.abc import Callable, Sequence
 
 import customtkinter as ctk
@@ -638,6 +639,18 @@ class ScheduleWindow:
         self.reload()
         if self._on_change is not None:
             self._on_change()
+
+    def focus(self) -> bool:
+        """把窗口提到前台; 窗口已关闭时返回 False(主窗口据此允许重新打开)."""
+        try:
+            if not self._window.winfo_exists():
+                return False
+            self._window.deiconify()
+            self._window.lift()
+            self._window.focus_set()
+        except tk.TclError:  # pragma: no cover - 窗口在检查与操作之间被销毁
+            return False
+        return True
 
     def close(self) -> None:
         """销毁窗口."""

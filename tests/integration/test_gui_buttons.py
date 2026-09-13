@@ -24,6 +24,7 @@ try:
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
+import archive_management.ui.discovery_window as disc_mod
 import archive_management.ui.main_window as main_mod
 import archive_management.ui.manage_window as mgr_mod
 import archive_management.ui.schedule_window as sched_mod
@@ -91,6 +92,10 @@ def _patch_dialogs(
     monkeypatch.setattr(sched_mod, "schedule_dialog", lambda *_a, **_k: schedule_result)
     monkeypatch.setattr(sched_mod, "confirm_dialog", lambda *_a, **_k: confirm)
     monkeypatch.setattr(sched_mod, "info_dialog", lambda *_a, **_k: None)
+    # 游戏发现窗口同样需要文本输入/确认/提示的自动应答.
+    monkeypatch.setattr(disc_mod, "ask_text", next_text)
+    monkeypatch.setattr(disc_mod, "confirm_dialog", lambda *_a, **_k: confirm)
+    monkeypatch.setattr(disc_mod, "info_dialog", lambda *_a, **_k: None)
 
 
 def _pump(app: ArchiveApp) -> None:
@@ -131,6 +136,18 @@ def _label_texts(widget: Any) -> list[str]:
         if isinstance(child, ctk.CTkLabel):
             found.append(str(child.cget("text")))
         found.extend(_label_texts(child))
+    return found
+
+
+def _button_texts(widget: Any) -> list[str]:
+    """递归收集控件树里所有按钮的文案(便于断言某个动作已从界面移除)."""
+    import customtkinter as ctk
+
+    found: list[str] = []
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkButton):
+            found.append(str(child.cget("text")))
+        found.extend(_button_texts(child))
     return found
 
 
@@ -591,6 +608,345 @@ def test_workspace_nav_opens_schedule_window(
 
         assert len(opened) == 1
         assert opened[0]["backend"] is app.backend
+    finally:
+        app.destroy()
+
+
+def test_workspace_nav_opens_discovery_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工作区的"游戏发现"入口打开本地游戏发现窗口, 并接上游戏列表刷新回调."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    opened: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        main_mod,
+        "DiscoveryWindow",
+        lambda _parent, **kwargs: opened.append(kwargs),
+    )
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        app._on_nav(tr("sidebar.nav_discovery"), tr("sidebar.nav_discovery_hint"))
+
+        assert len(opened) == 1
+        assert opened[0]["backend"] is app.backend
+        # 导入游戏后主窗口的列表要跟着刷新, 因此必须传 on_change 回调.
+        assert callable(opened[0]["on_change"])
+    finally:
+        app.destroy()
+
+
+def test_discovery_window_scans_filters_and_imports_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """发现窗口: 扫描、筛选、忽略/恢复与导入都作用到后端数据."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.models import CandidateFilter
+    from archive_management.ui.palette import Palette
+
+    _patch_dialogs(monkeypatch, ask_text="空洞骑士")
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        window = DiscoveryWindow(
+            app, backend=app.backend, palette=Palette.for_theme(app._theme)
+        )
+        assert [item.directory_id for item in window._dirs] == ["dir-1", "dir-2"]
+        assert len(window._candidates) == 5
+        # 未选中有效候选时"导入"不可用(候选 4 的路径已失效).
+        window._select_candidate("cand-4")
+        assert str(window._import_btn.cget("state")) == "disabled"
+
+        window._on_scan()
+        _pump(app)
+        assert tr("discovery.scanning") not in window._summary_label.cget("text")
+        assert window._dirs[0].last_scan_label != ""
+
+        # 筛选: 只看已忽略的候选, 再把它们恢复成待处理.
+        window._filter_box.set(CandidateFilter.IGNORED.label)
+        window._on_filter_change(CandidateFilter.IGNORED.label)
+        assert set(window._cand_rows) == {"cand-5"}
+        window._select_candidate("cand-5")
+        window._on_ignore()
+        _pump(app)
+        assert app.backend.list_candidates(status="ignored") == []
+
+        # 导入一条候选: 后端新增游戏, 候选变为已导入.
+        before = len(app.backend.list_games())
+        window._filter_box.set(CandidateFilter.NEW.label)
+        window._on_filter_change(CandidateFilter.NEW.label)
+        window._select_candidate("cand-2")
+        window._on_import()
+        _pump(app)
+
+        assert len(app.backend.list_games()) == before + 1
+        imported = next(
+            item for item in window._candidates if item.candidate_id == "cand-2"
+        )
+        assert imported.status == "imported"
+        assert imported.game_id is not None
+        window.close()
+    finally:
+        app.destroy()
+
+
+def test_discovery_window_manages_monitored_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """监控目录的新增校验: 非法路径给出后端原因, 合法路径写入列表."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.palette import Palette
+
+    # 依次回答: 先给一个空路径(应被拒绝), 再给一个真实目录.
+    _patch_dialogs(monkeypatch, ask_text_queue=["   ", str(tmp_path)])
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        window = DiscoveryWindow(
+            app, backend=app.backend, palette=Palette.for_theme(app._theme)
+        )
+        before = len(window._dirs)
+
+        window._on_add_dir()
+        _pump(app)
+        assert len(window._dirs) == before
+        assert "不能为空" in window._summary_label.cget("text")
+
+        window._on_add_dir()
+        _pump(app)
+        assert len(window._dirs) == before + 1
+        assert str(tmp_path) in {item.path for item in window._dirs}
+
+        # 停用后不再参与扫描, 但记录仍保留.
+        window._select_dir(window._dirs[-1].directory_id)
+        window._on_toggle_dir()
+        _pump(app)
+        assert window._dir_item() is not None
+        assert window._dir_item().enabled is False  # type: ignore[union-attr]
+        window.close()
+    finally:
+        app.destroy()
+
+
+def test_discovery_window_defaults_to_candidates_and_switches_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """发现窗口分成两页: 默认停在"探测结果", 可切到"监控目录".
+
+    同时锁定回归: 候选操作只剩导入/忽略/修正路径, 不再有"加入监控"按钮。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.models import DiscoveryPage
+    from archive_management.ui.palette import Palette
+
+    _patch_dialogs(monkeypatch)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        window = DiscoveryWindow(
+            app, backend=app.backend, palette=Palette.for_theme(app._theme)
+        )
+
+        def current() -> DiscoveryPage:
+            """读取当前页面(经函数返回避免 mypy 对属性做字面量收窄)."""
+            return window._page
+
+        candidates = window._page_frames[DiscoveryPage.CANDIDATES]
+        monitored = window._page_frames[DiscoveryPage.MONITORED]
+
+        # 默认页 = 探测结果, 监控目录页未布局(grid_remove 后 grid_info 为空).
+        assert current() is DiscoveryPage.CANDIDATES
+        assert candidates.grid_info() != {}
+        assert monitored.grid_info() == {}
+
+        # 候选页的按钮恰好是导入/忽略/修正路径三个(没有"加入监控").
+        expected = {
+            tr("discovery.cand_import"),
+            tr("discovery.cand_ignore"),
+            tr("discovery.cand_relocate"),
+        }
+        assert set(_button_texts(candidates)) & expected == expected
+        assert len(_button_texts(candidates)) == len(expected)
+
+        window._show_page(DiscoveryPage.MONITORED)
+        assert current() is DiscoveryPage.MONITORED
+        assert monitored.grid_info() != {}
+        assert candidates.grid_info() == {}
+        assert set(_button_texts(monitored)) >= {
+            tr("discovery.dir_add"),
+            tr("discovery.dir_edit"),
+            tr("discovery.dir_remove"),
+        }
+        # "重新扫描"在页签行上, 两个页面都能用.
+        assert tr("discovery.scan") in _button_texts(window._container)
+
+        window._show_page(DiscoveryPage.CANDIDATES)
+        assert current() is DiscoveryPage.CANDIDATES
+        assert candidates.grid_info() != {}
+        assert monitored.grid_info() == {}
+        window.close()
+    finally:
+        app.destroy()
+
+
+def test_discovery_default_filter_is_pending_with_filter_aware_empty_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """默认筛选为"待处理"; 筛选没有匹配项时提示与该筛选相关而不是"暂无探测结果"."""
+    from collections.abc import Sequence
+
+    from archive_management.domain import GameCandidate
+    from archive_management.infrastructure.database import Database
+    from archive_management.services.platform_scan import LocalGameScanner
+    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.models import CandidateFilter
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    db = Database(tmp_path / "filter.db")
+    db.migrate()
+    games = tmp_path / "Games"
+    (games / "Alpha").mkdir(parents=True)
+
+    # 用替身探测: 无论本机装了多少平台游戏, 这次扫描都只有一条候选.
+    def fake_scan(
+        self: object, *, monitored: Sequence[str] = ()
+    ) -> list[GameCandidate]:
+        del self, monitored
+        return [
+            GameCandidate(
+                name="Alpha",
+                install_dir=str(games / "Alpha"),
+                source="monitored",
+                confidence="medium",
+                reason_code="monitored_child",
+                health="ok",
+            )
+        ]
+
+    monkeypatch.setattr(LocalGameScanner, "scan", fake_scan)
+    service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+    service.add_monitored_directory(str(games))
+    try:
+        app = _new_app(service)
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        window = DiscoveryWindow(
+            app, backend=service, palette=Palette.for_theme(app._theme)
+        )
+        assert window._filter is CandidateFilter.NEW
+        assert window._filter_box.get() == CandidateFilter.NEW.label
+        assert window._cand_rows == {}  # 还没扫描过
+
+        window._on_scan()
+        _pump(app)
+        assert [item.status for item in window._candidates] == ["new"]
+        assert set(window._cand_rows) == {window._candidates[0].candidate_id}
+
+        # 忽略唯一一条待处理项: 待处理筛选下列表变空, 但提示说得清是筛选造成的.
+        target = window._candidates[0]
+        window._select_candidate(target.candidate_id)
+        window._on_ignore()
+        _pump(app)
+        assert window._cand_rows == {}
+        texts = _label_texts(window._cand_box)
+        assert tr("discovery.empty_filtered", filter=CandidateFilter.NEW.label) in texts
+        assert any("已忽略 1" in text for text in texts)
+        assert tr("discovery.candidates_empty") not in texts
+
+        # 切到"已忽略"就能看到刚忽略的那条(筛选本身工作正常).
+        window._on_filter_change(CandidateFilter.IGNORED.label)
+        _pump(app)
+        assert set(window._cand_rows) == {target.candidate_id}
+        assert "已忽略 1" in str(window._detail_label.cget("text"))
+        window.close()
+    finally:
+        app.destroy()
+
+
+def test_workspace_nav_keeps_a_single_window_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工作区的三个入口共用一个窗口位置: 不会重复开窗, 也不会同时开多个."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    class _FakeWindow:
+        """记录聚焦次数、可模拟"仍打开/已关闭"的窗口替身."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """保存构造参数便于断言."""
+            self.kwargs = kwargs
+            self.focus_calls = 0
+            self.alive = True
+
+        def focus(self) -> bool:
+            """累加聚焦次数; 返回窗口是否仍然打开."""
+            self.focus_calls += 1
+            return self.alive
+
+    opened: list[_FakeWindow] = []
+
+    def _factory(_parent: Any, **kwargs: Any) -> _FakeWindow:
+        window = _FakeWindow(**kwargs)
+        opened.append(window)
+        return window
+
+    _patch_dialogs(monkeypatch)
+    monkeypatch.setattr(main_mod, "DiscoveryWindow", _factory)
+    monkeypatch.setattr(main_mod, "ScheduleWindow", _factory)
+    monkeypatch.setattr(main_mod, "SettingsWindow", _factory)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        discovery = tr("sidebar.nav_discovery")
+        scheduled = tr("sidebar.nav_scheduled")
+        settings = tr("sidebar.nav_settings")
+
+        app._on_nav(discovery, "")
+        assert len(opened) == 1
+        # 同一入口再点: 只把已有窗口提到前台.
+        app._on_nav(discovery, "")
+        assert len(opened) == 1
+        assert opened[0].focus_calls == 1
+        # 另一个入口: 仍然只有一个窗口, 并提示先关闭当前窗口.
+        app._on_nav(scheduled, "")
+        assert len(opened) == 1
+        assert opened[0].focus_calls == 2
+        assert app._last_feedback[1] == tr("sidebar.nav_busy")
+        app._on_nav(settings, "")
+        assert len(opened) == 1
+        assert opened[0].focus_calls == 3
+
+        # 用户关闭当前窗口后即可打开另一个入口.
+        opened[0].alive = False
+        app._on_nav(scheduled, "")
+        assert len(opened) == 2
+        assert opened[1].focus_calls == 0
+        app._on_nav(settings, "")
+        assert len(opened) == 2
+        assert opened[1].focus_calls == 1
     finally:
         app.destroy()
 

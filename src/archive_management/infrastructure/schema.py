@@ -4,7 +4,8 @@
 内应用尚未执行的迁移(PLAN 5、阶段 A).
 
 表结构与 PLAN 第 5 节对齐: games、save_locations、backup_nodes、
-backup_files、scheduled_jobs. 操作日志不落库(见版本 3), 改为写入日志文件。
+backup_files、scheduled_jobs, 以及阶段 E-1 增加的 monitored_directories 与
+game_candidates. 操作日志不落库(见版本 3), 改为写入日志文件。
 """
 
 from __future__ import annotations
@@ -148,11 +149,60 @@ _V4_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 5(阶段 E-1 迭代): 本地游戏探测所需的监控目录与候选表.
+#
+# - ``monitored_directories``: 用户自行添加的监控目录(启用状态、备注、上次
+#   扫描时间与结果); 路径唯一, 重复添加在用例层直接拒绝.
+# - ``game_candidates``: 探测得到的候选游戏。候选是"待用户确认"的对象, 与
+#   ``games`` 分开存放: 用户的导入/忽略决定(status)不会因为下次扫描被覆盖,
+#   自动识别为"已纳入库"的候选通过 ``game_id`` 关联到游戏记录。
+_V5_STATEMENTS: Sequence[str] = (
+    """
+    CREATE TABLE IF NOT EXISTS monitored_directories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        last_scan_at TEXT,
+        last_scan_status TEXT,
+        UNIQUE (path)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS game_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        install_dir TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual',
+        confidence TEXT NOT NULL DEFAULT 'medium'
+            CHECK (confidence IN ('high', 'medium', 'low')),
+        reason_code TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT '',
+        found_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        status TEXT NOT NULL DEFAULT 'new'
+            CHECK (status IN ('new', 'imported', 'ignored')),
+        health TEXT NOT NULL DEFAULT 'ok',
+        game_id INTEGER REFERENCES games(id) ON DELETE SET NULL,
+        UNIQUE (install_dir)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_game_candidates_status
+        ON game_candidates (status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_game_candidates_game
+        ON game_candidates (game_id)
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
     (3, _V3_STATEMENTS),
     (4, _V4_STATEMENTS),
+    (5, _V5_STATEMENTS),
 )
 
 

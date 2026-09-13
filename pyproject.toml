@@ -128,6 +128,9 @@ ignore = []
 # GUI 与用例层不得使用 print: 前者走日志, 后者用接口返回值/回调表达结果.
 "src/archive_management/app.py" = ["T201"]
 "scripts/**/*.py" = ["T201"]
+# 注册表读取协议必须沿用 winreg 的原生方法名(OpenKey/EnumValue/EnumKey),
+# 否则无法和真实模块对齐; 仅此模块放行命名规则.
+"src/archive_management/services/platform_scan.py" = ["N802"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["archive_management"]
@@ -210,4 +213,4 @@ exclude_also = [
 show_missing = true
 skip_covered = true
 # 阶段 A 以骨架与核心模块为主, 随里程碑实现逐步上调.
-fail_under = 70
+fail_under = 80

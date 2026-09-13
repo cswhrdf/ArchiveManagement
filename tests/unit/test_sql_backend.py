@@ -842,3 +842,108 @@ def test_delete_save_location_uses_injected_trash(
     assert moved == [str(save)]
     assert str(save) in message
     assert service.list_locations(game_id) == []
+
+
+# ------------------------------------------------- 本地游戏探测(阶段 E-1)
+
+
+def test_monitored_directories_crud(tmp_path: Path) -> None:
+    """监控目录的增删改查都经后端暴露给界面, 并带实时路径状态."""
+    service = _service(tmp_path)
+    games = tmp_path / "Games"
+    games.mkdir()
+
+    created = service.add_monitored_directory(str(games), note="自定义")
+    assert created.path == str(games)
+    assert created.health == "ok"
+    assert [item.directory_id for item in service.list_monitored_directories()] == [
+        created.directory_id
+    ]
+
+    disabled = service.set_monitored_enabled(created.directory_id, False)
+    assert disabled.enabled is False
+    assert disabled.state_label == tr("discovery.dir_off")
+
+    updated = service.update_monitored_directory(created.directory_id, note="改过")
+    assert updated.note == "改过"
+
+    service.remove_monitored_directory(created.directory_id)
+    assert service.list_monitored_directories() == []
+
+
+def test_scan_finds_monitored_games_and_imports_them(tmp_path: Path) -> None:
+    """扫描会把监控目录里的游戏写进候选表, 导入后成为游戏记录."""
+    service = _service(tmp_path)
+    games = tmp_path / "Games"
+    (games / "Hades").mkdir(parents=True)
+    service.add_monitored_directory(str(games))
+
+    report = service.scan_candidates()
+
+    assert report.monitored == 1
+    assert report.active == 1
+    ours = next(
+        item
+        for item in service.list_candidates()
+        if item.install_dir == str(games / "Hades")
+    )
+    assert ours.source == "monitored"
+    assert ours.status == "new"
+    assert ours.importable is True
+
+    summary = service.import_candidate(ours.candidate_id, name="哈迪斯")
+
+    assert summary.name == "哈迪斯"
+    assert [game.game_id for game in service.list_games()] == [summary.game_id]
+    imported = service.list_candidates(status="imported")
+    assert [item.candidate_id for item in imported] == [ours.candidate_id]
+    assert imported[0].game_id == summary.game_id
+    # 已导入的候选不能再导入一次.
+    with pytest.raises(ArchiveManagementError):
+        service.import_candidate(ours.candidate_id)
+
+
+def test_candidate_ignore_restore_and_relocate(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    games = tmp_path / "Games"
+    (games / "Hades").mkdir(parents=True)
+    service.add_monitored_directory(str(games))
+    service.scan_candidates()
+    candidate = next(
+        item
+        for item in service.list_candidates()
+        if item.install_dir == str(games / "Hades")
+    )
+
+    ignored = service.set_candidate_ignored(candidate.candidate_id, True)
+    assert ignored.status == "ignored"
+    assert service.list_candidates(status="ignored")[0].candidate_id == (
+        candidate.candidate_id
+    )
+
+    restored = service.set_candidate_ignored(candidate.candidate_id, False)
+    assert restored.status == "new"
+
+    moved = tmp_path / "Elsewhere" / "Hades"
+    moved.mkdir(parents=True)
+    relocated = service.relocate_candidate(candidate.candidate_id, str(moved))
+    assert relocated.install_dir == str(moved)
+    assert relocated.health == "ok"
+
+    watched = service.add_candidate_as_monitored(candidate.candidate_id)
+    assert watched.path == str(tmp_path / "Elsewhere")
+
+
+def test_backend_rejects_unknown_discovery_ids(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+
+    with pytest.raises(ArchiveManagementError, match="未知监控目录"):
+        service.set_monitored_enabled("not-a-number", False)
+    with pytest.raises(ArchiveManagementError, match="未知监控目录"):
+        service.remove_monitored_directory("42")
+    with pytest.raises(ArchiveManagementError, match="未知探测结果"):
+        service.import_candidate("42")
+    with pytest.raises(ArchiveManagementError, match="未知探测结果"):
+        service.set_candidate_ignored("42", True)
+    with pytest.raises(ArchiveManagementError, match="不支持的筛选条件"):
+        service.list_candidates(status="bogus")

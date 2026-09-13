@@ -7,12 +7,18 @@ from datetime import UTC, datetime
 
 import pytest
 
+from archive_management.i18n import tr
 from archive_management.ui.models import (
     BackupItem,
+    CandidateFilter,
+    CandidateItem,
+    DiscoveryPage,
     FeedbackKind,
     GameDetail,
     GameSummary,
     LocationItem,
+    MonitoredDirItem,
+    ScanSummary,
     SourceFilter,
     ViewKind,
     branch_order,
@@ -283,6 +289,21 @@ def test_every_source_filter_label_is_translated() -> None:
         assert not label.startswith("filter.")
 
 
+def test_every_discovery_filter_and_page_label_is_translated() -> None:
+    """回归: 发现窗口的筛选与页签文案缺 key 会直接露出 discovery.xxx."""
+    for item in CandidateFilter:
+        assert not item.label.startswith("discovery.")
+    for page in DiscoveryPage:
+        assert not page.label.startswith("discovery.")
+
+
+def test_discovery_page_order_defaults_to_candidates() -> None:
+    """页签顺序就是枚举成员顺序: 第一个(探测结果)是默认页面."""
+    assert [page.value for page in DiscoveryPage] == ["candidates", "monitored"]
+    assert DiscoveryPage.CANDIDATES.label == tr("discovery.page_candidates")
+    assert DiscoveryPage.MONITORED.label == tr("discovery.page_monitored")
+
+
 def test_timeline_labels_inherit_branch_name() -> None:
     """时间线中的每个备份都显示自己所属的分支."""
     items = [
@@ -345,3 +366,109 @@ def test_location_item_fields() -> None:
     assert item.location_id == "1"
     assert item.path_kind == "directory"
     assert item.is_primary is True
+
+
+# --------------------------------------------------------- 本地游戏探测(E-1)
+
+
+def _candidate() -> CandidateItem:
+    """构造一条展示用候选(默认: Steam 探测、待处理、路径可用)."""
+    return CandidateItem(
+        candidate_id="1",
+        name="Hades",
+        install_dir=r"D:\Steam\Hades",
+        source="steam",
+        confidence="high",
+        status="new",
+        health="ok",
+    )
+
+
+def test_candidate_labels_come_from_i18n() -> None:
+    item = _candidate()
+
+    assert item.source_label == tr("discovery.source_steam")
+    assert item.confidence_label == tr("discovery.confidence_high")
+    assert item.status_label == tr("discovery.status_new")
+    assert item.health_label == tr("discovery.health_ok")
+    assert item.importable is True
+    assert item.summary.startswith(tr("discovery.source_steam"))
+
+
+def test_candidate_is_not_importable_when_path_unusable_or_handled() -> None:
+    assert replace(_candidate(), health="missing").importable is False
+    assert replace(_candidate(), status="ignored").importable is False
+    assert replace(_candidate(), status="imported", game_id="7").importable is False
+
+
+def test_candidate_filter_labels_and_values() -> None:
+    assert [item.value for item in CandidateFilter] == [
+        "all",
+        "new",
+        "imported",
+        "ignored",
+    ]
+    assert CandidateFilter.NEW.label == tr("discovery.filter_new")
+
+
+def test_monitored_dir_item_summary_reports_state_and_scan_time() -> None:
+    item = MonitoredDirItem(
+        directory_id="1",
+        path=r"D:\Games",
+        enabled=True,
+        note="自定义",
+        health="ok",
+        last_scan_label="2026/09/13 09:20",
+    )
+
+    assert item.state_label == tr("discovery.dir_on")
+    assert item.health_label == tr("discovery.health_ok")
+    assert r"D:\Games" not in item.summary  # 路径单独展示, 摘要里不重复
+    assert "自定义" in item.summary
+    assert item.summary.endswith(
+        tr("discovery.dir_last_scan", stamp="2026/09/13 09:20")
+    )
+    assert MonitoredDirItem(
+        directory_id="2",
+        path=r"E:\Gone",
+        enabled=False,
+        note="",
+        health="missing",
+    ).state_label == tr("discovery.dir_off")
+
+
+def test_scan_summary_label_and_detail() -> None:
+    summary = ScanSummary(
+        monitored=3,
+        active=2,
+        total=8,
+        added=5,
+        updated=3,
+        linked=1,
+        unusable=2,
+    )
+
+    assert tr("discovery.scan_done", added=5, total=8) == summary.label
+    assert tr("discovery.scan_monitored", count=3, active=2) in summary.detail
+    assert tr("discovery.scan_unusable", count=2) in summary.detail
+    assert tr("discovery.scan_linked", count=1) in summary.detail
+
+
+def test_scan_summary_detail_omits_empty_parts_and_reports_errors() -> None:
+    clean = ScanSummary(
+        monitored=0, active=0, total=0, added=0, updated=0, linked=0, unusable=0
+    )
+    assert tr("discovery.scan_linked", count=1) not in clean.detail
+    assert tr("discovery.scan_errors", count=1) not in clean.detail
+
+    broken = ScanSummary(
+        monitored=1,
+        active=1,
+        total=0,
+        added=0,
+        updated=0,
+        linked=0,
+        unusable=0,
+        errors=("注册表不可用",),
+    )
+    assert tr("discovery.scan_errors", count=1) in broken.detail

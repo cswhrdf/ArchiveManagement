@@ -14,7 +14,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
+from archive_management.application import discovery as discovery_cases
 from archive_management.application.backup import BackupService
 from archive_management.application.locations import (
     LocationRemovalPlan,
@@ -25,13 +27,17 @@ from archive_management.application.restore import RestorePlan, RestoreService
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     BackupNode,
+    CandidateStatus,
     DeletionMode,
     DeletionPlan,
     Game,
+    GameCandidate,
+    MonitoredDirectory,
     NodeKind,
     PathKind,
     SaveLocation,
     ScheduledJob,
+    candidate_sort_key,
 )
 from archive_management.exceptions import (
     ArchiveManagementError,
@@ -42,7 +48,9 @@ from archive_management.i18n import tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     BackupRepository,
+    CandidateRepository,
     GameRepository,
+    MonitoredDirectoryRepository,
     SaveLocationRepository,
     ScheduledJobRepository,
 )
@@ -52,6 +60,7 @@ from archive_management.services.pathcheck import (
     probe_path,
     summarize_path,
 )
+from archive_management.services.platform_scan import path_health
 from archive_management.services.scheduler import (
     BackupScheduler,
     format_interval,
@@ -60,9 +69,12 @@ from archive_management.services.scheduler import (
 from archive_management.services.snapshot import verify_snapshot
 from archive_management.ui.models import (
     BackupItem,
+    CandidateItem,
     GameDetail,
     GameSummary,
     LocationItem,
+    MonitoredDirItem,
+    ScanSummary,
     ScheduleItem,
     TaskStatus,
     size_label,
@@ -126,6 +138,8 @@ class SqlArchiveService:
         self._locations = SaveLocationRepository(database)
         self._nodes = BackupRepository(database)
         self._jobs = ScheduledJobRepository(database)
+        self._monitored = MonitoredDirectoryRepository(database)
+        self._candidates = CandidateRepository(database)
         self._backups = BackupService(database, backup_root=backup_root)
         self._restore = RestoreService(
             database, backup_root=backup_root, backups=self._backups
@@ -525,6 +539,170 @@ class SqlArchiveService:
         self._theme = "dark" if name == "dark" else "light"
         log_action("ui.set_theme", basic=True, theme=self._theme)
         return self._theme
+
+    # -- 本地游戏探测与监控目录(阶段 E-1) -------------------------------
+
+    def list_monitored_directories(self) -> list[MonitoredDirItem]:
+        """返回全部监控目录及其实时路径状态."""
+        return [self._monitored_item(item) for item in self._monitored.list_all()]
+
+    def add_monitored_directory(self, path: str, *, note: str = "") -> MonitoredDirItem:
+        """新增监控目录; 路径不可用或重复时抛出异常."""
+        created = discovery_cases.add_monitored_directory(
+            self._database, path, note=note
+        )
+        return self._monitored_item(created)
+
+    def update_monitored_directory(
+        self, directory_id: str, *, path: str | None = None, note: str | None = None
+    ) -> MonitoredDirItem:
+        """修改监控目录的路径或备注."""
+        updated = discovery_cases.update_monitored_directory(
+            self._database, self._monitored_ref(directory_id), path=path, note=note
+        )
+        return self._monitored_item(updated)
+
+    def set_monitored_enabled(
+        self, directory_id: str, enabled: bool
+    ) -> MonitoredDirItem:
+        """启用/停用一个监控目录."""
+        updated = discovery_cases.set_monitored_enabled(
+            self._database, self._monitored_ref(directory_id), enabled
+        )
+        return self._monitored_item(updated)
+
+    def remove_monitored_directory(self, directory_id: str) -> None:
+        """删除一个监控目录记录(磁盘内容不动)."""
+        discovery_cases.remove_monitored_directory(
+            self._database, self._monitored_ref(directory_id)
+        )
+
+    def scan_candidates(self) -> ScanSummary:
+        """扫描平台安装目录与监控目录, 返回结果摘要.
+
+        扫描会同时刷新监控目录的上次扫描时间与候选的路径健康状态。
+        """
+        report = discovery_cases.scan_library(self._database)
+        return ScanSummary(
+            monitored=report.monitored,
+            active=report.active,
+            total=report.total,
+            added=report.added,
+            updated=report.updated,
+            linked=report.linked,
+            unusable=report.unusable,
+            errors=report.errors,
+        )
+
+    def list_candidates(self, *, status: str | None = None) -> list[CandidateItem]:
+        """返回探测到的候选游戏(可按处理进度筛选)."""
+        wanted = self._candidate_status(status)
+        items = self._candidates.list_all(status=wanted)
+        return [
+            self._candidate_item(item) for item in sorted(items, key=candidate_sort_key)
+        ]
+
+    def import_candidate(
+        self, candidate_id: str, *, name: str | None = None
+    ) -> GameSummary:
+        """把一条探测结果导入为游戏, 返回新游戏的摘要."""
+        game = discovery_cases.import_candidate(
+            self._database, self._candidate_ref(candidate_id), name=name
+        )
+        self._touch()
+        return self._summary(game)
+
+    def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
+        """把候选标记为"已忽略"或恢复为"待处理"."""
+        reference = self._candidate_ref(candidate_id)
+        candidate = (
+            discovery_cases.ignore_candidate(self._database, reference)
+            if ignored
+            else discovery_cases.restore_candidate(self._database, reference)
+        )
+        return self._candidate_item(candidate)
+
+    def relocate_candidate(self, candidate_id: str, path: str) -> CandidateItem:
+        """修正候选的安装路径."""
+        candidate = discovery_cases.relocate_candidate(
+            self._database, self._candidate_ref(candidate_id), path
+        )
+        return self._candidate_item(candidate)
+
+    def add_candidate_as_monitored(self, candidate_id: str) -> MonitoredDirItem:
+        """把候选所在的上一层目录加入监控列表."""
+        created = discovery_cases.add_candidate_as_monitored(
+            self._database, self._candidate_ref(candidate_id)
+        )
+        return self._monitored_item(created)
+
+    @staticmethod
+    def _monitored_item(directory: MonitoredDirectory) -> MonitoredDirItem:
+        """把监控目录实体映射为展示模型(路径状态实时判定)."""
+        return MonitoredDirItem(
+            directory_id=str(directory.id),
+            path=directory.path,
+            enabled=directory.enabled,
+            note=directory.note,
+            health=path_health(directory.path),
+            last_scan_label=(
+                _stamp(directory.last_scan_at)
+                if directory.last_scan_at is not None
+                else ""
+            ),
+        )
+
+    @staticmethod
+    def _candidate_item(candidate: GameCandidate) -> CandidateItem:
+        """把候选实体映射为展示模型(路径状态实时判定)."""
+        return CandidateItem(
+            candidate_id=str(candidate.id),
+            name=candidate.name,
+            install_dir=candidate.install_dir,
+            source=candidate.source,
+            confidence=candidate.confidence,
+            status=candidate.status,
+            health=path_health(candidate.install_dir),
+            detail=candidate.detail,
+            game_id=None if candidate.game_id is None else str(candidate.game_id),
+        )
+
+    def _monitored_ref(self, directory_id: str) -> int:
+        """把界面传入的字符串 id 解析为存在的监控目录 id."""
+        reference = self._parse_id(directory_id)
+        if reference is None or self._monitored.get(reference) is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_monitored", directory_id=directory_id)
+            )
+        return reference
+
+    def _candidate_ref(self, candidate_id: str) -> int:
+        """把界面传入的字符串 id 解析为存在的候选 id."""
+        reference = self._parse_id(candidate_id)
+        if reference is None or self._candidates.get(reference) is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_candidate", candidate_id=candidate_id)
+            )
+        return reference
+
+    @staticmethod
+    def _parse_id(raw: str) -> int | None:
+        """尝试把字符串 id 解析为整数; 非法时返回 None."""
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _candidate_status(status: str | None) -> CandidateStatus | None:
+        """把筛选下拉框的取值映射为仓库状态参数."""
+        if status in (None, "", "all"):
+            return None
+        if status in ("new", "imported", "ignored"):
+            return cast(CandidateStatus, status)
+        raise ArchiveManagementError(
+            tr("error.unknown_candidate_status", status=str(status))
+        )
 
     # -- 备份与分支(阶段 D) -----------------------------------------------
 

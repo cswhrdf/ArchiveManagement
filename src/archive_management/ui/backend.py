@@ -13,9 +13,12 @@ from archive_management.application.restore import RestorePlan
 from archive_management.domain import DEFAULT_KEEP_AUTO, DeletionPlan, PathKind
 from archive_management.ui.models import (
     BackupItem,
+    CandidateItem,
     GameDetail,
     GameSummary,
     LocationItem,
+    MonitoredDirItem,
+    ScanSummary,
     ScheduleItem,
     TaskStatus,
 )
@@ -174,6 +177,58 @@ class ArchiveService(Protocol):
 
     def cancel_active(self) -> bool:
         """请求取消当前正在进行的后台操作; 无进行中操作时返回 False."""
+        ...
+
+    # -- 本地游戏探测与监控目录(阶段 E-1) ---------------------------------
+
+    def list_monitored_directories(self) -> list[MonitoredDirItem]:
+        """返回全部监控目录及其启用状态、路径健康状态."""
+        ...
+
+    def add_monitored_directory(self, path: str, *, note: str = "") -> MonitoredDirItem:
+        """新增监控目录; 路径不可用或重复时抛出异常."""
+        ...
+
+    def update_monitored_directory(
+        self, directory_id: str, *, path: str | None = None, note: str | None = None
+    ) -> MonitoredDirItem:
+        """修改监控目录的路径或备注; 新路径不可用或重复时抛出异常."""
+        ...
+
+    def set_monitored_enabled(
+        self, directory_id: str, enabled: bool
+    ) -> MonitoredDirItem:
+        """启用/停用一个监控目录."""
+        ...
+
+    def remove_monitored_directory(self, directory_id: str) -> None:
+        """删除一个监控目录记录(不删除磁盘内容)."""
+        ...
+
+    def scan_candidates(self) -> ScanSummary:
+        """扫描平台安装目录与监控目录, 返回结果摘要(失败也不抛异常)."""
+        ...
+
+    def list_candidates(self, *, status: str | None = None) -> list[CandidateItem]:
+        """返回探测到的候选游戏(可按处理进度筛选)."""
+        ...
+
+    def import_candidate(
+        self, candidate_id: str, *, name: str | None = None
+    ) -> GameSummary:
+        """把一条探测结果导入为游戏, 返回新游戏的摘要."""
+        ...
+
+    def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
+        """把候选标记为"已忽略"或恢复为"待处理"."""
+        ...
+
+    def relocate_candidate(self, candidate_id: str, path: str) -> CandidateItem:
+        """修正候选的安装路径, 返回更新后的候选."""
+        ...
+
+    def add_candidate_as_monitored(self, candidate_id: str) -> MonitoredDirItem:
+        """把候选所在的上一层目录加入监控列表."""
         ...
 
     def shutdown(self) -> None:
