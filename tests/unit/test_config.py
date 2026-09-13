@@ -10,7 +10,14 @@ import pytest
 from archive_management.config import AppConfig, load_config, parse_config, save_config
 from archive_management.exceptions import ConfigurationError
 
-pytestmark = [pytest.mark.config, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.config,
+    pytest.mark.critical,
+    pytest.mark.epic("基础工程"),
+    pytest.mark.feature("应用配置"),
+    pytest.mark.story("配置读写与校验"),
+    pytest.mark.layer("unit"),
+]
 
 
 def test_missing_file_yields_default(tmp_path: Path) -> None:

@@ -11,7 +11,14 @@ import pytest
 import archive_management.app as app_module
 from archive_management.infrastructure.database import Database
 
-pytestmark = [pytest.mark.cli, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.cli,
+    pytest.mark.critical,
+    pytest.mark.epic("基础工程"),
+    pytest.mark.feature("命令行入口"),
+    pytest.mark.story("初始化与自检命令"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _run_with_output(argv: list[str]) -> tuple[int, str]:

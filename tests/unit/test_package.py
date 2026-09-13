@@ -6,7 +6,15 @@ import importlib
 
 import pytest
 
-pytestmark = [pytest.mark.package, pytest.mark.smoke, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.package,
+    pytest.mark.smoke,
+    pytest.mark.critical,
+    pytest.mark.epic("工程与发布"),
+    pytest.mark.feature("打包与版本信息"),
+    pytest.mark.story("包结构与版本"),
+    pytest.mark.layer("unit"),
+]
 
 _SUBPACKAGES = (
     "archive_management.application",

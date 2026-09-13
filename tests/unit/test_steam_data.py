@@ -11,7 +11,14 @@ from archive_management.domain.steam_data import (
     SteamGameEntry,
 )
 
-pytestmark = [pytest.mark.steam, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.steam,
+    pytest.mark.critical,
+    pytest.mark.epic("游戏与存档位置"),
+    pytest.mark.feature("Steam 数据模型"),
+    pytest.mark.story("Steam 配置建模"),
+    pytest.mark.layer("unit"),
+]
 
 
 def test_steam_data_file_defaults_to_current_version() -> None:

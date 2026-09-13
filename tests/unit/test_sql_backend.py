@@ -12,7 +12,15 @@ from archive_management.infrastructure.repository import ScheduledJobRepository
 from archive_management.services.scheduler import BackupScheduler, ManualBackend
 from archive_management.ui.sql_backend import SqlArchiveService
 
-pytestmark = [pytest.mark.backend, pytest.mark.database, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.backend,
+    pytest.mark.database,
+    pytest.mark.critical,
+    pytest.mark.epic("数据持久化"),
+    pytest.mark.feature("真实 SQLite 后端"),
+    pytest.mark.story("备份恢复与删除数据流"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _service(tmp_path: Path) -> SqlArchiveService:

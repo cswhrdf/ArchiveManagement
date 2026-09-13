@@ -13,7 +13,14 @@ from archive_management.services.scheduler import (
     parse_interval,
 )
 
-pytestmark = [pytest.mark.domain, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.domain,
+    pytest.mark.critical,
+    pytest.mark.epic("备份与分支"),
+    pytest.mark.feature("定时调度"),
+    pytest.mark.story("定时备份"),
+    pytest.mark.layer("unit"),
+]
 
 
 @pytest.mark.parametrize(

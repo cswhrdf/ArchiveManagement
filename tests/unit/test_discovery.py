@@ -10,7 +10,14 @@ from archive_management.services.discovery import (
     NoopCandidateProbe,
 )
 
-pytestmark = [pytest.mark.discovery, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.discovery,
+    pytest.mark.critical,
+    pytest.mark.epic("游戏与存档位置"),
+    pytest.mark.feature("存档位置发现"),
+    pytest.mark.story("发现游戏存档位置"),
+    pytest.mark.layer("unit"),
+]
 
 
 def test_noop_probe_returns_no_candidates() -> None:

@@ -38,6 +38,10 @@ pytestmark = [
     pytest.mark.smoke,
     pytest.mark.ui,
     pytest.mark.normal,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("端到端界面流程"),
+    pytest.mark.story("按钮端到端操作"),
+    pytest.mark.layer("e2e"),
 ]
 
 

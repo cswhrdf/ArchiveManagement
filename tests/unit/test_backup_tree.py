@@ -8,7 +8,14 @@ import pytest
 
 from archive_management.domain import BackupNode, TreeInput, build_tree, tree_depths
 
-pytestmark = [pytest.mark.domain, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.domain,
+    pytest.mark.critical,
+    pytest.mark.epic("备份与分支"),
+    pytest.mark.feature("分支树计算"),
+    pytest.mark.story("分支树与时间线排序"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _dt(day: int, hour: int = 9) -> datetime:

@@ -8,7 +8,14 @@ import pytest
 
 from archive_management.infrastructure.paths import ApplicationPaths
 
-pytestmark = [pytest.mark.paths, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.paths,
+    pytest.mark.critical,
+    pytest.mark.epic("基础工程"),
+    pytest.mark.feature("应用目录"),
+    pytest.mark.story("应用数据目录布局"),
+    pytest.mark.layer("unit"),
+]
 
 _DB_NAME = "archive-management.db"
 

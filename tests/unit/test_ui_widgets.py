@@ -15,7 +15,14 @@ import pytest
 import archive_management.ui.widgets as widgets
 from archive_management.ui.palette import DARK
 
-pytestmark = [pytest.mark.ui, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.ui,
+    pytest.mark.critical,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("通用控件"),
+    pytest.mark.story("控件主题重绘"),
+    pytest.mark.layer("unit"),
+]
 
 
 class _FakeCtkWidget:

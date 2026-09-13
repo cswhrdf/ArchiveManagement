@@ -24,7 +24,14 @@ from archive_management.infrastructure.repository import (
     ScheduledJobRepository,
 )
 
-pytestmark = [pytest.mark.repository, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.repository,
+    pytest.mark.critical,
+    pytest.mark.epic("数据持久化"),
+    pytest.mark.feature("数据仓储"),
+    pytest.mark.story("游戏位置与备份读写"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _database(tmp_path: Path) -> Database:

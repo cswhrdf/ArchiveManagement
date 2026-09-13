@@ -9,7 +9,14 @@ from pydantic import ValidationError
 
 from archive_management.domain import BackupFileEntry, BackupNode, Game, SaveLocation
 
-pytestmark = [pytest.mark.domain, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.domain,
+    pytest.mark.critical,
+    pytest.mark.epic("游戏与存档位置"),
+    pytest.mark.feature("领域模型"),
+    pytest.mark.story("游戏与存档位置建模"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _utc() -> datetime:

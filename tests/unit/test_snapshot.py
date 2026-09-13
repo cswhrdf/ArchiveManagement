@@ -24,7 +24,14 @@ from archive_management.services.snapshot import (
     verify_snapshot,
 )
 
-pytestmark = [pytest.mark.integration, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.critical,
+    pytest.mark.epic("备份与分支"),
+    pytest.mark.feature("快照服务"),
+    pytest.mark.story("生成与校验快照"),
+    pytest.mark.layer("integration"),
+]
 
 
 def _saved_dir(root: Path) -> Path:

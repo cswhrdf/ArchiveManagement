@@ -8,7 +8,15 @@ from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.ui.demo_backend import DemoArchiveService
 
-pytestmark = [pytest.mark.backend, pytest.mark.ui, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.backend,
+    pytest.mark.ui,
+    pytest.mark.critical,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("演示后端"),
+    pytest.mark.story("演示数据后端"),
+    pytest.mark.layer("unit"),
+]
 
 
 @pytest.fixture

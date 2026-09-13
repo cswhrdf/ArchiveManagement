@@ -146,6 +146,7 @@ strict = true
 no_implicit_optional = false
 allow_redefinition = false
 ignore_missing_imports = true
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
 
 [[tool.mypy.overrides]]
 # CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制(PLAN 3.3)
@@ -174,8 +175,11 @@ markers = [
     "dialogs: tests for dialog behavior",
     "discovery: tests for game or save-location discovery",
     "domain: tests for domain models and validation",
+    "epic: Allure product-level module label (see tests/conftest.py._EPICS)",
+    "feature: Allure functional module label",
     "i18n: tests for localization behavior",
     "integration: tests that use the filesystem or other infrastructure",
+    "layer: Allure test layer label (unit/integration/e2e)",
     "minor: low-severity tests (skipped by local pre-commit)",
     "no_severity: tests without an assigned severity",
     "normal: standard tests run in CI only",
@@ -184,6 +188,7 @@ markers = [
     "repository: tests for repository operations",
     "smoke: smoke tests for startup or package availability",
     "steam: tests for Steam data integration",
+    "story: Allure user-scenario label",
     "trivial: cosmetic tests (skipped by local pre-commit)",
     "ui: tests for user-interface behavior",
 ]

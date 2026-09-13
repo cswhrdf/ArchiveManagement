@@ -10,7 +10,14 @@ import pytest
 
 from archive_management.infrastructure.database import Database
 
-pytestmark = [pytest.mark.database, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.database,
+    pytest.mark.critical,
+    pytest.mark.epic("数据持久化"),
+    pytest.mark.feature("数据库迁移"),
+    pytest.mark.story("数据库结构与版本"),
+    pytest.mark.layer("unit"),
+]
 
 EXPECTED_TABLES = {
     "games",

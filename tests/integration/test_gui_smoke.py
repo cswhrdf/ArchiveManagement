@@ -21,6 +21,10 @@ pytestmark = [
     pytest.mark.smoke,
     pytest.mark.ui,
     pytest.mark.normal,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("窗口启动与主题"),
+    pytest.mark.story("窗口构建冒烟"),
+    pytest.mark.layer("integration"),
 ]
 
 

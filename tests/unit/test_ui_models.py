@@ -19,7 +19,14 @@ from archive_management.ui.models import (
     timeline_order,
 )
 
-pytestmark = [pytest.mark.ui, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.ui,
+    pytest.mark.critical,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("展示模型"),
+    pytest.mark.story("备份列表展示"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _dt(*, day: int, hour: int, minute: int) -> datetime:

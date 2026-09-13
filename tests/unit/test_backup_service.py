@@ -35,7 +35,14 @@ from archive_management.infrastructure.repository import (
 )
 from archive_management.services.snapshot import SnapshotSource
 
-pytestmark = [pytest.mark.backend, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.backend,
+    pytest.mark.critical,
+    pytest.mark.epic("备份与分支"),
+    pytest.mark.feature("备份用例服务"),
+    pytest.mark.story("创建备份与分支"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _service(tmp_path: Path, *, saves: int = 1) -> tuple[BackupService, int]:

@@ -8,7 +8,14 @@ import pytest
 
 from archive_management.services.pathcheck import normalize_path, probe_path
 
-pytestmark = [pytest.mark.paths, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.paths,
+    pytest.mark.critical,
+    pytest.mark.epic("游戏与存档位置"),
+    pytest.mark.feature("存档路径校验"),
+    pytest.mark.story("校验存档路径"),
+    pytest.mark.layer("unit"),
+]
 
 
 def test_normalize_path_returns_absolute(tmp_path: Path) -> None:

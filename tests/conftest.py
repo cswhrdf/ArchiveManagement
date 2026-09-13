@@ -1,23 +1,33 @@
-"""测试严重等级与 Allure 元数据.
+"""测试严重等级与 Allure 元数据(含四层标签).
 
 严重等级使用 Allure 官方分级: blocker/critical/normal/minor/trivial/no_severity.
 解析优先级: 用例或模块上显式标注的等级(如 ``@pytest.mark.blocker``)优先, 否则
 按目录默认(unit=critical, integration=normal, 其余 no_severity)。本地 CI
 (pre-commit)通过 ``--min-severity`` 只保留 normal 以上(不含 normal)即
 blocker+critical 的用例; GitHub Actions 仍运行全部用例。
+
+Allure 标签语义(与 Allure 3 报告控件一一对应):
+
+- ``epic``: 产品级模块, 取值限定在 ``_EPICS``(基础工程/数据持久化/界面框架/
+  游戏与存档位置/备份与分支/工程与发布);
+- ``feature``: 功能模块, 与生产模块一一对应(如 快照服务、数据仓储);
+- ``story``: 具体用户场景(如 删除备份节点、创建备份与分支);
+- ``layer``: 测试层次, ``unit`` / ``integration`` / ``e2e``, 供"按层耗时"直方图使用。
+
+测试模块用 ``pytestmark`` 声明默认标签, 单个用例可用同名标记覆盖
+(``@pytest.mark.story("...")``)。``layer`` 未声明时按 ``integration`` 标记或目录推断,
+保证直方图不会缺数据; 声明的 ``epic``/``layer`` 必须属于闭集, 拼错在收集期直接报错,
+以避免报告里冒出只有一个用例的畸形分类。
 """
 
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import allure
 import pytest
-
-_TestObject = Callable[..., Any]
 
 _SEVERITY_LEVELS = ("blocker", "critical", "normal", "minor", "trivial")
 _SEVERITY_RANK = {
@@ -35,6 +45,37 @@ _ALLURE_LEVELS = {
     "minor": allure.severity_level.MINOR,
     "trivial": allure.severity_level.TRIVIAL,
 }
+
+# 测试层次: 闭集, 供 Allure "按层耗时" 直方图分组使用.
+_LAYERS = ("unit", "integration", "e2e")
+# 层次在 suite 视图里的展示名(Allure 3 部分控件只认 suite 标签, 双保险).
+_LAYER_SUITES = {
+    "unit": "单元测试 unit",
+    "integration": "集成测试 integration",
+    "e2e": "端到端测试 e2e",
+}
+# 产品级模块: 闭集, 新增产品级模块时在此登记.
+_EPICS = (
+    "基础工程",
+    "数据持久化",
+    "界面框架",
+    "游戏与存档位置",
+    "备份与分支",
+    "工程与发布",
+)
+# 标签取值约束: None 表示自由文本(功能模块与场景随功能增长).
+_LABEL_ALLOWED: dict[str, tuple[str, ...] | None] = {
+    "epic": _EPICS,
+    "feature": None,
+    "story": None,
+    "layer": _LAYERS,
+}
+_METADATA_MARKERS = frozenset(_LABEL_ALLOWED)
+# 元数据与等级标记不再重复当作 tag(其余标记如 backend/ui 保留为标签).
+_TAG_EXCLUDED = _METADATA_MARKERS | set(_SEVERITY_LEVELS) | {"integration"}
+_UNCLASSIFIED = "未分类"
+# allure.dynamic 的函数没有类型标注, 统一按 Any 调用, 避免满屏 no-untyped-call 忽略.
+_ALLURE_DYNAMIC: Any = allure.dynamic
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -61,25 +102,56 @@ def _resolve_severity(item: pytest.Item) -> str:
     return "no_severity"
 
 
+def _where(item: pytest.Item) -> str:
+    """定位串, 用于拼写错误提示."""
+    return f"{item.fspath}::{item.name}"
+
+
+def _label_value(
+    item: pytest.Item, name: str, allowed: tuple[str, ...] | None = None
+) -> str | None:
+    """取最近一层同名标记的取值(用例级覆盖模块级), 并校验闭集取值."""
+    marker = item.get_closest_marker(name)
+    if marker is None:
+        return None
+    if not marker.args:
+        raise pytest.UsageError(
+            f'{_where(item)}: {name} 标记缺少取值, 请写成 pytest.mark.{name}("...")'
+        )
+    value = str(marker.args[0])
+    if allowed is not None and value not in allowed:
+        raise pytest.UsageError(
+            f"{_where(item)}: 未知的 {name} {value!r}, 可用取值: {' / '.join(allowed)}"
+        )
+    return value
+
+
+def _default_layer(item: pytest.Item) -> str:
+    """未显式声明 layer 时的兵底: integration 标记或目录名, 否则 unit."""
+    if item.get_closest_marker("integration"):
+        return "integration"
+    if "integration" in Path(str(item.fspath)).parts:
+        return "integration"
+    return "unit"
+
+
+def _validate_metadata(item: pytest.Item) -> None:
+    """收集期校验标签取值, 拼错时立即失败而不是静默多出分类."""
+    for name, allowed in _LABEL_ALLOWED.items():
+        _label_value(item, name, allowed)
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """附加严重等级/Allure 元数据, 并按 --min-severity 过滤."""
+    """附加严重等级, 校验 Allure 标签, 并按 --min-severity 过滤."""
     minimum = config.getoption("--min-severity")
     min_rank = _SEVERITY_RANK[minimum] if minimum is not None else None
     kept: list[pytest.Item] = []
     for item in items:
+        _validate_metadata(item)
         severity = _resolve_severity(item)
         item.add_marker(getattr(pytest.mark, severity))
-
-        title = item.name.removeprefix("test_").replace("_", " ").capitalize()
-        module = getattr(item, "module", None)
-        module_description = inspect.getdoc(module) or "ArchiveManagement 测试用例"
-        description = f"{module_description}\n\n验证行为: {title}。"
-        item.add_marker(pytest.mark.allure_description(description))
-        test_object = cast(_TestObject, getattr(item, "obj", None))
-        allure.title(title)(test_object)  # type: ignore[no-untyped-call]
-        allure.description(description)(test_object)  # type: ignore[no-untyped-call]
 
         if min_rank is not None and _SEVERITY_RANK[severity] < min_rank:
             continue
@@ -93,30 +165,36 @@ def pytest_collection_modifyitems(
 
 
 def _configure_allure(item: pytest.Item) -> None:
-    """把测试名称、严重等级和分类写入 Allure 元数据."""
+    """把名称、描述、四层标签、分类与严重等级写入 Allure 元数据."""
     title = item.name.removeprefix("test_").replace("_", " ").capitalize()
     module = getattr(item, "module", None)
     module_description = inspect.getdoc(module) or "ArchiveManagement 测试用例"
-    excluded = {"allure_description", "integration"} | set(_SEVERITY_LEVELS)
-    categories = {
-        marker.name for marker in item.iter_markers() if marker.name not in excluded
-    }
-    category = sorted(categories)[0] if categories else "uncategorized"
 
-    allure.dynamic.title(title)  # type: ignore[no-untyped-call]
-    allure.dynamic.description(  # type: ignore[no-untyped-call]
-        f"{module_description}\n\n验证行为: {title}。"
-    )
-    allure.dynamic.epic("ArchiveManagement")  # type: ignore[no-untyped-call]
-    allure.dynamic.feature(category)  # type: ignore[no-untyped-call]
-    allure.dynamic.story(title)  # type: ignore[no-untyped-call]
-    allure.dynamic.tag(category)  # type: ignore[no-untyped-call]
+    epic = _label_value(item, "epic", _EPICS) or _UNCLASSIFIED
+    feature = _label_value(item, "feature") or _UNCLASSIFIED
+    story = _label_value(item, "story") or title
+    layer = _label_value(item, "layer", _LAYERS) or _default_layer(item)
+
+    _ALLURE_DYNAMIC.title(title)
+    _ALLURE_DYNAMIC.description(f"{module_description}\n\n验证行为: {title}。")
+    # epic/feature/story 驱动 "按产品级模块/功能模块/用户场景的稳定性分布" 控件.
+    _ALLURE_DYNAMIC.epic(epic)
+    _ALLURE_DYNAMIC.feature(feature)
+    _ALLURE_DYNAMIC.story(story)
+    # allure-pytest 没有 layer 装饰器, 只能写原始标签(Allure 3 "按层耗时" 直方图读它).
+    _ALLURE_DYNAMIC.label("layer", layer)
+    # suite 三层与 layer/epic/feature 对齐, 作为只认 suite 标签的控件兵底.
+    _ALLURE_DYNAMIC.parent_suite(_LAYER_SUITES.get(layer, layer))
+    _ALLURE_DYNAMIC.suite(epic)
+    _ALLURE_DYNAMIC.sub_suite(feature)
+
+    tags = sorted({marker.name for marker in item.iter_markers()} - _TAG_EXCLUDED)
+    if tags:
+        _ALLURE_DYNAMIC.tag(*tags)
 
     severity = _resolve_severity(item)
     if severity != "no_severity":
-        allure.dynamic.severity(  # type: ignore[no-untyped-call]
-            _ALLURE_LEVELS[severity]
-        )
+        _ALLURE_DYNAMIC.severity(_ALLURE_LEVELS[severity])
 
 
 @pytest.fixture(autouse=True)

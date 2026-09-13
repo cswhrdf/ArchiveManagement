@@ -9,12 +9,20 @@ import pytest
 from archive_management.domain import (
     BackupNode,
     DeletionMode,
+    NodeKind,
     auto_prune_ids,
     descendant_ids,
     plan_deletion,
 )
 
-pytestmark = [pytest.mark.domain, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.domain,
+    pytest.mark.critical,
+    pytest.mark.epic("备份与分支"),
+    pytest.mark.feature("删除策略"),
+    pytest.mark.story("删除备份节点"),
+    pytest.mark.layer("unit"),
+]
 
 
 def _dt(day: int, hour: int = 9) -> datetime:
@@ -26,13 +34,13 @@ def _node(
     parent_id: int | None = None,
     *,
     day: int = 1,
-    kind: str = "manual",
+    kind: NodeKind = "manual",
 ) -> BackupNode:
     return BackupNode(
         id=node_id,
         game_id=1,
         parent_id=parent_id,
-        node_kind=kind,  # type: ignore[arg-type]
+        node_kind=kind,
         created_at=_dt(day),
     )
 

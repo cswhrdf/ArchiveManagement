@@ -16,7 +16,15 @@ import archive_management.ui.dialogs as dialogs
 from archive_management.i18n import tr
 from archive_management.ui.palette import DARK
 
-pytestmark = [pytest.mark.dialogs, pytest.mark.ui, pytest.mark.critical]
+pytestmark = [
+    pytest.mark.dialogs,
+    pytest.mark.ui,
+    pytest.mark.critical,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("对话框"),
+    pytest.mark.story("输入与确认对话框"),
+    pytest.mark.layer("unit"),
+]
 
 
 class _FakeWidget:

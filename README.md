@@ -38,7 +38,7 @@ GUI 使用本地 SQLite 作为数据源(阶段 C): 首次进入为空库, 通过
 ```shell
 uv run ruff check .
 uv run black --check .
-uv run mypy src
+uv run mypy
 uv run pytest --cov
 ```
 
@@ -50,6 +50,25 @@ GitHub Actions 会运行全部测试，并生成覆盖率报告和 Allure 报告
 uv run pytest --alluredir=allure-results --clean-alluredir
 npx --yes allure@3 generate allure-results --output allure-report
 allure open
+```
+
+每个用例都带四层 Allure 标签：标签由 `tests/conftest.py` 统一写入，测试模块用模块级 `pytestmark` 声明默认值，单个用例可用同名标记覆盖（如 `@pytest.mark.story("删除分支")`）；有未声明取值的用例按目录推断层次并在报告里归入“未分类”，`epic`/`layer` 拼错会在收集期直接报错。
+
+| 标签              | 含义                                     | 示例                             |
+| ----------------- | ---------------------------------------- | -------------------------------- |
+| `@allure.epic`    | 产品级模块（闭集，见 `conftest._EPICS`） | 备份与分支 / 界面框架            |
+| `@allure.feature` | 功能模块（与生产模块一一对应）           | 快照服务 / 数据仓储 / 主题调色板 |
+| `@allure.story`   | 具体用户场景                             | 删除备份节点 / 深浅色主题切换    |
+| `layer`           | 测试层次                                 | unit / integration / e2e         |
+
+`epic`/`feature`/`story` 驱动报告中的“按产品级模块/功能/场景的稳定性分布”；`layer` 只能通过 `allure.dynamic.label("layer", ...)` 写入（`allure-pytest` 没有 `allure.layer` 装饰器），用于“按层耗时直方图”，同时写入 `parentSuite/suite/subSuite` 作为兼容。
+
+稳定性分布控件需要至少 5 次历史运行的数据，CI 通过 `.allure/history.jsonl` 累积。本地想看到填充效果可复用同一套配置（注意每次都要先删掉输出目录，否则 Allure 不会覆盖已有报告）：
+
+```shell
+New-Item -ItemType Directory -Force .allure | Out-Null
+Set-Content .allure/allurerc.json '{"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}'
+allure generate allure-results --output allure-report --config ./.allure/allurerc.json
 ```
 
 ### 构建 Windows 测试包
