@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 from archive_management.application.backup import MAX_NOTE_LENGTH
+from archive_management.application.locations import LocationRemovalPlan
+from archive_management.application.restore import RestorePlan, RestoreTarget
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     BackupNode,
@@ -20,12 +22,15 @@ from archive_management.domain import (
 )
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
+from archive_management.services.naming import game_folder
 from archive_management.services.pathcheck import normalize_path
+from archive_management.services.processes import ProcessProbe
 from archive_management.ui.models import (
     BackupItem,
     GameDetail,
     GameSummary,
     LocationItem,
+    ScheduleItem,
     TaskStatus,
 )
 
@@ -163,6 +168,8 @@ _DETAILS: dict[str, GameDetail] = {
         total_backups_label="5 个节点",
         total_backups_sub="3 条分支 · 7 天活跃",
         next_backup_label="今天 12:00",
+        original_name="星际拓荒",
+        storage_folder=game_folder("星际拓荒", [r"D:\Games\OuterWilds\save"]),
     ),
     "shanhai": GameDetail(
         name="山海旅人",
@@ -175,6 +182,8 @@ _DETAILS: dict[str, GameDetail] = {
         total_backups_label="2 个节点",
         total_backups_sub="1 条分支",
         next_backup_label="今天 12:00",
+        original_name="山海旅人",
+        storage_folder=game_folder("山海旅人", [r"D:\Games\ShanHai\save"]),
     ),
     "endless-space": GameDetail(
         name="无尽太空",
@@ -198,7 +207,10 @@ class DemoArchiveService:
         """用内存数据构造演示后端; ``delay`` 控制模拟耗时."""
         self._delay = delay
         self._theme = "dark"
-        self._schedule_text = "1d"
+        # 每个游戏的定时备份配置: game_id -> (周期文本, 是否启用, 保留份数).
+        self._schedules: dict[str, tuple[str, bool, int]] = {
+            "outer-wilds": ("1d", True, 3),
+        }
         self._keep_auto = 3
         self._revision = 0
         self._items: dict[str, list[BackupItem]] = {
@@ -218,7 +230,9 @@ class DemoArchiveService:
             if primary:
                 self._locations[game.game_id] = [
                     LocationItem(
-                        location_id="demo-primary",
+                        # 位置 id 必须带上游戏 id: 演示数据每个游戏各有一个主位置,
+                        # 用固定 id 会让按 id 查找/删除命中别的游戏.
+                        location_id=f"{game.game_id}-primary",
                         game_id=game.game_id,
                         path=primary,
                         path_kind="directory",
@@ -252,23 +266,24 @@ class DemoArchiveService:
         ]
 
     def task_status(self, game_id: str | None = None) -> TaskStatus:
-        """返回定时任务状态(演示数据不区分游戏)."""
-        del game_id
+        """返回定时任务状态(演示数据按游戏记录周期)."""
+        interval, enabled, keep = self._schedule_of(game_id)
         return TaskStatus(
             running=False,
             task_name=(
-                tr("task.every", interval=self._schedule_text, keep=self._keep_auto)
-                if self._schedule_text
+                tr("task.every", interval=interval, keep=keep)
+                if interval
                 else tr("task.unscheduled")
             ),
             progress=0.0,
-            next_run_label="今天 12:00",
+            next_run_label="今天 12:00" if interval else "—",
             target_label="本地备份目录",
             shortcut_label="Ctrl Alt S",
             theme_name=self._theme,
             backend_ok=True,
-            schedule_text=self._schedule_text,
-            keep_auto=self._keep_auto,
+            schedule_text=interval,
+            schedule_enabled=enabled,
+            keep_auto=keep,
             revision=self._revision,
         )
 
@@ -280,11 +295,49 @@ class DemoArchiveService:
         enabled: bool = True,
         keep_auto: int = DEFAULT_KEEP_AUTO,
     ) -> TaskStatus:
-        """记录演示用的定时备份周期与自动备份保留份数."""
+        """记录演示用的定时备份周期与自动备份保留份数(按游戏)."""
         self._require_game(game_id)
-        self._schedule_text = interval_text.strip() if enabled else ""
-        self._keep_auto = max(1, keep_auto)
+        clean = interval_text.strip()
+        if clean and not self._locations[game_id]:
+            # 与真实后端一致: 没有存档位置就不能定时备份.
+            raise ArchiveManagementError(tr("error.no_locations_schedule", name=""))
+        if not clean:
+            # 空周期 = 删除任务(暂停状态也不再保留).
+            self._schedules.pop(game_id, None)
+        else:
+            self._schedules[game_id] = (clean, enabled, max(1, keep_auto))
         return self.task_status(game_id)
+
+    def list_schedules(self) -> list[ScheduleItem]:
+        """返回全部游戏的定时备份配置."""
+        items: list[ScheduleItem] = []
+        for summary in self.list_games():
+            interval, enabled, keep = self._schedule_of(summary.game_id)
+            autos = [item for item in self._items.get(summary.game_id, []) if item.auto]
+            items.append(
+                ScheduleItem(
+                    game_id=summary.game_id,
+                    game_name=summary.name,
+                    interval_text=interval,
+                    enabled=enabled and bool(interval),
+                    keep_auto=keep,
+                    next_run_label="今天 12:00" if interval and enabled else "—",
+                    auto_count=len(autos),
+                    tone=summary.tone,
+                    has_locations=summary.has_locations,
+                )
+            )
+        return items
+
+    def storage_usage(self) -> int:
+        """返回演示用的存储占用(按节点数量估算)."""
+        return sum(len(items) for items in self._items.values()) * 128 * 1024 * 1024
+
+    def _schedule_of(self, game_id: str | None) -> tuple[str, bool, int]:
+        """返回某游戏的调度配置; 未指定游戏或未配置时给出空周期."""
+        if game_id is None:
+            return ("", True, self._keep_auto)
+        return self._schedules.get(game_id, ("", True, self._keep_auto))
 
     def plan_delete(self, game_id: str, backup_id: str) -> DeletionPlan:
         """按分支树计算删除计划."""
@@ -403,33 +456,107 @@ class DemoArchiveService:
                 branch_label=tr("backup.mainline"),
                 size_label="1 MB",
                 verified=True,
-                sub="本会话创建",
+                sub="",
                 parent_id=self._current.get(game_id),
             )
         )
         self._current[game_id] = items[-1].backup_id
+        self._remember_storage_folder(game_id)
         self._revision += 1
         return tr("result.backup_done", name=self._name_of(game_id))
 
-    def run_restore(self, game_id: str, backup_id: str) -> str:
-        """把当前节点切换到指定备份; 特定节点刻意失败以演示错误路径."""
+    def preview_restore(self, game_id: str, backup_id: str) -> RestorePlan:
+        """返回演示用的恢复预检(不触碰磁盘)."""
+        self._require_game(game_id)
+        _nodes, mapping = self._nodes_of(game_id)
+        try:
+            node_id = mapping[backup_id]
+        except KeyError as exc:
+            raise ArchiveManagementError(
+                tr("error.unknown_backup", backup_id=backup_id)
+            ) from exc
+        item = next(
+            (
+                entry
+                for entry in self._items.get(game_id, [])
+                if entry.backup_id == backup_id
+            ),
+            None,
+        )
+        if item is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_backup", backup_id=backup_id)
+            )
+        locations = self._locations.get(game_id, [])
+        targets = tuple(
+            RestoreTarget(
+                index=index,
+                path=location.path,
+                kind=location.path_kind,
+                exists=True,
+                writable=True,
+            )
+            for index, location in enumerate(locations)
+        )
+        return RestorePlan(
+            backup_id=node_id,
+            title=item.display_title,
+            snapshot_ok=True,
+            snapshot_reason=None,
+            file_count=24,
+            total_size=128 * 1024 * 1024,
+            targets=targets,
+            # 演示: 中断节点同时用于展示"游戏正在运行"的风险提示.
+            process=ProcessProbe(checked=True, running=backup_id == _FAIL_RESTORE_ID),
+            safety_point_available=bool(locations),
+        )
+
+    def run_restore(
+        self,
+        game_id: str,
+        backup_id: str,
+        *,
+        safety_point: bool = True,
+        force: bool = False,
+    ) -> str:
+        """模拟写回存档并把当前节点切到指定备份; 特定节点刻意失败.
+
+        与真实后端一致: ``safety_point=True`` 时先在时间线里补一个安全点节点。
+        """
         self._simulate()
         self._require_game(game_id)
         if backup_id == _FAIL_RESTORE_ID:
             raise ArchiveManagementError(tr("error.restore_busy"))
+        del force
         items = {item.backup_id: item for item in self._items.get(game_id, [])}
         node = items.get(backup_id)
         if node is None:
             raise ArchiveManagementError(
                 tr("error.unknown_backup", backup_id=backup_id)
             )
+        if safety_point and self._locations.get(game_id):
+            self._items[game_id].append(
+                BackupItem(
+                    backup_id=f"safety-{len(self._items[game_id]) + 1}",
+                    title=tr("backup.title_safety_point"),
+                    created_dt=_dt(2026, 9, 6, 12, len(self._items[game_id])),
+                    created_label=tr("backup.safety_label_just_now"),
+                    auto=False,
+                    safety=True,
+                    branch_label=tr("backup.mainline"),
+                    size_label=node.size_label,
+                    verified=True,
+                    sub="",
+                    parent_id=self._current.get(game_id),
+                )
+            )
         self._current[game_id] = backup_id
         self._revision += 1
         return tr(
-            "result.restore_done",
+            "result.restore_written",
             name=self._name_of(game_id),
-            backup_id=backup_id,
-            title=node.title,
+            title=node.display_title,
+            files=24,
         )
 
     def run_create_branch(self, game_id: str, backup_id: str, branch_name: str) -> str:
@@ -455,6 +582,7 @@ class DemoArchiveService:
             )
         )
         self._current[game_id] = items[-1].backup_id
+        self._remember_storage_folder(game_id)
         self._revision += 1
         return tr("result.branch_done", backup_id=backup_id, branch_name=branch_name)
 
@@ -491,6 +619,7 @@ class DemoArchiveService:
             total_backups_label=tr("detail.backups_none"),
             total_backups_sub="",
             next_backup_label="—",
+            original_name=clean,
         )
         self._locations[game_id] = []
         self._items[game_id] = []
@@ -502,8 +631,20 @@ class DemoArchiveService:
         clean = self._clean_name(name)
         self._require_game(game_id)
         self._meta[game_id] = replace(self._meta[game_id], name=clean)
+        # 只改展示名称: 原始名称与备份目录名保持不变.
         self._details[game_id] = replace(self._details[game_id], name=clean)
         return self._live_summary(game_id)
+
+    def _remember_storage_folder(self, game_id: str) -> None:
+        """首次备份时记录"名称 + 存档路径"推导出的目录名(之后保持不变)."""
+        detail = self._details[game_id]
+        if detail.storage_folder:
+            return
+        paths = [item.path for item in self._locations.get(game_id, [])]
+        self._details[game_id] = replace(
+            detail,
+            storage_folder=game_folder(detail.original_name or detail.name, paths),
+        )
 
     def delete_game(self, game_id: str) -> None:
         """删除游戏记录及其存档位置."""
@@ -619,6 +760,41 @@ class DemoArchiveService:
         return updated
 
     # -- 内部 ---------------------------------------------------------------
+
+    def preview_location_removal(self, location_id: str) -> LocationRemovalPlan:
+        """返回演示用的删除预检(影响范围是演示数据)."""
+        item = self._find_location(location_id)
+        return LocationRemovalPlan(
+            game_name=self._name_of(item.game_id),
+            path=item.path,
+            path_kind=item.path_kind,
+            files=18,
+            directories=3,
+            symlinks=0,
+            total_size=64 * 1024 * 1024,
+            exists=True,
+            blocked_reason=None,
+        )
+
+    def delete_save_location(self, location_id: str, *, confirm_name: str) -> str:
+        """模拟把原始存档目录移入回收站, 并移除该位置."""
+        self._simulate()
+        item = self._find_location(location_id)
+        game_name = self._name_of(item.game_id)
+        if confirm_name.strip().casefold() != game_name.strip().casefold():
+            raise ArchiveManagementError(tr("error.location_delete_confirm"))
+        remaining = [
+            entry
+            for entry in self._locations.get(item.game_id, [])
+            if entry.location_id != location_id
+        ]
+        if item.is_primary and remaining:
+            remaining[0] = replace(remaining[0], is_primary=True)
+        self._locations[item.game_id] = remaining
+        self._revision += 1
+        return tr("result.location_deleted", path=item.path, count=18)
+
+    # -- 其它 ---------------------------------------------------------------
 
     def _require_locations(self, game_id: str) -> None:
         if not self._locations[game_id]:

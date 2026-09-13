@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import tkinter as tk
@@ -17,9 +18,11 @@ from typing import Literal
 import customtkinter as ctk
 
 from archive_management.application.backup import MAX_NOTE_LENGTH
-from archive_management.exceptions import ArchiveManagementError
+from archive_management.application.restore import RestorePlan
+from archive_management.exceptions import ArchiveManagementError, ContentUnchangedError
 from archive_management.i18n import tr
 from archive_management.infrastructure.paths import ApplicationPaths
+from archive_management.services.audit import log_action
 from archive_management.services.hotkeys import (
     DEFAULT_ACCELERATOR,
     GlobalHotkeyService,
@@ -32,7 +35,7 @@ from archive_management.ui.dialogs import (
     confirm_dialog,
     edit_backup_dialog,
     info_dialog,
-    schedule_dialog,
+    restore_dialog,
 )
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
@@ -40,13 +43,20 @@ from archive_management.ui.models import (
     FeedbackKind,
     GameDetail,
     GameSummary,
+    SourceFilter,
     TaskStatus,
     ViewKind,
     branch_order,
+    filter_by_source_label,
+    size_label,
     timeline_order,
 )
 from archive_management.ui.palette import DEFAULT_THEME, Palette
+from archive_management.ui.schedule_window import ScheduleWindow
+from archive_management.ui.settings_window import SettingsWindow
 from archive_management.ui.widgets import UiKit
+
+logger = logging.getLogger(__name__)
 
 _TONE_COLORS: dict[str, str] = {
     "orange": "#d15b3e",
@@ -60,8 +70,17 @@ _RAIL_WIDTH = 350
 _BRANCH_MARK = "└ "
 # 当前节点标记: 后续备份/分支都从这个节点继续.
 _CURRENT_MARK = "●"
-# 自动备份保留份数的可配置上限.
-MAX_KEEP_AUTO = 20
+
+
+def _schedule_state(task: TaskStatus) -> str:
+    """返回定时备份的启用状态文案(未配置/已启用/已暂停)."""
+    if not task.schedule_text:
+        return tr("schedule.state_off")
+    return (
+        tr("schedule.state_on")
+        if task.schedule_enabled
+        else tr("schedule.state_paused")
+    )
 
 
 class ArchiveApp(ctk.CTk):
@@ -102,16 +121,16 @@ class ArchiveApp(ctk.CTk):
         self._row_unregisters: list[Callable[[], None]] = []
         self._card_unregisters: list[Callable[[], None]] = []
 
-        self._messages: queue.Queue[tuple[Literal["ok", "err", "hotkey"], str]] = (
-            queue.Queue()
-        )
+        self._messages: queue.Queue[
+            tuple[Literal["ok", "err", "unchanged", "hotkey"], str]
+        ] = queue.Queue()
         self._pending_ok: Callable[[str], None] | None = None
-        self._sync_labels: list[ctk.CTkLabel] = []
         self._last_feedback: tuple[FeedbackKind, str] = (
             FeedbackKind.INFO,
             tr("status.ready"),
         )
         self._verified = True
+        self._usage_text = tr("status.usage", used="—")
         self._hotkeys = hotkeys if hotkeys is not None else GlobalHotkeyService()
         self._shortcut_text = "—"
         self.title(title)
@@ -192,20 +211,6 @@ class ArchiveApp(ctk.CTk):
         )
         brand.grid(row=0, column=1, padx=(0, 8), pady=10)
 
-        self._sync_label = self.kit.label(parent, "", style="muted", size=12)
-        self._sync_label.grid(row=0, column=2, sticky="e", padx=8)
-        self._sync_labels.append(self._sync_label)
-
-        self.theme_btn = self.kit.button(
-            parent,
-            tr("theme.to_light"),
-            style="ghost",
-            command=self._on_toggle_theme,
-            width=96,
-            height=30,
-        )
-        self.theme_btn.grid(row=0, column=3, padx=(6, 18), pady=10)
-
     def _build_sidebar(self, parent: ctk.CTkFrame) -> None:
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(1, weight=1)
@@ -246,7 +251,6 @@ class ArchiveApp(ctk.CTk):
         nav.grid(row=4, column=0, sticky="ew", padx=16, pady=2)
         self.kit.register(lambda p: nav.configure(fg_color="transparent"))
         nav_items = [
-            (tr("sidebar.nav_all"), tr("sidebar.nav_all_hint")),
             (tr("sidebar.nav_scheduled"), tr("sidebar.nav_scheduled_hint")),
             (tr("sidebar.nav_settings"), tr("sidebar.nav_settings_hint")),
         ]
@@ -360,6 +364,8 @@ class ArchiveApp(ctk.CTk):
             info, text="", font=ctk.CTkFont(size=12, weight="bold")
         )
         self._hero_verified_label.pack(anchor="w", pady=(6, 0))
+        # 额外信息: 原始名称(改过名时)与备份根下的目录名.
+        self._hero_origin_label = self.kit.label(info, "", style="muted", size=11)
         self.kit.register(
             lambda p: self._hero_verified_label.configure(
                 text_color=p.success if self._verified else p.danger
@@ -432,8 +438,13 @@ class ArchiveApp(ctk.CTk):
         )
         self._filter_source = self._new_combo(
             parent,
-            [tr("filter.all_sources"), tr("filter.manual"), tr("filter.auto")],
-            tr("filter.all_sources"),
+            [
+                SourceFilter.ALL.label,
+                SourceFilter.MANUAL.label,
+                SourceFilter.AUTO.label,
+                SourceFilter.SAFETY.label,
+            ],
+            SourceFilter.ALL.label,
         )
         self._filter_source.grid(row=0, column=3, padx=(0, 8), pady=10)
         self._filter_period = self._new_combo(
@@ -630,6 +641,7 @@ class ArchiveApp(ctk.CTk):
         self._task_name_label = self.kit.label(
             panel, "", style="body", size=13, weight="bold"
         )
+        self._task_name_label.configure(wraplength=180, justify="left")
         self._task_name_label.grid(row=1, column=0, padx=18, sticky="w")
         self._task_state_label = self.kit.label(panel, "", style="muted", size=12)
         self._task_state_label.grid(row=1, column=1, padx=(0, 18), sticky="e")
@@ -663,43 +675,49 @@ class ArchiveApp(ctk.CTk):
             row=4, column=0, padx=18, sticky="w"
         )
         self._task_next = self.kit.label(panel, "", style="body", size=12)
+        self._task_next.configure(wraplength=180, justify="left")
         self._task_next.grid(row=4, column=1, padx=(0, 18), sticky="e")
 
         self.kit.label(panel, tr("task.target"), style="muted", size=12).grid(
-            row=5, column=0, padx=18, pady=(6, 0), sticky="w"
+            row=5, column=0, padx=18, pady=(6, 0), sticky="nw"
         )
-        self._task_target = self.kit.label(panel, "", style="muted", size=12)
-        self._task_target.grid(row=5, column=1, padx=(0, 18), pady=(6, 0), sticky="e")
+        # 备份目标是完整路径, 必须换行显示, 否则会被卡片裁掉.
+        self._task_target = self.kit.label(panel, "", style="muted", size=11)
+        self._task_target.configure(wraplength=190, justify="left")
+        self._task_target.grid(row=5, column=1, padx=(0, 18), pady=(6, 0), sticky="ne")
 
         self.kit.label(panel, tr("task.shortcut"), style="muted", size=12).grid(
             row=6, column=0, padx=18, pady=(6, 0), sticky="w"
         )
         self._task_shortcut = self.kit.label(panel, "", style="body", size=11)
         self._task_shortcut.grid(row=6, column=1, padx=(0, 18), pady=(6, 0), sticky="e")
-
-        self._task_edit_btn = self.kit.button(
-            panel,
-            tr("task.edit"),
-            style="ghost",
-            command=self._on_edit_task,
-            width=150,
-            height=28,
-        )
-        self._task_edit_btn.grid(
+        self._task_hint = self.kit.label(panel, "", style="muted", size=11)
+        self._task_hint.configure(wraplength=250, justify="left")
+        self._task_hint.grid(
             row=7, column=0, columnspan=2, padx=18, pady=(10, 12), sticky="w"
         )
 
     # ---------------------------------------------------------------- 数据装载
 
+    def _refresh_usage(self) -> None:
+        """刷新状态栏的存储占用文本.
+
+        目录扫描成本不低, 因此只在启动与数据版本变化时重算一次, 其余时候
+        复用缓存文本(``_render_task`` 会高频调用)。
+        """
+        self._usage_text = tr(
+            "status.usage", used=size_label(self.backend.storage_usage())
+        )
+
     def _load_first_game(self) -> None:
         games = self.backend.list_games()
         self._render_game_list(games)
+        self._refresh_usage()
         if games:
             self._select_game(games[0].game_id)
         else:
             self._show_empty_list()
         self._render_task(self.backend.task_status(self._game_id))
-        self._refresh_sync()
 
     def _render_game_list(self, games: list[GameSummary]) -> None:
         for unsubscribe in self._row_unregisters:
@@ -782,13 +800,36 @@ class ArchiveApp(ctk.CTk):
             name.configure(text_color=palette.text_body)
         detail.configure(text_color=palette.text_muted)
 
-    def _refresh_sync(self) -> None:
-        for label in self._sync_labels:
-            label.configure(text=tr("topbar.sync", stamp="2026/09/06  09:42"))
-
     def _show_empty_list(self) -> None:
+        """没有游戏时的空状态: 列表与概要区一起清空, 不留下被删游戏的内容.
+
+        删除最后一个游戏后, 概要区(名称/存档位置/统计)、标题行与选中面板都
+        还停留在被删的那款游戏上, 因此这里把它们全部复位。
+        """
+        self._game_id = None
+        self._game = None
+        self._backup_id = None
+        self._current_id = None
+        self._items = []
+        self._cards = {}
+        self._hover_id = None
         self._list_title.configure(text=tr("list.fallback_title"))
         self._list_sub.configure(text=tr("list.no_games"))
+        self._title_label.configure(text=tr("hero.no_game"))
+        self._subtitle_label.configure(text=tr("list.no_games"))
+        self._hero_tile.configure(text="", fg_color=self._tone_color(None))
+        self._hero_name_label.configure(text=tr("hero.no_game"))
+        self._hero_location_label.configure(text="")
+        self._hero_verified_label.configure(text="")
+        self._hero_origin_label.pack_forget()
+        self._stat_recent_value.configure(text="—")
+        self._stat_recent_sub.configure(text="")
+        self._stat_total_value.configure(text=tr("detail.backups_none"))
+        self._stat_total_sub.configure(text="")
+        self._stat_next_value.configure(text="—")
+        self._render_selected(None)
+        self._render_task(self.backend.task_status(None))
+        self._update_actions()
         for child in self._list_scroll.winfo_children():
             child.destroy()
         empty = self.kit.label(
@@ -803,7 +844,10 @@ class ArchiveApp(ctk.CTk):
         games = self.backend.list_games()
         self._game = next((g for g in games if g.game_id == game_id), None)
         if self._game is None:
+            # 游戏已被删除: 不要留着指向上一次选中项的“半选中”状态.
+            self._show_empty_list()
             return
+        log_action("ui.select_game", basic=True, game_id=game_id, name=self._game.name)
         detail = self.backend.get_detail(game_id)
         self._backup_id = None
         self._hero_tile.configure(
@@ -819,9 +863,19 @@ class ArchiveApp(ctk.CTk):
         if self._game is not None and not self._game.has_locations:
             self._feedback(FeedbackKind.INFO, tr("game.no_locations_hint"))
 
+    def _render_origin(self, detail: GameDetail) -> None:
+        """展示"原始名称 / 备份目录"补充信息(无内容时不占位)."""
+        text = detail.origin_label
+        if not text:
+            self._hero_origin_label.pack_forget()
+            return
+        self._hero_origin_label.configure(text=text)
+        self._hero_origin_label.pack(anchor="w", pady=(4, 0))
+
     def _render_hero(self, detail: GameDetail) -> None:
         self._verified = detail.location_verified
         self._hero_name_label.configure(text=detail.name)
+        self._render_origin(detail)
         if detail.main_location:
             location = f"{detail.location_note}  ·  {detail.main_location}"
         else:
@@ -841,7 +895,8 @@ class ArchiveApp(ctk.CTk):
         self._subtitle_label.configure(text=detail.subtitle)
 
     def _render_task(self, task: TaskStatus) -> None:
-        state = tr("task.running") if task.running else tr("task.paused")
+        """刷新任务状态卡: 运行中的操作优先, 否则显示定时任务的启用状态."""
+        state = tr("task.running") if task.running else _schedule_state(task)
         self._task_name_label.configure(text=task.task_name)
         self._task_state_label.configure(text=state)
         self._task_progress.set(task.progress)
@@ -851,11 +906,10 @@ class ArchiveApp(ctk.CTk):
         self._task_next.configure(text=task.next_run_label)
         self._task_target.configure(text=task.target_label)
         self._task_shortcut.configure(text=self._shortcut_text)
+        self._task_hint.configure(text=tr("task.hint"))
         self._cancel_btn.configure(state="normal" if task.cancellable else "disabled")
         self._status_title.configure(text=tr("status.service_ok"))
-        self._status_sub.configure(
-            text=tr("status.disk", free="186 GB", shortcut=self._shortcut_text)
-        )
+        self._status_sub.configure(text=self._usage_text)
 
     def _refresh_task(self) -> None:
         """轮询任务状态: 备份进行中时刷新进度, 数据变化时重载列表.
@@ -876,9 +930,17 @@ class ArchiveApp(ctk.CTk):
     def _reload_data(self, task: TaskStatus | None = None) -> None:
         """重载备份列表与概要, 并同步数据版本号与选中项."""
         status = task if task is not None else self.backend.task_status(self._game_id)
+        if status.revision != self._revision:
+            self._refresh_usage()
         self._revision = status.revision
         self._render_task(status)
         if self._game_id is None:
+            return
+        games = self.backend.list_games()
+        if not any(game.game_id == self._game_id for game in games):
+            # 当前游戏已被删除(例如在别处删除后由轮询触发的重载): 整体回到空状态.
+            self._render_game_list(games)
+            self._show_empty_list()
             return
         self._render_list()
         self._render_hero(self.backend.get_detail(self._game_id))
@@ -901,16 +963,19 @@ class ArchiveApp(ctk.CTk):
         self._items = self.backend.list_backups(game_id)
         current = next((item for item in self._items if item.is_current), None)
         self._current_id = None if current is None else current.backup_id
+        # 先按来源筛选再排序: 显式筛选"安全点"时, 分支视图也应把它们显示出来.
+        selected = filter_by_source_label(self._items, self._filter_source.get())
+        show_safety = self._filter_source.get() == SourceFilter.SAFETY.label
         if self._view == ViewKind.TIMELINE:
-            ordered = timeline_order(self._items)
+            ordered = timeline_order(selected)
             title, sub = tr("list.timeline_title"), tr("list.timeline_sub")
         else:
-            ordered = branch_order(self._items)
+            ordered = branch_order(selected, include_safety=show_safety)
             title, sub = tr("list.branch_title"), tr("list.branch_sub")
         self._list_title.configure(text=title)
         self._list_sub.configure(text=sub)
 
-        items = self._apply_filters(ordered)
+        items = self._apply_period_filter(ordered)
         if self._backup_id is not None and not any(
             item.backup_id == self._backup_id for item in items
         ):
@@ -971,14 +1036,8 @@ class ArchiveApp(ctk.CTk):
             text = item.size_label
         return f"{text}\n{item.sub}" if item.sub else text
 
-    def _apply_filters(self, items: list[BackupItem]) -> list[BackupItem]:
-        """按来源与时间范围筛选备份节点."""
-        source = self._filter_source.get()
-        if source == tr("filter.auto"):
-            items = [item for item in items if item.auto]
-        elif source == tr("filter.manual"):
-            items = [item for item in items if not item.auto]
-
+    def _apply_period_filter(self, items: list[BackupItem]) -> list[BackupItem]:
+        """按时间范围筛选备份节点(来源筛选已在排序前完成)."""
         period = self._filter_period.get()
         if period != tr("filter.all_time"):
             days = 7 if period == tr("filter.last_week") else 30
@@ -1124,6 +1183,13 @@ class ArchiveApp(ctk.CTk):
 
     def _select_backup(self, item: BackupItem) -> None:
         previous, self._backup_id = self._backup_id, item.backup_id
+        log_action(
+            "ui.select_backup",
+            basic=True,
+            game_id=self._game_id,
+            backup_id=item.backup_id,
+            title=item.display_title,
+        )
         self._render_selected(item)
         self._update_actions()
         self._paint_card_by_id(previous)
@@ -1163,11 +1229,19 @@ class ArchiveApp(ctk.CTk):
         if view == self._view:
             return
         self._view = view
+        log_action("ui.switch_view", basic=True, view=view.value, game_id=self._game_id)
         self._render_list()
         self.kit.apply(self.p)
 
-    def _on_filter_change(self, _value: str) -> None:
+    def _on_filter_change(self, value: str) -> None:
         """筛选条件变化时刷新列表."""
+        log_action(
+            "ui.filter",
+            basic=True,
+            filter=value,
+            period=self._filter_period.get(),
+            game_id=self._game_id,
+        )
         self._render_list()
         self._update_actions()
 
@@ -1212,31 +1286,67 @@ class ArchiveApp(ctk.CTk):
         self._feedback(FeedbackKind.PENDING, tr("action.cancel_pending"))
 
     def _on_restore(self) -> None:
-        """恢复到此节点: 把当前节点移到这里, 之后的备份/分支都从此继续."""
+        """恢复到此节点: 把备份内容写回原始存档, 之后的备份/分支都从此继续."""
         game = self._game
-        if game is None or self._backup_id is None or self._busy:
-            return
         item = self._selected_item()
-        confirmed = confirm_dialog(
+        if game is None or item is None or self._busy:
+            return
+        try:
+            plan = self.backend.preview_restore(game.game_id, item.backup_id)
+        except ArchiveManagementError as exc:
+            self._feedback(FeedbackKind.ERROR, str(exc))
+            return
+        if not plan.snapshot_ok:
+            self._feedback(
+                FeedbackKind.ERROR,
+                plan.snapshot_reason or tr("dialog.restore_invalid"),
+            )
+            return
+        blocked = plan.blocked_targets
+        if blocked:
+            self._feedback(
+                FeedbackKind.ERROR,
+                tr(
+                    "dialog.restore_blocked",
+                    path=blocked[0].path,
+                    reason=self._restore_problem_text(blocked[0].problem),
+                ),
+            )
+            return
+        options = restore_dialog(
             self,
             self.p,
             title=tr("dialog.restore_title"),
-            message=tr(
-                "dialog.restore_message",
-                name=game.name,
-                title=item.display_title if item is not None else "",
-            ),
-            confirm_text=tr("dialog.restore_confirm"),
+            summary=self._restore_summary(game.name, item, plan),
+            safety_label=tr("dialog.restore_safety"),
+            safety_hint=tr("dialog.restore_safety_hint"),
+            safety_available=plan.safety_point_available,
+            danger_note=self._restore_danger_note(plan),
         )
-        if not confirmed:
+        if options is None:
+            log_action(
+                "restore",
+                basic=True,
+                result="cancelled",
+                game_id=game.game_id,
+                backup_id=item.backup_id,
+            )
             self._feedback(FeedbackKind.INFO, tr("action.restore_canceled"))
             return
+        safety_point = options
+        # 预检已经确认游戏在运行, 这里代表用户看过提示后选择强制执行.
+        force = plan.process.running
+        backup_id = item.backup_id
         self._set_busy(True)
-        backup_id = self._backup_id
         self._feedback(FeedbackKind.PENDING, tr("action.restore_pending"))
 
         def work() -> str:
-            return self.backend.run_restore(game.game_id, backup_id)
+            return self.backend.run_restore(
+                game.game_id,
+                backup_id,
+                safety_point=safety_point,
+                force=force,
+            )
 
         def ok(message: str) -> None:
             self._set_busy(False)
@@ -1244,6 +1354,37 @@ class ArchiveApp(ctk.CTk):
             self._reload_data()
 
         self._submit(work, ok)
+
+    def _restore_summary(self, name: str, item: BackupItem, plan: RestorePlan) -> str:
+        """拼装恢复对话框的摘要文本(快照规模与写回目标)."""
+        targets = "\n".join(f"· {target.path}" for target in plan.targets)
+        return tr(
+            "dialog.restore_summary",
+            name=name,
+            title=item.display_title,
+            files=plan.file_count,
+            size=item.size_label,
+            targets=targets,
+        )
+
+    def _restore_danger_note(self, plan: RestorePlan) -> str:
+        """拼装需要用户额外确认的风险提示."""
+        notes: list[str] = []
+        if plan.process.running:
+            notes.append(
+                tr(
+                    "dialog.restore_process",
+                    matches=", ".join(plan.process.matches[:3]),
+                )
+            )
+        notes.extend(tr(f"restore.warn_{code}") for code in plan.warnings)
+        return "\n".join(notes)
+
+    def _restore_problem_text(self, code: str | None) -> str:
+        """把恢复预检的原因代码映射为文案."""
+        if code is None:
+            return ""
+        return tr(f"restore.problem_{code}")
 
     def _on_branch(self) -> None:
         game = self._game
@@ -1257,6 +1398,12 @@ class ArchiveApp(ctk.CTk):
             initial=tr("dialog.branch_default"),
         )
         if not branch_name:
+            log_action(
+                "branch.cancel",
+                basic=True,
+                game_id=game.game_id,
+                parent_id=self._backup_id,
+            )
             self._feedback(FeedbackKind.INFO, tr("action.branch_canceled"))
             return
         self._set_busy(True)
@@ -1293,6 +1440,13 @@ class ArchiveApp(ctk.CTk):
             limit=MAX_NOTE_LENGTH,
         )
         if edited is None:
+            log_action(
+                "backup.update_meta",
+                basic=True,
+                game_id=game.game_id,
+                backup_id=item.backup_id,
+                result="cancelled",
+            )
             return
         title, note = edited
         backup_id = item.backup_id
@@ -1333,6 +1487,14 @@ class ArchiveApp(ctk.CTk):
                 confirm_text=tr("dialog.delete_confirm"),
             )
             if not confirmed:
+                log_action(
+                    "backup.delete",
+                    basic=True,
+                    game_id=game.game_id,
+                    backup_id=item.backup_id,
+                    result="cancelled",
+                    removed=plan.removed_count,
+                )
                 self._feedback(FeedbackKind.INFO, tr("action.delete_canceled"))
                 return
         backup_id = item.backup_id
@@ -1376,7 +1538,8 @@ class ArchiveApp(ctk.CTk):
 
         self._submit(work, ok)
 
-    def _on_toggle_theme(self) -> None:
+    def _on_toggle_theme(self) -> str:
+        """切换浅/深主题并返回生效主题名(供设置窗口刷新按钮文案)."""
         next_theme = "light" if self._theme == "dark" else "dark"
         self._theme = self.backend.set_theme(next_theme)
         ctk.set_appearance_mode(self._theme)
@@ -1385,9 +1548,10 @@ class ArchiveApp(ctk.CTk):
         theme_text = (
             tr("theme.to_dark") if self._theme == "light" else tr("theme.to_light")
         )
-        self.theme_btn.configure(text=theme_text)
         self.kit.apply(self.p)
+        log_action("ui.toggle_theme", basic=True, theme=self._theme)
         self._feedback(FeedbackKind.INFO, tr("theme.switched", theme=theme_text))
+        return self._theme
 
     def _on_add_game(self) -> None:
         """添加游戏: 询问名称后写入后端并选中."""
@@ -1400,76 +1564,44 @@ class ArchiveApp(ctk.CTk):
             text=tr("dialog.add_game_prompt"),
         )
         if not name:
+            log_action("game.add", basic=True, result="cancelled")
             return
         try:
             summary = self.backend.add_game(name)
         except ArchiveManagementError as exc:
+            log_action("game.add", result="failed", error=str(exc))
             self._feedback(FeedbackKind.ERROR, str(exc))
             return
+        log_action("game.add", game_id=summary.game_id, name=summary.name)
         self._feedback(FeedbackKind.SUCCESS, tr("result.game_added", name=summary.name))
         self._refresh_after_manage(select=summary.game_id)
 
     def _on_nav(self, name: str, message: str) -> None:
         if name == tr("sidebar.nav_settings"):
             self._open_settings()
+        elif name == tr("sidebar.nav_scheduled"):
+            self._open_schedule_window()
         else:
             self._feedback(FeedbackKind.INFO, message)
 
+    def _open_schedule_window(self) -> None:
+        """打开全局定时任务窗口(可新增/编辑/删除每个游戏的定时备份)."""
+        log_action("ui.open_schedules", basic=True)
+        ScheduleWindow(
+            self,
+            backend=self.backend,
+            palette=self.p,
+            on_change=self._after_schedule_change,
+        )
+
+    def _after_schedule_change(self) -> None:
+        """定时配置变化后刷新任务卡(概要区的下次运行时间也随之一同更新)."""
+        self._render_task(self.backend.task_status(self._game_id))
+        if self._game_id is not None:
+            self._render_hero(self.backend.get_detail(self._game_id))
+
     def _on_game_settings(self) -> None:
         self._open_manage_game()
-
-    def _on_edit_task(self) -> None:
-        """在一个窗口内编辑定时备份周期(留空即取消)与自动备份保留份数."""
-        game = self._game
-        if game is None:
-            self._feedback(FeedbackKind.INFO, tr("manage.require_game"))
-            return
-        task = self.backend.task_status(game.game_id)
-        edited = schedule_dialog(
-            self,
-            self.p,
-            title=tr("dialog.schedule_title"),
-            interval_label=tr("dialog.schedule_interval_label"),
-            interval_prompt=tr(
-                "dialog.schedule_prompt",
-                current=task.schedule_text or tr("task.unscheduled"),
-            ),
-            keep_label=tr("dialog.keep_auto_label"),
-            keep_prompt=tr("dialog.keep_auto_prompt", max=MAX_KEEP_AUTO),
-            initial_interval=task.schedule_text,
-            initial_keep=str(task.keep_auto),
-        )
-        if edited is None:
-            return
-        text, keep_text = edited
-        keep_auto = task.keep_auto
-        if keep_text:
-            try:
-                keep_auto = int(keep_text)
-            except ValueError:
-                self._feedback(FeedbackKind.ERROR, tr("error.keep_auto_invalid"))
-                return
-            if not 1 <= keep_auto <= MAX_KEEP_AUTO:
-                self._feedback(
-                    FeedbackKind.ERROR,
-                    tr("error.keep_auto_range", max=MAX_KEEP_AUTO),
-                )
-                return
-        try:
-            status = self.backend.set_schedule(game.game_id, text, keep_auto=keep_auto)
-        except ArchiveManagementError as exc:
-            self._feedback(FeedbackKind.ERROR, str(exc))
-            return
-        self._render_task(status)
-        self._render_hero(self.backend.get_detail(game.game_id))
-        self._feedback(
-            FeedbackKind.SUCCESS,
-            (
-                tr("result.schedule_saved", interval=status.schedule_text)
-                if status.schedule_text
-                else tr("result.schedule_cleared")
-            ),
-        )
 
     def _open_manage_game(self) -> None:
         """打开当前游戏的管理窗口(重命名/停用/删除/管理存档位置)."""
@@ -1504,26 +1636,18 @@ class ArchiveApp(ctk.CTk):
         if games:
             self._select_game(games[0].game_id)
         else:
-            self._game_id = None
-            self._game = None
+            # 最后一个游戏被删掉: 连概要区一起回到空状态.
             self._show_empty_list()
 
     def _open_settings(self) -> None:
-        task = self.backend.task_status(self._game_id)
-        state = tr("task.running") if task.running else tr("task.paused")
-        info_dialog(
+        """打开设置窗口(主题切换、快捷键说明; 不包含定时任务配置)."""
+        log_action("ui.open_settings", basic=True, theme=self._theme)
+        SettingsWindow(
             self,
-            self.p,
-            title=tr("dialog.settings_title"),
-            message=tr(
-                "dialog.settings_message",
-                theme=self._theme,
-                task=task.task_name,
-                state=state,
-                next_run=task.next_run_label,
-                shortcut=self._shortcut_text,
-                note=tr("dialog.settings_note"),
-            ),
+            palette=self.p,
+            theme=self._theme,
+            shortcut=self._shortcut_text,
+            on_toggle_theme=self._on_toggle_theme,
         )
 
     def _on_close(self) -> None:
@@ -1532,7 +1656,8 @@ class ArchiveApp(ctk.CTk):
         try:
             self.backend.shutdown()
         except Exception as exc:  # pragma: no cover - 退出期异常不阻塞关闭
-            print(f"释放后台资源失败: {exc}")
+            # GUI 不使用 print: 退出期的问题只写日志, 不干扰界面.
+            logger.warning("释放后台资源失败: %s", exc)
         self.destroy()
 
     # ---------------------------------------------------------------- 反馈与后台
@@ -1570,6 +1695,8 @@ class ArchiveApp(ctk.CTk):
         def runner() -> None:
             try:
                 payload = work()
+            except ContentUnchangedError as exc:
+                self._messages.put(("unchanged", exc.target_label))
             except Exception as exc:
                 self._messages.put(("err", str(exc)))
             else:
@@ -1592,7 +1719,7 @@ class ArchiveApp(ctk.CTk):
         self.after(100, self._poll_messages)
 
     def _finish_message(
-        self, kind: Literal["ok", "err", "hotkey"], payload: str
+        self, kind: Literal["ok", "err", "unchanged", "hotkey"], payload: str
     ) -> None:
         on_ok = self._pending_ok
         self._pending_ok = None
@@ -1604,6 +1731,17 @@ class ArchiveApp(ctk.CTk):
                 self._set_busy(False)
             return
         self._set_busy(False)
+        if kind == "unchanged":
+            # 存档与参照备份完全一致: 弹窗告知, 不当作错误.
+            message = tr("dialog.unchanged_backup", backup=payload)
+            info_dialog(
+                self,
+                self.p,
+                title=tr("dialog.unchanged_title"),
+                message=message,
+            )
+            self._feedback(FeedbackKind.INFO, message)
+            return
         if self._canceled:
             self._canceled = False
             self._feedback(FeedbackKind.INFO, payload)
@@ -1630,12 +1768,20 @@ def run_gui(
     smoke_seconds: float | None = None,
     display_name: str = "ArchiveManagement",
     paths: ApplicationPaths | None = None,
+    verbose: bool = False,
 ) -> int:
-    """启动基于 SQLite 的真实后端并进入主循环, 返回退出码."""
+    """启动基于 SQLite 的真实后端并进入主循环, 返回退出码.
+
+    未装配过日志时自动写入应用日志目录: 文件始终记录全部级别的用户操作,
+    控制台默认只显示高风险操作(``verbose=True`` 时放宽到 DEBUG)。
+    """
     from archive_management.infrastructure.database import Database
+    from archive_management.logging_config import configure_logging
     from archive_management.ui.sql_backend import SqlArchiveService
 
     paths = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
+    configure_logging(paths.log_dir, level=logging.DEBUG if verbose else logging.INFO)
+    logger.info("界面启动(verbose=%s)", verbose)
     database = Database(paths.database_path)
     database.migrate()
     backend: ArchiveService = SqlArchiveService(database, backup_root=paths.backup_root)

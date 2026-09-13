@@ -4,7 +4,7 @@
 内应用尚未执行的迁移(PLAN 5、阶段 A).
 
 表结构与 PLAN 第 5 节对齐: games、save_locations、backup_nodes、
-backup_files、scheduled_jobs、operations.
+backup_files、scheduled_jobs. 操作日志不落库(见版本 3), 改为写入日志文件。
 """
 
 from __future__ import annotations
@@ -98,23 +98,6 @@ _V1_STATEMENTS: Sequence[str] = (
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS operations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        op_kind TEXT NOT NULL
-            CHECK (op_kind IN ('backup', 'restore', 'import', 'export',
-                               'delete', 'create_branch')),
-        game_id INTEGER REFERENCES games(id) ON DELETE SET NULL,
-        status TEXT NOT NULL DEFAULT 'started'
-            CHECK (status IN ('started', 'succeeded', 'failed', 'cancelled')),
-        message TEXT,
-        started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        finished_at TEXT
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_operations_started ON operations (started_at)
-    """,
 )
 
 # 版本 2(阶段 D 迭代): 备份命名与描述、每游戏的"当前节点"指针、自动备份保留份数.
@@ -136,9 +119,40 @@ _V2_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 3(阶段 E 迭代): 安全点标记与操作日志出库.
+#
+# - ``is_safety``: "恢复前安全点"是特殊的手动备份, 只在时间线展示, 不参与
+#   分支树的线路关系, 因此用一个独立标记而不是新增 node_kind(避免为了改
+#   CHECK 约束而重建整张表, 那会连带影响外键与既有数据).
+# - ``operations``: 操作日志改为写入日志文件(见 services/audit.py), 不再落库.
+_V3_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE backup_nodes ADD COLUMN is_safety INTEGER NOT NULL DEFAULT 0
+    """,
+    "DROP TABLE IF EXISTS operations",
+    "DROP INDEX IF EXISTS idx_operations_started",
+)
+
+# 版本 4(阶段 E 迭代): 备份目录按名称命名所需的两个字段.
+#
+# - ``original_name``: 录入游戏时识别到的名称(重命名不会改写它), 仅用于界面
+#   展示"原始名称", 让用户知道磁盘上的目录来自哪个名字;
+# - ``storage_key``: 备份根目录下该游戏实际使用的目录名(``<slug>-<token>``),
+#   第一次备份时写入后不再变化 —— 改名或增删存档位置都不会搬动已有备份。
+_V4_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE games ADD COLUMN original_name TEXT NOT NULL DEFAULT ''
+    """,
+    """
+    ALTER TABLE games ADD COLUMN storage_key TEXT NOT NULL DEFAULT ''
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
+    (3, _V3_STATEMENTS),
+    (4, _V4_STATEMENTS),
 )
 
 

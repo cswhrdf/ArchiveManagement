@@ -344,6 +344,24 @@ class BackupScheduler:
         """返回某游戏的任务配置."""
         return self._entries.get(game_id)
 
+    def refresh(self, game_id: int) -> ScheduledEntry | None:
+        """重新读取后端的下次触发时间, 返回最新条目(无任务时返回 None).
+
+        ``next_run_at`` 在登记时从后端读一次, 每次执行后后端会重新排下一次
+        触发时间; 不刷新的话界面会一直显示上一次(已经过去的)时间。
+        """
+        entry = self._entries.get(game_id)
+        if entry is None:
+            return None
+        updated = ScheduledEntry(
+            game_id=entry.game_id,
+            interval_minutes=entry.interval_minutes,
+            enabled=entry.enabled,
+            next_run_at=self._backend.next_run_at(job_id_for(game_id)),
+        )
+        self._entries[game_id] = updated
+        return updated
+
     def running_games(self) -> tuple[int, ...]:
         """返回当前正在执行备份的游戏 id."""
         with self._gate:

@@ -574,3 +574,117 @@ def schedule_dialog(
     _center(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
+
+
+def restore_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    title: str,
+    summary: str,
+    safety_label: str,
+    safety_hint: str,
+    safety_available: bool,
+    safety_default: bool = True,
+    danger_note: str = "",
+) -> bool | None:
+    """在同一个窗口里确认恢复并选择是否先创建安全点; 取消返回 None.
+
+    返回 ``True`` 表示恢复前先创建安全点(默认), ``False`` 表示直接恢复。
+    当前没有可备份内容时选项被禁用且强制为 ``False``; 风险提示(例如检测到
+    游戏进程在运行)与选项在同一窗口展示, 不再额外弹窗(PLAN 阶段 E 第 2 条)。
+    """
+    window = ctk.CTkToplevel(parent)
+    window.title(title)
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    ctk.CTkLabel(
+        window,
+        text=summary,
+        anchor="w",
+        justify="left",
+        wraplength=420,
+        font=ctk.CTkFont(size=13),
+        text_color=palette.text_body,
+    ).pack(padx=24, pady=(20, 8), anchor="w")
+
+    if danger_note:
+        ctk.CTkLabel(
+            window,
+            text=danger_note,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.danger,
+        ).pack(padx=24, pady=(0, 8), anchor="w")
+
+    safety_var = ctk.BooleanVar(value=safety_default and safety_available)
+
+    def option(
+        label: str,
+        hint_text: str,
+        variable: ctk.BooleanVar,
+        *,
+        available: bool,
+    ) -> None:
+        box = ctk.CTkCheckBox(
+            window,
+            text=label,
+            variable=variable,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+            fg_color=palette.accent,
+            hover_color=palette.accent_soft_border,
+            checkmark_color=palette.accent_text,
+        )
+        if not available:
+            box.configure(state="disabled")
+        box.pack(padx=24, pady=(0, 2), anchor="w")
+        ctk.CTkLabel(
+            window,
+            text=hint_text,
+            anchor="w",
+            justify="left",
+            wraplength=400,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        ).pack(padx=(46, 24), pady=(0, 10), anchor="w")
+
+    option(safety_label, safety_hint, safety_var, available=safety_available)
+
+    result: list[bool] = []
+
+    def submit() -> None:
+        result.append(bool(safety_var.get()) and safety_available)
+        window.destroy()
+
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.restore_confirm"),
+        width=112,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=submit,
+    ).pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None

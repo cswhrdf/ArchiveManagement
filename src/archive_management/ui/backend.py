@@ -8,12 +8,15 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from archive_management.application.locations import LocationRemovalPlan
+from archive_management.application.restore import RestorePlan
 from archive_management.domain import DEFAULT_KEEP_AUTO, DeletionPlan, PathKind
 from archive_management.ui.models import (
     BackupItem,
     GameDetail,
     GameSummary,
     LocationItem,
+    ScheduleItem,
     TaskStatus,
 )
 
@@ -50,8 +53,24 @@ class ArchiveService(Protocol):
         """立即创建一次备份;成功返回提示,失败抛出异常."""
         ...
 
-    def run_restore(self, game_id: str, backup_id: str) -> str:
-        """把当前节点切换到指定备份; 之后的备份/分支都从该节点继续."""
+    def run_restore(
+        self,
+        game_id: str,
+        backup_id: str,
+        *,
+        safety_point: bool = True,
+        force: bool = False,
+    ) -> str:
+        """把备份内容写回原始存档位置, 并把当前节点切到该备份.
+
+        ``safety_point`` 为 True 时恢复前先创建一份安全点备份(只在时间线视图
+        展示), 使恢复可逆; ``force`` 用于在检测到游戏进程运行时由用户明确
+        强制执行。
+        """
+        ...
+
+    def preview_restore(self, game_id: str, backup_id: str) -> RestorePlan:
+        """恢复预检: 快照完整性、写回目标、多余文件与游戏进程状态."""
         ...
 
     def run_create_branch(self, game_id: str, backup_id: str, branch_name: str) -> str:
@@ -110,6 +129,14 @@ class ArchiveService(Protocol):
         """重新校验一个存档位置并返回最新状态."""
         ...
 
+    def preview_location_removal(self, location_id: str) -> LocationRemovalPlan:
+        """删除原始存档目录前的预检: 影响范围与路径安全判定."""
+        ...
+
+    def delete_save_location(self, location_id: str, *, confirm_name: str) -> str:
+        """把原始存档目录移入系统回收站并删除该位置记录(阶段 E 第 5 条)."""
+        ...
+
     # -- 备份、调度与生命周期(阶段 D) ------------------------------------
 
     def set_schedule(
@@ -121,6 +148,14 @@ class ArchiveService(Protocol):
         keep_auto: int = DEFAULT_KEEP_AUTO,
     ) -> TaskStatus:
         """设置或取消某游戏的定期备份, 返回最新任务状态."""
+        ...
+
+    def list_schedules(self) -> list[ScheduleItem]:
+        """返回全部游戏的定时备份配置(供全局任务窗口展示/编辑)."""
+        ...
+
+    def storage_usage(self) -> int:
+        """返回备份存储当前占用的字节数(供状态栏显示)."""
         ...
 
     def plan_delete(self, game_id: str, backup_id: str) -> DeletionPlan:

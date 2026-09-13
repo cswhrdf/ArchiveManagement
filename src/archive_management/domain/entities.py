@@ -15,10 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field
 PathKind = Literal["file", "directory"]
 SaveSource = Literal["steam", "manual"]
 NodeKind = Literal["manual", "branch", "auto"]
-OperationKind = Literal[
-    "backup", "restore", "import", "export", "delete", "create_branch"
-]
-OperationStatus = Literal["started", "succeeded", "failed", "cancelled"]
 FileKind = Literal["file", "symlink", "directory"]
 
 
@@ -37,6 +33,10 @@ class Game(_RowModel):
     platform: str = "windows"
     enabled: bool = True
     created_at: datetime | None = None
+    # 录入时识别到的原始名称(重命名不会改写), 供界面作为额外信息展示.
+    original_name: str = ""
+    # 备份根目录下该游戏实际使用的目录名(首次备份时确定, 之后保持不变).
+    storage_key: str = ""
 
 
 class SaveLocation(_RowModel):
@@ -68,6 +68,8 @@ class BackupNode(_RowModel):
     content_hash: str | None = None
     # 相对应用备份根目录的路径, 保证备份存储可整体迁移.
     storage_relpath: str | None = None
+    # 恢复前自动创建的安全点: 只在时间线展示, 不进入分支树的线路关系.
+    is_safety: bool = False
 
 
 class BackupFileEntry(_RowModel):
@@ -93,15 +95,3 @@ class ScheduledJob(_RowModel):
     last_error: str | None = None
     # 自动备份是特殊备份: 只保留最近 N 份(默认 3, 允许用户自定义).
     keep_auto: int = Field(default=3, ge=1, le=50)
-
-
-class Operation(_RowModel):
-    """一次已记录的操作及其结果摘要."""
-
-    id: int | None = None
-    op_kind: OperationKind
-    game_id: int | None = None
-    status: OperationStatus = "started"
-    message: str | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None

@@ -77,10 +77,35 @@ def test_theme_cycle(service: DemoArchiveService) -> None:
 
 def test_task_status_reports_theme(service: DemoArchiveService) -> None:
     service.set_theme("light")
-    status = service.task_status()
+    status = service.task_status("outer-wilds")
     assert status.running is False
     assert status.theme_name == "light"
     assert status.schedule_text == "1d"
+
+
+def test_schedules_are_configured_per_game(service: DemoArchiveService) -> None:
+    """每个游戏的定时备份配置互不影响."""
+    service.set_schedule("shanhai", "5m", keep_auto=2)
+
+    changed = service.task_status("shanhai")
+    untouched = service.task_status("outer-wilds")
+
+    assert changed.schedule_text == "5m"
+    assert changed.keep_auto == 2
+    assert untouched.schedule_text == "1d"
+
+
+def test_list_schedules_covers_every_game(service: DemoArchiveService) -> None:
+    items = service.list_schedules()
+
+    assert [item.game_name for item in items] == ["星际拓荒", "山海旅人", "无尽太空"]
+    first = items[0]
+    assert first.interval_text == "1d"
+    assert first.enabled is True
+    assert first.auto_count_label
+    assert "来自游戏" in first.game_label
+    # 未配置的游戏中显示为未配置.
+    assert items[-1].state_label == "未配置"
 
 
 def test_get_detail_unknown_game_raises(service: DemoArchiveService) -> None:
@@ -205,3 +230,86 @@ def test_demo_live_summary_tracks_locations(service: DemoArchiveService) -> None
     after = next(game for game in service.list_games() if game.game_id == game_id)
     assert after.has_locations is True
     assert after.location_count == 1
+
+
+# ------------------------------------------------- 阶段 E: 恢复与删除原始位置
+
+
+def test_demo_preview_restore_describes_plan(service: DemoArchiveService) -> None:
+    plan = service.preview_restore("outer-wilds", "b1")
+
+    assert plan.snapshot_ok is True
+    assert plan.title == "离开量子月亮前"
+    assert [target.path for target in plan.targets] == [r"D:\Games\OuterWilds\save"]
+    assert plan.safety_point_available is True
+
+
+def test_demo_preview_restore_flags_running_process(
+    service: DemoArchiveService,
+) -> None:
+    plan = service.preview_restore("outer-wilds", "b2")
+
+    assert plan.process.running is True
+
+
+def test_demo_run_restore_accepts_restore_options(
+    service: DemoArchiveService,
+) -> None:
+    message = service.run_restore("outer-wilds", "b1", safety_point=False, force=True)
+
+    assert "当前节点" in message
+
+
+def test_demo_run_restore_adds_safety_point_to_timeline(
+    service: DemoArchiveService,
+) -> None:
+    from archive_management.ui.models import visible_in_branch_view
+
+    service.run_restore("outer-wilds", "b1", safety_point=True)
+
+    items = service.list_backups("outer-wilds")
+    safety = [item for item in items if item.safety]
+    assert len(safety) == 1
+    assert safety[0].kind_label == tr("backup.kind_safety")
+    # 安全点不进入分支树.
+    assert safety[0].backup_id not in visible_in_branch_view(items)
+
+
+def test_demo_preview_location_removal_reports_impact(
+    service: DemoArchiveService,
+) -> None:
+    location = service.list_locations("outer-wilds")[0]
+
+    plan = service.preview_location_removal(location.location_id)
+
+    assert plan.game_name == "星际拓荒"
+    assert plan.path == location.path
+    assert plan.files > 0
+    assert plan.blocked is False
+
+
+def test_demo_delete_save_location_requires_confirm_name(
+    service: DemoArchiveService,
+) -> None:
+    location = service.list_locations("outer-wilds")[0]
+
+    with pytest.raises(ArchiveManagementError):
+        service.delete_save_location(location.location_id, confirm_name="错的")
+
+    assert [item.location_id for item in service.list_locations("outer-wilds")] == [
+        location.location_id
+    ]
+
+
+def test_demo_delete_save_location_removes_location(
+    service: DemoArchiveService,
+) -> None:
+    location = service.list_locations("outer-wilds")[0]
+
+    message = service.delete_save_location(
+        location.location_id, confirm_name="星际拓荒"
+    )
+
+    assert location.path in message
+    assert service.list_locations("outer-wilds") == []
+    assert service.list_games()[0].has_locations is False

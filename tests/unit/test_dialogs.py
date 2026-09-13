@@ -79,6 +79,37 @@ class _FakeTextbox(_FakeWidget):
         return self._value
 
 
+class _FakeVar:
+    """假 tkinter 变量."""
+
+    def __init__(self, *, value: Any = False) -> None:
+        self.value = value
+
+    def get(self) -> Any:
+        return self.value
+
+    def set(self, value: Any) -> None:
+        self.value = value
+
+
+class _FakeCheckBox(_FakeWidget):
+    """假复选框: 记录变量与文本, 可用 select/deselect 模拟勾选."""
+
+    def __init__(self, master: Any = None, **kwargs: Any) -> None:
+        super().__init__(master=master, **kwargs)
+        self.variable = kwargs.get("variable")
+
+    def select(self) -> None:
+        """模拟勾选."""
+        if self.variable is not None:
+            self.variable.set(True)
+
+    def deselect(self) -> None:
+        """模拟取消勾选."""
+        if self.variable is not None:
+            self.variable.set(False)
+
+
 class _FakeWindow(_FakeWidget):
     """假顶级窗口: 提供对话框所需的几何/几何查询 API."""
 
@@ -133,17 +164,23 @@ class _FakeParent(_FakeWidget):
         buttons: list[_FakeWidget],
         windows: list[_FakeWindow],
         entries: list[_FakeWidget],
+        checkboxes: list[_FakeCheckBox],
+        labels: list[_FakeWidget],
     ) -> None:
         super().__init__()
         self.buttons = buttons
         self.windows = windows
         self.entries = entries
+        self.checkboxes = checkboxes
+        self.labels = labels
         self.click_text: str | None = None
         self.wait_called = False
         self.entry_value = ""
         # 一次对话框含多个输入框时按顺序取值(优先于 entry_value).
         self.entry_values: list[str] = []
         self.textbox_value = ""
+        # wait_window 内先执行的钩子: 用于模拟用户先改选项再确认.
+        self.on_wait: Callable[[], None] | None = None
 
     def winfo_rootx(self) -> int:
         return 100
@@ -159,6 +196,8 @@ class _FakeParent(_FakeWidget):
 
     def wait_window(self, _window: Any) -> None:
         self.wait_called = True
+        if self.on_wait is not None:
+            self.on_wait()
         if self.click_text is None:
             return
         for button in self.buttons:
@@ -173,7 +212,9 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
     windows: list[_FakeWindow] = []
     buttons: list[_FakeWidget] = []
     entries: list[_FakeWidget] = []
-    parent = _FakeParent(buttons, windows, entries)
+    checkboxes: list[_FakeCheckBox] = []
+    labels: list[_FakeWidget] = []
+    parent = _FakeParent(buttons, windows, entries, checkboxes, labels)
 
     def make_window(master: Any = None, **kwargs: Any) -> _FakeWindow:
         window = _FakeWindow(master=master, **kwargs)
@@ -203,12 +244,18 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
             box._preset = True
         return box
 
+    def make_label(master: Any = None, **kwargs: Any) -> _FakeWidget:
+        label = _FakeWidget(master=master, **kwargs)
+        labels.append(label)
+        return label
+
+    def make_checkbox(master: Any = None, **kwargs: Any) -> _FakeCheckBox:
+        box = _FakeCheckBox(master=master, **kwargs)
+        checkboxes.append(box)
+        return box
+
     monkeypatch.setattr(ctk, "CTkToplevel", make_window)
-    monkeypatch.setattr(
-        ctk,
-        "CTkLabel",
-        lambda master=None, **kwargs: _FakeWidget(master=master, **kwargs),
-    )
+    monkeypatch.setattr(ctk, "CTkLabel", make_label)
     monkeypatch.setattr(
         ctk,
         "CTkFrame",
@@ -217,6 +264,8 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
     monkeypatch.setattr(ctk, "CTkButton", make_button)
     monkeypatch.setattr(ctk, "CTkEntry", make_entry)
     monkeypatch.setattr(ctk, "CTkTextbox", make_textbox)
+    monkeypatch.setattr(ctk, "CTkCheckBox", make_checkbox)
+    monkeypatch.setattr(ctk, "BooleanVar", lambda **kwargs: _FakeVar(**kwargs))
     monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
     return parent
 
@@ -421,3 +470,84 @@ def test_schedule_dialog_allows_empty_interval(harness: _FakeParent) -> None:
 def test_schedule_dialog_cancel_returns_none(harness: _FakeParent) -> None:
     harness.click_text = tr("dialog.cancel")
     assert dialogs.schedule_dialog(harness, DARK, **_schedule_args()) is None
+
+
+class _RestoreArgs(TypedDict):
+    """restore_dialog 的公共参数."""
+
+    title: str
+    summary: str
+    safety_label: str
+    safety_hint: str
+    safety_available: bool
+
+
+def _restore_args(*, safety_available: bool = True) -> _RestoreArgs:
+    """构造恢复对话框参数(按用例覆盖候选开关)."""
+    return {
+        "title": tr("dialog.restore_title"),
+        "summary": tr(
+            "dialog.restore_summary",
+            name="星际拓荒",
+            title="离开量子月亮前",
+            files=3,
+            size="1 MB",
+            targets="· D:/save",
+        ),
+        "safety_label": tr("dialog.restore_safety"),
+        "safety_hint": tr("dialog.restore_safety_hint"),
+        "safety_available": safety_available,
+    }
+
+
+def test_restore_dialog_defaults_to_safety_point(harness: _FakeParent) -> None:
+    """默认勾选安全点: 恢复因此可逆(安全点只在时间线视图显示)."""
+    harness.click_text = tr("dialog.restore_confirm")
+
+    result = dialogs.restore_dialog(harness, DARK, **_restore_args())
+
+    assert result is True
+    assert len(harness.checkboxes) == 1
+    assert harness.windows[0].destroyed is True
+
+
+def test_restore_dialog_returns_false_when_safety_point_cleared(
+    harness: _FakeParent,
+) -> None:
+    """取消勾选安全点后返回 False(仍然继续恢复)."""
+    harness.click_text = tr("dialog.restore_confirm")
+    harness.on_wait = lambda: harness.checkboxes[0].deselect()
+
+    assert dialogs.restore_dialog(harness, DARK, **_restore_args()) is False
+
+
+def test_restore_dialog_forces_unavailable_option_off(harness: _FakeParent) -> None:
+    """存档没有可备份内容时, 安全点选项被禁用且不会生效."""
+    harness.click_text = tr("dialog.restore_confirm")
+    harness.on_wait = lambda: harness.checkboxes[0].select()
+
+    result = dialogs.restore_dialog(
+        harness, DARK, **_restore_args(safety_available=False)
+    )
+
+    assert result is False
+    assert [box.kwargs["state"] for box in harness.checkboxes] == ["disabled"]
+
+
+def test_restore_dialog_cancel_returns_none(harness: _FakeParent) -> None:
+    harness.click_text = tr("dialog.cancel")
+    assert dialogs.restore_dialog(harness, DARK, **_restore_args()) is None
+
+
+def test_restore_dialog_shows_danger_note_in_same_window(
+    harness: _FakeParent,
+) -> None:
+    """风险提示与选项在同一个窗口内展示, 不额外弹窗."""
+    harness.click_text = tr("dialog.restore_confirm")
+    note = tr("dialog.restore_process", matches="OuterWilds.exe")
+
+    dialogs.restore_dialog(harness, DARK, **_restore_args(), danger_note=note)
+
+    assert len(harness.windows) == 1
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert note in texts

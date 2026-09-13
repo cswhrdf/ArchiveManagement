@@ -15,11 +15,11 @@ from archive_management.domain import (
     SaveLocation,
     ScheduledJob,
 )
+from archive_management.exceptions import DatabaseError
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     BackupRepository,
     GameRepository,
-    OperationRepository,
     SaveLocationRepository,
     ScheduledJobRepository,
 )
@@ -92,6 +92,54 @@ def test_game_update_without_id_raises(tmp_path: Path) -> None:
     repo = GameRepository(_database(tmp_path))
     with pytest.raises(ValueError):
         repo.update(Game(name="无 id"))
+
+
+def test_game_add_keeps_original_name(tmp_path: Path) -> None:
+    """首次录入的名称记入 original_name, 供界面展示"原始名称"."""
+    repo = GameRepository(_database(tmp_path))
+    game = _add_game(repo, name="Outer Wilds")
+
+    assert game.original_name == "Outer Wilds"
+    assert game.storage_key == ""
+    fetched = repo.get(game.id or 0)
+    assert fetched is not None
+    assert fetched.original_name == "Outer Wilds"
+
+
+def test_game_rename_keeps_original_name_and_storage_key(tmp_path: Path) -> None:
+    repo = GameRepository(_database(tmp_path))
+    game = _add_game(repo, name="旧名字")
+    assert game.id is not None
+    folder = repo.ensure_storage_key(game.id, "旧名字-1a2b3c4d")
+
+    repo.update(game.model_copy(update={"name": "新名字"}))
+
+    fetched = repo.get(game.id)
+    assert fetched is not None
+    assert fetched.name == "新名字"
+    assert fetched.original_name == "旧名字"
+    assert fetched.storage_key == folder
+
+
+def test_ensure_storage_key_is_write_once(tmp_path: Path) -> None:
+    repo = GameRepository(_database(tmp_path))
+    game = _add_game(repo)
+    assert game.id is not None
+
+    first = repo.ensure_storage_key(game.id, "Demo-aaaaaaaa")
+    second = repo.ensure_storage_key(game.id, "Other-bbbbbbbb")
+
+    assert first == "Demo-aaaaaaaa"
+    assert second == "Demo-aaaaaaaa"
+    fetched = repo.get(game.id)
+    assert fetched is not None
+    assert fetched.storage_key == "Demo-aaaaaaaa"
+
+
+def test_ensure_storage_key_rejects_unknown_game(tmp_path: Path) -> None:
+    repo = GameRepository(_database(tmp_path))
+    with pytest.raises(DatabaseError):
+        repo.ensure_storage_key(4242, "Demo-aaaaaaaa")
 
 
 def test_game_delete_cascades_locations(tmp_path: Path) -> None:
@@ -262,6 +310,30 @@ def test_backup_list_orders_by_creation_and_latest_wins(tmp_path: Path) -> None:
     assert repo.latest_for_game(game_id) == second
 
 
+def test_backup_safety_flag_roundtrip(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    game_id = _game_id(GameRepository(database))
+    repo = BackupRepository(database)
+
+    normal = repo.add(BackupNode(game_id=game_id, node_kind="manual", note="普通"))
+    safety = repo.add(
+        BackupNode(game_id=game_id, node_kind="manual", note="安全点", is_safety=True)
+    )
+
+    assert normal.id is not None
+    assert safety.id is not None
+    normal_row = repo.get(normal.id)
+    safety_row = repo.get(safety.id)
+    assert normal_row is not None
+    assert safety_row is not None
+    assert normal_row.is_safety is False
+    assert safety_row.is_safety is True
+    assert [item.is_safety for item in repo.list_for_game(game_id)] == [False, True]
+    latest = repo.latest_for_game(game_id)
+    assert latest is not None
+    assert latest.is_safety is True
+
+
 def test_backup_add_with_files_is_atomic(tmp_path: Path) -> None:
     database = _database(tmp_path)
     game_id = _game_id(GameRepository(database))
@@ -327,34 +399,6 @@ def test_backup_files_cascade_on_node_delete(tmp_path: Path) -> None:
 
     assert repo.list_files(node.id) == []
     assert repo.get(node.id) is None
-
-
-# ------------------------------------------------------------------- 操作记录
-
-
-def test_operation_repository_records_lifecycle(tmp_path: Path) -> None:
-    database = _database(tmp_path)
-    repo = OperationRepository(database)
-
-    operation_id = repo.start("backup", None, "手动备份")
-    repo.finish(operation_id, "succeeded", "1 条文件清单")
-
-    recent = repo.list_recent()
-    assert len(recent) == 1
-    assert recent[0].op_kind == "backup"
-    assert recent[0].status == "succeeded"
-    assert recent[0].message == "1 条文件清单"
-    assert recent[0].finished_at is not None
-
-
-def test_operation_repository_limits_and_orders(tmp_path: Path) -> None:
-    repo = OperationRepository(_database(tmp_path))
-    for index in range(3):
-        operation_id = repo.start("backup", None, f"op-{index}")
-        repo.finish(operation_id, "failed", f"err-{index}")
-    recent = repo.list_recent(limit=2)
-    assert len(recent) == 2
-    assert {item.message for item in recent} == {"err-1", "err-2"}
 
 
 # ----------------------------------------------------------------- 定期任务

@@ -1,13 +1,14 @@
-"""基于 SQLite 的真实后端(阶段 C/D).
+"""基于 SQLite 的真实后端(阶段 C/D/E).
 
 把 :mod:`archive_management.domain` 实体与仓库映射为 UI 展示模型,
 实现 :class:`~archive_management.ui.backend.ArchiveService`. 本后端是
-GUI 的默认数据来源; 备份与分支在阶段 D 接入真实文件快照, 恢复/导入
-导出仍给出明确的阶段提示而非静默忽略.
+GUI 的默认数据来源; 备份、分支、恢复与删除原始存档目录都接入真实服务层,
+导入导出仍给出明确的阶段提示而非静默忽略.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +16,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from archive_management.application.backup import BackupService
+from archive_management.application.locations import (
+    LocationRemovalPlan,
+    plan_location_removal,
+    remove_save_location,
+)
+from archive_management.application.restore import RestorePlan, RestoreService
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     BackupNode,
@@ -28,6 +35,7 @@ from archive_management.domain import (
 )
 from archive_management.exceptions import (
     ArchiveManagementError,
+    ContentUnchangedError,
     OperationCancelledError,
 )
 from archive_management.i18n import tr
@@ -38,7 +46,12 @@ from archive_management.infrastructure.repository import (
     SaveLocationRepository,
     ScheduledJobRepository,
 )
-from archive_management.services.pathcheck import normalize_path, probe_path
+from archive_management.services.audit import log_action, redacted_path
+from archive_management.services.pathcheck import (
+    normalize_path,
+    probe_path,
+    summarize_path,
+)
 from archive_management.services.scheduler import (
     BackupScheduler,
     format_interval,
@@ -50,8 +63,12 @@ from archive_management.ui.models import (
     GameDetail,
     GameSummary,
     LocationItem,
+    ScheduleItem,
     TaskStatus,
+    size_label,
 )
+
+logger = logging.getLogger(__name__)
 
 _TONES = ("orange", "blue", "green")
 _DEFAULT_THEME = "dark"
@@ -66,17 +83,6 @@ def _tone(name: str) -> str:
 def _stamp(moment: datetime) -> str:
     """把时间格式化为本地时区的展示文本."""
     return moment.astimezone().strftime("%Y/%m/%d %H:%M")
-
-
-def _size_label(total: int) -> str:
-    """把字节数格式化为紧凑的容量文本."""
-    if total >= 1024**3:
-        return f"{total / 1024**3:.1f} GB"
-    if total >= 1024**2:
-        return f"{total / 1024**2:.1f} MB"
-    if total >= 1024:
-        return f"{total / 1024:.1f} KB"
-    return f"{total} B"
 
 
 def _default_title(node: BackupNode) -> str:
@@ -121,12 +127,46 @@ class SqlArchiveService:
         self._nodes = BackupRepository(database)
         self._jobs = ScheduledJobRepository(database)
         self._backups = BackupService(database, backup_root=backup_root)
+        self._restore = RestoreService(
+            database, backup_root=backup_root, backups=self._backups
+        )
         self._scheduler = scheduler if scheduler is not None else BackupScheduler()
         self._theme = _DEFAULT_THEME
         self._revision = 0
         self._operation_lock = threading.Lock()
         self._active: _ActiveOperation | None = None
         self._verify_cache: dict[str, bool] = {}
+        self._restore_schedules()
+
+    def _restore_schedules(self) -> None:
+        """启动时从数据库恢复已配置的定时备份.
+
+        没有这一步, 重启后 ``scheduled_jobs`` 里的配置就不会生效: 界面会显示
+        "未配置定时备份"、下次运行时间为空, 也不会自动触发备份。
+        """
+        restored = 0
+        for job in self._jobs.list_all():
+            if job.game_id is None or not job.schedule.strip():
+                continue
+            try:
+                minutes = parse_interval(job.schedule)
+            except ArchiveManagementError as exc:
+                logger.warning(
+                    "忽略无法解析的定时任务: game=%s schedule=%r (%s)",
+                    job.game_id,
+                    job.schedule,
+                    exc,
+                )
+                continue
+            self._scheduler.schedule(
+                job.game_id,
+                minutes,
+                self._scheduled_backup(job.game_id),
+                enabled=job.enabled,
+            )
+            restored += 1
+        if restored:
+            log_action("schedule.restore", basic=True, count=restored)
 
     @property
     def _data_revision(self) -> int:
@@ -178,7 +218,7 @@ class SqlArchiveService:
                     if latest.node_kind == "auto"
                     else tr("backup.kind_manual")
                 ),
-                size=_size_label(facts.total_size),
+                size=size_label(facts.total_size),
             )
         else:
             last_label = "—"
@@ -199,46 +239,39 @@ class SqlArchiveService:
             ),
             total_backups_sub="",
             next_backup_label=_stamp(next_run) if next_run is not None else "—",
+            original_name=game.original_name or game.name,
+            storage_folder=game.storage_key,
         )
 
     def add_game(self, name: str) -> GameSummary:
         """新增游戏, 返回其摘要."""
         clean = self._clean_name(name)
         game = self._games.add(Game(name=clean))
+        log_action("game.add", game_id=game.id, name=clean)
         return self._summary(game)
 
     def update_game(self, game_id: str, name: str) -> GameSummary:
         """重命名游戏, 返回其摘要."""
         clean = self._clean_name(name)
         game = self._game(game_id)
-        updated = Game(
-            id=game.id,
-            name=clean,
-            steam_app_id=game.steam_app_id,
-            platform=game.platform,
-            enabled=game.enabled,
-            created_at=game.created_at,
-        )
+        # 只改名称: 首次录入的原始名称与磁盘目录名保持不变.
+        updated = game.model_copy(update={"name": clean})
         self._games.update(updated)
+        log_action("game.rename", game_id=game.id, name=clean)
         return self._summary(updated)
 
     def delete_game(self, game_id: str) -> None:
         """删除游戏记录及其存档位置."""
-        _game, gid = self._game_ref(game_id)
+        game, gid = self._game_ref(game_id)
         self._games.delete(gid)
+        log_action("game.delete", game_id=gid, name=game.name)
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
         """启用或停用一个游戏."""
         game = self._game(game_id)
-        updated = Game(
-            id=game.id,
-            name=game.name,
-            steam_app_id=game.steam_app_id,
-            platform=game.platform,
-            enabled=enabled,
-            created_at=game.created_at,
-        )
+        updated = game.model_copy(update={"enabled": enabled})
         self._games.update(updated)
+        log_action("game.set_enabled", game_id=game.id, enabled=enabled)
         return self._summary(updated)
 
     # -- 存档位置管理 ------------------------------------------------------
@@ -273,6 +306,13 @@ class SqlArchiveService:
                 last_check_status="ok",
             )
         )
+        log_action(
+            "location.add",
+            game_id=gid,
+            location_id=location.id,
+            kind=kind,
+            path=redacted_path(normalized),
+        )
         return self._location_item(location)
 
     def update_location(
@@ -304,12 +344,19 @@ class SqlArchiveService:
             last_check_status="ok",
         )
         self._locations.update(changed)
+        log_action(
+            "location.update",
+            game_id=location.game_id,
+            location_id=location.id,
+            path=redacted_path(new_path),
+        )
         return self._location_item(changed)
 
     def remove_location(self, location_id: str) -> None:
         """删除指定存档位置记录."""
         _location, lid = self._location_ref(location_id)
         self._locations.delete(lid)
+        log_action("location.remove", location_id=lid)
 
     def set_primary_location(self, game_id: str, location_id: str) -> LocationItem:
         """把某位置设为主位置并返回更新后的条目."""
@@ -320,6 +367,7 @@ class SqlArchiveService:
                 tr("error.unknown_location", location_id=location_id)
             )
         self._locations.make_primary(gid, lid)
+        log_action("location.set_primary", game_id=gid, location_id=lid)
         return self._location_item(location)
 
     def verify_location(self, location_id: str) -> LocationItem:
@@ -337,7 +385,35 @@ class SqlArchiveService:
             last_check_status="ok" if probe.ok else probe.reason_code,
         )
         self._locations.update(changed)
+        log_action(
+            "location.verify",
+            basic=True,
+            location_id=location.id,
+            status=changed.last_check_status,
+        )
         return self._location_item(changed)
+
+    def preview_location_removal(self, location_id: str) -> LocationRemovalPlan:
+        """删除原始存档目录前的预检(影响范围与路径安全判定)."""
+        _location, lid = self._location_ref(location_id)
+        return plan_location_removal(self._database, lid, protect=(self._backup_root,))
+
+    def delete_save_location(self, location_id: str, *, confirm_name: str) -> str:
+        """把原始存档目录移入系统回收站, 并删除该位置记录."""
+        _location, lid = self._location_ref(location_id)
+        try:
+            result = remove_save_location(
+                self._database,
+                lid,
+                confirm_name=confirm_name,
+                protect=(self._backup_root,),
+            )
+        except ArchiveManagementError as exc:
+            raise ArchiveManagementError(
+                tr("error.location_delete_failed", reason=str(exc))
+            ) from exc
+        self._touch()
+        return tr("result.location_deleted", path=result.path, count=result.files)
 
     def list_backups(self, game_id: str) -> list[BackupItem]:
         """返回某游戏的备份节点(含分支树层级与校验状态)."""
@@ -360,7 +436,8 @@ class SqlArchiveService:
         entry = self._scheduler.get(gid) if gid is not None else None
         next_run = self._next_run(gid) if gid is not None else None
         error = self._scheduler.last_error(gid) if gid is not None else None
-        scheduled = entry is not None and entry.enabled
+        # 暂停不算"未配置": 周期仍然保留, 只是不触发。
+        configured = entry is not None
         return TaskStatus(
             running=active is not None,
             task_name=(
@@ -369,7 +446,7 @@ class SqlArchiveService:
                     interval=_interval_label(entry.interval_minutes),
                     keep=self._keep_auto(gid),
                 )
-                if scheduled and entry is not None
+                if configured and entry is not None
                 else tr("task.unscheduled")
             ),
             progress=active.fraction if active is not None else 0.0,
@@ -380,14 +457,64 @@ class SqlArchiveService:
             backend_ok=True,
             schedule_text=(
                 _interval_label(entry.interval_minutes)
-                if scheduled and entry is not None
+                if configured and entry is not None
                 else ""
             ),
+            schedule_enabled=(entry.enabled if entry is not None else True),
             cancellable=active is not None,
             progress_label=(active.message if active is not None else (error or "")),
             keep_auto=self._keep_auto(gid),
             revision=self._data_revision,
         )
+
+    def list_schedules(self) -> list[ScheduleItem]:
+        """返回全部游戏的定时备份配置(未配置的游戏也会出现, 便于新增).
+
+        任务来自哪个游戏、下次运行时间、当前保留的自动备份份数都在这里
+        组装好, 供全局任务窗口直接展示。
+        """
+        items: list[ScheduleItem] = []
+        for game in self._games.list():
+            if game.id is None:
+                continue
+            entry = self._scheduler.get(game.id)
+            jobs = self._jobs.for_game(game.id)
+            job = jobs[0] if jobs else None
+            next_run = (
+                entry.next_run_at
+                if entry is not None and entry.enabled
+                else (job.next_run_at if job is not None else None)
+            )
+            items.append(
+                ScheduleItem(
+                    game_id=str(game.id),
+                    game_name=game.name,
+                    interval_text=(
+                        _interval_label(entry.interval_minutes)
+                        if entry is not None
+                        else (job.schedule if job is not None else "")
+                    ),
+                    enabled=entry.enabled if entry is not None else True,
+                    keep_auto=job.keep_auto if job is not None else DEFAULT_KEEP_AUTO,
+                    next_run_label=_stamp(next_run) if next_run is not None else "—",
+                    auto_count=self._auto_backup_count(game.id),
+                    last_error=(job.last_error if job is not None else "") or "",
+                    has_locations=self._games.count_locations(game.id) > 0,
+                    tone=_tone(game.name),
+                )
+            )
+        return items
+
+    def _auto_backup_count(self, game_id: int) -> int:
+        """统计某游戏当前保留的自动备份(含恢复前安全点之外的自动备份)份数."""
+        return sum(
+            1 for node in self._nodes.list_for_game(game_id) if node.node_kind == "auto"
+        )
+
+    def storage_usage(self) -> int:
+        """返回备份存储当前占用的字节数(状态栏显示)."""
+        summary = summarize_path(str(self._backup_root))
+        return summary.total_size
 
     def current_theme(self) -> str:
         """返回当前主题名."""
@@ -396,6 +523,7 @@ class SqlArchiveService:
     def set_theme(self, name: str) -> str:
         """切换主题 (dark/light), 返回生效主题."""
         self._theme = "dark" if name == "dark" else "light"
+        log_action("ui.set_theme", basic=True, theme=self._theme)
         return self._theme
 
     # -- 备份与分支(阶段 D) -----------------------------------------------
@@ -405,7 +533,8 @@ class SqlArchiveService:
         game, gid = self._game_ref(game_id)
         if not self._locations.list_for_game(gid):
             raise ArchiveManagementError(tr("error.no_locations_backup"))
-        self._perform_backup(gid, note=tr("backup.note_manual"))
+        # 新备份带默认名称(直接显示在标题列), 内容摘要留空等用户填写.
+        self._perform_backup(gid, title=tr("backup.title_manual"))
         return tr("result.backup_done", name=game.name)
 
     def run_create_branch(self, game_id: str, backup_id: str, branch_name: str) -> str:
@@ -424,21 +553,59 @@ class SqlArchiveService:
         )
         return tr("result.branch_done", backup_id=backup_id, branch_name=clean)
 
-    def run_restore(self, game_id: str, backup_id: str) -> str:
-        """把"当前节点"切换到选中备份; 之后的备份/分支都从该节点继续.
+    def preview_restore(self, game_id: str, backup_id: str) -> RestorePlan:
+        """恢复预检: 快照完整性、写回目标、多余文件与游戏进程状态."""
+        _game, gid = self._game_ref(game_id)
+        self._require_backup(gid, backup_id)
+        return self._restore.plan(gid, int(backup_id))
 
-        本阶段只移动分支树的起点指针, 不会修改磁盘上的原始存档文件
-        (真正的文件恢复在阶段 E).
+    def run_restore(
+        self,
+        game_id: str,
+        backup_id: str,
+        *,
+        safety_point: bool = True,
+        force: bool = False,
+    ) -> str:
+        """把备份内容写回原始存档位置, 并把当前节点切到该备份.
+
+        写回前会深度校验快照、检查目标路径与游戏进程; 恢复前默认创建一份
+        "恢复前安全点"备份(只在时间线视图展示), 使恢复可逆; 恢复完成后新备份
+        与新分支都从这个节点重新开始。
         """
         game, gid = self._game_ref(game_id)
         node = self._require_backup(gid, backup_id)
-        self._backups.set_current(gid, int(backup_id))
+        if node.id is None:
+            raise ArchiveManagementError(
+                tr("error.unknown_backup", backup_id=backup_id)
+            )
+        with self._operation_lock:
+            if self._active is not None:
+                raise ArchiveManagementError(tr("error.operation_busy"))
+            self._active = _ActiveOperation(game_id=gid)
+        try:
+            result = self._restore.restore(
+                gid,
+                node.id,
+                safety_point=safety_point,
+                force=force,
+                safety_title=tr("backup.title_safety_point"),
+                safety_note="",
+                progress=self._report_progress,
+                cancelled=self._cancel_requested,
+            )
+            self._backups.set_current(gid, node.id)
+        except OperationCancelledError as exc:
+            raise ArchiveManagementError(tr("result.restore_canceled")) from exc
+        finally:
+            with self._operation_lock:
+                self._active = None
         self._touch()
         return tr(
-            "result.restore_done",
+            "result.restore_written",
             name=game.name,
-            backup_id=backup_id,
             title=self._node_title(node),
+            files=result.restored_files,
         )
 
     def rename_backup(
@@ -480,7 +647,8 @@ class SqlArchiveService:
 
     def run_export(self, game_id: str) -> str:
         """导出游戏(阶段 G 接入)."""
-        self._game(game_id)
+        game, _gid = self._game_ref(game_id)
+        log_action("export.start", basic=True, game_id=game.id, name=game.name)
         raise ArchiveManagementError(tr("error.not_in_this_phase", phase="G"))
 
     # -- 调度与生命周期(阶段 D) -------------------------------------------
@@ -498,13 +666,20 @@ class SqlArchiveService:
         传空文本表示取消定时备份; 周期文本非法时抛出异常, 由 UI 提示
         用户而不是静默回落默认周期.
         """
-        _game, gid = self._game_ref(game_id)
+        game, gid = self._game_ref(game_id)
         clean = interval_text.strip()
+        if clean and not self._locations.list_for_game(gid):
+            # 没有存档位置就没有可备份的内容: 提前拒绝并告知原因.
+            log_action("schedule.rejected", game_id=gid, reason="no_locations")
+            raise ArchiveManagementError(
+                tr("error.no_locations_schedule", name=game.name)
+            )
         if not clean:
             self._scheduler.unschedule(gid)
             for job in self._jobs.for_game(gid):
                 if job.id is not None:
                     self._jobs.delete(job.id)
+            log_action("schedule.clear", game_id=gid)
             return self.task_status(game_id)
         minutes = parse_interval(clean)
         entry = self._scheduler.schedule(
@@ -517,6 +692,13 @@ class SqlArchiveService:
             next_run=entry.next_run_at,
             keep_auto=keep_auto,
         )
+        log_action(
+            "schedule.set",
+            game_id=gid,
+            interval=clean,
+            enabled=enabled,
+            keep_auto=keep_auto,
+        )
         return self.task_status(game_id)
 
     def cancel_active(self) -> bool:
@@ -525,6 +707,7 @@ class SqlArchiveService:
             if self._active is None:
                 return False
             self._active.cancel_requested = True
+            log_action("task.cancel", game_id=self._active.game_id)
             return True
 
     def shutdown(self) -> None:
@@ -569,11 +752,19 @@ class SqlArchiveService:
         return node
 
     def _scheduled_backup(self, game_id: int) -> Callable[[], None]:
-        """构造定时备份回调(在调度线程执行, 不得触碰 Tk)."""
+        """构造定时备份回调(在调度线程执行, 不得触碰 Tk).
+
+        存档与当前节点内容一致时本次自动备份静默跳过(create_backup 会写
+        DEBUG 级日志), 任务状态仍记为"本次已执行", 不向用户报错。
+        """
 
         def run() -> None:
             try:
-                self._perform_backup(game_id, kind="auto", note=tr("backup.note_auto"))
+                self._perform_backup(
+                    game_id, kind="auto", title=tr("backup.title_auto")
+                )
+            except ContentUnchangedError:
+                self._mark_job_run(game_id, error=None)
             except ArchiveManagementError as exc:
                 self._mark_job_run(game_id, error=str(exc))
             else:
@@ -594,12 +785,16 @@ class SqlArchiveService:
         previous = existing[0] if existing else None
         if previous is None or previous.id is None:
             return
+        # 后端已重排下一次触发时间, 刷新缓存后才能显示新的"下次运行".
+        self._scheduler.refresh(game_id)
         self._jobs.mark_run(
             previous.id,
             ran_at=datetime.now(UTC),
             next_run_at=self._next_run(game_id),
             error=error,
         )
+        # 即使本次因"存档未变化"被跳过, 下次运行时间也变了: 让界面重新读取.
+        self._touch()
 
     def _persist_job(
         self,
@@ -685,12 +880,13 @@ class SqlArchiveService:
             created_dt=created,
             created_label=_stamp(created),
             auto=node.node_kind == "auto",
+            safety=node.is_safety,
             branch_label=(
                 tr("backup.branch_label", branch=branch)
                 if branch
                 else tr("backup.mainline")
             ),
-            size_label=_size_label(facts.total_size),
+            size_label=size_label(facts.total_size),
             verified=self._is_verified(node),
             sub=node.note,
             parent_id=None if node.parent_id is None else str(node.parent_id),

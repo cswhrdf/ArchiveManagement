@@ -220,6 +220,68 @@ def verify_snapshot(root: Path, *, deep: bool = True) -> SnapshotVerification:
     )
 
 
+@dataclass(frozen=True)
+class SnapshotManifest:
+    """一份快照清单的解析结果: 清单项、来源位置与整体内容哈希."""
+
+    entries: tuple[SnapshotEntry, ...]
+    sources: tuple[SnapshotSource, ...]
+    content_hash: str
+
+
+def read_manifest(root: Path) -> SnapshotManifest:
+    """读取快照清单, 供恢复用例定位写回目标(阶段 E).
+
+    与 :func:`verify_snapshot` 的区别是这里还会解析 ``sources``: 恢复必须知道
+    ``loc-<index>`` 当初对应哪个存档路径, 才能把内容写回原位置。
+    """
+    manifest_path = Path(root) / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        raise SnapshotError(f"缺少清单文件: {MANIFEST_FILENAME}")
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SnapshotError(f"无法读取快照清单: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise SnapshotError("快照清单顶层必须是对象")
+    return SnapshotManifest(
+        entries=read_manifest_entries(raw),
+        sources=_parse_sources(raw.get("sources")),
+        content_hash=str(raw.get("content_hash", "")),
+    )
+
+
+def _parse_sources(raw: object) -> tuple[SnapshotSource, ...]:
+    """解析清单里的来源列表, 字段非法时抛出异常."""
+    if not isinstance(raw, list) or not raw:
+        raise SnapshotError("快照清单缺少 sources 列表")
+    sources: list[SnapshotSource] = []
+    seen: set[int] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise SnapshotError("快照来源项必须是对象")
+        index = item.get("index")
+        path = item.get("path")
+        raw_kind = item.get("kind")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise SnapshotError(f"快照来源序号非法: {item!r}")
+        if not isinstance(path, str) or not path:
+            raise SnapshotError(f"快照来源路径非法: {item!r}")
+        if raw_kind not in ("file", "directory"):
+            raise SnapshotError(f"快照来源类型非法: {item!r}")
+        if index in seen:
+            raise SnapshotError(f"快照来源序号重复: {index}")
+        seen.add(index)
+        kind: PathKind = "file" if raw_kind == "file" else "directory"
+        sources.append(SnapshotSource(path=path, kind=kind, index=index))
+    return tuple(sources)
+
+
+def source_root(index: int) -> str:
+    """返回某个来源在快照内的相对根目录名(与生成时保持一致)."""
+    return f"loc-{index}"
+
+
 def read_manifest_entries(raw: object) -> tuple[SnapshotEntry, ...]:
     """从 manifest 原始数据中读取清单项."""
     if not isinstance(raw, dict):
@@ -338,7 +400,7 @@ def _plan(sources: Sequence[SnapshotSource]) -> list[_CopyPlan]:
     plans: list[_CopyPlan] = []
     for source in sorted(sources, key=lambda item: item.index):
         origin = Path(source.path)
-        root = f"loc-{source.index}"
+        root = source_root(source.index)
         if source.kind == "file":
             if not origin.is_file() or origin.is_symlink():
                 raise SnapshotError(f"存档文件不可用: {origin}")

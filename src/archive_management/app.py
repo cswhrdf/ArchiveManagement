@@ -27,11 +27,19 @@ logger = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行参数解析器."""
     common = argparse.ArgumentParser(add_help=False)
+    # 子命令与顶层共享 --root/--verbose: 用 SUPPRESS 作为默认值, 否则子解析器的
+    # 默认值会盖掉写在子命令前面的取值("init --root X" 与 "--root X init" 都可用).
     common.add_argument(
         "--root",
         type=Path,
-        default=None,
+        default=argparse.SUPPRESS,
         help="将所有应用数据收敛到该根目录(便携/开发/测试模式)",
+    )
+    common.add_argument(
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="控制台也输出基础操作日志(默认仅写入日志文件)",
     )
     parser = argparse.ArgumentParser(
         prog="archive-management",
@@ -82,17 +90,23 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(package_version())
         return 0
 
-    paths = ApplicationPaths.default(override_root=args.root).ensure()
+    paths = ApplicationPaths.default(override_root=getattr(args, "root", None)).ensure()
+    verbose = bool(getattr(args, "verbose", False))
+    console_level = logging.DEBUG if verbose else logging.INFO
     command = args.command
     if command is None:
         # 阶段 A 默认执行初始化: 无参数启动即完成空应用引导.
         command = "init"
     if command == "init":
-        return _run_init(paths, force=bool(getattr(args, "force", False)))
+        return _run_init(
+            paths,
+            force=bool(getattr(args, "force", False)),
+            console_level=console_level,
+        )
     if command == "doctor":
-        return _run_doctor(paths)
+        return _run_doctor(paths, console_level=console_level)
     if command == "gui":
-        return _run_gui(paths, smoke=args.smoke)
+        return _run_gui(paths, smoke=args.smoke, verbose=verbose)
     parser.error(f"未知命令: {command}")
     return 1
 
@@ -110,8 +124,8 @@ def _load_or_create_config(paths: ApplicationPaths, *, force: bool) -> AppConfig
     return config
 
 
-def _run_init(paths: ApplicationPaths, *, force: bool) -> int:
-    configure_logging(paths.log_dir)
+def _run_init(paths: ApplicationPaths, *, force: bool, console_level: int) -> int:
+    configure_logging(paths.log_dir, level=console_level)
     config = _load_or_create_config(paths, force=force)
     save_config(config, paths.config_path)
 
@@ -131,8 +145,8 @@ def _run_init(paths: ApplicationPaths, *, force: bool) -> int:
     return 0
 
 
-def _run_doctor(paths: ApplicationPaths) -> int:
-    configure_logging(paths.log_dir)
+def _run_doctor(paths: ApplicationPaths, *, console_level: int) -> int:
+    configure_logging(paths.log_dir, level=console_level)
     print(f"应用   : {APP_DISPLAY_NAME} {package_version()}")
     print(f"配置目录: {paths.config_dir}")
     print(f"数据目录: {paths.data_dir}")
@@ -156,12 +170,17 @@ def _run_doctor(paths: ApplicationPaths) -> int:
     return 0
 
 
-def _run_gui(paths: ApplicationPaths, *, smoke: float | None) -> int:
+def _run_gui(paths: ApplicationPaths, *, smoke: float | None, verbose: bool) -> int:
     """启动图形界面;无图形环境或缺少 tkinter 时给出清晰错误."""
     try:
         from archive_management.ui.main_window import run_gui
 
-        return run_gui(smoke_seconds=smoke, display_name=APP_DISPLAY_NAME, paths=paths)
+        return run_gui(
+            smoke_seconds=smoke,
+            display_name=APP_DISPLAY_NAME,
+            paths=paths,
+            verbose=verbose,
+        )
     except Exception as exc:
         logger.error("GUI 启动失败: %s", exc)
         print(f"无法启动图形界面:{exc}\nGUI 需要可用的桌面环境与 tkinter。")

@@ -15,9 +15,6 @@ from archive_management.domain import (
     BackupFileEntry,
     BackupNode,
     Game,
-    Operation,
-    OperationKind,
-    OperationStatus,
     SaveLocation,
     ScheduledJob,
 )
@@ -45,13 +42,16 @@ def _dt_text(value: datetime | None) -> str | None:
 
 
 def _row_to_game(row: sqlite3.Row) -> Game:
+    name = str(row["name"])
     return Game(
         id=int(row["id"]),
-        name=str(row["name"]),
+        name=name,
         steam_app_id=None if row["steam_app_id"] is None else int(row["steam_app_id"]),
         platform=str(row["platform"]),
         enabled=_as_bool(row["enabled"]),
         created_at=_parse_dt(row["created_at"]),
+        original_name=str(row["original_name"] or "") or name,
+        storage_key=str(row["storage_key"] or ""),
     )
 
 
@@ -80,6 +80,7 @@ def _row_to_backup_node(row: sqlite3.Row) -> BackupNode:
         content_hash=row["content_hash"],
         storage_relpath=row["storage_relpath"],
         created_at=_parse_dt(row["created_at"]),
+        is_safety=_as_bool(row["is_safety"]),
     )
 
 
@@ -91,18 +92,6 @@ def _row_to_backup_file(row: sqlite3.Row) -> BackupFileEntry:
         size=int(row["size"]),
         sha256=str(row["sha256"]),
         file_kind=str(row["file_kind"]),  # type: ignore[arg-type]
-    )
-
-
-def _row_to_operation(row: sqlite3.Row) -> Operation:
-    return Operation(
-        id=int(row["id"]),
-        op_kind=str(row["op_kind"]),  # type: ignore[arg-type]
-        game_id=None if row["game_id"] is None else int(row["game_id"]),
-        status=str(row["status"]),  # type: ignore[arg-type]
-        message=row["message"],
-        started_at=_parse_dt(row["started_at"]),
-        finished_at=_parse_dt(row["finished_at"]),
     )
 
 
@@ -130,8 +119,8 @@ class GameRepository:
         """返回全部游戏, 按创建时间升序."""
         with self._database.connect() as connection:
             rows = connection.execute(
-                "SELECT id, name, steam_app_id, platform, enabled, created_at"
-                " FROM games ORDER BY created_at, id"
+                "SELECT id, name, steam_app_id, platform, enabled, created_at,"
+                " original_name, storage_key FROM games ORDER BY created_at, id"
             ).fetchall()
         return [_row_to_game(row) for row in rows]
 
@@ -139,8 +128,8 @@ class GameRepository:
         """按 id 返回单个游戏; 不存在返回 None."""
         with self._database.connect() as connection:
             row = connection.execute(
-                "SELECT id, name, steam_app_id, platform, enabled, created_at"
-                " FROM games WHERE id = ?",
+                "SELECT id, name, steam_app_id, platform, enabled, created_at,"
+                " original_name, storage_key FROM games WHERE id = ?",
                 (game_id,),
             ).fetchone()
         return _row_to_game(row) if row is not None else None
@@ -148,16 +137,19 @@ class GameRepository:
     def add(self, game: Game) -> Game:
         """插入一条游戏记录, 返回带 id 与创建时间的实体."""
         created_at = _dt_text(game.created_at) or iso_utc_now()
+        original_name = game.original_name or game.name
         with self._database.session() as connection:
             cursor = connection.execute(
-                "INSERT INTO games (name, steam_app_id, platform, enabled, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO games (name, steam_app_id, platform, enabled, created_at,"
+                " original_name, storage_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     game.name,
                     game.steam_app_id,
                     game.platform,
                     int(game.enabled),
                     created_at,
+                    original_name,
+                    game.storage_key,
                 ),
             )
             if cursor.lastrowid is None:
@@ -170,10 +162,16 @@ class GameRepository:
             platform=game.platform,
             enabled=game.enabled,
             created_at=_parse_dt(created_at),
+            original_name=original_name,
+            storage_key=game.storage_key,
         )
 
     def update(self, game: Game) -> Game:
-        """按 id 更新可变字段; 缺少 id 时抛错."""
+        """按 id 更新可变字段; 缺少 id 时抛错.
+
+        只更新名称/Steam/平台/启用状态: ``original_name`` 与 ``storage_key``
+        记录的是"首次录入的名称"与"磁盘上实际使用的目录", 重命名不得改写。
+        """
         if game.id is None:
             raise ValueError("更新游戏需要 id")
         with self._database.session() as connection:
@@ -189,6 +187,25 @@ class GameRepository:
                 ),
             )
         return game
+
+    def ensure_storage_key(self, game_id: int, key: str) -> str:
+        """写入并返回该游戏在备份根下的目录名(已有取值时不再改写).
+
+        目录名只在第一次备份时确定: 之后改名或增删存档位置都不会搬动已有
+        备份, 因此这里用"仅在为空时写入"的方式保证稳定性。
+        """
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE games SET storage_key = ? WHERE id = ?"
+                " AND (storage_key IS NULL OR storage_key = '')",
+                (key, game_id),
+            )
+            row = connection.execute(
+                "SELECT storage_key FROM games WHERE id = ?", (game_id,)
+            ).fetchone()
+        if row is None:
+            raise DatabaseError(f"未知游戏: {game_id}")
+        return str(row["storage_key"] or "") or key
 
     def delete(self, game_id: int) -> None:
         """删除游戏记录; 存档位置与备份节点随外键级联删除."""
@@ -366,8 +383,8 @@ class BackupRepository:
         with self._database.session() as connection:
             cursor = connection.execute(
                 "INSERT INTO backup_nodes (game_id, parent_id, node_kind,"
-                " branch_name, note, content_hash, storage_relpath, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " branch_name, note, content_hash, storage_relpath, created_at,"
+                " is_safety) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node.game_id,
                     node.parent_id,
@@ -377,6 +394,7 @@ class BackupRepository:
                     node.content_hash,
                     node.storage_relpath,
                     created_at,
+                    int(node.is_safety),
                 ),
             )
             if cursor.lastrowid is None:
@@ -392,6 +410,7 @@ class BackupRepository:
             content_hash=node.content_hash,
             storage_relpath=node.storage_relpath,
             created_at=_parse_dt(created_at),
+            is_safety=node.is_safety,
         )
 
     def get(self, backup_id: int) -> BackupNode | None:
@@ -399,8 +418,8 @@ class BackupRepository:
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT id, game_id, parent_id, node_kind, branch_name, note, title,"
-                " content_hash, storage_relpath, created_at FROM backup_nodes"
-                " WHERE id = ?",
+                " content_hash, storage_relpath, created_at, is_safety"
+                " FROM backup_nodes WHERE id = ?",
                 (backup_id,),
             ).fetchone()
         return _row_to_backup_node(row) if row is not None else None
@@ -410,8 +429,8 @@ class BackupRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT id, game_id, parent_id, node_kind, branch_name, note, title,"
-                " content_hash, storage_relpath, created_at FROM backup_nodes"
-                " WHERE game_id = ? ORDER BY created_at, id",
+                " content_hash, storage_relpath, created_at, is_safety"
+                " FROM backup_nodes WHERE game_id = ? ORDER BY created_at, id",
                 (game_id,),
             ).fetchall()
         return [_row_to_backup_node(row) for row in rows]
@@ -421,8 +440,9 @@ class BackupRepository:
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT id, game_id, parent_id, node_kind, branch_name, note, title,"
-                " content_hash, storage_relpath, created_at FROM backup_nodes"
-                " WHERE game_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                " content_hash, storage_relpath, created_at, is_safety"
+                " FROM backup_nodes WHERE game_id = ?"
+                " ORDER BY created_at DESC, id DESC LIMIT 1",
                 (game_id,),
             ).fetchone()
         return _row_to_backup_node(row) if row is not None else None
@@ -476,8 +496,8 @@ class BackupRepository:
         with self._database.session() as connection:
             cursor = connection.execute(
                 "INSERT INTO backup_nodes (game_id, parent_id, node_kind,"
-                " branch_name, note, title, content_hash, storage_relpath, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " branch_name, note, title, content_hash, storage_relpath,"
+                " created_at, is_safety) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node.game_id,
                     node.parent_id,
@@ -488,6 +508,7 @@ class BackupRepository:
                     node.content_hash,
                     node.storage_relpath,
                     created_at,
+                    int(node.is_safety),
                 ),
             )
             if cursor.lastrowid is None:
@@ -519,6 +540,7 @@ class BackupRepository:
             content_hash=node.content_hash,
             storage_relpath=node.storage_relpath,
             created_at=_parse_dt(created_at),
+            is_safety=node.is_safety,
         )
 
     def add_files(self, backup_id: int, entries: Sequence[BackupFileEntry]) -> int:
@@ -571,56 +593,6 @@ class BackupRepository:
                 "SELECT COUNT(*) FROM backup_nodes WHERE game_id = ?", (game_id,)
             ).fetchone()
         return int(row[0]) if row is not None else 0
-
-
-class OperationRepository:
-    """operations 表的行级访问: 记录备份/恢复等操作的状态与错误摘要."""
-
-    def __init__(self, database: Database) -> None:
-        """绑定到指定的数据库封装."""
-        self._database = database
-
-    def start(
-        self,
-        op_kind: OperationKind,
-        game_id: int | None = None,
-        message: str | None = None,
-    ) -> int:
-        """开始一次操作, 返回操作 id."""
-        with self._database.session() as connection:
-            cursor = connection.execute(
-                "INSERT INTO operations (op_kind, game_id, status, message,"
-                " started_at) VALUES (?, ?, 'started', ?, ?)",
-                (op_kind, game_id, message, iso_utc_now()),
-            )
-            if cursor.lastrowid is None:
-                raise DatabaseError("插入操作记录失败: 未返回行 id")
-            return int(cursor.lastrowid)
-
-    def finish(
-        self,
-        operation_id: int,
-        status: OperationStatus,
-        message: str | None = None,
-    ) -> None:
-        """结束一次操作, 写入结果状态与摘要."""
-        with self._database.session() as connection:
-            connection.execute(
-                "UPDATE operations SET status = ?, message = ?, finished_at = ?"
-                " WHERE id = ?",
-                (status, message, iso_utc_now(), operation_id),
-            )
-
-    def list_recent(self, *, limit: int = 20) -> list[Operation]:
-        """返回最近的操作记录(新的在前)."""
-        with self._database.connect() as connection:
-            rows = connection.execute(
-                "SELECT id, op_kind, game_id, status, message, started_at,"
-                " finished_at FROM operations ORDER BY started_at DESC, id DESC"
-                " LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return [_row_to_operation(row) for row in rows]
 
 
 class ScheduledJobRepository:

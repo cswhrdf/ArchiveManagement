@@ -23,11 +23,15 @@ Allure 标签语义(与 Allure 3 报告控件一一对应):
 from __future__ import annotations
 
 import inspect
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import allure
 import pytest
+
+from archive_management.services.audit import AUDIT_LOGGER_NAME
 
 _SEVERITY_LEVELS = ("blocker", "critical", "normal", "minor", "trivial")
 _SEVERITY_RANK = {
@@ -201,3 +205,37 @@ def _configure_allure(item: pytest.Item) -> None:
 def _allure_metadata(request: pytest.FixtureRequest) -> None:
     """在每个测试开始后写入 Allure 元数据。"""
     _configure_allure(request.node)
+
+
+class _RecordingHandler(logging.Handler):
+    """把审计日志采样到内存列表, 供用例断言。"""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@pytest.fixture
+def audit_log() -> Iterator[list[str]]:
+    """捕获 ``archive_management.audit`` 的日志行.
+
+    用户操作只写日志文件与内存, 不落数据库, 因此用例通过日志行断言
+    "操作是否被记录"; 夹具临时把审计日志器降到 DEBUG 并捕获全部行。
+    """
+    logger = logging.getLogger(AUDIT_LOGGER_NAME)
+    handler = _RecordingHandler()
+    previous_level = logger.level
+    previous_propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        yield handler.messages
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagate

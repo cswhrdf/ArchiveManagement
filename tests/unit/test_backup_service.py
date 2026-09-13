@@ -22,6 +22,7 @@ from archive_management.application.backup import (
 from archive_management.domain import DeletionMode, Game, SaveLocation
 from archive_management.exceptions import (
     ArchiveManagementError,
+    ContentUnchangedError,
     DatabaseError,
     OperationCancelledError,
     SnapshotError,
@@ -30,10 +31,10 @@ from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     BackupRepository,
     GameRepository,
-    OperationRepository,
     SaveLocationRepository,
 )
-from archive_management.services.snapshot import SnapshotSource
+from archive_management.services.naming import game_folder
+from archive_management.services.snapshot import MANIFEST_FILENAME, SnapshotSource
 
 pytestmark = [
     pytest.mark.backend,
@@ -70,6 +71,18 @@ def _service(tmp_path: Path, *, saves: int = 1) -> tuple[BackupService, int]:
     return service, game.id
 
 
+def _touch_save(tmp_path: Path, *, index: int = 0, text: str = "") -> None:
+    """改动存档内容, 让下一次备份与当前节点不同.
+
+    "内容没有变化就不产生新备份"是用例层的规则(见
+    :class:`ArchiveManagementError` 的 ContentUnchangedError), 因此需要连续
+    备份的用例必须先推进一次存档状态.
+    """
+    target = tmp_path / f"save{index}" / "slot.dat"
+    previous = target.read_text(encoding="utf-8")
+    target.write_text(text or f"{previous}+", encoding="utf-8")
+
+
 def test_create_backup_writes_node_files_and_snapshot(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     node = service.create_backup(game_id, note="首个节点")
@@ -92,6 +105,7 @@ def test_second_backup_chains_onto_previous_node(tmp_path: Path) -> None:
     """向下保存: 新节点挂在当前末端之后."""
     service, game_id = _service(tmp_path)
     first = service.create_backup(game_id)
+    _touch_save(tmp_path)
     second = service.create_backup(game_id)
 
     assert first.id is not None
@@ -100,10 +114,54 @@ def test_second_backup_chains_onto_previous_node(tmp_path: Path) -> None:
     assert service.latest(game_id) == second
 
 
+def test_create_backup_skips_unchanged_content(
+    tmp_path: Path, audit_log: list[str]
+) -> None:
+    """存档与当前节点完全一致时不创建新备份, 并留下 DEBUG 级日志."""
+    service, game_id = _service(tmp_path)
+    first = service.create_backup(game_id)
+
+    with pytest.raises(ContentUnchangedError) as excinfo:
+        service.create_backup(game_id)
+
+    assert excinfo.value.backup_id == first.id
+    assert [node.id for node in service.list_nodes(game_id)] == [first.id]
+    skipped = [line for line in audit_log if "skipped_unchanged" in line]
+    assert skipped
+    # 重复跳过是基础操作: 只在文件日志里留痕.
+    assert all("backup.create " in line for line in skipped)
+
+
+def test_unchanged_backup_leaves_no_snapshot_directory(tmp_path: Path) -> None:
+    """被判定没有变化的那一次不能留下快照目录."""
+    service, game_id = _service(tmp_path)
+    service.create_backup(game_id)
+
+    with pytest.raises(ContentUnchangedError):
+        service.create_backup(game_id)
+
+    assert len(list((tmp_path / "backups").rglob(MANIFEST_FILENAME))) == 1
+
+
+def test_create_branch_requires_changed_content(tmp_path: Path) -> None:
+    """分支同样要校验内容: 与分支起点一致时不产生节点."""
+    service, game_id = _service(tmp_path)
+    base = service.create_backup(game_id)
+    assert base.id is not None
+
+    with pytest.raises(ContentUnchangedError):
+        service.create_branch(game_id, base.id, "黑棘")
+
+    _touch_save(tmp_path)
+    branch = service.create_branch(game_id, base.id, "黑棘")
+    assert branch.branch_name == "黑棘"
+
+
 def test_create_branch_marks_parent_and_name(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     base = service.create_backup(game_id)
     assert base.id is not None
+    _touch_save(tmp_path)
 
     branch = service.create_branch(game_id, base.id, "  黑棘  ")
 
@@ -121,6 +179,80 @@ def test_create_branch_rejects_blank_name(tmp_path: Path) -> None:
     assert base.id is not None
     with pytest.raises(ArchiveManagementError):
         service.create_branch(game_id, base.id, "   ")
+
+
+def test_create_backup_uses_named_folder_instead_of_game_id(tmp_path: Path) -> None:
+    """备份目录用"名称 + 名称与路径的短哈希", 不再用数字 id."""
+    service, game_id = _service(tmp_path)
+    node = service.create_backup(game_id)
+
+    assert node.storage_relpath is not None
+    folder, _, leaf = node.storage_relpath.partition("/")
+    assert folder == game_folder("Demo", [str(tmp_path / "save0")])
+    assert folder.startswith("Demo-")
+    assert folder != str(game_id)
+    assert leaf  # 目录内仍然是一次备份的时间前缀文件件
+
+    # 目录名已持久化在 games 表, 用于界面额外信息展示.
+    stored = GameRepository(Database(tmp_path / "app.db")).get(game_id)
+    assert stored is not None
+    assert stored.storage_key == folder
+    assert stored.original_name == "Demo"
+
+
+def test_storage_folder_survives_rename_and_location_change(tmp_path: Path) -> None:
+    """改名/增删存档位置不搬动已有备份: 目录名在首次备份时固化."""
+    service, game_id = _service(tmp_path)
+    first = service.create_backup(game_id)
+    games = GameRepository(Database(tmp_path / "app.db"))
+    renamed = games.get(game_id)
+    assert renamed is not None
+    games.update(renamed.model_copy(update={"name": "改名后的游戏"}))
+
+    _touch_save(tmp_path)
+    second = service.create_backup(game_id)
+    extra = tmp_path / "save-extra"
+    extra.mkdir()
+    (extra / "slot.dat").write_text("extra", encoding="utf-8")
+    SaveLocationRepository(Database(tmp_path / "app.db")).add(
+        SaveLocation(game_id=game_id, path=str(extra), path_kind="directory")
+    )
+    _touch_save(tmp_path)
+    third = service.create_backup(game_id)
+
+    def folder_of(relpath: str | None) -> str:
+        assert relpath is not None
+        return relpath.split("/")[0]
+
+    assert folder_of(first.storage_relpath) == folder_of(second.storage_relpath)
+    assert folder_of(second.storage_relpath) == folder_of(third.storage_relpath)
+    stored = games.get(game_id)
+    assert stored is not None
+    assert stored.original_name == "Demo"  # 原始名称保留, 改名不改写
+    assert stored.name == "改名后的游戏"
+
+
+def test_storage_folder_distinguishes_games_with_same_name(tmp_path: Path) -> None:
+    """同名游戏靠路径哈希区分, 不会互相覆盖."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    games = GameRepository(database)
+    locations = SaveLocationRepository(database)
+    service = BackupService(database, backup_root=tmp_path / "backups")
+    folders: list[str] = []
+    for name in ("Demo", "Demo"):
+        save = tmp_path / f"save-{len(folders)}"
+        save.mkdir()
+        (save / "slot.dat").write_text(name, encoding="utf-8")
+        game = games.add(Game(name=name))
+        assert game.id is not None
+        locations.add(SaveLocation(game_id=game.id, path=str(save)))
+        node = service.create_backup(game.id)
+        assert node.storage_relpath is not None
+        folders.append(node.storage_relpath.split("/")[0])
+
+    assert folders[0] != folders[1]
+    assert all(folder.startswith("Demo-") for folder in folders)
 
 
 def test_create_backup_rejects_unknown_parent(tmp_path: Path) -> None:
@@ -145,13 +277,17 @@ def test_create_backup_rejects_unknown_game(tmp_path: Path) -> None:
         service.create_backup(4242)
 
 
-def test_create_backup_records_successful_operation(tmp_path: Path) -> None:
+def test_create_backup_records_successful_operation(
+    tmp_path: Path, audit_log: list[str]
+) -> None:
     service, game_id = _service(tmp_path)
-    database = Database(tmp_path / "app.db")
-    service.create_backup(game_id)
-    operations = OperationRepository(database).list_recent()
-    assert [item.status for item in operations] == ["succeeded"]
-    assert operations[0].op_kind == "backup"
+    node = service.create_backup(game_id)
+    assert any(
+        message.startswith("backup.create ")
+        and "result=succeeded" in message
+        and f"backup_id={node.id}" in message
+        for message in audit_log
+    )
 
 
 def test_snapshot_failure_leaves_no_node_or_directory(tmp_path: Path) -> None:
@@ -184,7 +320,9 @@ def test_database_failure_rolls_back_snapshot_directory(
     assert service.list_nodes(game_id) == []
 
 
-def test_cancelled_backup_reports_and_cleans_up(tmp_path: Path) -> None:
+def test_cancelled_backup_reports_and_cleans_up(
+    tmp_path: Path, audit_log: list[str]
+) -> None:
     service, game_id = _service(tmp_path, saves=2)
     seen = {"checks": 0}
 
@@ -197,13 +335,13 @@ def test_cancelled_backup_reports_and_cleans_up(tmp_path: Path) -> None:
 
     assert service.list_nodes(game_id) == []
     assert not list((tmp_path / "backups").rglob("snapshot.json"))
-    operations = OperationRepository(Database(tmp_path / "app.db")).list_recent()
-    assert [item.status for item in operations] == ["cancelled"]
+    assert any("result=cancelled" in message for message in audit_log)
 
 
 def test_snapshot_failure_is_recorded_as_failed_operation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    audit_log: list[str],
 ) -> None:
     service, game_id = _service(tmp_path)
 
@@ -218,9 +356,10 @@ def test_snapshot_failure_is_recorded_as_failed_operation(
     with pytest.raises(SnapshotError):
         service.create_backup(game_id)
 
-    operations = OperationRepository(Database(tmp_path / "app.db")).list_recent()
-    assert [item.status for item in operations] == ["failed"]
-    assert operations[0].message == "磁盘空间不足"
+    assert any(
+        message.startswith("backup.create.failed ") and "error=" in message
+        for message in audit_log
+    )
 
 
 def test_facts_for_unsaved_node(tmp_path: Path) -> None:
@@ -267,6 +406,7 @@ def test_multiple_save_locations_are_all_backed_up(tmp_path: Path) -> None:
 def test_current_node_defaults_to_latest(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     first = service.create_backup(game_id)
+    _touch_save(tmp_path)
     second = service.create_backup(game_id)
     assert service.current_node(game_id) == second
     assert service.current_node(game_id) != first
@@ -278,7 +418,9 @@ def test_set_current_makes_new_backups_continue_from_that_node(
     """恢复到此节点后, 之后的向下保存从该节点重新开始."""
     service, game_id = _service(tmp_path)
     root = service.create_backup(game_id)
+    _touch_save(tmp_path)
     middle = service.create_backup(game_id)
+    _touch_save(tmp_path)
     tip = service.create_backup(game_id)
     assert root.id is not None
     assert middle.id is not None
@@ -287,6 +429,7 @@ def test_set_current_makes_new_backups_continue_from_that_node(
     service.set_current(game_id, root.id)
     assert service.current_node(game_id) == root
 
+    _touch_save(tmp_path)
     continued = service.create_backup(game_id)
 
     assert continued.parent_id == root.id
@@ -316,6 +459,7 @@ def test_set_current_rejects_unknown_backup(tmp_path: Path) -> None:
 def test_delete_leaf_removes_node_and_snapshot(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     service.create_backup(game_id)
+    _touch_save(tmp_path)
     leaf = service.create_backup(game_id)
     root = service.snapshot_root(leaf)
 
@@ -329,7 +473,9 @@ def test_delete_leaf_removes_node_and_snapshot(tmp_path: Path) -> None:
 def test_delete_middle_node_moves_later_backups_up(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     first = service.create_backup(game_id)
+    _touch_save(tmp_path)
     middle = service.create_backup(game_id)
+    _touch_save(tmp_path)
     last = service.create_backup(game_id)
     assert first.id is not None
     assert middle.id is not None
@@ -348,8 +494,10 @@ def test_delete_branch_root_requires_confirmation(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     base = service.create_backup(game_id)
     assert base.id is not None
+    _touch_save(tmp_path)
     branch = service.create_branch(game_id, base.id, "Branch")
     assert branch.id is not None
+    _touch_save(tmp_path)
     child = service.create_backup(game_id, parent_id=branch.id)
 
     with pytest.raises(ArchiveManagementError):
@@ -363,8 +511,10 @@ def test_delete_branch_root_cascade_removes_subtree(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     base = service.create_backup(game_id)
     assert base.id is not None
+    _touch_save(tmp_path)
     branch = service.create_branch(game_id, base.id, "Branch")
     assert branch.id is not None
+    _touch_save(tmp_path)
     service.create_backup(game_id, parent_id=branch.id)
     branch_root = service.snapshot_root(branch)
 
@@ -379,6 +529,7 @@ def test_delete_branch_root_cascade_removes_subtree(tmp_path: Path) -> None:
 def test_delete_current_node_falls_back_to_parent(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     first = service.create_backup(game_id)
+    _touch_save(tmp_path)
     last = service.create_backup(game_id)
     assert first.id is not None
     assert last.id is not None
@@ -444,6 +595,7 @@ def test_branch_node_uses_branch_name_as_title(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     base = service.create_backup(game_id)
     assert base.id is not None
+    _touch_save(tmp_path)
     branch = service.create_branch(game_id, base.id, "Branch")
     assert branch.title == "Branch"
     assert branch.branch_name == "Branch"
@@ -456,6 +608,7 @@ def test_auto_backups_are_pruned_to_keep_count(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     for _ in range(3):
         service.create_backup(game_id, kind="auto", keep_auto=2)
+        _touch_save(tmp_path)
 
     autos = [node for node in service.list_nodes(game_id) if node.node_kind == "auto"]
     assert len(autos) == 2
@@ -469,6 +622,7 @@ def test_pruned_auto_keeps_chain_connected(tmp_path: Path) -> None:
     base = service.create_backup(game_id)
     assert base.id is not None
     for _ in range(3):
+        _touch_save(tmp_path)
         service.create_backup(game_id, kind="auto", keep_auto=1)
 
     autos = [node for node in service.list_nodes(game_id) if node.node_kind == "auto"]

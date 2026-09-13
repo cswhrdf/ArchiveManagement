@@ -6,10 +6,17 @@ from pathlib import Path
 
 import pytest
 
+import archive_management.application.locations as locations_mod
+from archive_management.domain import Game, ScheduledJob
 from archive_management.exceptions import ArchiveManagementError
+from archive_management.i18n import tr
 from archive_management.infrastructure.database import Database
-from archive_management.infrastructure.repository import ScheduledJobRepository
+from archive_management.infrastructure.repository import (
+    GameRepository,
+    ScheduledJobRepository,
+)
 from archive_management.services.scheduler import BackupScheduler, ManualBackend
+from archive_management.ui.models import visible_in_branch_view
 from archive_management.ui.sql_backend import SqlArchiveService
 
 pytestmark = [
@@ -54,7 +61,27 @@ def test_update_game_renames(tmp_path: Path) -> None:
     game_id = service.add_game("旧名").game_id
     updated = service.update_game(game_id, "新名")
     assert updated.name == "新名"
-    assert service.get_detail(game_id).name == "新名"
+    detail = service.get_detail(game_id)
+    assert detail.name == "新名"
+    # 重命名不改写"首次录入的名称", 界面据此展示额外的原始名称.
+    assert detail.original_name == "旧名"
+    assert detail.origin_label == "原始名称: 旧名"
+
+
+def test_backup_uses_named_folder_and_shows_it(tmp_path: Path) -> None:
+    """备份目录改用"名称 + 哈希", 并在详情里作为额外信息展示."""
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+
+    detail = service.get_detail(game_id)
+    assert detail.storage_folder.startswith("Demo-")
+    assert detail.storage_folder != game_id
+    assert detail.origin_label == f"备份目录: {detail.storage_folder}"
+    snapshots = list(
+        (tmp_path / "backups" / detail.storage_folder).glob("*/loc-0/*.dat")
+    )
+    assert [item.name for item in snapshots] == ["slot1.dat"]
+    assert str(save) not in detail.storage_folder
 
 
 def test_set_game_enabled_flag(tmp_path: Path) -> None:
@@ -190,6 +217,13 @@ def test_task_status_reports_backup_root(tmp_path: Path) -> None:
 # ----------------------------------------------------- 阶段 D: 备份/分支/调度
 
 
+def _advance(save: Path, text: str = "") -> None:
+    """改动存档内容, 让下一次备份与当前节点不同(否则会被判为"未变化")."""
+    target = save / "slot1.dat"
+    previous = target.read_text(encoding="utf-8")
+    target.write_text(text or f"{previous}+", encoding="utf-8")
+
+
 def _service_with_save(
     tmp_path: Path, name: str = "Demo"
 ) -> tuple[SqlArchiveService, str, Path]:
@@ -226,9 +260,35 @@ def test_backup_now_requires_locations(tmp_path: Path) -> None:
         service.run_backup_now(game_id)
 
 
-def test_second_backup_becomes_child_node(tmp_path: Path) -> None:
+def test_new_backup_gets_default_title_and_empty_summary(tmp_path: Path) -> None:
+    """新建备份的标题列直接给出默认名称, 内容摘要默认为空."""
+    service, game_id, _save = _service_with_save(tmp_path)
+
+    service.run_backup_now(game_id)
+
+    item = service.list_backups(game_id)[0]
+    assert item.title == tr("backup.title_manual")
+    assert item.display_title == tr("backup.title_manual")
+    assert item.sub == ""
+
+
+def test_created_backup_title_is_persisted(tmp_path: Path) -> None:
+    """默认名称写进数据库, 而不是只在界面回退展示."""
+    from archive_management.infrastructure.database import Database
+    from archive_management.infrastructure.repository import BackupRepository
+
     service, game_id, _save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
+
+    nodes = BackupRepository(Database(tmp_path / "app.db")).list_for_game(int(game_id))
+    assert [node.title for node in nodes] == [tr("backup.title_manual")]
+    assert [node.note for node in nodes] == [""]
+
+
+def test_second_backup_becomes_child_node(tmp_path: Path) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    _advance(save)
     service.run_backup_now(game_id)
 
     items = service.list_backups(game_id)
@@ -239,9 +299,10 @@ def test_second_backup_becomes_child_node(tmp_path: Path) -> None:
 
 
 def test_create_branch_marks_node(tmp_path: Path) -> None:
-    service, game_id, _save = _service_with_save(tmp_path)
+    service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
     base = service.list_backups(game_id)[0]
+    _advance(save)
 
     message = service.run_create_branch(game_id, base.backup_id, "黑棘")
 
@@ -362,9 +423,10 @@ def test_backup_marks_current_node_and_bumps_revision(tmp_path: Path) -> None:
 
 
 def test_restore_moves_current_node_and_keeps_branch_label(tmp_path: Path) -> None:
-    service, game_id, _save = _service_with_save(tmp_path)
+    service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
     first = service.list_backups(game_id)[0]
+    _advance(save)
     service.run_create_branch(game_id, first.backup_id, "Branch")
     branch = service.list_backups(game_id)[-1]
 
@@ -374,15 +436,17 @@ def test_restore_moves_current_node_and_keeps_branch_label(tmp_path: Path) -> No
     assert items[first.backup_id].is_current is True
     assert items[branch.backup_id].is_current is False
     # 新备份从当前节点(而非末尾)继续.
+    _advance(save, "restored")
     service.run_backup_now(game_id)
     created = [item for item in service.list_backups(game_id) if not item.is_branch]
     assert created[-1].parent_id == first.backup_id
 
 
 def test_branch_node_carries_branch_name_for_inheritance(tmp_path: Path) -> None:
-    service, game_id, _save = _service_with_save(tmp_path)
+    service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
     base = service.list_backups(game_id)[0]
+    _advance(save)
 
     service.run_create_branch(game_id, base.backup_id, "黑棘")
 
@@ -414,12 +478,14 @@ def test_rename_backup_rejects_too_long_note(tmp_path: Path) -> None:
 
 
 def test_plan_delete_signals_confirmation_for_branch_root(tmp_path: Path) -> None:
-    service, game_id, _save = _service_with_save(tmp_path)
+    service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
     base = service.list_backups(game_id)[0]
+    _advance(save)
     service.run_create_branch(game_id, base.backup_id, "Branch")
     branch = service.list_backups(game_id)[-1]
     # 分支上继续保存, 形成"分支根 + 其备份"的结构.
+    _advance(save)
     service.run_backup_now(game_id)
 
     plan = service.plan_delete(game_id, branch.backup_id)
@@ -431,9 +497,10 @@ def test_plan_delete_signals_confirmation_for_branch_root(tmp_path: Path) -> Non
 
 def test_plan_delete_branch_tip_is_plain_single_delete(tmp_path: Path) -> None:
     """分支末端没有后续备份时, 删除它不涉及其它节点."""
-    service, game_id, _save = _service_with_save(tmp_path)
+    service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
     base = service.list_backups(game_id)[0]
+    _advance(save)
     service.run_create_branch(game_id, base.backup_id, "Branch")
     branch = service.list_backups(game_id)[-1]
 
@@ -444,9 +511,11 @@ def test_plan_delete_branch_tip_is_plain_single_delete(tmp_path: Path) -> None:
 
 
 def test_run_delete_backup_shifts_later_nodes(tmp_path: Path) -> None:
-    service, game_id, _save = _service_with_save(tmp_path)
+    service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
+    _advance(save)
     service.run_backup_now(game_id)
+    _advance(save)
     service.run_backup_now(game_id)
     middle = service.list_backups(game_id)[1]
 
@@ -459,9 +528,10 @@ def test_run_delete_backup_shifts_later_nodes(tmp_path: Path) -> None:
 
 
 def test_run_delete_backup_removes_branch_subtree(tmp_path: Path) -> None:
-    service, game_id, _save = _service_with_save(tmp_path)
+    service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
     base = service.list_backups(game_id)[0]
+    _advance(save)
     service.run_create_branch(game_id, base.backup_id, "Branch")
     branch = service.list_backups(game_id)[-1]
 
@@ -499,6 +569,93 @@ def test_scheduled_backup_creates_auto_node_and_prunes(
     assert jobs[0].last_error is None
 
 
+def test_schedules_are_restored_on_startup(tmp_path: Path) -> None:
+    """重启后要能从数据库恢复已配置的定时任务(否则界面显示"未配置")."""
+    service, game_id, _backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m", keep_auto=4)
+
+    # 模拟重启: 同一个数据库重新构造服务(新的调度器实例).
+    restarted = SqlArchiveService(
+        Database(tmp_path / "app.db"),
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+
+    status = restarted.task_status(game_id)
+    assert status.schedule_text == "30m"
+    assert status.keep_auto == 4
+    assert status.schedule_enabled is True
+    item = next(i for i in restarted.list_schedules() if i.game_id == game_id)
+    assert item.interval_text == "30m"
+    assert item.state_label == "已启用"
+
+
+def test_paused_schedule_survives_restart(tmp_path: Path) -> None:
+    """暂停状态与周期配置也要在重启后保持(不会变成未配置)."""
+    service, game_id, _backend = _service_with_scheduler(tmp_path)
+    assert service.set_schedule(game_id, "2h", enabled=False)
+
+    restarted = SqlArchiveService(
+        Database(tmp_path / "app.db"),
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+
+    status = restarted.task_status(game_id)
+    assert status.schedule_text == "2h"
+    assert status.schedule_enabled is False
+
+
+def test_unparsable_stored_schedule_is_ignored(tmp_path: Path) -> None:
+    """数据库里的脏数据不应该阻止服务启动."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    game = GameRepository(database).add(Game(name="Demo"))
+    assert game.id is not None
+    ScheduledJobRepository(database).upsert(
+        ScheduledJob(id=None, game_id=game.id, schedule="每个星期")
+    )
+
+    service = SqlArchiveService(
+        database,
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+
+    assert service.task_status(str(game.id)).schedule_text == ""
+    assert service.list_schedules()
+
+
+def test_schedule_requires_save_locations(tmp_path: Path) -> None:
+    """未配置存档位置的游戏不能创建定时备份, 错误信息要说明原因."""
+    service = _service(tmp_path)
+    game_id = service.add_game("无位置").game_id
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.set_schedule(game_id, "30m")
+
+    assert "存档位置" in str(excinfo.value)
+    assert service.task_status(game_id).schedule_text == ""
+    item = next(i for i in service.list_schedules() if i.game_id == game_id)
+    assert item.can_schedule is False
+
+
+def test_skipped_run_refreshes_next_run_and_revision(tmp_path: Path) -> None:
+    """存档未变化被跳过时也要刷新下次运行时间与数据版本(界面需重读)."""
+    service, game_id, backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m")
+    service.run_backup_now(game_id)
+    before = service.task_status(game_id)
+
+    backend.trigger(f"backup-{game_id}")
+
+    after = service.task_status(game_id)
+    assert after.revision != before.revision
+    assert len(service.list_backups(game_id)) == 1
+    jobs = ScheduledJobRepository(Database(tmp_path / "app.db")).for_game(int(game_id))
+    assert jobs[0].last_run_at is not None
+
+
 def test_scheduled_backup_failure_is_recorded(tmp_path: Path) -> None:
     service, game_id, backend = _service_with_scheduler(tmp_path)
     service.set_schedule(game_id, "30m")
@@ -512,3 +669,176 @@ def test_scheduled_backup_failure_is_recorded(tmp_path: Path) -> None:
 
     jobs = ScheduledJobRepository(Database(tmp_path / "app.db")).for_game(int(game_id))
     assert jobs[0].last_error is not None
+
+
+def test_scheduled_backup_skips_unchanged_save(tmp_path: Path) -> None:
+    """自动备份遇到"存档未变化"时静默跳过: 不新增节点, 也不报错."""
+    service, game_id, backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m")
+    service.run_backup_now(game_id)
+    before = len(service.list_backups(game_id))
+
+    backend.trigger(f"backup-{game_id}")
+
+    assert len(service.list_backups(game_id)) == before
+    jobs = ScheduledJobRepository(Database(tmp_path / "app.db")).for_game(int(game_id))
+    assert jobs[0].last_error is None
+    status = service.task_status(game_id)
+    assert status.progress_label == ""
+
+
+def test_storage_usage_counts_backup_storage(tmp_path: Path) -> None:
+    """状态栏展示的"当前占用"来自备份存储的实际大小."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    before = service.storage_usage()
+
+    service.run_backup_now(game_id)
+
+    after = service.storage_usage()
+    assert after > before
+    assert after > 0
+
+
+def test_list_schedules_reports_all_games(tmp_path: Path) -> None:
+    """全局任务列表包含每个游戏: 来源游戏、下次运行与已保留的自动备份份数."""
+    service, game_id, backend = _service_with_scheduler(tmp_path)
+    other = service.add_game("另一位玩家").game_id
+    service.set_schedule(game_id, "30m", keep_auto=2)
+    backend.trigger(f"backup-{game_id}")
+
+    items = {item.game_id: item for item in service.list_schedules()}
+
+    assert set(items) == {game_id, other}
+    configured = items[game_id]
+    assert configured.game_name == "Demo"
+    assert configured.interval_text == "30m"
+    assert configured.keep_auto == 2
+    # ManifestBackend 没有时间轴(下次运行时间为 None), 因此文案回退到占位符;
+    # 真实调度器会给出具体时间戳(见 test_pause_keeps_interval_configuration).
+    assert configured.next_run_label
+    assert configured.auto_count == 1
+    assert configured.auto_count_label
+    assert configured.state_label == "已启用"
+    # 未配置定时备份的游戏也出现在列表里, 便于直接新增.
+    idle = items[other]
+    assert idle.interval_text == ""
+    assert idle.state_label == "未配置"
+
+
+def test_pause_keeps_interval_configuration(tmp_path: Path) -> None:
+    """暂停只停触发, 不清空周期配置(否则再编辑会丢掉周期)."""
+    service, game_id, _backend = _service_with_scheduler(tmp_path)
+
+    paused = service.set_schedule(game_id, "30m", enabled=False)
+
+    assert paused.schedule_text == "30m"
+    assert paused.schedule_enabled is False
+    item = next(i for i in service.list_schedules() if i.game_id == game_id)
+    assert item.interval_text == "30m"
+    assert item.enabled is False
+    assert item.state_label == "已暂停"
+    assert item.next_run_label == "—"
+
+
+# ------------------------------------------------- 阶段 E: 恢复与删除原始位置
+
+
+def test_preview_restore_reports_targets_and_extra_files(tmp_path: Path) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    node = service.list_backups(game_id)[0]
+    (save / "notes.txt").write_text("extra", encoding="utf-8")
+
+    plan = service.preview_restore(game_id, node.backup_id)
+
+    assert plan.snapshot_ok is True
+    assert plan.file_count == 1
+    assert [target.path for target in plan.targets] == [str(save)]
+    assert plan.blocked_reason is None
+    assert plan.safety_point_available is True
+
+
+def test_preview_restore_rejects_unknown_backup(tmp_path: Path) -> None:
+    service, game_id, _save = _service_with_save(tmp_path)
+    with pytest.raises(ArchiveManagementError):
+        service.preview_restore(game_id, "9999")
+
+
+def test_run_restore_writes_files_and_keeps_current_pointer(tmp_path: Path) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    node = service.list_backups(game_id)[0]
+    (save / "slot1.dat").write_text("changed", encoding="utf-8")
+
+    message = service.run_restore(game_id, node.backup_id, safety_point=False)
+
+    assert (save / "slot1.dat").read_text(encoding="utf-8") == "progress"
+    assert "当前节点" in message
+    items = {item.backup_id: item for item in service.list_backups(game_id)}
+    assert items[node.backup_id].is_current is True
+
+
+def test_run_restore_keeps_extra_files(tmp_path: Path) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    node = service.list_backups(game_id)[0]
+    (save / "notes.txt").write_text("extra", encoding="utf-8")
+
+    message = service.run_restore(game_id, node.backup_id, safety_point=False)
+
+    # 恢复是覆盖而不是镜像: 快照之外的文件保持原样.
+    assert (save / "notes.txt").read_text(encoding="utf-8") == "extra"
+    assert "1 个文件" in message
+
+
+def test_run_restore_creates_safety_point_by_default(tmp_path: Path) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    node = service.list_backups(game_id)[0]
+    (save / "slot1.dat").write_text("changed", encoding="utf-8")
+
+    service.run_restore(game_id, node.backup_id)
+
+    items = service.list_backups(game_id)
+    safety = [item for item in items if item.safety]
+    assert [item.display_title for item in safety] == ["恢复前安全点"]
+    # 安全点带 safety 标记: 只出现在时间线, 不占分支树的位置.
+    assert safety[0].backup_id not in visible_in_branch_view(items)
+
+
+def test_preview_location_removal_reports_impact(tmp_path: Path) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    location = service.list_locations(game_id)[0]
+
+    plan = service.preview_location_removal(location.location_id)
+
+    assert plan.game_name == "Demo"
+    assert plan.path == str(save)
+    assert plan.files == 1
+    assert plan.blocked_reason is None
+
+
+def test_delete_save_location_requires_matching_name(tmp_path: Path) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    location = service.list_locations(game_id)[0]
+
+    with pytest.raises(ArchiveManagementError):
+        service.delete_save_location(location.location_id, confirm_name="别的游戏")
+
+    assert save.exists()
+    assert len(service.list_locations(game_id)) == 1
+
+
+def test_delete_save_location_uses_injected_trash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, game_id, save = _service_with_save(tmp_path)
+    location = service.list_locations(game_id)[0]
+    moved: list[str] = []
+    monkeypatch.setattr(locations_mod, "send_to_trash", moved.append)
+
+    message = service.delete_save_location(location.location_id, confirm_name="demo")
+
+    assert moved == [str(save)]
+    assert str(save) in message
+    assert service.list_locations(game_id) == []

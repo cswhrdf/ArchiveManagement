@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
+
 import pytest
 
 from archive_management.exceptions import SchedulingError
@@ -164,3 +167,51 @@ def test_entries_are_sorted_by_game_id() -> None:
     scheduler.schedule(9, 30, lambda: None)
     scheduler.schedule(2, 30, lambda: None)
     assert [entry.game_id for entry in scheduler.entries()] == [2, 9]
+
+
+class _FixedNextRun:
+    """只用于测试的最小后端: 汇报一个可变更的下次运行时间."""
+
+    def __init__(self, moment: datetime | None) -> None:
+        self.moment = moment
+
+    def add(
+        self, job_id: str, *, interval_minutes: int, callback: Callable[[], None]
+    ) -> None:
+        """本用例不依赖注册, 空实现."""
+
+    def remove(self, job_id: str) -> None:
+        """空实现."""
+
+    def pause(self, job_id: str) -> None:
+        """空实现."""
+
+    def resume(self, job_id: str) -> None:
+        """空实现."""
+
+    def next_run_at(self, job_id: str) -> datetime | None:
+        """返回当前记录的下次运行时间."""
+        return self.moment
+
+    def shutdown(self) -> None:
+        """空实现."""
+
+
+def test_refresh_rereads_next_run_from_backend() -> None:
+    """任务执行后后端会重排下次触发时间, 缓存必须能刷新."""
+    backend = _FixedNextRun(None)
+    scheduler = BackupScheduler(backend=backend)
+    entry = scheduler.schedule(7, 30, lambda: None)
+    assert entry.next_run_at is None
+
+    later = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+    backend.moment = later  # 模拟一次执行后后端排出的新时间
+
+    refreshed = scheduler.refresh(7)
+
+    assert refreshed is not None
+    assert refreshed.next_run_at == later
+    cached = scheduler.get(7)
+    assert cached is not None
+    assert cached.next_run_at == later
+    assert scheduler.refresh(999) is None

@@ -1,9 +1,11 @@
-"""管理游戏与存档位置窗口 (阶段 C).
+"""管理游戏与存档位置窗口 (阶段 C/E).
 
 一个模态浮层: 上半部管理游戏信息(重命名/停用/删除), 下半部管理该
 游戏的"原始存档位置"(添加目录/文件、设为主位置、重新验证、编辑路径、
-删除). 界面明确区分原始位置与由应用管理的备份目录, 避免误操作
-(PLAN 阶段 C 第 1/2/6 条). 本模块采用组合式窗口, 便于无头测试.
+删除记录), 并提供阶段 E 的"删除原始存档位置": 把磁盘上的原目录移入
+系统回收站(需输入游戏名称确认, 不会永久删除)。界面明确区分原始位置与
+由应用管理的备份目录, 避免误操作(PLAN 阶段 C 第 1/2/6 条、阶段 E 第 5 条)。
+本模块采用组合式窗口, 便于无头测试。
 """
 
 from __future__ import annotations
@@ -17,9 +19,10 @@ from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import _center, ask_text, confirm_dialog, info_dialog
-from archive_management.ui.models import LocationItem
+from archive_management.ui.models import LocationItem, size_label
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory, pick_file
+from archive_management.ui.schedule_window import edit_schedule
 
 _ChangeCallback = Callable[[], None]
 
@@ -65,7 +68,7 @@ class ManageGameWindow:
         window = ctk.CTkToplevel(self._parent)
         self._window = window
         window.title(tr("manage.title"))
-        window.geometry("600x560")
+        window.geometry("600x600")
         window.resizable(False, False)
         window.transient(self._parent)
         window.grab_set()
@@ -98,6 +101,10 @@ class ManageGameWindow:
 
         header_actions = ctk.CTkFrame(header, fg_color="transparent")
         header_actions.grid(row=0, column=1, rowspan=2, padx=12)
+        self._schedule_btn = self._make_button(
+            header_actions, tr("manage.schedule"), self._on_schedule, width=104
+        )
+        self._schedule_btn.pack(side="left", padx=(0, 6))
         self._rename_btn = self._make_button(
             header_actions, tr("manage.rename"), self._on_rename, width=88
         )
@@ -114,6 +121,15 @@ class ManageGameWindow:
         )
         self._delete_btn.pack(side="left")
 
+        self._schedule_state = ctk.CTkLabel(
+            container,
+            text="",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_muted,
+        )
+        self._schedule_state.grid(row=1, column=0, sticky="w", pady=(0, 6))
+
         locations_title = ctk.CTkLabel(
             container,
             text=tr("manage.locations_title"),
@@ -121,14 +137,14 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_body,
         )
-        locations_title.grid(row=1, column=0, sticky="w", pady=(0, 6))
+        locations_title.grid(row=2, column=0, sticky="w", pady=(0, 6))
 
         self._list_scroll = ctk.CTkScrollableFrame(
             container, fg_color=palette.panel, corner_radius=10
         )
-        self._list_scroll.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+        self._list_scroll.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
         self._list_scroll.grid_columnconfigure(0, weight=1)
-        container.grid_rowconfigure(2, weight=1)
+        container.grid_rowconfigure(3, weight=1)
 
         note = ctk.CTkLabel(
             container,
@@ -139,10 +155,10 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        note.grid(row=3, column=0, sticky="w", pady=(0, 8))
+        note.grid(row=4, column=0, sticky="w", pady=(0, 8))
 
         action_bar = ctk.CTkFrame(container, fg_color="transparent")
-        action_bar.grid(row=4, column=0, sticky="w")
+        action_bar.grid(row=5, column=0, sticky="w")
         for text, handler, width in (
             (tr("loc.add_dir"), self._on_add_directory, 96),
             (tr("loc.add_file"), self._on_add_file, 96),
@@ -154,12 +170,24 @@ class ManageGameWindow:
             button = self._make_button(action_bar, text, handler, width=width)
             button.pack(side="left", padx=(0, 6))
 
+        danger_bar = ctk.CTkFrame(container, fg_color="transparent")
+        danger_bar.grid(row=6, column=0, sticky="w", pady=(8, 0))
+        self._delete_origin_btn = self._make_button(
+            danger_bar,
+            tr("loc.delete_origin"),
+            self._on_delete_origin,
+            width=168,
+            danger=True,
+        )
+        self._delete_origin_btn.pack(side="left")
+
         close = self._make_button(
             container, tr("dialog.close"), self.close, width=96, danger=True
         )
-        close.grid(row=5, column=0, sticky="e", pady=(10, 0))
+        close.grid(row=7, column=0, sticky="e", pady=(10, 0))
 
         self._render_state()
+        self._render_schedule_state()
         self.refresh()
 
     def _make_button(
@@ -193,6 +221,17 @@ class ManageGameWindow:
             tr("manage.enabled_label") if self._enabled else tr("manage.disabled_label")
         )
         self._state_label.configure(text=state)
+
+    def _render_schedule_state(self) -> None:
+        """展示该游戏当前的定时备份配置(每个游戏独立配置)."""
+        task = self._backend.task_status(self._game_id)
+        self._schedule_state.configure(
+            text=tr(
+                "manage.schedule_state",
+                state=task.schedule_text or tr("task.unscheduled"),
+                keep=task.keep_auto,
+            )
+        )
 
     def refresh(self) -> None:
         """从后端重载存档位置列表并重绘."""
@@ -290,6 +329,18 @@ class ManageGameWindow:
         self._paint_rows()
 
     # -- 游戏操作 -----------------------------------------------------------
+
+    def _on_schedule(self) -> None:
+        """配置该游戏的定时备份(每个游戏独立配置)."""
+        if edit_schedule(
+            self._window,
+            self._palette,
+            self._backend,
+            game_id=self._game_id,
+            game_name=self._name,
+        ):
+            self._render_schedule_state()
+            self._on_change()
 
     def _on_rename(self) -> None:
         name = ask_text(
@@ -454,6 +505,61 @@ class ManageGameWindow:
         self._on_change()
 
     # -- 其它 ---------------------------------------------------------------
+
+    def _on_delete_origin(self) -> None:
+        """把原始存档目录移入回收站(需输入游戏名称确认).
+
+        这里只做"预检 -> 确认 -> 调用后端"三步; 路径边界与回收站失败等
+        判断都在用例层完成, 界面只负责展示与收集确认文本。
+        """
+        item = self._selected_item()
+        if item is None:
+            return
+        try:
+            plan = self._backend.preview_location_removal(item.location_id)
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
+        if plan.blocked:
+            self._show_error(
+                ArchiveManagementError(
+                    tr(
+                        f"loc.delete_blocked_{plan.blocked_reason}",
+                        path=plan.path,
+                    )
+                )
+            )
+            return
+        typed = ask_text(
+            self._window,
+            self._palette,
+            title=tr("loc.delete_origin_title"),
+            text=tr(
+                "loc.delete_origin_prompt",
+                path=plan.path,
+                files=plan.files,
+                size=size_label(plan.total_size),
+                name=plan.game_name,
+            ),
+            confirm_text=tr("loc.delete_origin_confirm"),
+        )
+        if typed is None:
+            return
+        try:
+            message = self._backend.delete_save_location(
+                item.location_id, confirm_name=typed
+            )
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
+        self.refresh()
+        self._on_change()
+        info_dialog(
+            self._window,
+            self._palette,
+            title=tr("loc.delete_origin_done"),
+            message=message,
+        )
 
     def _show_error(self, exc: ArchiveManagementError) -> None:
         info_dialog(

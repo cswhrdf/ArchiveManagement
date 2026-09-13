@@ -10,13 +10,18 @@ import pytest
 from archive_management.ui.models import (
     BackupItem,
     FeedbackKind,
+    GameDetail,
     GameSummary,
     LocationItem,
+    SourceFilter,
     ViewKind,
     branch_order,
     can_backup,
+    filter_by_source,
+    filter_by_source_label,
     group_by_parent,
     timeline_order,
+    visible_in_branch_view,
 )
 
 pytestmark = [
@@ -58,6 +63,40 @@ def test_game_list_detail_without_locations() -> None:
         game_id="g", name="Demo", has_locations=False, location_count=0, backup_count=0
     )
     assert game.list_detail == "未配置存档位置"
+
+
+def _detail(*, name: str, original_name: str = "", folder: str = "") -> GameDetail:
+    return GameDetail(
+        name=name,
+        subtitle="",
+        main_location="",
+        location_verified=False,
+        location_note="",
+        last_backup_label="—",
+        last_backup_sub="",
+        total_backups_label="0 个节点",
+        total_backups_sub="",
+        next_backup_label="—",
+        original_name=original_name,
+        storage_folder=folder,
+    )
+
+
+def test_detail_origin_label_lists_original_name_and_folder() -> None:
+    """改名后额外展示原始名称, 并始终展示磁盘上的备份目录."""
+    detail = _detail(name="新名字", original_name="旧名字", folder="旧名字-1a2b3c4d")
+
+    assert detail.origin_label == "原始名称: 旧名字 · 备份目录: 旧名字-1a2b3c4d"
+
+
+def test_detail_origin_label_skips_unchanged_name() -> None:
+    detail = _detail(name="Demo", original_name="Demo", folder="Demo-1a2b3c4d")
+
+    assert detail.origin_label == "备份目录: Demo-1a2b3c4d"
+
+
+def test_detail_origin_label_empty_before_first_backup() -> None:
+    assert _detail(name="Demo", original_name="Demo").origin_label == ""
 
 
 def test_can_backup_only_with_locations() -> None:
@@ -165,6 +204,83 @@ def test_branch_view_keeps_all_manual_backups() -> None:
         _item("c", _dt(day=3, hour=9, minute=0)),
     ]
     assert len(branch_order(items)) == 3
+
+
+def _safety(backup_id: str, day: int, parent_id: str | None = None) -> BackupItem:
+    return replace(
+        _item(backup_id, _dt(day=day, hour=9, minute=0)),
+        safety=True,
+        parent_id=parent_id,
+    )
+
+
+def test_safety_point_stays_out_of_branch_view_by_default() -> None:
+    """恢复前安全点只出现在时间线, 分支树里不展示."""
+    items = [
+        _item("root", _dt(day=1, hour=9, minute=0)),
+        _safety("safety", 2, parent_id="root"),
+    ]
+
+    assert [item.backup_id for item in branch_order(items)] == ["root"]
+    assert visible_in_branch_view(items) == {"root"}
+    # 时间线展示全部节点.
+    assert len(timeline_order(items)) == 2
+    # 只有显式筛选安全点时才进入分支树.
+    assert [item.backup_id for item in branch_order(items, include_safety=True)] == [
+        "root",
+        "safety",
+    ]
+
+
+def test_safety_point_kind_label_differs_from_manual() -> None:
+    stamp = _dt(day=2, hour=9, minute=0)
+    assert _safety("safety", 2).kind_label != _item("manual", stamp).kind_label
+
+
+def test_filter_by_source_covers_all_kinds() -> None:
+    items = [
+        _item("manual", _dt(day=1, hour=9, minute=0)),
+        _auto("auto-1", 2),
+        _safety("safety", 3),
+    ]
+
+    assert len(filter_by_source(items, SourceFilter.ALL)) == 3
+    # 手动来源包含安全点(它也走手动保存链路).
+    assert {
+        item.backup_id for item in filter_by_source(items, SourceFilter.MANUAL)
+    } == {
+        "manual",
+        "safety",
+    }
+    assert [item.backup_id for item in filter_by_source(items, SourceFilter.AUTO)] == [
+        "auto-1"
+    ]
+    assert [
+        item.backup_id for item in filter_by_source(items, SourceFilter.SAFETY)
+    ] == ["safety"]
+
+
+def test_filter_by_source_label_matches_dropdown_text() -> None:
+    items = [
+        _item("manual", _dt(day=1, hour=9, minute=0)),
+        _safety("safety", 3),
+    ]
+
+    assert len(filter_by_source_label(items, SourceFilter.ALL.label)) == 2
+    assert [
+        item.backup_id
+        for item in filter_by_source_label(items, SourceFilter.SAFETY.label)
+    ] == ["safety"]
+    # 未知文案(语言切换/旧配置)按不过滤处理, 避免列表变空.
+    assert len(filter_by_source_label(items, "未知筛选")) == 2
+
+
+def test_every_source_filter_label_is_translated() -> None:
+    """回归: 下拉框展示的就是标签文案, 缺 key 会在界面上露出 filter.xxx."""
+    for source in SourceFilter:
+        label = source.label
+        assert label != f"filter.{source.value}"
+        assert not label.startswith("filter.")
 
 
 def test_timeline_labels_inherit_branch_name() -> None:

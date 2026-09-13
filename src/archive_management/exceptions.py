@@ -31,6 +31,27 @@ class OperationCancelledError(ArchiveManagementError):
     """用户主动取消了正在进行的操作."""
 
 
+class ContentUnchangedError(ArchiveManagementError):
+    """存档内容与参照的备份节点完全一致, 因此不需要新建备份.
+
+    手动/分支备份由界面提示用户"存档未变化"; 自动备份与恢复前的安全点
+    直接跳过(写入 DEBUG 级日志), 不打扰用户。
+    """
+
+    def __init__(
+        self, message: str, *, backup_id: int | None = None, title: str = ""
+    ) -> None:
+        """记录与之相同的那份备份, 供界面拼出可读提示."""
+        super().__init__(message)
+        self.backup_id = backup_id
+        self.title = title
+
+    @property
+    def target_label(self) -> str:
+        """返回与之相同的备份节点展示名(如 "手动备份" 或 "#4")."""
+        return self.title or ("—" if self.backup_id is None else f"#{self.backup_id}")
+
+
 class HotkeyError(ArchiveManagementError):
     """全局快捷键注册或监听失败(权限不足、被占用、无图形环境)."""
 

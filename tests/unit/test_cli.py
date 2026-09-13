@@ -71,6 +71,23 @@ def test_default_command_runs_init(tmp_path: Path) -> None:
     assert (tmp_path / "data" / "archive-management.db").is_file()
 
 
+def test_root_before_subcommand_is_not_overridden(tmp_path: Path) -> None:
+    """`--root X init` 与 `init --root X` 必须等价(子解析器不能盖掉前置取值)."""
+    code, output = _run_with_output(["--root", str(tmp_path), "init"])
+
+    assert code == 0
+    assert "初始化完成" in output
+    assert (tmp_path / "data" / "archive-management.db").is_file()
+    assert (tmp_path / "logs" / "archive-management.log").is_file()
+
+
+def test_verbose_flag_keeps_init_working(tmp_path: Path) -> None:
+    code, output = _run_with_output(["--verbose", "init", "--root", str(tmp_path)])
+
+    assert code == 0
+    assert "初始化完成" in output
+
+
 def test_gui_command_returns_two_when_gui_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

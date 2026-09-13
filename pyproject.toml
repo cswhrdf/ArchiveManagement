@@ -99,7 +99,9 @@ select = [
     "E7",
     "E9",
     "F",
+    "G",
     "I",
+    "LOG",
     "N",
     "PERF",
     "PTH",
@@ -108,21 +110,24 @@ select = [
     "RUF",
     "S",
     "SIM",
+    "T20",
     "UP",
 ]
-ignore = [
-    "ANN401",  # 允许 typing.Any 这种例外
-    "D100",  # 忽略 module docstring
-    "D104",  # 忽略 package docstring
-]
+ignore = []
 
 [tool.ruff.lint.per-file-ignores]
+# 测试里允许用 print 做临时调试输出(例如在失败前打印现场).
 "tests/**/*.py" = [
     "D",
     "ANN",
     "S101",
     "PT011",
+    "T201",
 ]
+# 命令行入口与独立脚本的职责就是向终端打印结果, 因此放行 T201.
+# GUI 与用例层不得使用 print: 前者走日志, 后者用接口返回值/回调表达结果.
+"src/archive_management/app.py" = ["T201"]
+"scripts/**/*.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["archive_management"]

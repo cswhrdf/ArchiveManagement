@@ -25,7 +25,6 @@ EXPECTED_TABLES = {
     "backup_nodes",
     "backup_files",
     "scheduled_jobs",
-    "operations",
     "schema_migrations",
 }
 
@@ -70,6 +69,19 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
         count = connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()
     assert count is not None
     assert int(count[0]) == database.latest_schema_version()
+
+
+def test_games_table_has_naming_columns(tmp_path: Path) -> None:
+    """备份目录命名依赖 original_name/storage_key 两列(版本 4 迁移)."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+
+    with database.connect() as connection:
+        rows = connection.execute("PRAGMA table_info(games)").fetchall()
+    columns = {str(row["name"]) for row in rows}
+
+    assert {"original_name", "storage_key"} <= columns
+    assert database.schema_version() >= 4
 
 
 def test_session_commits_changes(tmp_path: Path) -> None:
