@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from archive_management.domain import (
+    HOME_STATE_VERSION,
     BackupFileEntry,
     BackupNode,
     CandidateStatus,
     Game,
     GameCandidate,
+    HomeFilter,
+    HomeLayout,
+    HomeView,
     MonitoredDirectory,
     PathHealth,
     SaveLocation,
@@ -45,6 +50,17 @@ def _dt_text(value: datetime | None) -> str | None:
     return value.astimezone(UTC).isoformat(timespec="seconds")
 
 
+def _split_tags(raw: object) -> tuple[str, ...]:
+    """把数据库中逗号拼接的标签文本还原为元组."""
+    text = str(raw or "")
+    return tuple(tag for tag in (part.strip() for part in text.split(",")) if tag)
+
+
+def _join_tags(tags: Sequence[str]) -> str:
+    """把标签元组拼成数据库存储形式."""
+    return ",".join(tag.strip() for tag in tags if tag.strip())
+
+
 def _row_to_game(row: sqlite3.Row) -> Game:
     name = str(row["name"])
     return Game(
@@ -56,6 +72,10 @@ def _row_to_game(row: sqlite3.Row) -> Game:
         created_at=_parse_dt(row["created_at"]),
         original_name=str(row["original_name"] or "") or name,
         storage_key=str(row["storage_key"] or ""),
+        origin=str(row["origin"] or "manual"),
+        tags=_split_tags(row["tags"]),
+        archived=_as_bool(row["archived"]),
+        last_activity_at=_parse_dt(row["last_activity_at"]),
     )
 
 
@@ -124,7 +144,8 @@ class GameRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT id, name, steam_app_id, platform, enabled, created_at,"
-                " original_name, storage_key FROM games ORDER BY created_at, id"
+                " original_name, storage_key, origin, tags, archived,"
+                " last_activity_at FROM games ORDER BY created_at, id"
             ).fetchall()
         return [_row_to_game(row) for row in rows]
 
@@ -133,7 +154,8 @@ class GameRepository:
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT id, name, steam_app_id, platform, enabled, created_at,"
-                " original_name, storage_key FROM games WHERE id = ?",
+                " original_name, storage_key, origin, tags, archived,"
+                " last_activity_at FROM games WHERE id = ?",
                 (game_id,),
             ).fetchone()
         return _row_to_game(row) if row is not None else None
@@ -145,7 +167,8 @@ class GameRepository:
         with self._database.session() as connection:
             cursor = connection.execute(
                 "INSERT INTO games (name, steam_app_id, platform, enabled, created_at,"
-                " original_name, storage_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " original_name, storage_key, origin, tags, archived,"
+                " last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     game.name,
                     game.steam_app_id,
@@ -154,6 +177,10 @@ class GameRepository:
                     created_at,
                     original_name,
                     game.storage_key,
+                    game.origin,
+                    _join_tags(game.tags),
+                    int(game.archived),
+                    _dt_text(game.last_activity_at) or created_at,
                 ),
             )
             if cursor.lastrowid is None:
@@ -168,6 +195,10 @@ class GameRepository:
             created_at=_parse_dt(created_at),
             original_name=original_name,
             storage_key=game.storage_key,
+            origin=game.origin,
+            tags=game.tags,
+            archived=game.archived,
+            last_activity_at=_parse_dt(_dt_text(game.last_activity_at) or created_at),
         )
 
     def update(self, game: Game) -> Game:
@@ -257,6 +288,37 @@ class GameRepository:
                 "UPDATE games SET current_backup_id = NULL"
                 " WHERE current_backup_id = ?",
                 (backup_id,),
+            )
+
+    def set_archived(self, game_id: int, archived: bool) -> None:
+        """设置或取消归档(归档只是从主页收起来, 不删除任何数据)."""
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE games SET archived = ?, last_activity_at = ? WHERE id = ?",
+                (int(archived), iso_utc_now(), game_id),
+            )
+
+    def set_tags(self, game_id: int, tags: Sequence[str]) -> None:
+        """覆盖写入游戏的自定义标签(调用方负责清理与限额)."""
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE games SET tags = ?, last_activity_at = ? WHERE id = ?",
+                (_join_tags(tags), iso_utc_now(), game_id),
+            )
+
+    def set_origin(self, game_id: int, origin: str) -> None:
+        """记录游戏的来源平台(导入探测结果或手动录入时使用)."""
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE games SET origin = ? WHERE id = ?", (origin, game_id)
+            )
+
+    def touch_activity(self, game_id: int, *, when: datetime | None = None) -> None:
+        """记录一次与该游戏相关的动作, 供主页的"最近活跃"排序使用."""
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE games SET last_activity_at = ? WHERE id = ?",
+                (_dt_text(when) or iso_utc_now(), game_id),
             )
 
 
@@ -1025,3 +1087,128 @@ class CandidateRepository:
         for row in rows:
             counts[str(row[0])] = int(row[1])
         return counts
+
+
+@dataclass(frozen=True)
+class HomeRow:
+    """主页聚合查询的一行: 游戏 + 存档位置 + 备份计数 + 是否来自探测流程.
+
+    ``locations`` 是 ``(路径, 路径类型)`` 元组, 只在应用层判定风险时使用, 因此
+    不构造完整的 :class:`SaveLocation`(主页不需要校验时间等字段)。
+    """
+
+    game: Game
+    locations: tuple[tuple[str, str], ...]
+    backup_count: int
+    last_backup_at: datetime | None
+    monitored: bool
+
+
+class HomeRepository:
+    """主页所需的聚合查询与筛选条件持久化(阶段 E-2)."""
+
+    def __init__(self, database: Database) -> None:
+        """绑定到指定的数据库封装."""
+        self._database = database
+
+    def list_rows(self) -> list[HomeRow]:
+        """一次性取出全部游戏及其计数, 避免按游戏逐个查询.
+
+        共 4 条查询(游戏、存档位置、备份计数、探测关联), 与游戏数量无关。
+        """
+        with self._database.connect() as connection:
+            games = [
+                _row_to_game(row)
+                for row in connection.execute(
+                    "SELECT id, name, steam_app_id, platform, enabled, created_at,"
+                    " original_name, storage_key, origin, tags, archived,"
+                    " last_activity_at FROM games ORDER BY name, id"
+                ).fetchall()
+            ]
+            paths: dict[int, list[tuple[str, str]]] = {}
+            for row in connection.execute(
+                "SELECT game_id, path, path_kind FROM save_locations ORDER BY id"
+            ).fetchall():
+                paths.setdefault(int(row["game_id"]), []).append(
+                    (str(row["path"]), str(row["path_kind"]))
+                )
+            counts: dict[int, tuple[int, datetime | None]] = {}
+            for row in connection.execute(
+                "SELECT game_id, COUNT(*) AS total, MAX(created_at) AS latest"
+                " FROM backup_nodes GROUP BY game_id"
+            ).fetchall():
+                counts[int(row["game_id"])] = (
+                    int(row["total"]),
+                    _parse_dt(row["latest"]),
+                )
+            monitored = {
+                int(row["game_id"])
+                for row in connection.execute(
+                    "SELECT DISTINCT game_id FROM game_candidates"
+                    " WHERE game_id IS NOT NULL"
+                ).fetchall()
+            }
+        rows: list[HomeRow] = []
+        for game in games:
+            if game.id is None:  # pragma: no cover - 查询总是带 id
+                continue
+            total, latest = counts.get(game.id, (0, None))
+            rows.append(
+                HomeRow(
+                    game=game,
+                    locations=tuple(paths.get(game.id, ())),
+                    backup_count=total,
+                    last_backup_at=latest,
+                    monitored=game.id in monitored,
+                )
+            )
+        return rows
+
+    def load_state(self) -> HomeFilter | None:
+        """读取主页状态; 无记录或版本不符时返回 None(调用方用默认值)."""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT view, origin, category, search, layout, page_size, version"
+                " FROM home_state WHERE id = 1"
+            ).fetchone()
+        if row is None or int(row["version"]) != HOME_STATE_VERSION:
+            return None
+        try:
+            view = HomeView(str(row["view"]))
+            layout = HomeLayout(str(row["layout"]))
+        except ValueError:  # pragma: no cover - 版本内取值被手工改坏
+            return None
+        return HomeFilter(
+            view=view,
+            origin=str(row["origin"] or ""),
+            category=str(row["category"] or ""),
+            search=str(row["search"] or ""),
+            layout=layout,
+            page_size=int(row["page_size"]),
+            version=HOME_STATE_VERSION,
+        ).normalized()
+
+    def save_state(self, active: HomeFilter) -> HomeFilter:
+        """写入主页状态(单行表), 返回规范化的取值."""
+        clean = active.normalized()
+        with self._database.session() as connection:
+            connection.execute(
+                "INSERT INTO home_state (id, view, origin, category, search, layout,"
+                " page_size, version, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (id) DO UPDATE SET view = excluded.view,"
+                " origin = excluded.origin, category = excluded.category,"
+                " search = excluded.search, layout = excluded.layout,"
+                " page_size = excluded.page_size,"
+                " version = excluded.version, updated_at = excluded.updated_at",
+                (
+                    clean.view.value,
+                    clean.origin,
+                    clean.category,
+                    clean.search,
+                    clean.layout.value,
+                    clean.page_size,
+                    clean.version,
+                    iso_utc_now(),
+                ),
+            )
+        return clean

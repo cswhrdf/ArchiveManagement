@@ -37,6 +37,14 @@ class Game(_RowModel):
     original_name: str = ""
     # 备份根目录下该游戏实际使用的目录名(首次备份时确定, 之后保持不变).
     storage_key: str = ""
+    # 游戏来源平台: steam/epic/gog/battle_net/monitored/manual(阶段 E-2 分类用).
+    origin: str = "manual"
+    # 用户自定义标签(主页分类), 落库时按逗号拼接, 因此标签内不含逗号.
+    tags: tuple[str, ...] = ()
+    # 归档等价于"从主页收起来": 记录与备份都保留, 只是默认列表不再显示.
+    archived: bool = False
+    # 最近一次与该游戏相关的动作(备份/恢复/修改)发生的时间.
+    last_activity_at: datetime | None = None
 
 
 class SaveLocation(_RowModel):

@@ -6,11 +6,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
+from archive_management.application.home import HomeReport
 from archive_management.domain import (
+    GameFacts,
+    HomeFilter,
+    HomeStats,
+    HomeView,
     PathKind,
     SaveSource,
     TreeInput,
@@ -26,6 +32,42 @@ class ViewKind(StrEnum):
 
     TIMELINE = "timeline"
     BRANCH = "branch"
+
+
+class AppPage(StrEnum):
+    """主窗口内容区里的页面(阶段 E-2).
+
+    两个页面同格叠放, 同一时间只显示一个: **成员顺序即默认页面**, 当前第一位是
+    游戏主页 —— 游戏变多以后, 打开软件先看到全局视图比直接进某个游戏的详情更有用。
+    """
+
+    HOME = "home"
+    DETAIL = "detail"
+
+
+class HomeSection(StrEnum):
+    """游戏主页内部的分区(成员顺序即页签顺序).
+
+    游戏发现原本是独立窗口, 后来合并成主页的一个分区: 两者都在回答"游戏库里有
+    什么", 放在同一个页面里切换比开两个窗口更顺手。
+    """
+
+    LIBRARY = "library"
+    DISCOVERY = "discovery"
+
+    @property
+    def label(self) -> str:
+        """返回分区页签文案."""
+        return tr(f"page.{self.value}")
+
+
+# 海报卡片的目标宽度(留出间距后用于计算每行张数).
+POSTER_WIDTH = 210
+
+
+def poster_columns(width: int) -> int:
+    """按可用宽度计算海报模式每行放几张卡片(纯函数, 便于单独测试)."""
+    return max(2, int(width) // (POSTER_WIDTH + 16))
 
 
 # 自动备份保留份数的可配置上限(调度配置对话框与校验共用).
@@ -544,3 +586,246 @@ class CandidateItem:
                 self.health_label,
             )
         )
+
+
+# --------------------------------------------------------- 统一游戏主页(E-2)
+
+
+@dataclass(frozen=True)
+class HomeOption:
+    """主页的一个可选项(视图页签、平台或分类).
+
+    ``key`` 用于回写筛选条件, ``label`` 是人类可读名称, ``count`` 让用户在切换
+    之前就知道每个选项里有多少游戏 —— 分类下拉框里的数字为 0 的分类不会出现,
+    用户不会点进一个空分类。
+    """
+
+    key: str
+    label: str
+    count: int
+
+    @property
+    def text(self) -> str:
+        """带数量的展示文案(页签与下拉框共用)."""
+        return f"{self.label} ({self.count})"
+
+
+def _option_text(options: tuple[HomeOption, ...], key: str, fallback: str) -> str:
+    """按 key 找选项文案; 找不到(例如该平台暂时没有游戏)时使用回退文案."""
+    return next((item.text for item in options if item.key == key), fallback)
+
+
+@dataclass(frozen=True)
+class HomeGameItem:
+    """主页列表中的单条游戏摘要(名称、平台、位置/备份数量、时间与风险)."""
+
+    game_id: str
+    name: str
+    origin: str  # steam/epic/gog/battle_net/monitored/manual
+    location_count: int
+    backup_count: int
+    last_backup_label: str  # 已格式化时间; 从未备份时为空串
+    activity_label: str  # 最近活动时间; 无记录时为空串
+    risk: bool
+    monitored: bool
+    archived: bool
+    enabled: bool = True
+    tags: tuple[str, ...] = ()
+    tone: str = "blue"  # 头像色块基调, 由窗口映射到调色板
+
+    @property
+    def platform_label(self) -> str:
+        """来源平台文案(与探测结果使用同一套来源文案)."""
+        return tr(f"discovery.source_{self.origin}")
+
+    @property
+    def backup_label(self) -> str:
+        """是否已备份的文案."""
+        return (
+            tr("home.cat_backup_done")
+            if self.backup_count
+            else tr("home.cat_backup_none")
+        )
+
+    @property
+    def risk_label(self) -> str:
+        """存档路径状态文案."""
+        return tr("home.risk_bad") if self.risk else tr("home.risk_ok")
+
+    @property
+    def state_label(self) -> str:
+        """归档状态文案(未归档时为空串)."""
+        return tr("home.chip_archived") if self.archived else ""
+
+    @property
+    def meta(self) -> str:
+        """存档位置与备份数量的简要说明."""
+        return tr("home.meta", locations=self.location_count, backups=self.backup_count)
+
+    @property
+    def summary(self) -> str:
+        """列表行副标题: 位置/备份数量 + 最近备份 + 最近活动."""
+        parts = [
+            self.meta,
+            (
+                tr("home.last_backup", stamp=self.last_backup_label)
+                if self.last_backup_label
+                else tr("home.last_backup_none")
+            ),
+        ]
+        if self.activity_label:
+            parts.append(tr("home.activity", stamp=self.activity_label))
+        return " · ".join(parts)
+
+    @property
+    def chips(self) -> tuple[str, ...]:
+        """列表行的分类标签: 平台、备份、监控、风险、归档与自定义标签."""
+        parts = [
+            self.platform_label,
+            self.backup_label,
+            tr("home.cat_monitor_on") if self.monitored else tr("home.cat_monitor_off"),
+        ]
+        if self.risk:
+            parts.append(tr("home.chip_risk"))
+        if self.archived:
+            parts.append(tr("home.chip_archived"))
+        parts.extend(self.tags)
+        return tuple(parts)
+
+    @property
+    def backup_enabled(self) -> bool:
+        """没有存档位置时不允许"立即备份"(与主窗口的规则一致)."""
+        return self.location_count > 0
+
+
+@dataclass(frozen=True)
+class HomeBoard:
+    """主页一次渲染所需的全部数据(列表、页签、筛选项与底部摘要)."""
+
+    filter: HomeFilter
+    games: tuple[HomeGameItem, ...]
+    views: tuple[HomeOption, ...]
+    origins: tuple[HomeOption, ...]
+    categories: tuple[HomeOption, ...]
+    stats: HomeStats
+
+    @property
+    def view_text(self) -> str:
+        """当前视图的页签文案(含数量)."""
+        return _option_text(self.views, self.filter.view.value, self.filter.view.label)
+
+    @property
+    def origin_text(self) -> str:
+        """当前平台筛选的文案(含数量); 未选择时用"全部平台"."""
+        if not self.filter.origin:
+            return tr("home.origin_all")
+        fallback = tr(f"discovery.source_{self.filter.origin}")
+        return _option_text(self.origins, self.filter.origin, fallback)
+
+    @property
+    def category_text(self) -> str:
+        """当前分类筛选的文案(含数量); 未选择时用"全部类型"."""
+        if not self.filter.category:
+            return tr("home.category_all")
+        item = self.filter.category_item
+        fallback = item.label if item is not None else self.filter.category
+        return _option_text(self.categories, self.filter.category, fallback)
+
+    @property
+    def summary(self) -> str:
+        """底部第一行: 各视图的计数."""
+        return tr(
+            "home.summary",
+            total=self.stats.total,
+            recent=self.stats.recent,
+            pending=self.stats.pending,
+            archived=self.stats.archived,
+        )
+
+    @property
+    def detail(self) -> str:
+        """底部第二行: 备份、探测关联与风险数量."""
+        return tr(
+            "home.detail",
+            backed_up=self.stats.backed_up,
+            monitored=self.stats.monitored,
+            risky=self.stats.risky,
+        )
+
+    @property
+    def narrowing(self) -> bool:
+        """当前是否偏离了"默认视图 + 无筛选"的初始状态."""
+        active = self.filter
+        return (
+            bool(active.origin or active.category or active.search)
+            or active.view is not HomeView.ALL
+        )
+
+    @property
+    def empty_message(self) -> str:
+        """空状态主文案: 区分"游戏库为空"与"当前筛选没有匹配"."""
+        if self.stats.total == 0 and self.stats.archived == 0:
+            return tr("home.empty_library")
+        if not self.narrowing:
+            return tr("home.empty_view", view=self.filter.view.label)
+        return tr("home.empty_filtered", total=self.stats.total)
+
+    @property
+    def empty_hint(self) -> str:
+        """空状态补充说明(始终给出下一步可以做什么)."""
+        if self.stats.total == 0 and self.stats.archived == 0:
+            return tr("home.empty_library_hint")
+        if not self.narrowing:
+            return tr("home.empty_hint")
+        return tr("home.empty_filtered_hint")
+
+
+def home_board(report: HomeReport, *, stamp: Callable[[datetime], str]) -> HomeBoard:
+    """把主页用例结果映射为展示模型.
+
+    真实后端与演示后端共用这段映射, 保证两个后端的界面行为一致(演示后端只需
+    提供事实, 不需要重新实现分类与筛选)。``stamp`` 由后端提供, 用于把时间格式
+    化为本地时间文本。
+    """
+    return HomeBoard(
+        filter=report.filter,
+        games=tuple(_home_item(facts, stamp=stamp) for facts in report.games),
+        views=tuple(
+            HomeOption(
+                key=view.value,
+                label=view.label,
+                count=report.stats.count_for(view),
+            )
+            for view in HomeView
+        ),
+        origins=tuple(
+            HomeOption(key=origin, label=tr(f"discovery.source_{origin}"), count=count)
+            for origin, count in report.origins
+        ),
+        categories=tuple(
+            HomeOption(key=category.value, label=category.label, count=count)
+            for category, count in report.categories
+        ),
+        stats=report.stats,
+    )
+
+
+def _home_item(facts: GameFacts, *, stamp: Callable[[datetime], str]) -> HomeGameItem:
+    """把单个游戏的事实映射为列表项."""
+    activity = facts.activity_at
+    return HomeGameItem(
+        game_id=facts.game_id,
+        name=facts.name,
+        origin=facts.origin,
+        location_count=facts.location_count,
+        backup_count=facts.backup_count,
+        last_backup_label=(
+            stamp(facts.last_backup_at) if facts.last_backup_at is not None else ""
+        ),
+        activity_label=stamp(activity) if activity is not None else "",
+        risk=facts.risk,
+        monitored=facts.monitored,
+        archived=facts.archived,
+        enabled=facts.enabled,
+        tags=facts.tags,
+    )

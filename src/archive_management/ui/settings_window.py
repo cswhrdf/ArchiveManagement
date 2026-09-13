@@ -147,7 +147,8 @@ class SettingsWindow:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        self._shortcut_hint.grid(row=1, column=0, padx=16, sticky="w")
+        # 面板最后一行的底部留白不能省: 贴边的文字会盖住面板自己的下边框。
+        self._shortcut_hint.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="w")
         self._shortcut_value = ctk.CTkLabel(
             self._shortcut_panel,
             text=self._shortcut,

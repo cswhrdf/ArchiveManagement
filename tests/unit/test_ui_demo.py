@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from archive_management.domain import HomeFilter, HomeView
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.ui.demo_backend import DemoArchiveService
@@ -136,6 +137,60 @@ def test_create_branch_message_contains_name(service: DemoArchiveService) -> Non
 def test_export_message_contains_game_name(service: DemoArchiveService) -> None:
     message = service.run_export("outer-wilds")
     assert "星际拓荒" in message
+
+
+def test_home_board_lists_demo_games_with_filters(
+    service: DemoArchiveService,
+) -> None:
+    """演示主页也要给出视图、平台、分类与统计(界面在演示模式下同样可用)."""
+    board = service.load_home()
+
+    assert {item.game_id for item in board.games} == {
+        "outer-wilds",
+        "shanhai",
+        "endless-space",
+    }
+    assert board.stats.total == 3
+    assert [option.key for option in board.views] == [view.value for view in HomeView]
+    origins = {option.key for option in board.origins}
+    # 星际拓荒来自 Steam 探测, 另外两款是手动录入.
+    assert origins == {"steam", "manual"}
+    assert "backup:done" in {option.key for option in board.categories}
+
+    narrowed = service.apply_home_filter(HomeFilter(search="山海"))
+    assert [item.name for item in narrowed.games] == ["山海旅人"]
+    assert narrowed.filter.search == "山海"
+
+
+def test_home_board_archive_tags_and_backup(
+    service: DemoArchiveService,
+) -> None:
+    archived = service.set_game_archived("endless-space", True)
+    assert archived.stats.archived == 1
+    assert "endless-space" not in {item.game_id for item in archived.games}
+
+    restored = service.set_game_archived("endless-space", False)
+    assert "endless-space" in {item.game_id for item in restored.games}
+
+    tagged = service.set_game_tags("shanhai", [" 解谜 ", "解谜"])
+    item = next(entry for entry in tagged.games if entry.game_id == "shanhai")
+    assert item.tags == ("解谜",)
+    assert "解谜" in item.chips
+
+    before = item.backup_count
+    after = service.run_backup_now("shanhai")
+    assert "山海旅人" in after
+    refreshed = service.load_home()
+    updated = next(entry for entry in refreshed.games if entry.game_id == "shanhai")
+    assert updated.backup_count == before + 1
+    assert updated.last_backup_label != ""
+
+
+def test_home_board_rejects_unknown_game(service: DemoArchiveService) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.set_game_archived("missing-game", True)
+    with pytest.raises(ArchiveManagementError):
+        service.set_game_tags("missing-game", ["x"])
 
 
 def test_simulate_delay_sleeps_when_configured() -> None:

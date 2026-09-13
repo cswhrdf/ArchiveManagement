@@ -1,23 +1,22 @@
-"""本地游戏发现窗口(阶段 E-1).
+"""本地游戏发现(阶段 E-1, 已合并进游戏主页).
 
-工作区的"游戏发现"入口打开这个窗口, 窗口分为两个页面(顶部页签切换, 默认
-停在"探测结果"):
+这是主窗口内的一页(不是弹窗): 游戏主页的"游戏发现"分区显示它, 内部分成两个
+子页签(默认停在"探测结果"):
 
-- **探测结果**(默认): 从 Steam、Epic、GOG、Battle.net 的安装清单与注册表,
-  以及监控目录中发现的候选游戏。可按"全部/待处理/已导入/已忽略"筛选, 并对
-  选中项执行"导入为游戏 / 忽略(恢复) / 修正路径";
-- **监控目录**: 用户自行添加的目录, 用于覆盖平台客户端未安装、未登录或存档
-  路径自定义的情况。每行显示实时路径状态(可用/不存在/不是文件夹/不可读/
-  高风险)与上次扫描时间, 支持添加、编辑、启用/停用与删除。
+- **探测结果**: 从 Steam、Epic、GOG、Battle.net 的安装清单与注册表, 以及监控
+  目录中发现的候选游戏。可按"全部/待处理/已导入/已忽略"筛选, 并对选中项执行
+  "导入为游戏 / 忽略(恢复) / 修正路径";
+- **监控目录**: 用户自行添加的目录, 用于覆盖平台客户端未安装、未登录或存档路径
+  自定义的情况。每行显示实时路径状态(可用/不存在/不是文件夹/不可读/高风险)与
+  上次扫描时间, 支持添加、编辑、启用/停用与删除。
 
-"重新扫描"固定放在页签行右侧, 两个页面都能随时触发。窗口只做展示与交互编排:
+"重新扫描"固定放在页签行右侧, 两个子页都能随时触发。这里只做展示与交互编排:
 路径校验、重复检测与落库都在后端完成, 失败时把后端给出的原因展示在弹窗与状态
 文案里。所有文案来自 i18n, 便于无头测试。
 """
 
 from __future__ import annotations
 
-import tkinter as tk
 from collections.abc import Callable
 
 import customtkinter as ctk
@@ -26,12 +25,7 @@ from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.services.audit import log_action
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.dialogs import (
-    _center,
-    ask_text,
-    confirm_dialog,
-    info_dialog,
-)
+from archive_management.ui.dialogs import ask_text, confirm_dialog, info_dialog
 from archive_management.ui.models import (
     CandidateFilter,
     CandidateItem,
@@ -43,19 +37,22 @@ from archive_management.ui.pickers import pick_directory
 
 _ChangeCallback = Callable[[], None]
 
+# 卡片内文字/列表相对卡片边缘的内缩: 与游戏库的卡片保持一致(那里也是 10).
+_PANEL_PAD = 10
 
-class DiscoveryWindow:
-    """本地游戏发现窗口(不直接子类化 CTkToplevel, 便于无头测试)."""
+
+class DiscoveryPanel:
+    """本地游戏发现的页面内容(主窗口的一页, 由游戏主页承载)."""
 
     def __init__(
         self,
-        parent: ctk.CTk,
+        parent: ctk.CTkFrame,
         *,
         backend: ArchiveService,
         palette: Palette,
         on_change: _ChangeCallback | None = None,
     ) -> None:
-        """构造窗口并装载监控目录与探测结果(默认停在"探测结果"页)."""
+        """在 ``parent`` 内构造页面并装载监控目录与探测结果(默认停在"探测结果")."""
         self._parent = parent
         self._backend = backend
         self._palette = palette
@@ -69,45 +66,30 @@ class DiscoveryWindow:
         # 这个页面的用途是"把发现的游戏加进游戏库", 因此默认只看待处理项.
         self._filter = CandidateFilter.NEW
         self._page: DiscoveryPage = DiscoveryPage.CANDIDATES
+        self.frame = ctk.CTkFrame(parent, fg_color=palette.background, corner_radius=0)
         self._build()
         self.reload()
 
     # -- 布局 ---------------------------------------------------------------
 
     def _build(self) -> None:
-        palette = self._palette
-        window = ctk.CTkToplevel(self._parent)
-        self._window = window
-        window.title(tr("discovery.title"))
-        window.geometry("920x700")
-        window.resizable(False, False)
-        window.transient(self._parent)
-        window.configure(fg_color=palette.background)
-        _center(self._parent, window)
+        container = self.frame
+        container.grid_columnconfigure(0, weight=1)
+        container.grid_rowconfigure(2, weight=1)
 
-        self._container = ctk.CTkFrame(window, fg_color=palette.background)
-        self._container.pack(fill="both", expand=True, padx=18, pady=16)
-        self._container.grid_columnconfigure(0, weight=1)
-        self._container.grid_rowconfigure(2, weight=1)
-
-        self._title_label = ctk.CTkLabel(
-            self._container,
-            text=tr("discovery.title"),
-            anchor="w",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=palette.text_primary,
-        )
-        self._title_label.grid(row=0, column=0, sticky="w")
-
-        self._build_tabs()
-        self._build_pages()
-        self._build_footer()
+        self._build_tabs(container)
+        self._build_pages(container)
+        self._build_footer(container)
         self._show_page(self._page)
 
-    def _build_tabs(self) -> None:
-        """构造页签栏: "探测结果" / "监控目录", 右侧固定放"重新扫描"."""
-        bar = ctk.CTkFrame(self._container, fg_color="transparent")
-        bar.grid(row=1, column=0, sticky="ew", pady=(10, 8))
+    def _build_tabs(self, container: ctk.CTkFrame) -> None:
+        """构造页签栏: "探测结果" / "监控目录", 右侧固定放"重新扫描".
+
+        页签栏、子页容器与底部状态条都不再加内缩: 外层已按页面边距留白,
+        再缩一次会让"游戏发现"比起"游戏库"明显往里挤。
+        """
+        bar = ctk.CTkFrame(container, fg_color="transparent")
+        bar.grid(row=1, column=0, sticky="ew", pady=(4, 8))
         bar.grid_columnconfigure(len(DiscoveryPage), weight=1)
         self._tabs: dict[DiscoveryPage, ctk.CTkButton] = {}
         for index, page in enumerate(DiscoveryPage):
@@ -129,9 +111,9 @@ class DiscoveryWindow:
         self._scan_btn.grid(row=0, column=len(DiscoveryPage), sticky="e")
         self._paint_tabs()
 
-    def _build_pages(self) -> None:
-        """构造两个页面(同格叠放), 由 :meth:`_show_page` 决定显示哪一个."""
-        pages = ctk.CTkFrame(self._container, fg_color="transparent")
+    def _build_pages(self, container: ctk.CTkFrame) -> None:
+        """构造两个子页(同格叠放), 由 :meth:`_show_page` 决定显示哪一个."""
+        pages = ctk.CTkFrame(container, fg_color="transparent")
         pages.grid(row=2, column=0, sticky="nsew")
         pages.grid_columnconfigure(0, weight=1)
         pages.grid_rowconfigure(0, weight=1)
@@ -150,11 +132,11 @@ class DiscoveryWindow:
         self._build_candidates(self._page_frames[DiscoveryPage.CANDIDATES])
         self._build_dirs(self._page_frames[DiscoveryPage.MONITORED])
 
-    def _build_footer(self) -> None:
-        """底部状态条: 计数/扫描摘要 + 关闭按钮(两个页面共用)."""
+    def _build_footer(self, container: ctk.CTkFrame) -> None:
+        """底部状态条: 计数/扫描摘要(两个子页共用)."""
         palette = self._palette
-        footer = ctk.CTkFrame(self._container, fg_color="transparent")
-        footer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        footer = ctk.CTkFrame(container, fg_color="transparent")
+        footer.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         footer.grid_columnconfigure(0, weight=1)
         self._summary_label = ctk.CTkLabel(
             footer,
@@ -172,13 +154,9 @@ class DiscoveryWindow:
             text_color=palette.text_muted,
         )
         self._detail_label.grid(row=1, column=0, sticky="w")
-        self._close_btn = self._button(
-            footer, tr("discovery.close"), self.close, style="ghost", width=96
-        )
-        self._close_btn.grid(row=0, column=1, rowspan=2, sticky="e")
 
     def _show_page(self, page: DiscoveryPage) -> None:
-        """切换到指定页面并重绘页签(默认页面是"探测结果")."""
+        """切换到指定子页并重绘页签(默认页面是"探测结果")."""
         self._page = page
         for kind, frame in self._page_frames.items():
             if kind is page:
@@ -217,14 +195,14 @@ class DiscoveryWindow:
             text=tr("discovery.dirs_hint"),
             anchor="w",
             justify="left",
-            wraplength=440,
+            wraplength=760,
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        self._dirs_hint.grid(row=0, column=0, padx=16, pady=(14, 0), sticky="w")
+        self._dirs_hint.grid(row=0, column=0, padx=_PANEL_PAD, pady=(14, 0), sticky="w")
 
         actions = ctk.CTkFrame(panel, fg_color="transparent")
-        actions.grid(row=0, column=1, padx=16, pady=(14, 0), sticky="e")
+        actions.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="e")
         self._add_dir_btn = self._button(
             actions, tr("discovery.dir_add"), self._on_add_dir, width=76
         )
@@ -257,7 +235,7 @@ class DiscoveryWindow:
             corner_radius=8,
         )
         self._dirs_box.grid(
-            row=1, column=0, columnspan=2, padx=16, pady=(10, 14), sticky="nsew"
+            row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 14), sticky="nsew"
         )
         self._dirs_box.grid_columnconfigure(0, weight=1)
 
@@ -272,14 +250,16 @@ class DiscoveryWindow:
             text=tr("discovery.hint"),
             anchor="w",
             justify="left",
-            wraplength=440,
+            wraplength=760,
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        self._hint_label.grid(row=0, column=0, padx=16, pady=(14, 0), sticky="w")
+        self._hint_label.grid(
+            row=0, column=0, padx=_PANEL_PAD, pady=(14, 0), sticky="w"
+        )
 
         filters = ctk.CTkFrame(panel, fg_color="transparent")
-        filters.grid(row=0, column=1, padx=16, pady=(14, 0), sticky="e")
+        filters.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="e")
         self._filter_box = ctk.CTkComboBox(
             filters,
             values=[item.label for item in CandidateFilter],
@@ -299,7 +279,9 @@ class DiscoveryWindow:
         self._filter_box.pack(side="left")
 
         actions = ctk.CTkFrame(panel, fg_color="transparent")
-        actions.grid(row=1, column=0, columnspan=2, padx=16, pady=(8, 0), sticky="e")
+        actions.grid(
+            row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(8, 0), sticky="e"
+        )
         self._import_btn = self._button(
             actions, tr("discovery.cand_import"), self._on_import, style="accent"
         )
@@ -320,7 +302,7 @@ class DiscoveryWindow:
             corner_radius=8,
         )
         self._cand_box.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(10, 14), sticky="nsew"
+            row=2, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 14), sticky="nsew"
         )
         self._cand_box.grid_columnconfigure(0, weight=1)
 
@@ -671,7 +653,7 @@ class DiscoveryWindow:
             text=tr("discovery.scanning"), text_color=self._palette.accent
         )
         self._detail_label.configure(text="")
-        self._window.update_idletasks()
+        self.frame.update_idletasks()
         try:
             report = self._backend.scan_candidates()
         except ArchiveManagementError as exc:
@@ -685,7 +667,7 @@ class DiscoveryWindow:
     def _on_add_dir(self) -> None:
         """添加监控目录(可选择"浏览"按钮挑目录)."""
         path = ask_text(
-            self._window,
+            self.frame,
             self._palette,
             title=tr("dialog.monitor_add_title"),
             text=tr("dialog.monitor_add_prompt"),
@@ -709,7 +691,7 @@ class DiscoveryWindow:
         if directory is None:
             return
         path = ask_text(
-            self._window,
+            self.frame,
             self._palette,
             title=tr("dialog.monitor_edit_title"),
             text=tr("dialog.monitor_edit_prompt"),
@@ -720,7 +702,7 @@ class DiscoveryWindow:
             log_action("monitor.update", basic=True, result="cancelled")
             return
         note = ask_text(
-            self._window,
+            self.frame,
             self._palette,
             title=tr("dialog.monitor_note_title"),
             text=tr("dialog.monitor_note_prompt"),
@@ -758,7 +740,7 @@ class DiscoveryWindow:
         if directory is None:
             return
         if not confirm_dialog(
-            self._window,
+            self.frame,
             self._palette,
             title=tr("dialog.monitor_remove_title"),
             message=tr("dialog.monitor_remove_message", path=directory.path),
@@ -779,7 +761,7 @@ class DiscoveryWindow:
         if candidate is None or not candidate.importable:
             return
         name = ask_text(
-            self._window,
+            self.frame,
             self._palette,
             title=tr("dialog.candidate_import_title"),
             text=tr("dialog.candidate_import_prompt"),
@@ -817,7 +799,7 @@ class DiscoveryWindow:
         if candidate is None:
             return
         path = ask_text(
-            self._window,
+            self.frame,
             self._palette,
             title=tr("dialog.candidate_relocate_title"),
             text=tr("dialog.candidate_relocate_prompt"),
@@ -839,24 +821,8 @@ class DiscoveryWindow:
         message = str(exc)
         self._summary_label.configure(text=message, text_color=self._palette.danger)
         info_dialog(
-            self._window,
+            self.frame,
             self._palette,
             title=tr("dialog.error_title"),
             message=message,
         )
-
-    def focus(self) -> bool:
-        """把窗口提到前台; 窗口已关闭时返回 False(主窗口据此允许重新打开)."""
-        try:
-            if not self._window.winfo_exists():
-                return False
-            self._window.deiconify()
-            self._window.lift()
-            self._window.focus_set()
-        except tk.TclError:  # pragma: no cover - 窗口在检查与操作之间被销毁
-            return False
-        return True
-
-    def close(self) -> None:
-        """关闭窗口."""
-        self._window.destroy()

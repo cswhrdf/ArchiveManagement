@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
 from archive_management.application import discovery as discovery_cases
+from archive_management.application import home as home_cases
 from archive_management.application.backup import BackupService
 from archive_management.application.locations import (
     LocationRemovalPlan,
@@ -32,6 +33,7 @@ from archive_management.domain import (
     DeletionPlan,
     Game,
     GameCandidate,
+    HomeFilter,
     MonitoredDirectory,
     NodeKind,
     PathKind,
@@ -72,11 +74,13 @@ from archive_management.ui.models import (
     CandidateItem,
     GameDetail,
     GameSummary,
+    HomeBoard,
     LocationItem,
     MonitoredDirItem,
     ScanSummary,
     ScheduleItem,
     TaskStatus,
+    home_board,
     size_label,
 )
 
@@ -667,6 +671,35 @@ class SqlArchiveService:
             game_id=None if candidate.game_id is None else str(candidate.game_id),
         )
 
+    # -- 统一游戏主页(阶段 E-2) -------------------------------------------
+
+    def load_home(self) -> HomeBoard:
+        """返回主页数据, 沿用上次保存的筛选条件(第一次打开用默认视图)."""
+        return self._board(home_cases.load_home(self._database))
+
+    def apply_home_filter(self, active: HomeFilter) -> HomeBoard:
+        """按给定筛选条件重算主页并保存该条件."""
+        saved = home_cases.save_filter(self._database, active)
+        return self._board(home_cases.filter_home(self._database, saved))
+
+    def set_game_archived(self, game_id: str, archived: bool) -> HomeBoard:
+        """归档或取消归档一个游戏, 返回重算后的主页数据."""
+        _game, gid = self._game_ref(game_id)
+        home_cases.set_archived(self._database, gid, archived)
+        self._touch()
+        return self.load_home()
+
+    def set_game_tags(self, game_id: str, tags: Sequence[str]) -> HomeBoard:
+        """覆盖写入游戏的自定义标签, 返回重算后的主页数据."""
+        _game, gid = self._game_ref(game_id)
+        home_cases.set_tags(self._database, gid, list(tags))
+        self._touch()
+        return self.load_home()
+
+    def _board(self, report: home_cases.HomeReport) -> HomeBoard:
+        """把主页用例结果映射为展示模型(映射逻辑与演示后端共用)."""
+        return home_board(report, stamp=_stamp)
+
     def _monitored_ref(self, directory_id: str) -> int:
         """把界面传入的字符串 id 解析为存在的监控目录 id."""
         reference = self._parse_id(directory_id)
@@ -926,6 +959,8 @@ class SqlArchiveService:
         finally:
             with self._operation_lock:
                 self._active = None
+        # 主页的"最近活跃/长期未更新"分类依据这次动作的时间.
+        self._games.touch_activity(game_id)
         self._touch()
         return node
 

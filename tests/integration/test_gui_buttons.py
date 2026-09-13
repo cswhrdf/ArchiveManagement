@@ -20,14 +20,16 @@ try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
     from tkinter import TclError
 
-    import customtkinter  # noqa: F401 - 校验 customtkinter 可导入
+    import customtkinter as ctk  # 既校验可导入, 也用于构造测试用父容器
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
-import archive_management.ui.discovery_window as disc_mod
+import archive_management.ui.discovery_page as disc_mod
+import archive_management.ui.home_page as home_page_mod
 import archive_management.ui.main_window as main_mod
 import archive_management.ui.manage_window as mgr_mod
 import archive_management.ui.schedule_window as sched_mod
+from archive_management.domain import HomeView
 from archive_management.i18n import tr
 from archive_management.services.hotkeys import (
     GlobalHotkeyService,
@@ -92,10 +94,13 @@ def _patch_dialogs(
     monkeypatch.setattr(sched_mod, "schedule_dialog", lambda *_a, **_k: schedule_result)
     monkeypatch.setattr(sched_mod, "confirm_dialog", lambda *_a, **_k: confirm)
     monkeypatch.setattr(sched_mod, "info_dialog", lambda *_a, **_k: None)
-    # 游戏发现窗口同样需要文本输入/确认/提示的自动应答.
+    # 游戏发现已合并进游戏主页的页面, 同样需要文本输入/确认/提示的自动应答.
     monkeypatch.setattr(disc_mod, "ask_text", next_text)
     monkeypatch.setattr(disc_mod, "confirm_dialog", lambda *_a, **_k: confirm)
     monkeypatch.setattr(disc_mod, "info_dialog", lambda *_a, **_k: None)
+    # 游戏主页窗口需要文本输入(存档位置/标签)与错误提示的自动应答.
+    monkeypatch.setattr(home_page_mod, "ask_text", next_text)
+    monkeypatch.setattr(home_page_mod, "info_dialog", lambda *_a, **_k: None)
 
 
 def _pump(app: ArchiveApp) -> None:
@@ -125,6 +130,22 @@ def _feedback_kind(app: ArchiveApp) -> FeedbackKind:
     字面量收窄(收窄后再比较其它等级会被判为 non-overlapping)。
     """
     return app._last_feedback[0]
+
+
+def _current_page(app: ArchiveApp) -> Any:
+    """返回主窗口当前页面.
+
+    经函数返回可避免 mypy 对 ``app._page`` 做字面量收窄(收窄后再比较另一页
+    会被判为 non-overlapping)。
+    """
+    return app._page
+
+
+def _home_item(page: Any, game_id: str) -> Any:
+    """取出主页列表里的某个游戏项(顺便收窄可选类型)."""
+    board = page._board
+    assert board is not None
+    return next(entry for entry in board.games if entry.game_id == game_id)
 
 
 def _label_texts(widget: Any) -> list[str]:
@@ -585,10 +606,10 @@ def test_game_without_locations_cannot_be_scheduled(
         app.destroy()
 
 
-def test_workspace_nav_opens_schedule_window(
+def test_topbar_opens_schedule_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """工作区的"定时任务"入口打开全局任务窗口(而不是只给一句提示)."""
+    """顶栏右侧的"定时任务"入口打开全局任务窗口(而不是只给一句提示)."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch)
@@ -604,7 +625,8 @@ def test_workspace_nav_opens_schedule_window(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        app._on_nav(tr("sidebar.nav_scheduled"), tr("sidebar.nav_scheduled_hint"))
+        assert app._schedule_btn.cget("text") == tr("topbar.nav_scheduled")
+        app._on_open_schedules()
 
         assert len(opened) == 1
         assert opened[0]["backend"] is app.backend
@@ -612,41 +634,12 @@ def test_workspace_nav_opens_schedule_window(
         app.destroy()
 
 
-def test_workspace_nav_opens_discovery_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """工作区的"游戏发现"入口打开本地游戏发现窗口, 并接上游戏列表刷新回调."""
-    from archive_management.ui.demo_backend import DemoArchiveService
-
-    _patch_dialogs(monkeypatch)
-    opened: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        main_mod,
-        "DiscoveryWindow",
-        lambda _parent, **kwargs: opened.append(kwargs),
-    )
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._on_nav(tr("sidebar.nav_discovery"), tr("sidebar.nav_discovery_hint"))
-
-        assert len(opened) == 1
-        assert opened[0]["backend"] is app.backend
-        # 导入游戏后主窗口的列表要跟着刷新, 因此必须传 on_change 回调.
-        assert callable(opened[0]["on_change"])
-    finally:
-        app.destroy()
-
-
-def test_discovery_window_scans_filters_and_imports_candidate(
+def test_discovery_panel_scans_filters_and_imports_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """发现窗口: 扫描、筛选、忽略/恢复与导入都作用到后端数据."""
     from archive_management.ui.demo_backend import DemoArchiveService
-    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.discovery_page import DiscoveryPanel
     from archive_management.ui.models import CandidateFilter
     from archive_management.ui.palette import Palette
 
@@ -657,54 +650,55 @@ def test_discovery_window_scans_filters_and_imports_candidate(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        window = DiscoveryWindow(
-            app, backend=app.backend, palette=Palette.for_theme(app._theme)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app),
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
         )
-        assert [item.directory_id for item in window._dirs] == ["dir-1", "dir-2"]
-        assert len(window._candidates) == 5
+        assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
+        assert len(panel._candidates) == 5
         # 未选中有效候选时"导入"不可用(候选 4 的路径已失效).
-        window._select_candidate("cand-4")
-        assert str(window._import_btn.cget("state")) == "disabled"
+        panel._select_candidate("cand-4")
+        assert str(panel._import_btn.cget("state")) == "disabled"
 
-        window._on_scan()
+        panel._on_scan()
         _pump(app)
-        assert tr("discovery.scanning") not in window._summary_label.cget("text")
-        assert window._dirs[0].last_scan_label != ""
+        assert tr("discovery.scanning") not in panel._summary_label.cget("text")
+        assert panel._dirs[0].last_scan_label != ""
 
         # 筛选: 只看已忽略的候选, 再把它们恢复成待处理.
-        window._filter_box.set(CandidateFilter.IGNORED.label)
-        window._on_filter_change(CandidateFilter.IGNORED.label)
-        assert set(window._cand_rows) == {"cand-5"}
-        window._select_candidate("cand-5")
-        window._on_ignore()
+        panel._filter_box.set(CandidateFilter.IGNORED.label)
+        panel._on_filter_change(CandidateFilter.IGNORED.label)
+        assert set(panel._cand_rows) == {"cand-5"}
+        panel._select_candidate("cand-5")
+        panel._on_ignore()
         _pump(app)
         assert app.backend.list_candidates(status="ignored") == []
 
         # 导入一条候选: 后端新增游戏, 候选变为已导入.
         before = len(app.backend.list_games())
-        window._filter_box.set(CandidateFilter.NEW.label)
-        window._on_filter_change(CandidateFilter.NEW.label)
-        window._select_candidate("cand-2")
-        window._on_import()
+        panel._filter_box.set(CandidateFilter.NEW.label)
+        panel._on_filter_change(CandidateFilter.NEW.label)
+        panel._select_candidate("cand-2")
+        panel._on_import()
         _pump(app)
 
         assert len(app.backend.list_games()) == before + 1
         imported = next(
-            item for item in window._candidates if item.candidate_id == "cand-2"
+            item for item in panel._candidates if item.candidate_id == "cand-2"
         )
         assert imported.status == "imported"
         assert imported.game_id is not None
-        window.close()
     finally:
         app.destroy()
 
 
-def test_discovery_window_manages_monitored_directories(
+def test_discovery_panel_manages_monitored_directories(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """监控目录的新增校验: 非法路径给出后端原因, 合法路径写入列表."""
     from archive_management.ui.demo_backend import DemoArchiveService
-    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.discovery_page import DiscoveryPanel
     from archive_management.ui.palette import Palette
 
     # 依次回答: 先给一个空路径(应被拒绝), 再给一个真实目录.
@@ -715,33 +709,34 @@ def test_discovery_window_manages_monitored_directories(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        window = DiscoveryWindow(
-            app, backend=app.backend, palette=Palette.for_theme(app._theme)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app),
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
         )
-        before = len(window._dirs)
+        before = len(panel._dirs)
 
-        window._on_add_dir()
+        panel._on_add_dir()
         _pump(app)
-        assert len(window._dirs) == before
-        assert "不能为空" in window._summary_label.cget("text")
+        assert len(panel._dirs) == before
+        assert "不能为空" in panel._summary_label.cget("text")
 
-        window._on_add_dir()
+        panel._on_add_dir()
         _pump(app)
-        assert len(window._dirs) == before + 1
-        assert str(tmp_path) in {item.path for item in window._dirs}
+        assert len(panel._dirs) == before + 1
+        assert str(tmp_path) in {item.path for item in panel._dirs}
 
         # 停用后不再参与扫描, 但记录仍保留.
-        window._select_dir(window._dirs[-1].directory_id)
-        window._on_toggle_dir()
+        panel._select_dir(panel._dirs[-1].directory_id)
+        panel._on_toggle_dir()
         _pump(app)
-        assert window._dir_item() is not None
-        assert window._dir_item().enabled is False  # type: ignore[union-attr]
-        window.close()
+        assert panel._dir_item() is not None
+        assert panel._dir_item().enabled is False  # type: ignore[union-attr]
     finally:
         app.destroy()
 
 
-def test_discovery_window_defaults_to_candidates_and_switches_pages(
+def test_discovery_panel_defaults_to_candidates_and_switches_pages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """发现窗口分成两页: 默认停在"探测结果", 可切到"监控目录".
@@ -749,7 +744,7 @@ def test_discovery_window_defaults_to_candidates_and_switches_pages(
     同时锁定回归: 候选操作只剩导入/忽略/修正路径, 不再有"加入监控"按钮。
     """
     from archive_management.ui.demo_backend import DemoArchiveService
-    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.discovery_page import DiscoveryPanel
     from archive_management.ui.models import DiscoveryPage
     from archive_management.ui.palette import Palette
 
@@ -760,16 +755,18 @@ def test_discovery_window_defaults_to_candidates_and_switches_pages(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        window = DiscoveryWindow(
-            app, backend=app.backend, palette=Palette.for_theme(app._theme)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app),
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
         )
 
         def current() -> DiscoveryPage:
             """读取当前页面(经函数返回避免 mypy 对属性做字面量收窄)."""
-            return window._page
+            return panel._page
 
-        candidates = window._page_frames[DiscoveryPage.CANDIDATES]
-        monitored = window._page_frames[DiscoveryPage.MONITORED]
+        candidates = panel._page_frames[DiscoveryPage.CANDIDATES]
+        monitored = panel._page_frames[DiscoveryPage.MONITORED]
 
         # 默认页 = 探测结果, 监控目录页未布局(grid_remove 后 grid_info 为空).
         assert current() is DiscoveryPage.CANDIDATES
@@ -785,7 +782,7 @@ def test_discovery_window_defaults_to_candidates_and_switches_pages(
         assert set(_button_texts(candidates)) & expected == expected
         assert len(_button_texts(candidates)) == len(expected)
 
-        window._show_page(DiscoveryPage.MONITORED)
+        panel._show_page(DiscoveryPage.MONITORED)
         assert current() is DiscoveryPage.MONITORED
         assert monitored.grid_info() != {}
         assert candidates.grid_info() == {}
@@ -795,13 +792,12 @@ def test_discovery_window_defaults_to_candidates_and_switches_pages(
             tr("discovery.dir_remove"),
         }
         # "重新扫描"在页签行上, 两个页面都能用.
-        assert tr("discovery.scan") in _button_texts(window._container)
+        assert tr("discovery.scan") in _button_texts(panel.frame)
 
-        window._show_page(DiscoveryPage.CANDIDATES)
+        panel._show_page(DiscoveryPage.CANDIDATES)
         assert current() is DiscoveryPage.CANDIDATES
         assert candidates.grid_info() != {}
         assert monitored.grid_info() == {}
-        window.close()
     finally:
         app.destroy()
 
@@ -815,7 +811,7 @@ def test_discovery_default_filter_is_pending_with_filter_aware_empty_state(
     from archive_management.domain import GameCandidate
     from archive_management.infrastructure.database import Database
     from archive_management.services.platform_scan import LocalGameScanner
-    from archive_management.ui.discovery_window import DiscoveryWindow
+    from archive_management.ui.discovery_page import DiscoveryPanel
     from archive_management.ui.models import CandidateFilter
     from archive_management.ui.palette import Palette
     from archive_management.ui.sql_backend import SqlArchiveService
@@ -850,35 +846,387 @@ def test_discovery_default_filter_is_pending_with_filter_aware_empty_state(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        window = DiscoveryWindow(
-            app, backend=service, palette=Palette.for_theme(app._theme)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app), backend=service, palette=Palette.for_theme(app._theme)
         )
-        assert window._filter is CandidateFilter.NEW
-        assert window._filter_box.get() == CandidateFilter.NEW.label
-        assert window._cand_rows == {}  # 还没扫描过
+        assert panel._filter is CandidateFilter.NEW
+        assert panel._filter_box.get() == CandidateFilter.NEW.label
+        assert panel._cand_rows == {}  # 还没扫描过
 
-        window._on_scan()
+        panel._on_scan()
         _pump(app)
-        assert [item.status for item in window._candidates] == ["new"]
-        assert set(window._cand_rows) == {window._candidates[0].candidate_id}
+        assert [item.status for item in panel._candidates] == ["new"]
+        assert set(panel._cand_rows) == {panel._candidates[0].candidate_id}
 
         # 忽略唯一一条待处理项: 待处理筛选下列表变空, 但提示说得清是筛选造成的.
-        target = window._candidates[0]
-        window._select_candidate(target.candidate_id)
-        window._on_ignore()
+        target = panel._candidates[0]
+        panel._select_candidate(target.candidate_id)
+        panel._on_ignore()
         _pump(app)
-        assert window._cand_rows == {}
-        texts = _label_texts(window._cand_box)
+        assert panel._cand_rows == {}
+        texts = _label_texts(panel._cand_box)
         assert tr("discovery.empty_filtered", filter=CandidateFilter.NEW.label) in texts
         assert any("已忽略 1" in text for text in texts)
         assert tr("discovery.candidates_empty") not in texts
 
         # 切到"已忽略"就能看到刚忽略的那条(筛选本身工作正常).
-        window._on_filter_change(CandidateFilter.IGNORED.label)
+        panel._on_filter_change(CandidateFilter.IGNORED.label)
         _pump(app)
-        assert set(window._cand_rows) == {target.candidate_id}
-        assert "已忽略 1" in str(window._detail_label.cget("text"))
-        window.close()
+        assert set(panel._cand_rows) == {target.candidate_id}
+        assert "已忽略 1" in str(panel._detail_label.cget("text"))
+    finally:
+        app.destroy()
+
+
+def test_default_page_is_home_and_detail_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主页是主窗口内的一页(不是弹窗): 默认显示主页, 与详情页可来回切换."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import AppPage, HomeSection
+
+    _patch_dialogs(monkeypatch)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        page = app._home_page
+
+        # 软件打开后默认停在游戏主页(游戏库分区): 主页可见, 详情页收起.
+        assert _current_page(app) is AppPage.HOME
+        assert page.frame.grid_info() != {}
+        assert app._content.grid_info() == {}
+        assert page._section is HomeSection.LIBRARY
+        assert page._library.grid_info() != {}
+        assert page._discovery.frame.grid_info() == {}
+        # 侧边栏已移除: 工作区入口都在顶栏右上角.
+        assert not hasattr(app, "_games_container")
+        assert not hasattr(app, "_status_card")
+        assert app._add_game_btn.cget("text") == tr("topbar.add_game")
+
+        # 主页是整页布局: 分区页签、表头列与数据行齐全, 没有弹窗式的"关闭"按钮.
+        section_tabs = _button_texts(page.frame)
+        assert HomeSection.LIBRARY.label in section_tabs
+        assert HomeSection.DISCOVERY.label in section_tabs
+        headers = _label_texts(page.frame)
+        for key in (
+            "home.col_name",
+            "home.col_platform",
+            "home.col_locations",
+            "home.col_backups",
+            "home.col_last_backup",
+            "home.col_state",
+        ):
+            assert tr(key) in headers
+        assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+        assert not hasattr(page, "_close_btn")
+
+        # 打开详情: 切到详情页, 主页收起, 顶栏出现"← 游戏主页".
+        assert app._back_btn.grid_info() == {}
+        app._open_game_detail("outer-wilds")
+        _pump(app)
+        assert _current_page(app) is AppPage.DETAIL
+        assert app._content.grid_info() != {}
+        assert page.frame.grid_info() == {}
+        assert app._title_label.cget("text") == "星际拓荒"
+        assert app._back_btn.grid_info() != {}
+
+        # 顶栏左侧的"← 游戏主页"返回主页(按钮随即隐藏).
+        assert app._back_btn.cget("text") == tr("page.back_home")
+        app._on_back_home()
+        _pump(app)
+        assert _current_page(app) is AppPage.HOME
+        assert page.frame.grid_info() != {}
+        assert app._back_btn.grid_info() == {}
+    finally:
+        app.destroy()
+
+
+def test_home_page_switches_between_library_and_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """游戏发现作为主页的一个分区: 切过去能看到探测结果与监控目录."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import DiscoveryPage, HomeSection
+
+    _patch_dialogs(monkeypatch)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        page = app._home_page
+        panel = page._discovery
+        assert len(panel._candidates) == 5
+        assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
+
+        page._show_section(HomeSection.DISCOVERY)
+        _pump(app)
+        assert page._section is HomeSection.DISCOVERY
+        assert panel.frame.grid_info() != {}
+        assert page._library.grid_info() == {}
+        # 发现分区内部仍是"探测结果 / 监控目录"两页, 默认停在探测结果.
+        assert panel._page is DiscoveryPage.CANDIDATES
+        assert panel._tabs[DiscoveryPage.CANDIDATES].cget("text") == (
+            tr("discovery.page_candidates")
+        )
+
+        page._show_section(HomeSection.LIBRARY)
+        _pump(app)
+        assert page._library.grid_info() != {}
+        assert panel.frame.grid_info() == {}
+    finally:
+        app.destroy()
+
+
+def test_home_page_imports_candidate_and_refreshes_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """在发现分区导入候选后, 游戏库列表立即出现这款游戏(两个分区共享数据)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import HomeSection
+
+    _patch_dialogs(monkeypatch, ask_text="空洞骑士")
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        page = app._home_page
+        before = len(app.backend.list_games())
+
+        page._show_section(HomeSection.DISCOVERY)
+        _pump(app)
+        panel = page._discovery
+        panel._select_candidate("cand-2")
+        panel._on_import()
+        _pump(app)
+
+        assert len(app.backend.list_games()) == before + 1
+        # 导入后游戏库已经包含新游戏(回到游戏库分区即可看到).
+        page._show_section(HomeSection.LIBRARY)
+        _pump(app)
+        assert "空洞骑士" in {item.name for item in page._board.games}  # type: ignore[union-attr]
+    finally:
+        app.destroy()
+
+
+def test_home_page_supports_poster_mode_and_paging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """海报模式显示封面占位/备份角标/名称/最近活动; 分页按每页条数切页."""
+    from archive_management.domain import HomeLayout
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        page = app._home_page
+        # 造 35 款游戏: 默认每页 30 条 -> 2 页.
+        for index in range(32):
+            app.backend.add_game(f"批量游戏{index:02d}")
+        page.reload()
+        _pump(app)
+
+        # 每页选择在右下角翻页控件的左边.
+        assert page._page_size_label.cget("text") == tr("home.page_size")
+        assert page._page_size_box.winfo_manager() != ""
+        pack_order = page._pager.pack_slaves()
+        assert pack_order.index(page._page_size_box) < pack_order.index(page._prev_btn)
+
+        assert len(page._board.games) == 35  # type: ignore[union-attr]
+        assert page._page_label.cget("text") == tr(
+            "home.page_indicator", page=1, pages=2
+        )
+        assert len(page._rows) == 30
+        assert str(page._prev_btn.cget("state")) == "disabled"
+        assert str(page._next_btn.cget("state")) == "normal"
+
+        page._on_next_page()
+        _pump(app)
+        assert page._page_label.cget("text") == tr(
+            "home.page_indicator", page=2, pages=2
+        )
+        assert len(page._rows) == 5
+        assert str(page._next_btn.cget("state")) == "disabled"
+
+        # 每页 60 条: 一页装得下全部游戏.
+        page._on_page_size_change("60")
+        _pump(app)
+        assert page._filter.page_size == 60
+        assert page._page_label.cget("text") == tr(
+            "home.page_indicator", page=1, pages=1
+        )
+        assert len(page._rows) == 35
+
+        # 海报模式: 竖屏封面(文字占位) + 右下角备份数角标 + 名称 + 最近活动.
+        page._on_layout_change(HomeLayout.POSTER.label)
+        _pump(app)
+        assert page._filter.layout is HomeLayout.POSTER
+        assert page._head.grid_info() == {}
+        card_texts = _label_texts(page._rows["outer-wilds"])
+        assert "星际" in card_texts
+        assert "星际拓荒" in card_texts
+        assert any(text.startswith("最近活动") for text in card_texts)
+        assert tr("home.poster_backups", count=5) in card_texts
+
+        # 封面是竖屏(高度明显大于宽度), 角标贴在封面的右下角.
+        card = page._rows["outer-wilds"]
+        cover = card.winfo_children()[0]
+        assert cover.winfo_reqheight() > 140
+        # 海报网格左对齐: 网格从滚动区左上角开始铺(列不分配权重, 卡片不会被
+        # 挤到行中间), 因此所有卡片里最靠左/最靠上的那张偏移就是内边距 4.
+        cards = list(page._rows.values())
+        assert min(item.winfo_x() for item in cards) == 4
+        assert min(item.winfo_y() for item in cards) == 4
+        badge = next(
+            child
+            for child in cover.winfo_children()
+            if child.cget("text") == tr("home.poster_backups", count=5)
+        )
+        sticky = str(badge.grid_info()["sticky"])
+        assert "s" in sticky
+        assert "e" in sticky
+
+        # 展示偏好会持久化: 重新读取主页仍是海报 + 每页 60 条.
+        reloaded = app.backend.load_home()
+        assert reloaded.filter.layout is HomeLayout.POSTER
+        assert reloaded.filter.page_size == 60
+    finally:
+        app.destroy()
+
+
+def test_home_page_follows_theme_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归: 切浅/深主题时主页也要换色(主页控件不经过 UiKit 的注册重绘)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import HomeSection
+    from archive_management.ui.palette import Palette
+
+    _patch_dialogs(monkeypatch)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        page = app._home_page
+        assert page._palette is app.p
+
+        app._on_toggle_theme()
+        _pump(app)
+        light = Palette.for_theme("light")
+        assert app._theme == "light"
+        assert page._palette is app.p
+        assert page.frame.cget("fg_color") == light.background
+        assert page._discovery.frame.cget("fg_color") == light.background
+        # 重建后数据仍在: 列表有内容, 分区与筛选条件保持不变.
+        assert page._rows
+        assert page._section is HomeSection.LIBRARY
+        assert page._filter.view is HomeView.ALL
+
+        app._on_toggle_theme()
+        _pump(app)
+        dark = Palette.for_theme("dark")
+        assert page.frame.cget("fg_color") == dark.background
+        # 主题切换不影响后端数据.
+        assert len(app.backend.list_games()) == 3
+    finally:
+        app.destroy()
+
+
+def test_home_page_filters_games_and_runs_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主页: 视图/搜索筛选、归档、标签、备份与"打开详情"都作用到后端数据."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import AppPage
+
+    # 标签输入含重复项与空格: 由用例层清理后落库.
+    _patch_dialogs(monkeypatch, ask_text="解谜, 解谜")
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        page = app._home_page
+
+        # 默认视图是"全部游戏", 页签带数量, 动作按钮齐全.
+        assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+        assert page._tabs[HomeView.ALL].cget("text") == f"{tr('home.view_all')} (3)"
+        assert page._detail_btn.cget("text") == tr("home.action_detail")
+        assert page._archive_btn.cget("text") == tr("home.action_archive")
+
+        # 待处理视图: 只留下没有存档位置的无尽太空, 且不能直接备份.
+        page._on_view(HomeView.PENDING)
+        _pump(app)
+        assert set(page._rows) == {"endless-space"}
+        assert str(page._backup_btn.cget("state")) == "disabled"
+
+        # 搜索: 只匹配名称包含关键字的游戏; 清除后回到全部.
+        page._on_view(HomeView.ALL)
+        page._search_entry.insert(0, "山海")
+        page._submit_search()
+        _pump(app)
+        assert set(page._rows) == {"shanhai"}
+        assert page._filter.search == "山海"
+        page._clear_search()
+        _pump(app)
+        assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+        assert page._filter.view is HomeView.ALL
+
+        # 归档: 从默认视图消失, 只在"已归档"里出现; 页面不跳转, 数据也不删除.
+        page._select("endless-space")
+        page._on_archive()
+        _pump(app)
+        assert set(page._rows) == {"outer-wilds", "shanhai"}
+        assert page._summary_label.cget("text") == tr("home.archived", name="无尽太空")
+        assert _current_page(app) is AppPage.HOME
+        # 归档只是"从主页收起来": 游戏记录仍在库里, 详情页照旧可以打开.
+        assert "无尽太空" in {item.name for item in app.backend.list_games()}
+
+        page._on_view(HomeView.ARCHIVED)
+        _pump(app)
+        assert set(page._rows) == {"endless-space"}
+        assert page._archive_btn.cget("text") == tr("home.action_unarchive")
+        page._select("endless-space")
+        page._on_archive()
+        _pump(app)
+        assert page._rows == {}
+
+        # 标签: 清理后的标签出现在列表行的分类标签上.
+        page._on_view(HomeView.ALL)
+        page._select("shanhai")
+        page._on_edit_tags()
+        _pump(app)
+        tagged = _home_item(page, "shanhai")
+        assert tagged.tags == ("解谜",)
+        assert any("解谜" in text for text in _label_texts(page._list_box))
+
+        # 立即备份: 有存档位置的游戏备份数增加, 主页计数随之刷新.
+        page._on_backup()
+        _pump(app)
+        backed_up = _home_item(page, "shanhai")
+        assert backed_up.backup_count == tagged.backup_count + 1
+        assert page._summary_label.cget("text") == tr("home.backed_up", name="山海旅人")
+
+        # 打开详情: 切到详情页并选中该游戏.
+        page._select("outer-wilds")
+        page._on_detail()
+        _pump(app)
+        assert _current_page(app) is AppPage.DETAIL
+        assert app._game_id == "outer-wilds"
+        assert app._title_label.cget("text") == "星际拓荒"
     finally:
         app.destroy()
 
@@ -886,7 +1234,7 @@ def test_discovery_default_filter_is_pending_with_filter_aware_empty_state(
 def test_workspace_nav_keeps_a_single_window_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """工作区的三个入口共用一个窗口位置: 不会重复开窗, 也不会同时开多个."""
+    """两个窗口入口共用一个窗口位置: 不会重复开窗(游戏主页是页面, 不开窗)."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
     class _FakeWindow:
@@ -911,7 +1259,6 @@ def test_workspace_nav_keeps_a_single_window_open(
         return window
 
     _patch_dialogs(monkeypatch)
-    monkeypatch.setattr(main_mod, "DiscoveryWindow", _factory)
     monkeypatch.setattr(main_mod, "ScheduleWindow", _factory)
     monkeypatch.setattr(main_mod, "SettingsWindow", _factory)
     try:
@@ -920,31 +1267,26 @@ def test_workspace_nav_keeps_a_single_window_open(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        discovery = tr("sidebar.nav_discovery")
-        scheduled = tr("sidebar.nav_scheduled")
-        settings = tr("sidebar.nav_settings")
 
-        app._on_nav(discovery, "")
+        # "定时任务"与"设置"共用同一个窗口位置: 不会重复开窗.
+        app._on_open_schedules()
         assert len(opened) == 1
         # 同一入口再点: 只把已有窗口提到前台.
-        app._on_nav(discovery, "")
+        app._on_open_schedules()
         assert len(opened) == 1
         assert opened[0].focus_calls == 1
         # 另一个入口: 仍然只有一个窗口, 并提示先关闭当前窗口.
-        app._on_nav(scheduled, "")
+        app._on_open_settings()
         assert len(opened) == 1
         assert opened[0].focus_calls == 2
-        assert app._last_feedback[1] == tr("sidebar.nav_busy")
-        app._on_nav(settings, "")
-        assert len(opened) == 1
-        assert opened[0].focus_calls == 3
+        assert app._last_feedback[1] == tr("topbar.busy")
 
         # 用户关闭当前窗口后即可打开另一个入口.
         opened[0].alive = False
-        app._on_nav(scheduled, "")
+        app._on_open_settings()
         assert len(opened) == 2
         assert opened[1].focus_calls == 0
-        app._on_nav(settings, "")
+        app._on_open_schedules()
         assert len(opened) == 2
         assert opened[1].focus_calls == 1
     finally:
@@ -984,9 +1326,8 @@ def test_game_settings_can_configure_schedule_per_game(
         app.destroy()
 
 
-def test_topbar_and_workspace_carry_no_sync_or_theme_button() -> None:
-    """顶栏不再展示同步时间与主题按钮; 工作区去掉"全部备份"入口."""
-
+def test_topbar_carries_global_entries_and_no_sidebar() -> None:
+    """顶栏右侧是全局入口(添加游戏/定时任务/设置); 侧边栏与其内容已移除."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
     try:
@@ -999,11 +1340,20 @@ def test_topbar_and_workspace_carry_no_sync_or_theme_button() -> None:
         assert not hasattr(app, "_sync_label")
         assert not hasattr(app, "theme_btn")
         assert not hasattr(app, "_sync_labels")
-        # 工作区只保留"定时任务"与"设置".
-        texts = _label_texts(app._status_card.master)
-        assert tr("sidebar.nav_scheduled") in texts
-        assert tr("sidebar.nav_settings") in texts
-        assert "全部备份" not in texts
+        # 全局入口都在顶栏: 添加游戏 + 定时任务 + 设置.
+        assert app._add_game_btn.cget("text") == tr("topbar.add_game")
+        assert app._schedule_btn.cget("text") == tr("topbar.nav_scheduled")
+        assert app._settings_btn.cget("text") == tr("topbar.nav_settings")
+        topbar_texts = _button_texts(app._add_game_btn.master)
+        assert tr("topbar.nav_settings") in topbar_texts
+        # 侧边栏的"我的游戏"列表、工作区标题与"全部备份"入口都不在了.
+        assert not hasattr(app, "_games_container")
+        assert not hasattr(app, "_status_card")
+        assert not hasattr(app, "_add_game_label")
+        assert tr("sidebar.my_games") not in _label_texts(app)
+        assert "全部备份" not in _label_texts(app)
+        # 备份服务状态挪到右下角的状态条里.
+        assert tr("status.service_ok") in app._service_label.cget("text")
     finally:
         app.destroy()
 
@@ -1435,11 +1785,11 @@ def test_reload_after_external_delete_clears_panels() -> None:
         app.destroy()
 
 
-def test_status_card_shows_storage_usage_without_hotkey(
+def test_service_status_shows_storage_usage_without_hotkey(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """状态栏显示备份存储的当前占用, 且不再展示快捷键."""
+    """右下角的服务状态显示备份存储占用, 且不再展示快捷键."""
     from archive_management.infrastructure.database import Database
     from archive_management.ui.sql_backend import SqlArchiveService
 
@@ -1460,14 +1810,18 @@ def test_status_card_shows_storage_usage_without_hotkey(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        text = app._status_sub.cget("text")
+        text = app._service_label.cget("text")
 
-        assert text.startswith("当前占用 ")
+        assert tr("status.service_ok") in text
+        assert "当前占用 " in text
         assert "磁盘剩余" not in text
-        # 快捷键不再出现在状态卡里(仅保留空间占用).
+        # 快捷键不再出现在状态里(仅保留服务状态与空间占用).
         assert "Ctrl" not in text
         assert "Alt" not in text
-        assert text == tr("status.usage", used=text.removeprefix("当前占用 "))
+        # "服务正常 · 当前占用 X" 两段拼接, 占用部分与后端给出的占用文本一致.
+        usage = text.split(" · ", 1)[1]
+        assert usage.startswith("当前占用 ")
+        assert usage == tr("status.usage", used=usage.removeprefix("当前占用 "))
     finally:
         app.destroy()
 

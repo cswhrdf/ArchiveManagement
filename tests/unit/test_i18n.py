@@ -33,7 +33,7 @@ def test_locales_available() -> None:
 
 def test_default_locale_is_chinese() -> None:
     assert current_locale() == "zh-CN"
-    assert tr("sidebar.my_games") == "我的游戏"
+    assert tr("topbar.add_game") == "+ 添加游戏"
 
 
 def test_tr_formats_placeholders() -> None:

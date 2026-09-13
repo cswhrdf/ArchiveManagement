@@ -6,16 +6,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan
-from archive_management.domain import DEFAULT_KEEP_AUTO, DeletionPlan, PathKind
+from archive_management.domain import (
+    DEFAULT_KEEP_AUTO,
+    DeletionPlan,
+    HomeFilter,
+    PathKind,
+)
 from archive_management.ui.models import (
     BackupItem,
     CandidateItem,
     GameDetail,
     GameSummary,
+    HomeBoard,
     LocationItem,
     MonitoredDirItem,
     ScanSummary,
@@ -229,6 +236,24 @@ class ArchiveService(Protocol):
 
     def add_candidate_as_monitored(self, candidate_id: str) -> MonitoredDirItem:
         """把候选所在的上一层目录加入监控列表."""
+        ...
+
+    # -- 统一游戏主页与分类视图(阶段 E-2) ---------------------------------
+
+    def load_home(self) -> HomeBoard:
+        """返回主页数据(沿用上次保存的筛选条件)."""
+        ...
+
+    def apply_home_filter(self, active: HomeFilter) -> HomeBoard:
+        """按给定筛选条件重算主页并保存该条件(下一次打开仍是这个视图)."""
+        ...
+
+    def set_game_archived(self, game_id: str, archived: bool) -> HomeBoard:
+        """归档或取消归档一个游戏, 返回重算后的主页数据."""
+        ...
+
+    def set_game_tags(self, game_id: str, tags: Sequence[str]) -> HomeBoard:
+        """覆盖写入游戏的自定义标签, 返回重算后的主页数据."""
         ...
 
     def shutdown(self) -> None:

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import archive_management.application.locations as locations_mod
-from archive_management.domain import Game, ScheduledJob
+from archive_management.domain import Game, HomeFilter, HomeView, ScheduledJob
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.infrastructure.database import Database
@@ -947,3 +947,118 @@ def test_backend_rejects_unknown_discovery_ids(tmp_path: Path) -> None:
         service.set_candidate_ignored("42", True)
     with pytest.raises(ArchiveManagementError, match="不支持的筛选条件"):
         service.list_candidates(status="bogus")
+
+
+def test_home_board_lists_games_and_persists_filter(tmp_path: Path) -> None:
+    """主页列表与筛选条件都要持久化: 重新打开仍是上次的视图."""
+    service = _service(tmp_path)
+    service.add_game("星际拓荒")
+    service.add_game("空洞骑士")
+
+    board = service.load_home()
+    assert {item.name for item in board.games} == {"星际拓荒", "空洞骑士"}
+    assert board.filter.view is HomeView.ALL
+    # 刚录入的游戏算“最近活跃”, 但都还没有存档位置, 因此都是待处理.
+    assert board.summary == tr("home.summary", total=2, recent=2, pending=2, archived=0)
+
+    service.apply_home_filter(HomeFilter(view=HomeView.PENDING, search="拓荒"))
+
+    reloaded = service.load_home()
+    assert reloaded.filter.view is HomeView.PENDING
+    assert reloaded.filter.search == "拓荒"
+    assert [item.name for item in reloaded.games] == ["星际拓荒"]
+    assert reloaded.origin_text == tr("home.origin_all")
+    assert reloaded.category_text == tr("home.category_all")
+
+
+def test_home_filter_options_carry_counts(tmp_path: Path) -> None:
+    """平台与分类下拉框的每一项都要带数量, 避免点进空分类."""
+    service = _service(tmp_path)
+    service.add_game("星际拓荒")
+
+    board = service.load_home()
+    assert [option.key for option in board.views] == [view.value for view in HomeView]
+    origins = {option.key: option.count for option in board.origins}
+    assert origins == {"manual": 1}
+    categories = {option.key: option.count for option in board.categories}
+    assert categories["origin:manual"] == 1
+    assert categories["backup:none"] == 1
+    assert categories["monitor:off"] == 1
+
+    narrowed = service.apply_home_filter(HomeFilter(origin="manual"))
+    assert narrowed.origin_text == f"{tr('discovery.source_manual')} (1)"
+    assert narrowed.narrowing is True
+    # 平台筛选不参与自身的计数: 否则下拉框里只会剩下当前平台.
+    assert {option.key for option in narrowed.origins} == {"manual"}
+
+
+def test_home_archive_and_tags_round_trip(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    summary = service.add_game("星际拓荒")
+
+    archived = service.set_game_archived(summary.game_id, True)
+    assert archived.stats.archived == 1
+    assert archived.games == ()
+
+    restored = service.set_game_archived(summary.game_id, False)
+    assert [item.name for item in restored.games] == ["星际拓荒"]
+
+    tagged = service.set_game_tags(summary.game_id, [" 探索 ", "探索", "解谜"])
+    assert tagged.games[0].tags == ("探索", "解谜")
+    assert "探索" in tagged.games[0].chips
+
+
+def test_home_reflects_backups_and_locations(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    summary = service.add_game("星际拓荒")
+    save = tmp_path / "save"
+    save.mkdir()
+    service.add_location(summary.game_id, path=str(save), kind="directory")
+
+    board = service.load_home()
+    item = board.games[0]
+    assert item.location_count == 1
+    assert item.backup_enabled is True
+    assert item.last_backup_label == ""
+    assert tr("home.last_backup_none") in item.summary
+    assert tr("home.cat_backup_none") in item.chips
+    assert board.detail == tr("home.detail", backed_up=0, monitored=0, risky=0)
+
+    service.run_backup_now(summary.game_id)
+
+    refreshed = service.load_home()
+    assert refreshed.games[0].backup_count == 1
+    assert refreshed.games[0].last_backup_label != ""
+    assert tr("home.cat_backup_done") in refreshed.games[0].chips
+    assert refreshed.stats.pending == 0
+    assert refreshed.detail == tr("home.detail", backed_up=1, monitored=0, risky=0)
+
+
+def test_home_marks_games_without_locations_as_pending(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    service.add_game("还没配置")
+
+    board = service.load_home()
+    assert board.stats.pending == 1
+    assert board.games[0].backup_enabled is False
+
+    only_pending = service.apply_home_filter(HomeFilter(view=HomeView.PENDING))
+    assert [item.name for item in only_pending.games] == ["还没配置"]
+    # 刚录入的游戏同时属于“最近活跃”: 录入本身就算一次活动.
+    recent = service.apply_home_filter(HomeFilter(view=HomeView.RECENT))
+    assert [item.name for item in recent.games] == ["还没配置"]
+
+    empty = service.apply_home_filter(HomeFilter(search="zzz"))
+    assert empty.games == ()
+    assert empty.narrowing is True
+    assert empty.empty_message == tr("home.empty_filtered", total=1)
+    assert empty.empty_hint == tr("home.empty_filtered_hint")
+
+
+def test_home_rejects_unknown_game_ids(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+
+    with pytest.raises(ArchiveManagementError, match="未知游戏"):
+        service.set_game_archived("999", True)
+    with pytest.raises(ArchiveManagementError, match="未知游戏"):
+        service.set_game_tags("not-a-number", ["x"])

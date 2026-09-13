@@ -37,9 +37,10 @@ from archive_management.ui.dialogs import (
     info_dialog,
     restore_dialog,
 )
-from archive_management.ui.discovery_window import DiscoveryWindow
+from archive_management.ui.home_page import HomePage
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
+    AppPage,
     BackupItem,
     FeedbackKind,
     GameDetail,
@@ -65,7 +66,7 @@ _TONE_COLORS: dict[str, str] = {
     "green": "#3b806e",
     "default": "#405685",
 }
-_WINDOW_MIN = (1080, 720)
+_WINDOW_MIN = (1200, 720)
 _RAIL_WIDTH = 350
 # 分支视图中用于标示层级的连接符(与缩进配合).
 _BRANCH_MARK = "└ "
@@ -95,6 +96,12 @@ class _WorkspaceWindow(Protocol):
         """把窗口提到前台; 窗口已关闭时返回 False."""
         ...
 
+    def close(self) -> None:
+        """关闭窗口."""
+        ...
+
+    _window: ctk.CTkToplevel
+
 
 class ArchiveApp(ctk.CTk):
     """存档管理主窗口."""
@@ -118,6 +125,8 @@ class ArchiveApp(ctk.CTk):
 
         self._game_id: str | None = None
         self._game: GameSummary | None = None
+        # 主窗口内的页面: 游戏主页(默认)与游戏详情页同格叠放, 同一时间只显示一个.
+        self._page: AppPage = AppPage.HOME
         # 当前打开的工作区窗口(游戏发现/定时任务/设置): 三个入口共用一个位置.
         self._active_window: _WorkspaceWindow | None = None
         self._active_nav: str | None = None
@@ -134,7 +143,6 @@ class ArchiveApp(ctk.CTk):
         self._task_ticks = 0
         self._cards: dict[str, ctk.CTkFrame] = {}
         self._card_painters: dict[str, Callable[[Palette], None]] = {}
-        self._row_unregisters: list[Callable[[], None]] = []
         self._card_unregisters: list[Callable[[], None]] = []
 
         self._messages: queue.Queue[
@@ -157,6 +165,8 @@ class ArchiveApp(ctk.CTk):
         self._build_layout()
         self._register_hotkey()
         self._load_first_game()
+        # 软件打开后默认停在游戏主页(游戏很多时它比单个游戏的详情更有用).
+        self._show_page(AppPage.HOME)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll_messages)
@@ -198,24 +208,59 @@ class ArchiveApp(ctk.CTk):
         topbar.grid(row=0, column=0, sticky="nsew")
         self._build_topbar(topbar)
 
-        self._main = self.kit.frame(self, bg_key="background", corner_radius=0)
-        self._main.grid(row=1, column=0, sticky="nsew")
-        self._main.grid_columnconfigure(1, weight=1)
-        self._main.grid_rowconfigure(0, weight=1)
+        # 内容区: 游戏主页(默认)与游戏详情页同格叠放, 由 _show_page 切换.
+        # 侧边栏已移除, 页面因此获得整窗宽度(游戏列表与海报网格受益最明显).
+        self._pages = self.kit.frame(self, bg_key="background", corner_radius=0)
+        self._pages.grid(row=1, column=0, sticky="nsew")
+        self._pages.grid_columnconfigure(0, weight=1)
+        self._pages.grid_rowconfigure(0, weight=1)
 
-        sidebar = self.kit.frame(
-            self._main, bg_key="sidebar", border_key="border", corner_radius=0
+        self._content = self.kit.frame(
+            self._pages, bg_key="background", corner_radius=0
         )
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.configure(width=272)
-        sidebar.grid_propagate(False)
-        self._build_sidebar(sidebar)
-
-        self._content = self.kit.frame(self._main, bg_key="background", corner_radius=0)
-        self._content.grid(row=0, column=1, sticky="nsew", padx=(0, 0))
+        self._content.grid(row=0, column=0, sticky="nsew")
         self._build_content()
 
+        self._home_page = HomePage(
+            self._pages,
+            backend=self.backend,
+            palette=self.p,
+            on_change=self._refresh_after_manage,
+            on_open_detail=self._open_game_detail,
+        )
+        self._home_page.frame.grid(row=0, column=0, sticky="nsew")
+        self._home_page.frame.grid_remove()
+
+    def _show_page(self, page: AppPage) -> None:
+        """切换主窗口内的页面: 游戏主页(默认)与游戏详情页.
+
+        进入主页时重新读取数据(其它窗口与后台任务都可能改过游戏库), 因此不需要
+        在其他地方额外刷新主页。"← 游戏主页"只在详情页有意义, 因此跟着页面显隐。
+        """
+        self._page = page
+        if page is AppPage.HOME:
+            self._home_page.reload()
+            self._home_page.frame.grid()
+            self._content.grid_remove()
+            # 已经在主页时"← 游戏主页"没有意义, 只有详情页才显示.
+            self._back_btn.grid_remove()
+        else:
+            self._content.grid()
+            self._home_page.frame.grid_remove()
+            self._back_btn.grid()
+
+    def _open_game_detail(self, game_id: str) -> None:
+        """打开某款游戏的详情页(主页"打开详情"与左侧列表点击都走这里)."""
+        self._select_game(game_id)
+        if self._game is not None:
+            self._show_page(AppPage.DETAIL)
+
     def _build_topbar(self, parent: ctk.CTkFrame) -> None:
+        """顶栏: 左侧是品牌与"← 游戏主页", 右侧是全局入口(添加游戏/定时任务/设置).
+
+        侧边栏去掉后, 全局动作统一收在顶栏右上角: 这些入口与当前看的是哪个页面
+        无关, 放在固定的位置最容易找到。
+        """
         parent.grid_columnconfigure(2, weight=1)
         logo = ctk.CTkFrame(
             parent, width=30, height=30, corner_radius=8, fg_color=self.p.accent
@@ -225,69 +270,48 @@ class ArchiveApp(ctk.CTk):
         brand = self.kit.label(
             parent, tr("topbar.brand"), style="primary", size=16, weight="bold"
         )
-        brand.grid(row=0, column=1, padx=(0, 8), pady=10)
+        brand.grid(row=0, column=1, padx=(0, 14), pady=10)
 
-    def _build_sidebar(self, parent: ctk.CTkFrame) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(1, weight=1)
-
-        section = self.kit.label(
-            parent, tr("sidebar.my_games"), style="muted", size=12, weight="bold"
+        # 返回主页只在详情页显示(在主页时它没有意义).
+        self._back_btn = self.kit.button(
+            parent,
+            tr("page.back_home"),
+            style="ghost",
+            command=self._on_back_home,
+            width=118,
+            height=34,
         )
-        section.grid(row=0, column=0, padx=22, pady=(18, 8), sticky="w")
+        self._back_btn.grid(row=0, column=2, sticky="w")
 
-        self._games_container = self.kit.scroll_frame(parent, bg_key="well")
-        self._games_container.grid(row=1, column=0, sticky="nsew", padx=10)
-
-        add_game = ctk.CTkFrame(parent, corner_radius=8, cursor="hand2")
-        add_game.grid(row=2, column=0, padx=22, pady=(10, 2), sticky="ew")
-        add_game.grid_columnconfigure(0, weight=1)
-        self.kit.register(
-            lambda p: add_game.configure(
-                fg_color=p.raised, border_width=1, border_color=p.border
-            )
+        actions = ctk.CTkFrame(parent, fg_color="transparent")
+        actions.grid(row=0, column=3, sticky="e", padx=(0, 18))
+        self._add_game_btn = self.kit.button(
+            actions,
+            tr("topbar.add_game"),
+            style="accent",
+            command=self._on_add_game,
+            width=104,
+            height=34,
         )
-        self._add_game_label = self.kit.label(
-            add_game,
-            tr("sidebar.add_game"),
-            style="body",
-            size=13,
-            weight="bold",
-            anchor="center",
+        self._add_game_btn.pack(side="left", padx=(0, 8))
+        self._schedule_btn = self.kit.button(
+            actions,
+            tr("topbar.nav_scheduled"),
+            style="ghost",
+            command=self._on_open_schedules,
+            width=104,
+            height=34,
         )
-        self._add_game_label.grid(row=0, column=0, pady=9)
-        self._add_game_label.bind("<Button-1>", lambda _e: self._on_add_game())
-
-        work = self.kit.label(
-            parent, tr("sidebar.workspace"), style="muted", size=12, weight="bold"
+        self._schedule_btn.pack(side="left", padx=(0, 8))
+        self._settings_btn = self.kit.button(
+            actions,
+            tr("topbar.nav_settings"),
+            style="ghost",
+            command=self._on_open_settings,
+            width=88,
+            height=34,
         )
-        work.grid(row=3, column=0, padx=22, pady=(14, 4), sticky="w")
-
-        nav = ctk.CTkFrame(parent, fg_color="transparent")
-        nav.grid(row=4, column=0, sticky="ew", padx=16, pady=2)
-        self.kit.register(lambda p: nav.configure(fg_color="transparent"))
-        nav_items = [
-            (tr("sidebar.nav_discovery"), tr("sidebar.nav_discovery_hint")),
-            (tr("sidebar.nav_scheduled"), tr("sidebar.nav_scheduled_hint")),
-            (tr("sidebar.nav_settings"), tr("sidebar.nav_settings_hint")),
-        ]
-        for text, message in nav_items:
-            row = self.kit.label(nav, text, style="body", size=14)
-            row.pack(fill="x", padx=12, pady=4)
-            row.bind("<Button-1>", lambda _e, m=message, t=text: self._on_nav(t, m))
-
-        self._status_card = self.kit.frame(parent, bg_key="raised", border_key="border")
-        self._status_card.grid(row=5, column=0, padx=16, pady=(8, 14), sticky="ew")
-        self._status_card.grid_columnconfigure(1, weight=1)
-        self._status_title = self.kit.label(
-            self._status_card, "", style="primary", size=12, weight="bold"
-        )
-        self._status_title.grid(row=0, column=1, padx=(8, 10), pady=(10, 0), sticky="w")
-        self._status_sub = self.kit.label(self._status_card, "", style="muted", size=11)
-        self._status_sub.grid(row=1, column=1, padx=(8, 10), pady=(0, 10), sticky="w")
-        dot = ctk.CTkLabel(self._status_card, text="●", text_color=self.p.success)
-        dot.grid(row=0, column=0, rowspan=2, padx=(14, 0))
-        self.kit.register(lambda p: dot.configure(text_color=p.success))
+        self._settings_btn.pack(side="left")
 
     def _build_content(self) -> None:
         self._content.grid_columnconfigure(0, weight=1)
@@ -311,7 +335,7 @@ class ArchiveApp(ctk.CTk):
             height=38,
         )
         self._export_btn.grid(row=0, column=1, rowspan=2, padx=(8, 6))
-        self._settings_btn = self.kit.button(
+        self._settings_game_btn = self.kit.button(
             header,
             tr("action.game_settings"),
             style="ghost",
@@ -319,7 +343,7 @@ class ArchiveApp(ctk.CTk):
             width=112,
             height=38,
         )
-        self._settings_btn.grid(row=0, column=2, rowspan=2)
+        self._settings_game_btn.grid(row=0, column=2, rowspan=2)
 
         self._hero = self.kit.frame(
             self._content, bg_key="hero_bg", border_key="border"
@@ -341,10 +365,26 @@ class ArchiveApp(ctk.CTk):
             self, bg_key="raised", border_key="border", corner_radius=0
         )
         statusbar.grid(row=2, column=0, sticky="ew")
+        # 左侧是操作反馈, 右下角是备份服务状态(原本在侧边栏的状态卡里).
         self._feedback_label = self.kit.label(
             statusbar, tr("status.ready"), style="muted", size=12
         )
         self._feedback_label.pack(side="left", padx=18, pady=4)
+
+        self._service_card = ctk.CTkFrame(statusbar, fg_color="transparent")
+        self._service_card.pack(side="right", padx=18, pady=4)
+        self._service_dot = ctk.CTkLabel(
+            self._service_card,
+            text="●",
+            text_color=self.p.success,
+            font=ctk.CTkFont(size=12),
+        )
+        self._service_dot.pack(side="left", padx=(0, 6))
+        self.kit.register(lambda p: self._service_dot.configure(text_color=p.success))
+        self._service_label = self.kit.label(
+            self._service_card, "", style="muted", size=12
+        )
+        self._service_label.pack(side="left")
         self.kit.register(lambda p: self._restyle_feedback(p))
 
     def _build_hero(self) -> None:
@@ -727,8 +767,8 @@ class ArchiveApp(ctk.CTk):
         )
 
     def _load_first_game(self) -> None:
+        """启动时选中第一款游戏(详情页有内容), 默认页面仍是游戏主页."""
         games = self.backend.list_games()
-        self._render_game_list(games)
         self._refresh_usage()
         if games:
             self._select_game(games[0].game_id)
@@ -736,89 +776,8 @@ class ArchiveApp(ctk.CTk):
             self._show_empty_list()
         self._render_task(self.backend.task_status(self._game_id))
 
-    def _render_game_list(self, games: list[GameSummary]) -> None:
-        for unsubscribe in self._row_unregisters:
-            unsubscribe()
-        self._row_unregisters = []
-        for child in self._games_container.winfo_children():
-            child.destroy()
-        for game in games:
-            row = self._build_game_row(game)
-            row.pack(fill="x", pady=3)
-            self._bind_game_row(row, game)
-
-    def _bind_game_row(self, row: ctk.CTkFrame, game: GameSummary) -> None:
-        for widget in (row, *row.winfo_children()):
-            widget.bind(
-                "<Button-1>",
-                lambda _event, gid=game.game_id: self._select_game(gid),
-            )
-
-    def _build_game_row(self, game: GameSummary) -> ctk.CTkFrame:
-        row = ctk.CTkFrame(self._games_container, corner_radius=10)
-        row.grid_columnconfigure(1, weight=1)
-        icon = ctk.CTkLabel(
-            row,
-            text=game.name[:1],
-            width=34,
-            height=34,
-            corner_radius=8,
-            fg_color=self._tone_color(game.tone),
-            text_color="#ffffff",
-            font=ctk.CTkFont(size=15, weight="bold"),
-        )
-        icon.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=8)
-        name = ctk.CTkLabel(
-            row,
-            text=game.name,
-            anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.p.text_primary,
-        )
-        name.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
-        detail = ctk.CTkLabel(
-            row,
-            text=game.list_detail,
-            anchor="w",
-            font=ctk.CTkFont(size=11),
-            text_color=self.p.text_muted,
-        )
-        detail.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 7))
-        self._row_unregisters.append(
-            self.kit.register(
-                lambda p, r=row, n=name, d=detail: self._paint_row(r, n, d, p, game)
-            )
-        )
-        return row
-
-    def _paint_row(
-        self,
-        row: ctk.CTkFrame,
-        name: ctk.CTkLabel,
-        detail: ctk.CTkLabel,
-        palette: Palette,
-        game: GameSummary,
-    ) -> None:
-        selected = game.game_id == self._game_id
-        if selected:
-            row.configure(
-                fg_color=palette.item_active,
-                border_width=1,
-                border_color=palette.accent,
-            )
-            name.configure(text_color=palette.text_primary)
-        else:
-            # 卡片色 + 描边: 浅色主题下白底白卡片也能与列表凹槽区分.
-            row.configure(
-                fg_color=palette.card,
-                border_width=1,
-                border_color=palette.card_border,
-            )
-            name.configure(text_color=palette.text_body)
-        detail.configure(text_color=palette.text_muted)
-
     def _show_empty_list(self) -> None:
-        """没有游戏时的空状态: 列表与概要区一起清空, 不留下被删游戏的内容.
+        """没有游戏时的空状态: 概要区、选中面板与备份列表一起复位.
 
         删除最后一个游戏后, 概要区(名称/存档位置/统计)、标题行与选中面板都
         还停留在被删的那款游戏上, 因此这里把它们全部复位。
@@ -925,8 +884,10 @@ class ArchiveApp(ctk.CTk):
         self._task_shortcut.configure(text=self._shortcut_text)
         self._task_hint.configure(text=tr("task.hint"))
         self._cancel_btn.configure(state="normal" if task.cancellable else "disabled")
-        self._status_title.configure(text=tr("status.service_ok"))
-        self._status_sub.configure(text=self._usage_text)
+        # 右下角的服务状态: 服务正常 + 备份占用(原本显示在侧边栏的状态卡里).
+        self._service_label.configure(
+            text=f"{tr('status.service_ok')} · {self._usage_text}"
+        )
 
     def _refresh_task(self) -> None:
         """轮询任务状态: 备份进行中时刷新进度, 数据变化时重载列表.
@@ -956,7 +917,6 @@ class ArchiveApp(ctk.CTk):
         games = self.backend.list_games()
         if not any(game.game_id == self._game_id for game in games):
             # 当前游戏已被删除(例如在别处删除后由轮询触发的重载): 整体回到空状态.
-            self._render_game_list(games)
             self._show_empty_list()
             return
         self._render_list()
@@ -1566,6 +1526,8 @@ class ArchiveApp(ctk.CTk):
             tr("theme.to_dark") if self._theme == "light" else tr("theme.to_light")
         )
         self.kit.apply(self.p)
+        # 主页里的控件是按调色板逐一定色的, 换主题后要用新调色板重建一次.
+        self._home_page.apply_palette(self.p)
         log_action("ui.toggle_theme", basic=True, theme=self._theme)
         self._feedback(FeedbackKind.INFO, tr("theme.switched", theme=theme_text))
         return self._theme
@@ -1593,18 +1555,15 @@ class ArchiveApp(ctk.CTk):
         self._feedback(FeedbackKind.SUCCESS, tr("result.game_added", name=summary.name))
         self._refresh_after_manage(select=summary.game_id)
 
-    def _on_nav(self, name: str, message: str) -> None:
-        """工作区入口: 三个入口共用同一个窗口位置, 不会重复开窗."""
-        openers: dict[str, Callable[[], _WorkspaceWindow]] = {
-            tr("sidebar.nav_discovery"): self._open_discovery_window,
-            tr("sidebar.nav_scheduled"): self._open_schedule_window,
-            tr("sidebar.nav_settings"): self._open_settings,
-        }
-        opener = openers.get(name)
-        if opener is None:
-            self._feedback(FeedbackKind.INFO, message)
-            return
-        self._open_workspace_window(name, opener)
+    def _on_open_schedules(self) -> None:
+        """顶栏"定时任务"入口: 打开全局任务窗口(与设置共用一个窗口位置)."""
+        self._open_workspace_window(
+            tr("topbar.nav_scheduled"), self._open_schedule_window
+        )
+
+    def _on_open_settings(self) -> None:
+        """顶栏"设置"入口: 打开设置窗口(与定时任务共用一个窗口位置)."""
+        self._open_workspace_window(tr("topbar.nav_settings"), self._open_settings)
 
     def _open_workspace_window(
         self, nav: str, opener: Callable[[], _WorkspaceWindow]
@@ -1618,7 +1577,7 @@ class ArchiveApp(ctk.CTk):
         active = self._active_window
         if active is not None and active.focus():
             if self._active_nav != nav:
-                self._feedback(FeedbackKind.INFO, tr("sidebar.nav_busy"))
+                self._feedback(FeedbackKind.INFO, tr("topbar.busy"))
             return
         self._active_window = None
         self._active_nav = None
@@ -1627,16 +1586,6 @@ class ArchiveApp(ctk.CTk):
             return
         self._active_window = created
         self._active_nav = nav
-
-    def _open_discovery_window(self) -> DiscoveryWindow:
-        """打开本地游戏发现窗口(监控目录 + 探测结果)."""
-        log_action("ui.open_discovery", basic=True)
-        return DiscoveryWindow(
-            self,
-            backend=self.backend,
-            palette=self.p,
-            on_change=self._refresh_after_manage,
-        )
 
     def _open_schedule_window(self) -> ScheduleWindow:
         """打开全局定时任务窗口(可新增/编辑/删除每个游戏的定时备份)."""
@@ -1657,6 +1606,11 @@ class ArchiveApp(ctk.CTk):
     def _on_game_settings(self) -> None:
         self._open_manage_game()
 
+    def _on_back_home(self) -> None:
+        """返回游戏主页(主窗口内的默认页面)."""
+        log_action("ui.show_home", basic=True, source="detail")
+        self._show_page(AppPage.HOME)
+
     def _open_manage_game(self) -> None:
         """打开当前游戏的管理窗口(重命名/停用/删除/管理存档位置)."""
         game = self._game
@@ -1676,9 +1630,14 @@ class ArchiveApp(ctk.CTk):
         )
 
     def _refresh_after_manage(self, *, select: str | None = None) -> None:
-        """游戏或存档位置变更后重载列表并保持/恢复选中."""
+        """游戏或存档位置变更后重载详情页并保持/恢复选中.
+
+        侧边栏已经去掉, 游戏列表由游戏主页承载, 因此这里只维护"当前游戏"与详情页;
+        主页可见时顺手刷新它(不可见时进入页面会重新读取, 无需在这里重算)。
+        """
         games = self.backend.list_games()
-        self._render_game_list(games)
+        if self._page is AppPage.HOME:
+            self._home_page.reload()
         if select is not None:
             self._select_game(select)
             return

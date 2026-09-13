@@ -2,6 +2,10 @@
 
 ``UiKit`` 集中创建控件并在主题切换时按调色板统一重绘(repaint),使
 业务代码只面向展示模型与回调,不直接散落控件配色逻辑。
+
+导入本模块即关闭 CustomTkinter 绘制层的"偶数取整"(详见
+:mod:`archive_management.ui.rendering`),否则奇数尺寸的控件会丢掉
+1px 右边框/下边框;所有创建窗口的模块最终都经 ``main_window`` 导入这里。
 """
 
 from __future__ import annotations
@@ -13,6 +17,9 @@ from typing import Literal
 import customtkinter as ctk
 
 from archive_management.ui.palette import Palette
+from archive_management.ui.rendering import apply_border_rendering_fix
+
+apply_border_rendering_fix()
 
 _PaletteKey = str
 _Repaint = Callable[..., None]

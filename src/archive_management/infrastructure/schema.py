@@ -4,8 +4,9 @@
 内应用尚未执行的迁移(PLAN 5、阶段 A).
 
 表结构与 PLAN 第 5 节对齐: games、save_locations、backup_nodes、
-backup_files、scheduled_jobs, 以及阶段 E-1 增加的 monitored_directories 与
-game_candidates. 操作日志不落库(见版本 3), 改为写入日志文件。
+backup_files、scheduled_jobs, 阶段 E-1 增加的 monitored_directories 与
+game_candidates, 以及阶段 E-2 增加的主页分类字段与 home_state. 操作日志不落库
+(见版本 3), 改为写入日志文件。
 """
 
 from __future__ import annotations
@@ -197,12 +198,84 @@ _V5_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 6(阶段 E-2 迭代): 统一游戏主页分类与筛选所需的状态.
+#
+# - ``games.origin``: 游戏来源平台(steam/epic/gog/battle_net/monitored/manual),
+#   用于主页的"平台"分类; 与既有的 ``platform``(操作系统)无关。
+# - ``games.tags``: 用户自定义标签, 逗号拼接保存(标签内不允许逗号)。
+# - ``games.archived``: 归档标记 = 从主页收起来(记录与备份都保留, 可随时取消)。
+# - ``games.last_activity_at``: 最近一次备份/恢复/修改的时间, 主页按它排序。
+# - ``home_state``: 单行表, 保存主页当前的视图/平台/分类/搜索词。筛选条件属于
+#   "用户偏好"而不是业务数据, 单独存一张表可以让迁移与清理互不影响; ``version``
+#   用于最小版本控制, 格式变化时旧记录会被用例层忽略。
+_V6_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE games ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'
+    """,
+    """
+    ALTER TABLE games ADD COLUMN tags TEXT NOT NULL DEFAULT ''
+    """,
+    """
+    ALTER TABLE games ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+    """,
+    """
+    ALTER TABLE games ADD COLUMN last_activity_at TEXT
+    """,
+    """
+    UPDATE games SET last_activity_at = created_at WHERE last_activity_at IS NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_games_archived ON games (archived)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS home_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        view TEXT NOT NULL DEFAULT 'all',
+        origin TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT '',
+        search TEXT NOT NULL DEFAULT '',
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    )
+    """,
+)
+
+# 版本 7(阶段 E-2 迭代): 主页的展示偏好.
+#
+# 游戏发现合并进主窗口后, 主页同时承担"游戏库总览"的职责, 因此把展示方式
+# (列表/海报)、翻页方式(分页/无限滚动)与每页条数一起保存到 home_state: 下次打开
+# 软件仍是上次看到的样子。默认列表模式 + 分页模式 + 每页 30 条。
+_V7_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE home_state ADD COLUMN layout TEXT NOT NULL DEFAULT 'list'
+    """,
+    """
+    ALTER TABLE home_state ADD COLUMN paging TEXT NOT NULL DEFAULT 'page'
+    """,
+    """
+    ALTER TABLE home_state ADD COLUMN page_size INTEGER NOT NULL DEFAULT 30
+    """,
+)
+
+# 版本 8(阶段 E-2 迭代): 无限滚动模式被去掉, 主页只保留分页翻页.
+#
+# 展示方式(列表/海报)与每页条数仍然持久化; ``paging`` 已无任何读取方, 留着
+# 会让人以为还存在两种翻页模式, 因此直接删列(该列不在索引或约束里, 可安全删除)。
+_V8_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE home_state DROP COLUMN paging
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
     (3, _V3_STATEMENTS),
     (4, _V4_STATEMENTS),
     (5, _V5_STATEMENTS),
+    (6, _V6_STATEMENTS),
+    (7, _V7_STATEMENTS),
+    (8, _V8_STATEMENTS),
 )
 
 

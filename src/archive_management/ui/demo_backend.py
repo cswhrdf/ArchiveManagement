@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from archive_management.application import home as home_cases
 from archive_management.application.backup import MAX_NOTE_LENGTH
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan, RestoreTarget
@@ -18,6 +20,9 @@ from archive_management.domain import (
     BackupNode,
     DeletionMode,
     DeletionPlan,
+    GameFacts,
+    HomeFilter,
+    normalize_tags,
     plan_deletion,
 )
 from archive_management.exceptions import ArchiveManagementError
@@ -30,11 +35,13 @@ from archive_management.ui.models import (
     CandidateItem,
     GameDetail,
     GameSummary,
+    HomeBoard,
     LocationItem,
     MonitoredDirItem,
     ScanSummary,
     ScheduleItem,
     TaskStatus,
+    home_board,
 )
 
 # 刻意用于演示恢复失败的中断节点
@@ -43,6 +50,11 @@ _FAIL_RESTORE_ID = "b2"
 
 def _dt(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
+
+
+def _stamp(moment: datetime) -> str:
+    """把时间格式化为本地时区的展示文本(与真实后端一致)."""
+    return moment.astimezone().strftime("%Y/%m/%d %H:%M")
 
 
 def _now_label() -> str:
@@ -312,6 +324,10 @@ class DemoArchiveService:
             item.candidate_id: item for item in _CANDIDATES
         }
         self._next_dir_id = len(_MONITORED_DIRS) + 1
+        # 阶段 E-2: 演示主页的筛选条件、归档标记与自定义标签.
+        self._home_filter = HomeFilter()
+        self._archived: dict[str, bool] = dict.fromkeys(self._meta, False)
+        self._tags: dict[str, tuple[str, ...]] = {key: () for key in self._meta}
         for game in _GAMES:
             existing = self._items.get(game.game_id, [])
             self._current[game.game_id] = existing[-1].backup_id if existing else None
@@ -1035,6 +1051,69 @@ class DemoArchiveService:
                 tr("error.unknown_candidate", candidate_id=candidate_id)
             )
         return item
+
+    # -- 统一游戏主页(阶段 E-2) -------------------------------------------
+
+    def load_home(self) -> HomeBoard:
+        """返回演示主页数据(沿用内存中保存的筛选条件)."""
+        return self._board()
+
+    def apply_home_filter(self, active: HomeFilter) -> HomeBoard:
+        """按给定筛选条件重算演示主页并记住该条件."""
+        self._home_filter = active.normalized()
+        return self._board()
+
+    def set_game_archived(self, game_id: str, archived: bool) -> HomeBoard:
+        """归档或取消归档一个演示游戏."""
+        self._require_game(game_id)
+        self._archived[game_id] = archived
+        self._revision += 1
+        return self._board()
+
+    def set_game_tags(self, game_id: str, tags: Sequence[str]) -> HomeBoard:
+        """覆盖写入演示游戏的自定义标签."""
+        self._require_game(game_id)
+        self._tags[game_id] = normalize_tags(tags)
+        return self._board()
+
+    def _home_facts(self) -> list[GameFacts]:
+        """把演示数据换算为主页事实(备份时间/存档位置/探测关联)."""
+        facts: list[GameFacts] = []
+        for game_id, summary in self._meta.items():
+            items = self._items.get(game_id, [])
+            moments = [item.created_dt for item in items]
+            locations = self._locations.get(game_id, [])
+            facts.append(
+                GameFacts(
+                    game_id=game_id,
+                    name=summary.name,
+                    origin=self._origin_of(game_id),
+                    location_count=len(locations),
+                    backup_count=len(items),
+                    last_backup_at=max(moments) if moments else None,
+                    last_activity_at=max(moments) if moments else None,
+                    risk=any(not item.ok for item in locations),
+                    monitored=any(
+                        item.game_id == game_id for item in self._candidates.values()
+                    ),
+                    archived=self._archived.get(game_id, False),
+                    enabled=summary.enabled,
+                    tags=self._tags.get(game_id, ()),
+                )
+            )
+        return facts
+
+    def _origin_of(self, game_id: str) -> str:
+        """演示来源: 有探测记录时沿用探测来源, 否则视为手动添加."""
+        for item in self._candidates.values():
+            if item.game_id == game_id:
+                return item.source
+        return "manual"
+
+    def _board(self) -> HomeBoard:
+        """按当前筛选条件重算演示主页(复用真实后端的映射逻辑)."""
+        report = home_cases.build_report(self._home_facts(), self._home_filter)
+        return home_board(report, stamp=_stamp)
 
     # -- 其它 ---------------------------------------------------------------
 

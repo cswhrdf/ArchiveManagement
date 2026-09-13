@@ -335,7 +335,9 @@ def import_candidate(
     final_name = (name if name is not None else candidate.name).strip()
     if not final_name:
         raise ArchiveManagementError("游戏名称不能为空")
-    game = games.add(Game(name=final_name, original_name=candidate.name))
+    game = games.add(
+        Game(name=final_name, original_name=candidate.name, origin=candidate.source)
+    )
     if game.id is None:  # pragma: no cover - add() 总是返回 id
         raise ArchiveManagementError("导入游戏失败: 未返回游戏 id")
     candidates.set_status(candidate_id, "imported", game_id=game.id)

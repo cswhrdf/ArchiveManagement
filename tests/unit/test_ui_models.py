@@ -7,8 +7,17 @@ from datetime import UTC, datetime
 
 import pytest
 
+from archive_management.application.home import build_report
+from archive_management.domain import (
+    DEFAULT_PAGE_SIZE,
+    GameFacts,
+    HomeFilter,
+    HomeLayout,
+    HomeView,
+)
 from archive_management.i18n import tr
 from archive_management.ui.models import (
+    AppPage,
     BackupItem,
     CandidateFilter,
     CandidateItem,
@@ -16,6 +25,9 @@ from archive_management.ui.models import (
     FeedbackKind,
     GameDetail,
     GameSummary,
+    HomeBoard,
+    HomeGameItem,
+    HomeSection,
     LocationItem,
     MonitoredDirItem,
     ScanSummary,
@@ -26,6 +38,8 @@ from archive_management.ui.models import (
     filter_by_source,
     filter_by_source_label,
     group_by_parent,
+    home_board,
+    poster_columns,
     timeline_order,
     visible_in_branch_view,
 )
@@ -472,3 +486,240 @@ def test_scan_summary_detail_omits_empty_parts_and_reports_errors() -> None:
         errors=("注册表不可用",),
     )
     assert tr("discovery.scan_errors", count=1) in broken.detail
+
+
+# --------------------------------------------------------- 统一游戏主页(E-2)
+
+_HOME_NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+
+
+def _home_facts(
+    game_id: str,
+    *,
+    name: str = "",
+    origin: str = "manual",
+    locations: int = 1,
+    backups: int = 1,
+    risk: bool = False,
+    monitored: bool = False,
+    archived: bool = False,
+    tags: tuple[str, ...] = (),
+) -> GameFacts:
+    """构造主页事实: 默认是"刚备份过、路径正常"的游戏."""
+    return GameFacts(
+        game_id=game_id,
+        name=name or game_id,
+        origin=origin,
+        location_count=locations,
+        backup_count=backups,
+        last_backup_at=_HOME_NOW if backups else None,
+        last_activity_at=_HOME_NOW,
+        risk=risk,
+        monitored=monitored,
+        archived=archived,
+        tags=tags,
+    )
+
+
+def _home_board(facts: list[GameFacts], active: HomeFilter | None = None) -> HomeBoard:
+    """按给定事实生成主页展示模型(与两个后端共用同一条映射路径)."""
+    report = build_report(facts, active or HomeFilter(), now=_HOME_NOW)
+    return home_board(report, stamp=lambda moment: moment.strftime("%m-%d %H:%M"))
+
+
+def test_home_game_item_labels_and_summary() -> None:
+    item = HomeGameItem(
+        game_id="1",
+        name="星际拓荒",
+        origin="steam",
+        location_count=2,
+        backup_count=3,
+        last_backup_label="09-12 08:00",
+        activity_label="09-13 09:00",
+        risk=False,
+        monitored=True,
+        archived=False,
+        tags=("探索",),
+    )
+
+    assert item.platform_label == tr("discovery.source_steam")
+    assert item.backup_label == tr("home.cat_backup_done")
+    assert item.risk_label == tr("home.risk_ok")
+    assert item.state_label == ""
+    assert item.meta == tr("home.meta", locations=2, backups=3)
+    assert tr("home.last_backup", stamp="09-12 08:00") in item.summary
+    assert tr("home.activity", stamp="09-13 09:00") in item.summary
+    assert item.backup_enabled is True
+    chips = item.chips
+    assert tr("discovery.source_steam") in chips
+    assert tr("home.cat_monitor_on") in chips
+    assert "探索" in chips
+    assert tr("home.chip_risk") not in chips
+
+
+def test_home_game_item_marks_risk_archive_and_missing_backup() -> None:
+    item = HomeGameItem(
+        game_id="2",
+        name="空游戏",
+        origin="manual",
+        location_count=0,
+        backup_count=0,
+        last_backup_label="",
+        activity_label="",
+        risk=True,
+        monitored=False,
+        archived=True,
+    )
+
+    assert item.backup_label == tr("home.cat_backup_none")
+    assert item.risk_label == tr("home.risk_bad")
+    assert item.state_label == tr("home.chip_archived")
+    assert tr("home.last_backup_none") in item.summary
+    assert tr("home.activity", stamp="") not in item.summary
+    assert item.backup_enabled is False
+    assert tr("home.chip_risk") in item.chips
+    assert tr("home.chip_archived") in item.chips
+
+
+def test_home_board_summary_detail_and_options() -> None:
+    board = _home_board(
+        [
+            _home_facts("1", name="A"),
+            _home_facts("2", name="B", locations=0),
+        ]
+    )
+
+    assert board.summary == tr("home.summary", total=2, recent=2, pending=1, archived=0)
+    assert board.detail == tr("home.detail", backed_up=2, monitored=0, risky=0)
+    assert [option.key for option in board.views] == [view.value for view in HomeView]
+    assert board.view_text == f"{tr('home.view_all')} (2)"
+    assert board.origin_text == tr("home.origin_all")
+    assert board.category_text == tr("home.category_all")
+    assert board.narrowing is False
+
+
+def test_home_board_option_texts_carry_counts() -> None:
+    board = _home_board(
+        [_home_facts("1", origin="steam")],
+        HomeFilter(origin="steam", category="backup:done"),
+    )
+
+    assert board.origin_text == f"{tr('discovery.source_steam')} (1)"
+    assert board.category_text == f"{tr('home.cat_backup_done')} (1)"
+    assert board.narrowing is True
+
+
+def test_home_board_uses_fallback_text_for_unavailable_selection() -> None:
+    """选中项在当前结果里没有出现时(例如组合筛选后为空)仍要显示可读文案."""
+    board = _home_board([_home_facts("1", origin="steam")], HomeFilter(origin="gog"))
+
+    assert board.games == ()
+    assert board.origin_text == tr("discovery.source_gog")
+
+
+def test_home_board_empty_states_distinguish_library_view_and_filter() -> None:
+    empty_library = _home_board([])
+    assert empty_library.empty_message == tr("home.empty_library")
+    assert empty_library.empty_hint == tr("home.empty_library_hint")
+
+    facts = [_home_facts("1", name="A")]
+    filtered = _home_board(facts, HomeFilter(search="zzz"))
+    assert filtered.empty_message == tr("home.empty_filtered", total=1)
+    assert filtered.empty_hint == tr("home.empty_filtered_hint")
+
+    only_archived = _home_board([_home_facts("1", archived=True)])
+    assert only_archived.empty_message == tr("home.empty_view", view=HomeView.ALL.label)
+    assert only_archived.empty_hint == tr("home.empty_hint")
+
+
+def test_home_filter_display_preferences_are_validated() -> None:
+    """展示偏好(列表/海报与每页条数)也要做取值校验."""
+    assert HomeFilter().layout is HomeLayout.LIST
+    assert HomeFilter().page_size == DEFAULT_PAGE_SIZE
+
+    assert HomeLayout.LIST.label == tr("home.layout_list")
+    assert HomeLayout.POSTER.label == tr("home.layout_poster")
+
+    # 非法的每页条数回落到默认值, 合法取值原样保留.
+    assert HomeFilter(page_size=7).normalized().page_size == DEFAULT_PAGE_SIZE
+    assert HomeFilter(page_size=60).normalized().page_size == 60
+
+
+def test_home_labels_are_all_translated() -> None:
+    """回归: 缺 key 会让界面直接露出 home.xxx / dialog.xxx 这样的原始键名."""
+    keys = (
+        "home.title",
+        "home.hint",
+        "home.search",
+        "home.search_placeholder",
+        "home.clear",
+        "home.origin_all",
+        "home.category_all",
+        "home.list_hint",
+        "home.require_game",
+        "home.risk_ok",
+        "home.risk_bad",
+        "home.chip_risk",
+        "home.chip_archived",
+        "home.col_name",
+        "home.col_platform",
+        "home.col_locations",
+        "home.col_backups",
+        "home.col_last_backup",
+        "home.col_activity",
+        "home.col_state",
+        "home.action_detail",
+        "home.action_backup",
+        "home.action_location",
+        "home.action_manage",
+        "home.action_tags",
+        "home.action_archive",
+        "home.action_unarchive",
+        "page.back_home",
+        "page.library",
+        "page.discovery",
+        "topbar.add_game",
+        "topbar.nav_scheduled",
+        "topbar.nav_settings",
+        "topbar.busy",
+        "home.layout_list",
+        "home.layout_poster",
+        "home.page_size",
+        "home.poster_backups",
+        "home.page_indicator",
+        "home.prev_page",
+        "home.next_page",
+        "home.activity_none",
+        "dialog.home_tags_title",
+        "dialog.home_location_title",
+        "error.home_location_required",
+    )
+    for key in keys:
+        assert tr(key) != key
+    for view in HomeView:
+        assert not view.label.startswith("home.")
+    for key in ("backup_done", "backup_none", "monitor_on", "monitor_off"):
+        assert tr(f"home.cat_{key}") != f"home.cat_{key}"
+
+
+def test_app_page_defaults_to_home_first() -> None:
+    """主窗口页面: 成员顺序即默认页面, 第一位是游戏主页(软件打开后的首页)."""
+    assert [page.value for page in AppPage] == ["home", "detail"]
+    assert AppPage.HOME is next(iter(AppPage))
+
+
+def test_home_section_order_and_labels() -> None:
+    """主页内部分区: 游戏库在前(默认), 游戏发现作为第二个分区."""
+    assert [section.value for section in HomeSection] == ["library", "discovery"]
+    assert HomeSection.LIBRARY is next(iter(HomeSection))
+    for section in HomeSection:
+        assert section.label == tr(f"page.{section.value}")
+        assert not section.label.startswith("page.")
+
+
+def test_poster_columns_scales_with_width() -> None:
+    """海报模式每行张数随可用宽度变化(收窄时至少两列)."""
+    assert poster_columns(400) == 2
+    assert poster_columns(1000) == 4
+    assert poster_columns(1600) == 7
+    assert poster_columns(1400) > poster_columns(1000)
