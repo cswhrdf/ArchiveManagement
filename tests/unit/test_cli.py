@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import io
+import json
+import logging
 from contextlib import redirect_stdout
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
 import archive_management.app as app_module
+from archive_management.config import AppConfig, load_config
 from archive_management.infrastructure.database import Database
 
 pytestmark = [
@@ -79,6 +83,64 @@ def test_root_before_subcommand_is_not_overridden(tmp_path: Path) -> None:
     assert "初始化完成" in output
     assert (tmp_path / "data" / "archive-management.db").is_file()
     assert (tmp_path / "logs" / "archive-management.log").is_file()
+
+
+def test_init_restores_invalid_config_to_defaults(tmp_path: Path) -> None:
+    """配置内容非法时 init 自动还原为默认值, 并把原文件改名保留."""
+    config_path = tmp_path / "config" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    payload = json.dumps({"version": 1, "theme": "neon"})
+    config_path.write_text(payload, encoding="utf-8")
+
+    code, output = _run_with_output(["init", "--root", str(tmp_path)])
+
+    assert code == 0
+    assert "初始化完成" in output
+    assert "配置还原" in output
+    backup = tmp_path / "config" / "config.json.invalid"
+    assert backup.read_text(encoding="utf-8") == payload
+    assert load_config(config_path) == AppConfig()
+
+
+def test_doctor_reports_restored_config(tmp_path: Path) -> None:
+    """doctor 遇到非法配置也会还原, 并在输出里说明."""
+    _run_with_output(["init", "--root", str(tmp_path)])
+    config_path = tmp_path / "config" / "config.json"
+    config_path.write_text("{", encoding="utf-8")
+
+    code, output = _run_with_output(["doctor", "--root", str(tmp_path)])
+
+    assert code == 0
+    assert "内容非法" in output
+    assert load_config(config_path) == AppConfig()
+
+
+def _detach_log_handlers() -> None:
+    """移除并关闭当前装配的日志处理器, 避免影响其他用例."""
+    root = logging.getLogger("archive_management")
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        handler.close()
+
+
+def test_init_applies_logging_settings_from_config(tmp_path: Path) -> None:
+    """配置里的 logging 段真的生效: 滚动上限与保留份数取自 config.json."""
+    _run_with_output(["init", "--root", str(tmp_path)])
+    config_path = tmp_path / "config" / "config.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["logging"]["max_bytes"] = 4096
+    payload["logging"]["backup_count"] = 2
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    try:
+        code, _ = _run_with_output(["init", "--root", str(tmp_path)])
+        assert code == 0
+        file_handler = logging.getLogger("archive_management").handlers[0]
+        assert isinstance(file_handler, RotatingFileHandler)
+        assert file_handler.maxBytes == 4096
+        assert file_handler.backupCount == 2
+    finally:
+        _detach_log_handlers()
 
 
 def test_verbose_flag_keeps_init_working(tmp_path: Path) -> None:

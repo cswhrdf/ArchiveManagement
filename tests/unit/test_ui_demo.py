@@ -287,7 +287,7 @@ def test_demo_live_summary_tracks_locations(service: DemoArchiveService) -> None
     assert after.location_count == 1
 
 
-# ------------------------------------------------- 阶段 E: 恢复与删除原始位置
+# ------------------------------------------------- 恢复与删除原始位置
 
 
 def test_demo_preview_restore_describes_plan(service: DemoArchiveService) -> None:

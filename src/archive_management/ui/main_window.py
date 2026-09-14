@@ -19,14 +19,27 @@ import customtkinter as ctk
 
 from archive_management.application.backup import MAX_NOTE_LENGTH
 from archive_management.application.restore import RestorePlan
-from archive_management.exceptions import ArchiveManagementError, ContentUnchangedError
+from archive_management.config import (
+    HotkeySettings,
+    load_or_reset_config,
+    save_config,
+)
+from archive_management.exceptions import (
+    ArchiveManagementError,
+    ContentUnchangedError,
+)
 from archive_management.i18n import tr
 from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.services.audit import log_action
 from archive_management.services.hotkeys import (
-    DEFAULT_ACCELERATOR,
+    ACTION_CREATE_BRANCH,
+    ACTION_SAVE_NOW,
+    DEFAULT_ACCELERATORS,
     GlobalHotkeyService,
     HotkeyBinding,
+    combo_error,
+    format_accelerator,
+    parse_accelerator,
 )
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import (
@@ -113,8 +126,12 @@ class ArchiveApp(ctk.CTk):
         title: str,
         smoke_seconds: float | None = None,
         hotkeys: GlobalHotkeyService | None = None,
+        paths: ApplicationPaths | None = None,
     ) -> None:
-        """构造主窗口并加载演示数据."""
+        """构造主窗口并加载演示数据.
+
+        ``paths`` 用于读写应用配置(快捷键); 省略时只在内存里维护, 便于测试。
+        """
         super().__init__()
         self.backend = backend
         self.kit = UiKit()
@@ -156,14 +173,15 @@ class ArchiveApp(ctk.CTk):
         self._verified = True
         self._usage_text = tr("status.usage", used="—")
         self._hotkeys = hotkeys if hotkeys is not None else GlobalHotkeyService()
-        self._shortcut_text = "—"
+        self._paths = paths
+        self._shortcuts = self._load_shortcuts()
         self.title(title)
         self.minsize(*_WINDOW_MIN)
         self.geometry("1360x860")
         self.configure(fg_color=self.p.background)
 
         self._build_layout()
-        self._register_hotkey()
+        self._register_hotkeys()
         self._load_first_game()
         # 软件打开后默认停在游戏主页(游戏很多时它比单个游戏的详情更有用).
         self._show_page(AppPage.HOME)
@@ -176,25 +194,61 @@ class ArchiveApp(ctk.CTk):
 
     # ---------------------------------------------------------------- 快捷键
 
-    def _register_hotkey(self) -> None:
-        """注册"全局保存"快捷键; 注册失败只提示, 不影响应用可用性."""
-        state = self._hotkeys.register(
-            HotkeyBinding(name="save_now", accelerator=DEFAULT_ACCELERATOR),
-            self._request_hotkey_backup,
-        )
-        if state.registered:
-            self._shortcut_text = state.accelerator
-        else:
-            self._shortcut_text = tr("hotkey.unavailable")
-            if state.error:
+    def _register_hotkeys(self) -> None:
+        """注册全局快捷键(保存/创建分支); 注册失败只提示, 不影响应用可用性."""
+        for action, callback in (
+            (ACTION_SAVE_NOW, self._request_hotkey_backup),
+            (ACTION_CREATE_BRANCH, self._request_hotkey_branch),
+        ):
+            state = self._hotkeys.register(
+                HotkeyBinding(name=action, accelerator=self._shortcuts[action]),
+                callback,
+            )
+            if not state.registered and state.error:
                 self._last_feedback = (
                     FeedbackKind.INFO,
                     tr("hotkey.failed", reason=state.error),
                 )
 
+    def _load_shortcuts(self) -> dict[str, str]:
+        """读取快捷键配置; 缺失或内容非法时使用默认组合.
+
+        内容非法时 ``load_or_reset_config`` 已经把配置文件还原为默认值, 这里再把这件事
+        反馈到界面与审计日志, 避免用户以为自己改的快捷键"没生效"。
+        """
+        shortcuts = dict(DEFAULT_ACCELERATORS)
+        if self._paths is None:
+            return shortcuts
+        loaded = load_or_reset_config(self._paths.config_path)
+        if loaded.reset:
+            log_action("config.reset", basic=True, backup=str(loaded.backup or ""))
+            self._last_feedback = (FeedbackKind.INFO, tr("config.reset"))
+        shortcuts[ACTION_SAVE_NOW] = loaded.config.hotkeys.save
+        shortcuts[ACTION_CREATE_BRANCH] = loaded.config.hotkeys.branch
+        return shortcuts
+
+    def _save_shortcuts(self) -> None:
+        """把当前快捷键写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        # 内容非法时 load_or_reset_config 已经还原过, 因此这里总能拿到一份可用配置。
+        config = load_or_reset_config(self._paths.config_path).config
+        config.hotkeys = HotkeySettings(
+            save=self._shortcuts[ACTION_SAVE_NOW],
+            branch=self._shortcuts[ACTION_CREATE_BRANCH],
+        )
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存快捷键失败: %s", exc)
+
     def _request_hotkey_backup(self) -> None:
         """快捷键回调运行在监听线程: 只投递消息, 由主线程执行备份."""
-        self._messages.put(("hotkey", ""))
+        self._messages.put(("hotkey", ACTION_SAVE_NOW))
+
+    def _request_hotkey_branch(self) -> None:
+        """创建分支的快捷键回调: 同样只投递消息, 由主线程执行."""
+        self._messages.put(("hotkey", ACTION_CREATE_BRANCH))
 
     # ------------------------------------------------------------------ 布局
 
@@ -743,15 +797,11 @@ class ArchiveApp(ctk.CTk):
         self._task_target.configure(wraplength=190, justify="left")
         self._task_target.grid(row=5, column=1, padx=(0, 18), pady=(6, 0), sticky="ne")
 
-        self.kit.label(panel, tr("task.shortcut"), style="muted", size=12).grid(
-            row=6, column=0, padx=18, pady=(6, 0), sticky="w"
-        )
-        self._task_shortcut = self.kit.label(panel, "", style="body", size=11)
-        self._task_shortcut.grid(row=6, column=1, padx=(0, 18), pady=(6, 0), sticky="e")
+        # 快捷键不在任务状态卡里展示: 它属于全局设置, 统一在"设置"窗口里查看与修改。
         self._task_hint = self.kit.label(panel, "", style="muted", size=11)
         self._task_hint.configure(wraplength=250, justify="left")
         self._task_hint.grid(
-            row=7, column=0, columnspan=2, padx=18, pady=(10, 12), sticky="w"
+            row=6, column=0, columnspan=2, padx=18, pady=(12, 12), sticky="w"
         )
 
     # ---------------------------------------------------------------- 数据装载
@@ -881,7 +931,6 @@ class ArchiveApp(ctk.CTk):
         )
         self._task_next.configure(text=task.next_run_label)
         self._task_target.configure(text=task.target_label)
-        self._task_shortcut.configure(text=self._shortcut_text)
         self._task_hint.configure(text=tr("task.hint"))
         self._cancel_btn.configure(state="normal" if task.cancellable else "disabled")
         # 右下角的服务状态: 服务正常 + 备份占用(原本显示在侧边栏的状态卡里).
@@ -1363,17 +1412,20 @@ class ArchiveApp(ctk.CTk):
             return ""
         return tr(f"restore.problem_{code}")
 
-    def _on_branch(self) -> None:
+    def _on_branch(self, *, quick: bool = False) -> None:
+        """创建分支; ``quick`` 为 True 时使用默认分支名且不弹窗(全局快捷键)."""
         game = self._game
         if game is None or self._backup_id is None or self._busy:
             return
-        branch_name = ask_branch_name(
-            self,
-            self.p,
-            title=tr("dialog.branch_title"),
-            text=tr("dialog.branch_prompt"),
-            initial=tr("dialog.branch_default"),
-        )
+        branch_name: str | None = tr("dialog.branch_default")
+        if not quick:
+            branch_name = ask_branch_name(
+                self,
+                self.p,
+                title=tr("dialog.branch_title"),
+                text=tr("dialog.branch_prompt"),
+                initial=branch_name or "",
+            )
         if not branch_name:
             log_action(
                 "branch.cancel",
@@ -1653,15 +1705,52 @@ class ArchiveApp(ctk.CTk):
             self._show_empty_list()
 
     def _open_settings(self) -> SettingsWindow:
-        """打开设置窗口(主题切换、快捷键说明; 不包含定时任务配置)."""
+        """打开设置窗口(主题切换与快捷键录制; 不包含定时任务配置)."""
         log_action("ui.open_settings", basic=True, theme=self._theme)
         return SettingsWindow(
             self,
             palette=self.p,
             theme=self._theme,
-            shortcut=self._shortcut_text,
+            shortcuts=self._shortcuts,
             on_toggle_theme=self._on_toggle_theme,
+            on_apply_shortcut=self._apply_shortcut,
+            on_capture_start=self._hotkeys.suspend,
+            on_capture_end=self._hotkeys.resume,
         )
+
+    def _apply_shortcut(self, action: str, accelerator: str) -> str | None:
+        """应用设置窗口录制到的组合键: 校验 → 重新注册 → 写回配置.
+
+        返回 None 表示成功; 否则返回可直接展示给用户的失败说明(注册失败时
+        会把上一个可用的组合恢复回去, 避免用户无声地失去快捷键)。
+        """
+        reason = combo_error(parse_accelerator(accelerator))
+        if reason is not None:
+            return tr(f"hotkey.err_{reason}")
+        previous = self._shortcuts.get(action, accelerator)
+        callback = (
+            self._request_hotkey_branch
+            if action == ACTION_CREATE_BRANCH
+            else self._request_hotkey_backup
+        )
+        self._hotkeys.unregister(action)
+        state = self._hotkeys.register(
+            HotkeyBinding(name=action, accelerator=accelerator), callback
+        )
+        if not state.registered:
+            self._hotkeys.register(
+                HotkeyBinding(name=action, accelerator=previous), callback
+            )
+            log_action("hotkey.apply_failed", hotkey=action, accelerator=accelerator)
+            return state.error or tr("hotkey.unavailable")
+        self._shortcuts[action] = accelerator
+        self._save_shortcuts()
+        log_action("hotkey.apply", hotkey=action, accelerator=accelerator)
+        self._feedback(
+            FeedbackKind.INFO,
+            tr("hotkey.updated", combo=format_accelerator(accelerator)),
+        )
+        return None
 
     def _on_close(self) -> None:
         """退出前释放调度器与快捷键监听, 避免遗留后台线程."""
@@ -1725,7 +1814,10 @@ class ArchiveApp(ctk.CTk):
             except queue.Empty:
                 break
             if kind == "hotkey":
-                self._on_backup()
+                if payload == ACTION_CREATE_BRANCH:
+                    self._on_branch(quick=True)
+                else:
+                    self._on_backup()
                 continue
             self._finish_message(kind, payload)
         self._refresh_task()
@@ -1785,20 +1877,30 @@ def run_gui(
 ) -> int:
     """启动基于 SQLite 的真实后端并进入主循环, 返回退出码.
 
-    未装配过日志时自动写入应用日志目录: 文件始终记录全部级别的用户操作,
-    控制台默认只显示高风险操作(``verbose=True`` 时放宽到 DEBUG)。
+    日志会在进入主循环前装配: 文件始终记录全部级别的用户操作, 控制台默认只显示
+    高风险操作(``verbose=True`` 时放宽到 DEBUG); 单文件上限与保留份数取自配置里的
+    ``logging`` 段。
     """
+    from archive_management.config import load_or_reset_config
     from archive_management.infrastructure.database import Database
-    from archive_management.logging_config import configure_logging
+    from archive_management.logging_config import configure_from_settings
     from archive_management.ui.sql_backend import SqlArchiveService
 
     paths = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
-    configure_logging(paths.log_dir, level=logging.DEBUG if verbose else logging.INFO)
+    loaded = load_or_reset_config(paths.config_path)
+    configure_from_settings(paths.log_dir, loaded.config.logging, verbose=verbose)
+    if loaded.reset:
+        logger.warning("配置文件内容非法, 已还原为默认值: %s", loaded.backup)
     logger.info("界面启动(verbose=%s)", verbose)
     database = Database(paths.database_path)
     database.migrate()
     backend: ArchiveService = SqlArchiveService(database, backup_root=paths.backup_root)
-    app = ArchiveApp(backend, title=display_name, smoke_seconds=smoke_seconds)
+    app = ArchiveApp(
+        backend,
+        title=display_name,
+        smoke_seconds=smoke_seconds,
+        paths=paths,
+    )
     app.mainloop()
     return 0
 

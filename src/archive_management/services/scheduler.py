@@ -1,4 +1,4 @@
-"""定期备份调度服务(阶段 D 第 3 条).
+"""定期备份调度服务.
 
 调度器只负责"什么时候触发", 不关心备份怎么落盘: 触发后调用注入的回调,
 由 :class:`~archive_management.application.backup.BackupService` 完成实际工作.

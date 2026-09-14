@@ -12,7 +12,8 @@ Allure 标签语义(与 Allure 3 报告控件一一对应):
   游戏与存档位置/备份与分支/工程与发布);
 - ``feature``: 功能模块, 与生产模块一一对应(如 快照服务、数据仓储);
 - ``story``: 具体用户场景(如 删除备份节点、创建备份与分支);
-- ``layer``: 测试层次, ``unit`` / ``integration`` / ``e2e``, 供"按层耗时"直方图使用。
+- ``layer``: 测试层次, ``unit`` / ``integration`` / ``e2e`` / ``performance`` /
+  ``security``, 供"按层耗时"直方图使用。
 
 测试模块用 ``pytestmark`` 声明默认标签, 单个用例可用同名标记覆盖
 (``@pytest.mark.story("...")``)。``layer`` 未声明时按 ``integration`` 标记或目录推断,
@@ -51,12 +52,22 @@ _ALLURE_LEVELS = {
 }
 
 # 测试层次: 闭集, 供 Allure "按层耗时" 直方图分组使用.
-_LAYERS = ("unit", "integration", "e2e")
+# performance/security 是只在 CI 执行的两类测试, 单独成层
+# 可以一眼看出它们占用的时间, 不会和普通单元/集成测试混在一起。
+_LAYERS = ("unit", "integration", "e2e", "performance", "security")
 # 层次在 suite 视图里的展示名(Allure 3 部分控件只认 suite 标签, 双保险).
 _LAYER_SUITES = {
     "unit": "单元测试 unit",
     "integration": "集成测试 integration",
     "e2e": "端到端测试 e2e",
+    "performance": "性能测试 performance",
+    "security": "安全测试 security",
+}
+# 目录名到默认层次的映射(未显式声明 layer 时的兵底).
+_DIRECTORY_LAYERS = {
+    "integration": "integration",
+    "performance": "performance",
+    "security": "security",
 }
 # 产品级模块: 闭集, 新增产品级模块时在此登记.
 _EPICS = (
@@ -103,6 +114,9 @@ def _resolve_severity(item: pytest.Item) -> str:
         return "critical"
     if "integration" in parts:
         return "normal"
+    # 性能与安全测试只在 CI 执行, 默认等级 normal(本地 pre-commit 子集不跑).
+    if "performance" in parts or "security" in parts:
+        return "normal"
     return "no_severity"
 
 
@@ -131,10 +145,12 @@ def _label_value(
 
 
 def _default_layer(item: pytest.Item) -> str:
-    """未显式声明 layer 时的兵底: integration 标记或目录名, 否则 unit."""
+    """未显式声明 layer 时的兵底: 目录名, 否则按 integration 标记, 再兵底 unit."""
+    parts = Path(str(item.fspath)).parts
+    for directory, layer in _DIRECTORY_LAYERS.items():
+        if directory in parts:
+            return layer
     if item.get_closest_marker("integration"):
-        return "integration"
-    if "integration" in Path(str(item.fspath)).parts:
         return "integration"
     return "unit"
 

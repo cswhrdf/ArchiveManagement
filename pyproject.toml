@@ -154,16 +154,19 @@ strict = true
 no_implicit_optional = false
 allow_redefinition = false
 ignore_missing_imports = true
-mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src:$MYPY_CONFIG_FILE_DIR/tests"
 
 [[tool.mypy.overrides]]
-# CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制(PLAN 3.3)
+# CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制
 module = ["archive_management.ui.main_window"]
 disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
+# 默认只跑单元与集成测试: 性能与安全测试只在 CI 执行,
+# 需要显式指定目录(`pytest tests/performance`)或标记(`pytest -m performance`).
+testpaths = ["tests/unit", "tests/integration"]
+# src 供被测包导入; tests 供跨模块共享的测试辅助模块(tests/helpers.py)导入.
+pythonpath = ["src", "tests"]
 # 每个用例都有最长执行时间: 卡住的用例会被计时器打断并打印各线程堆栈,
 # 避免整套测试长时间不结束. 个别慢用例可用 @pytest.mark.timeout(N) 覆盖.
 addopts = [
@@ -193,7 +196,9 @@ markers = [
     "normal: standard tests run in CI only",
     "package: tests for package imports and metadata",
     "paths: tests for filesystem path handling",
+    "performance: benchmark and scale tests (CI only, excluded locally)",
     "repository: tests for repository operations",
+    "security: security and hostile-input tests (CI only, excluded locally)",
     "smoke: smoke tests for startup or package availability",
     "steam: tests for Steam data integration",
     "story: Allure user-scenario label",
@@ -212,5 +217,5 @@ exclude_also = [
 ]
 show_missing = true
 skip_covered = true
-# 阶段 A 以骨架与核心模块为主, 随里程碑实现逐步上调.
-fail_under = 80
+# 覆盖率门槛: 低于该值则 pytest 失败(在 source 中排除入口与平台分支后逐步上调).
+fail_under = 85

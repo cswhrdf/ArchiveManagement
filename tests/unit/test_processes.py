@@ -1,4 +1,4 @@
-"""游戏进程探测的单元测试(阶段 E 第 1 条).
+"""游戏进程探测的单元测试.
 
 用注入的进程名提供者覆盖匹配、降级与多候选行为; 最后一条用真实
 ``psutil`` 验证默认提供者可用(断言宽松, 不依赖具体进程名)。
@@ -43,6 +43,15 @@ def test_probe_ignores_too_short_names() -> None:
 
     assert probe.checked is False
     assert probe.running is False
+
+
+def test_probe_strips_macos_app_bundle_suffix() -> None:
+    """macOS 的应用包名(``.app``)与 Windows 的 ``.exe`` 一样要在比较前去掉."""
+    probe = probe_game_process("Outer Wilds", provider=lambda: ["OuterWilds.app"])
+
+    assert probe.checked is True
+    assert probe.running is True
+    assert probe.matches == ("OuterWilds.app",)
 
 
 def test_probe_degrades_when_provider_fails() -> None:

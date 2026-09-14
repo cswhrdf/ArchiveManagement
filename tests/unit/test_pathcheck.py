@@ -71,7 +71,7 @@ def test_probe_flags_wrong_kind(tmp_path: Path) -> None:
     assert probe.reason_code == "wrong_kind"
 
 
-# ------------------------------------------------- 阶段 E: 汇总与边界判定
+# ------------------------------------------------- 汇总与边界判定
 
 
 def test_summarize_path_counts_entries_and_size(tmp_path: Path) -> None:

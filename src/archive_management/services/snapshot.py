@@ -1,4 +1,4 @@
-"""文件快照服务: 复制、哈希校验与原子提交(阶段 D 第 1 条).
+"""文件快照服务: 复制、哈希校验与原子提交.
 
 一次快照把若干存档位置(文件或目录)完整复制到应用自有的备份根目录之下,
 并记录逐文件清单与整体内容哈希. 关键约定:
@@ -230,7 +230,7 @@ class SnapshotManifest:
 
 
 def read_manifest(root: Path) -> SnapshotManifest:
-    """读取快照清单, 供恢复用例定位写回目标(阶段 E).
+    """读取快照清单, 供恢复用例定位写回目标.
 
     与 :func:`verify_snapshot` 的区别是这里还会解析 ``sources``: 恢复必须知道
     ``loc-<index>`` 当初对应哪个存档路径, 才能把内容写回原位置。
@@ -377,7 +377,7 @@ def _copy_into(
     for position, plan in enumerate(plans, start=1):
         if cancelled is not None and cancelled():
             raise OperationCancelledError("备份已取消")
-        # 复制阶段占前 90%, 剩余进度留给清单校验与原子提交.
+        # 复制占进度前 90%, 剩余留给清单校验与原子提交.
         _report(
             progress,
             0.9 * (position - 1) / total,

@@ -1,9 +1,8 @@
-"""Steam 数据读取边界 (阶段 C 预留, 阶段 F 落地).
+"""Steam 数据读取边界.
 
-定义读取"Steam 数据配置文件"的统一接口; 本阶段只提供从本地 JSON
-文件读取并校验的默认实现, 不发起任何网络请求(PLAN 6-F). 读取失败、
-版本不符或字段缺失时抛出 :class:`SteamIntegrationError`, 不应影响
-手动添加游戏与路径管理流程.
+定义读取"Steam 数据配置文件"的统一接口; 默认实现只从本地 JSON 文件读取并
+校验, 不发起任何网络请求. 读取失败、版本不符或字段缺失时抛出
+:class:`SteamIntegrationError`, 不应影响手动添加游戏与路径管理流程.
 """
 
 from __future__ import annotations

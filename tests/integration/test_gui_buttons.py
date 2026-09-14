@@ -3,7 +3,7 @@
 在可用图形环境下真实触发主窗口与管理窗口的各按钮, 验证点击不抛
 ``TclError``、不留下未复位状态, 并产生符合预期的反馈/数据变化。本
 模块集中覆盖两类回归: (1) 动态列表重建后 ``UiKit`` 主题重绘不再命中
-已销毁控件; (2) 真实 SQLite 后端的阶段占位动作给出明确提示而不是
+已销毁控件; (2) 真实 SQLite 后端尚未实现的动作用给出明确提示而不是
 崩溃。无 tkinter/图形环境自动跳过。
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,10 +31,17 @@ import archive_management.ui.main_window as main_mod
 import archive_management.ui.manage_window as mgr_mod
 import archive_management.ui.schedule_window as sched_mod
 from archive_management.domain import HomeView
+from archive_management.exceptions import HotkeyError
 from archive_management.i18n import tr
+from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.services.hotkeys import (
+    ACTION_CREATE_BRANCH,
+    ACTION_SAVE_NOW,
+    DEFAULT_BRANCH_ACCELERATOR,
+    DEFAULT_SAVE_ACCELERATOR,
     GlobalHotkeyService,
     UnavailableBackend,
+    format_accelerator,
 )
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.main_window import ArchiveApp
@@ -172,14 +180,58 @@ def _button_texts(widget: Any) -> list[str]:
     return found
 
 
-def _new_app(backend: ArchiveService) -> ArchiveApp:
-    """构造主窗口; 无显示环境时抛出 TclError 由调用方转 skip."""
+def _new_app(
+    backend: ArchiveService,
+    *,
+    hotkeys: GlobalHotkeyService | None = None,
+    paths: ApplicationPaths | None = None,
+) -> ArchiveApp:
+    """构造主窗口; 无显示环境时抛出 TclError 由调用方转 skip.
+
+    缺省不注册系统级快捷键, 避免遗留键盘钩子或误触发备份; 需要验证"注册成功"
+    的用例自行传入带替身后端的服务。
+    """
     return ArchiveApp(
         backend,
         title="按钮测试",
-        # 测试进程不注册系统级快捷键, 避免遗留键盘钩子或误触发备份.
-        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+        hotkeys=(
+            hotkeys
+            if hotkeys is not None
+            else GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用"))
+        ),
+        paths=paths,
     )
+
+
+class _RecordingBackend:
+    """记录注册项的后端替身: 用于验证快捷键注册与持久化, 不碰真实系统快捷键."""
+
+    def __init__(self) -> None:
+        self.registered: dict[str, str] = {}
+        self.suspends = 0
+        self.resumes = 0
+
+    def register(self, accelerator: str, callback: Any) -> object:
+        """模拟注册; 重复注册当作失败."""
+        if accelerator in self.registered:
+            raise HotkeyError(f"快捷键已被占用: {accelerator}")
+        self.registered[accelerator] = accelerator
+        return accelerator
+
+    def unregister(self, handle: object) -> None:
+        """移除注册项."""
+        self.registered.pop(str(handle), None)
+
+    def suspend(self) -> None:
+        """记录暂停次数."""
+        self.suspends += 1
+
+    def resume(self) -> None:
+        """记录恢复次数."""
+        self.resumes += 1
+
+    def stop(self) -> None:
+        """空实现."""
 
 
 # ---------------------------------------------------------------- 主窗口
@@ -1358,15 +1410,54 @@ def test_topbar_carries_global_entries_and_no_sidebar() -> None:
         app.destroy()
 
 
-def test_settings_window_holds_theme_toggle_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """设置窗口提供主题切换按钮, 且不再展示定时任务配置."""
-
-    from archive_management.ui.demo_backend import DemoArchiveService
+def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
+    """直接构造设置窗口(不走主窗口的窗口复用逻辑), 便于测试录制交互."""
     from archive_management.ui.settings_window import SettingsWindow
 
+    def apply(action: str, accelerator: str) -> str | None:
+        applied.append((action, accelerator))
+        return None
+
+    return SettingsWindow(
+        app,
+        palette=app.p,
+        theme=app._theme,
+        shortcuts=app._shortcuts,
+        on_toggle_theme=app._on_toggle_theme,
+        on_apply_shortcut=apply,
+        on_capture_start=lambda: None,
+        on_capture_end=lambda: None,
+    )
+
+
+def _press(window: Any, keysym: str, keycode: int) -> None:
+    """模拟按下并松开一个键(录制只依赖 keysym/keycode)."""
+    window._on_key_press(SimpleNamespace(keysym=keysym, keycode=keycode))
+    window._on_key_release(SimpleNamespace(keysym=keysym, keycode=keycode))
+
+
+def _wait_for(
+    app: ArchiveApp, predicate: Callable[[], bool], seconds: float = 3.0
+) -> bool:
+    """轮询等待条件成立; 录制收尾用的是 ``after`` 计时器, 需要真实事件循环."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        _pump(app)
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def test_settings_window_holds_theme_and_hotkey_shortcuts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """设置窗口提供主题切换与两个快捷键, 且不再展示定时任务配置."""
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+
     _patch_dialogs(monkeypatch)
+    applied: list[tuple[str, str]] = []
     try:
         app = _new_app(DemoArchiveService(delay=0))
     except TclError as exc:
@@ -1374,18 +1465,19 @@ def test_settings_window_holds_theme_toggle_only(
     try:
         _pump(app)
         before = app._theme
-        window = SettingsWindow(
-            app,
-            palette=app.p,
-            theme=before,
-            shortcut=app._shortcut_text,
-            on_toggle_theme=app._on_toggle_theme,
-        )
+        window = _settings_window(app, applied)
 
         # 定时任务相关的信息不在设置里.
         labels = _label_texts(window._container)
         assert all("定时" not in text for text in labels)
         assert any("外观" in text for text in labels)
+        # 两个快捷键按钮显示当前组合(可读写法), 而不是 pynput 的原始语法.
+        assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
+            DEFAULT_SAVE_ACCELERATOR
+        )
+        assert window.shortcut_text(ACTION_CREATE_BRANCH) == format_accelerator(
+            DEFAULT_BRANCH_ACCELERATOR
+        )
 
         # 点按钮即切换主题, 按钮文案与当前主题标签同步更新.
         window._toggle_btn.invoke()
@@ -1397,6 +1489,218 @@ def test_settings_window_holds_theme_toggle_only(
             tr("theme.to_dark"),
         }
         assert tr(f"theme.name_{app._theme}") in window._theme_label.cget("text")
+    finally:
+        app.destroy()
+
+
+def test_settings_window_records_a_pressed_combination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """点击按键区域后按下组合键即录制: 组合键交给回调并立即显示在按钮上."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    applied: list[tuple[str, str]] = []
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        window = _settings_window(app, applied)
+
+        window._toggle_capture(ACTION_CREATE_BRANCH)
+        assert window.shortcut_text(ACTION_CREATE_BRANCH) == tr("settings.recording")
+
+        _press(window, "Control_L", 17)
+        _press(window, "Win_L", 91)
+        _press(window, "Z", 90)
+
+        assert _wait_for(app, lambda: bool(applied))
+        assert applied == [(ACTION_CREATE_BRANCH, "<win>+<ctrl>+z")]
+        assert window.shortcut_text(ACTION_CREATE_BRANCH) == format_accelerator(
+            "<win>+<ctrl>+z"
+        )
+        assert window._shortcut_error.cget("text") == ""
+    finally:
+        app.destroy()
+
+
+def test_settings_window_rejects_a_single_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """只按修饰键或只按字母都不算合法组合: 给出原因且不修改快捷键."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    applied: list[tuple[str, str]] = []
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        window = _settings_window(app, applied)
+
+        window._toggle_capture(ACTION_SAVE_NOW)
+        _press(window, "Win_L", 91)
+
+        assert _wait_for(app, lambda: bool(window._shortcut_error.cget("text")))
+        assert applied == []
+        assert window._shortcut_error.cget("text") == tr("hotkey.err_no_letter")
+        assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
+            DEFAULT_SAVE_ACCELERATOR
+        )
+
+        # 只按字母缺少修饰键, 同样不生效.
+        window._toggle_capture(ACTION_SAVE_NOW)
+        _press(window, "s", 83)
+
+        assert _wait_for(app, lambda: bool(window._shortcut_error.cget("text")))
+        assert applied == []
+        assert window._shortcut_error.cget("text") == tr("hotkey.err_no_modifier")
+
+        # 数字键不在白名单里: 直接提示"不支持的按键".
+        window._toggle_capture(ACTION_SAVE_NOW)
+        _press(window, "1", 49)
+
+        assert _wait_for(
+            app,
+            lambda: window._shortcut_error.cget("text") == tr("hotkey.err_unknown_key"),
+        )
+    finally:
+        app.destroy()
+
+
+def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
+    """自定义快捷键写入配置文件, 下次启动仍然生效."""
+    from archive_management.config import load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    hotkeys = GlobalHotkeyService(backend=_RecordingBackend())
+    try:
+        app = _new_app(DemoArchiveService(delay=0), hotkeys=hotkeys, paths=paths)
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        assert app._apply_shortcut(ACTION_CREATE_BRANCH, "<win>+<ctrl>+z") is None
+        assert app._shortcuts[ACTION_CREATE_BRANCH] == "<win>+<ctrl>+z"
+        assert load_config(paths.config_path).hotkeys.branch == "<win>+<ctrl>+z"
+    finally:
+        app.destroy()
+
+    reloaded = _new_app(
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        paths=paths,
+    )
+    try:
+        assert reloaded._shortcuts[ACTION_CREATE_BRANCH] == "<win>+<ctrl>+z"
+        assert reloaded._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
+    finally:
+        reloaded.destroy()
+
+
+def test_invalid_config_is_reset_to_defaults_on_startup(tmp_path: Path) -> None:
+    """启动时发现配置内容非法: 还原为默认值并提示用户, 而不是静默回落."""
+    from archive_management.config import load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    paths.config_path.write_text('{"version": 1, "theme": "neon"}', encoding="utf-8")
+    try:
+        app = _new_app(
+            DemoArchiveService(delay=0),
+            hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+            paths=paths,
+        )
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        assert app._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
+        assert app._shortcuts[ACTION_CREATE_BRANCH] == DEFAULT_BRANCH_ACCELERATOR
+        assert app._last_feedback[1] == tr("config.reset")
+        assert (paths.config_dir / "config.json.invalid").is_file()
+        assert load_config(paths.config_path).hotkeys.save == DEFAULT_SAVE_ACCELERATOR
+    finally:
+        app.destroy()
+
+
+def test_failed_hotkey_registration_keeps_the_previous_combination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后端不可用时注册失败: 给出原因并保留原组合, 不让用户无声地失去快捷键."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        failure = app._apply_shortcut(ACTION_SAVE_NOW, "<win>+<ctrl>+q")
+
+        assert failure is not None
+        assert app._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
+    finally:
+        app.destroy()
+
+
+def test_task_card_no_longer_shows_the_hotkey() -> None:
+    """任务状态卡不再展示快捷键(它属于全局设置, 统一在设置窗口里维护)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        app._select_game("outer-wilds")
+        _pump(app)
+
+        assert not hasattr(app, "_task_shortcut")
+        assert not hasattr(app, "_shortcut_text")
+        labels = _label_texts(app._task_hint.master)
+        assert all(tr("task.shortcut") not in text for text in labels)
+    finally:
+        app.destroy()
+
+
+def test_branch_hotkey_creates_a_branch_without_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全局快捷键创建分支不弹窗: 直接使用默认分支名."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("全局快捷键不应弹出分支名对话框")
+
+    monkeypatch.setattr(main_mod, "ask_branch_name", forbidden)
+    try:
+        app = _new_app(
+            DemoArchiveService(delay=0),
+            hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        )
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        app._select_game("shanhai")
+        app._select_backup(app._items[0])
+
+        # 快捷键回调只投递消息, 由主线程轮询后执行.
+        app._request_hotkey_branch()
+        _drain(app)
+
+        created = app._items[-1]
+        assert created.branch_name == tr("dialog.branch_default")
+        assert app._hotkeys.accelerators()[ACTION_CREATE_BRANCH] == (
+            DEFAULT_BRANCH_ACCELERATOR
+        )
     finally:
         app.destroy()
 
@@ -1845,11 +2149,11 @@ def test_task_panel_is_renamed_and_has_no_schedule_editor() -> None:
 # ---------------------------------------------------------------- SQLite 后端
 
 
-def test_sql_backend_backup_creates_node_and_later_phases_report_clearly(
+def test_sql_backend_backup_creates_node_and_unfinished_actions_report_clearly(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """真实后端: 备份落地为节点, 恢复/导出给出明确的阶段提示而非崩溃."""
+    """真实后端: 备份落地为节点, 尚未实现的导出给出明确提示而非崩溃."""
     from archive_management.infrastructure.database import Database
     from archive_management.ui.models import FeedbackKind
     from archive_management.ui.sql_backend import SqlArchiveService
@@ -1887,11 +2191,11 @@ def test_sql_backend_backup_creates_node_and_later_phases_report_clearly(
         assert "当前节点" in app._last_feedback[1]
         assert service.list_backups(game.game_id)[0].is_current is True
 
-        # 导出属于阶段 G, 当前必须给出明确提示而不是静默成功.
+        # 导出尚未实现, 当前必须给出明确提示而不是静默成功.
         app._on_export()
         _drain(app)
         assert _feedback_kind(app) == FeedbackKind.ERROR
-        assert "G" in app._last_feedback[1]
+        assert app._last_feedback[1] == tr("error.not_available")
         assert not app._busy
     finally:
         app.destroy()

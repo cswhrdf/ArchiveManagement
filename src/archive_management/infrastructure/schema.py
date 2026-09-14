@@ -1,12 +1,11 @@
 """SQLite schema 与增量迁移定义.
 
-迁移以 ``(版本号, 有序 SQL 语句)`` 形式集中声明;应用启动时按版本号在事务
-内应用尚未执行的迁移(PLAN 5、阶段 A).
+迁移以 ``(版本号, 有序 SQL 语句)`` 形式集中声明; 应用启动时按版本号在事务内
+应用尚未执行的迁移, 使旧数据库可以就地升级。
 
-表结构与 PLAN 第 5 节对齐: games、save_locations、backup_nodes、
-backup_files、scheduled_jobs, 阶段 E-1 增加的 monitored_directories 与
-game_candidates, 以及阶段 E-2 增加的主页分类字段与 home_state. 操作日志不落库
-(见版本 3), 改为写入日志文件。
+业务表: games、save_locations、backup_nodes、backup_files、scheduled_jobs,
+游戏发现用的 monitored_directories、game_candidates, 以及主页状态表
+home_state。操作日志不落库(见版本 3), 改为写入日志文件。
 """
 
 from __future__ import annotations
@@ -102,7 +101,7 @@ _V1_STATEMENTS: Sequence[str] = (
     """,
 )
 
-# 版本 2(阶段 D 迭代): 备份命名与描述、每游戏的"当前节点"指针、自动备份保留份数.
+# 版本 2: 备份命名与描述、每游戏的"当前节点"指针、自动备份保留份数.
 # 说明: SQLite 允许 ADD COLUMN 带 REFERENCES, 但该列默认值必须为 NULL,
 # 因此 current_backup_id 在重建节点时由用例显式维护.
 _V2_STATEMENTS: Sequence[str] = (
@@ -121,7 +120,7 @@ _V2_STATEMENTS: Sequence[str] = (
     """,
 )
 
-# 版本 3(阶段 E 迭代): 安全点标记与操作日志出库.
+# 版本 3: 安全点标记与操作日志出库.
 #
 # - ``is_safety``: "恢复前安全点"是特殊的手动备份, 只在时间线展示, 不参与
 #   分支树的线路关系, 因此用一个独立标记而不是新增 node_kind(避免为了改
@@ -135,7 +134,7 @@ _V3_STATEMENTS: Sequence[str] = (
     "DROP INDEX IF EXISTS idx_operations_started",
 )
 
-# 版本 4(阶段 E 迭代): 备份目录按名称命名所需的两个字段.
+# 版本 4: 备份目录按名称命名所需的两个字段.
 #
 # - ``original_name``: 录入游戏时识别到的名称(重命名不会改写它), 仅用于界面
 #   展示"原始名称", 让用户知道磁盘上的目录来自哪个名字;
@@ -150,7 +149,7 @@ _V4_STATEMENTS: Sequence[str] = (
     """,
 )
 
-# 版本 5(阶段 E-1 迭代): 本地游戏探测所需的监控目录与候选表.
+# 版本 5: 本地游戏探测所需的监控目录与候选表.
 #
 # - ``monitored_directories``: 用户自行添加的监控目录(启用状态、备注、上次
 #   扫描时间与结果); 路径唯一, 重复添加在用例层直接拒绝.
@@ -198,9 +197,9 @@ _V5_STATEMENTS: Sequence[str] = (
     """,
 )
 
-# 版本 6(阶段 E-2 迭代): 统一游戏主页分类与筛选所需的状态.
+# 版本 6: 统一游戏主页分类与筛选所需的状态.
 #
-# - ``games.origin``: 游戏来源平台(steam/epic/gog/battle_net/monitored/manual),
+# - ``games.origin``: 游戏来源平台(steam/epic/gog/ubisoft/monitored/manual),
 #   用于主页的"平台"分类; 与既有的 ``platform``(操作系统)无关。
 # - ``games.tags``: 用户自定义标签, 逗号拼接保存(标签内不允许逗号)。
 # - ``games.archived``: 归档标记 = 从主页收起来(记录与备份都保留, 可随时取消)。
@@ -240,7 +239,7 @@ _V6_STATEMENTS: Sequence[str] = (
     """,
 )
 
-# 版本 7(阶段 E-2 迭代): 主页的展示偏好.
+# 版本 7: 主页的展示偏好.
 #
 # 游戏发现合并进主窗口后, 主页同时承担"游戏库总览"的职责, 因此把展示方式
 # (列表/海报)、翻页方式(分页/无限滚动)与每页条数一起保存到 home_state: 下次打开
@@ -257,7 +256,7 @@ _V7_STATEMENTS: Sequence[str] = (
     """,
 )
 
-# 版本 8(阶段 E-2 迭代): 无限滚动模式被去掉, 主页只保留分页翻页.
+# 版本 8: 去掉无限滚动模式, 主页只保留分页翻页.
 #
 # 展示方式(列表/海报)与每页条数仍然持久化; ``paging`` 已无任何读取方, 留着
 # 会让人以为还存在两种翻页模式, 因此直接删列(该列不在索引或约束里, 可安全删除)。

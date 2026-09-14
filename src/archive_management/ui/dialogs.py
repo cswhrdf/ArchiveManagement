@@ -592,7 +592,7 @@ def restore_dialog(
 
     返回 ``True`` 表示恢复前先创建安全点(默认), ``False`` 表示直接恢复。
     当前没有可备份内容时选项被禁用且强制为 ``False``; 风险提示(例如检测到
-    游戏进程在运行)与选项在同一窗口展示, 不再额外弹窗(PLAN 阶段 E 第 2 条)。
+    游戏进程在运行)与选项在同一窗口展示, 不再额外弹窗。
     """
     window = ctk.CTkToplevel(parent)
     window.title(title)

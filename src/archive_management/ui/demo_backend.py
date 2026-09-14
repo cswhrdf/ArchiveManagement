@@ -1,6 +1,6 @@
 """演示后端.
 
-阶段 B 用内存演示数据驱动界面;每个写操作是可阻塞的(模拟真实耗时),
+用内存演示数据驱动界面;每个写操作是可阻塞的(模拟真实耗时),
 由 UI 在后台线程执行。某些节点刻意失败以演示“失败反馈”路径。
 """
 
@@ -219,7 +219,7 @@ _DETAILS: dict[str, GameDetail] = {
     ),
 }
 
-# 阶段 E-1 演示数据: 监控目录与探测到的候选游戏.
+# 演示数据: 监控目录与探测到的候选游戏.
 _MONITORED_DIRS: tuple[MonitoredDirItem, ...] = (
     MonitoredDirItem(
         directory_id="dir-1",
@@ -316,7 +316,7 @@ class DemoArchiveService:
         self._locations: dict[str, list[LocationItem]] = {}
         self._next_game_id = 1
         self._next_location_id = 1
-        # 阶段 E-1: 演示监控目录与探测结果(固定数据, 不触碰真实磁盘).
+        # 演示监控目录与探测结果(固定数据, 不触碰真实磁盘).
         self._monitored_dirs: dict[str, MonitoredDirItem] = {
             item.directory_id: item for item in _MONITORED_DIRS
         }
@@ -324,7 +324,7 @@ class DemoArchiveService:
             item.candidate_id: item for item in _CANDIDATES
         }
         self._next_dir_id = len(_MONITORED_DIRS) + 1
-        # 阶段 E-2: 演示主页的筛选条件、归档标记与自定义标签.
+        # 演示主页的筛选条件、归档标记与自定义标签.
         self._home_filter = HomeFilter()
         self._archived: dict[str, bool] = dict.fromkeys(self._meta, False)
         self._tags: dict[str, tuple[str, ...]] = {key: () for key in self._meta}
@@ -384,7 +384,6 @@ class DemoArchiveService:
             progress=0.0,
             next_run_label="今天 12:00" if interval else "—",
             target_label="本地备份目录",
-            shortcut_label="Ctrl Alt S",
             theme_name=self._theme,
             backend_ok=True,
             schedule_text=interval,
@@ -900,7 +899,7 @@ class DemoArchiveService:
         self._revision += 1
         return tr("result.location_deleted", path=item.path, count=18)
 
-    # -- 本地游戏探测与监控目录(阶段 E-1) ---------------------------------
+    # -- 本地游戏探测与监控目录 -------------------------------------------
 
     def list_monitored_directories(self) -> list[MonitoredDirItem]:
         """返回演示监控目录(按添加顺序)."""
@@ -1052,7 +1051,7 @@ class DemoArchiveService:
             )
         return item
 
-    # -- 统一游戏主页(阶段 E-2) -------------------------------------------
+    # -- 统一游戏主页 ------------------------------------------------------
 
     def load_home(self) -> HomeBoard:
         """返回演示主页数据(沿用内存中保存的筛选条件)."""

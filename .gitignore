@@ -54,6 +54,14 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Allure 报告与性能/安全结果(由 CI 生成并作为 artifact 上传)
+allure-results/
+allure-report*/
+.allure/
+performance-results.json
+performance-results.csv
+security-results.json
+
 # Translations
 *.mo
 *.pot

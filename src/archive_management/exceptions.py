@@ -1,7 +1,7 @@
 """应用异常分类.
 
 业务、基础设施与 UI 层抛出的可预期异常统一继承 :class:`ArchiveManagementError`,
-便于外层按类型处理并提供可恢复的错误状态(PLAN 第 7 节).
+便于外层按类型处理并提供可恢复的错误状态.
 """
 
 from __future__ import annotations

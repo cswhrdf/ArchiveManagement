@@ -1,7 +1,7 @@
 """SQLite 存储: 连接、schema 迁移与会话管理.
 
 使用标准库 ``sqlite3`` 而不引入 ORM, 以降低依赖与迁移复杂度
-(PLAN 3.2).所有写操作通过 :meth:`Database.session` 在事务中执行,
+所有写操作通过 :meth:`Database.session` 在事务中执行,
 出现异常即回滚.
 """
 

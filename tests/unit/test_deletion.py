@@ -1,8 +1,8 @@
-"""备份删除计划与自动备份清理的单元测试(阶段 D 迭代)."""
+"""备份删除计划与自动备份清理的单元测试."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 import pytest
 
@@ -14,6 +14,7 @@ from archive_management.domain import (
     descendant_ids,
     plan_deletion,
 )
+from helpers import utc_moment
 
 pytestmark = [
     pytest.mark.domain,
@@ -26,7 +27,8 @@ pytestmark = [
 
 
 def _dt(day: int, hour: int = 9) -> datetime:
-    return datetime(2026, 9, day, hour, 0, tzinfo=UTC)
+    """返回固定 UTC 时刻(实现见 tests/helpers.py 的 utc_moment)."""
+    return utc_moment(day, hour)
 
 
 def _node(

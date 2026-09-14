@@ -35,7 +35,7 @@ class ViewKind(StrEnum):
 
 
 class AppPage(StrEnum):
-    """主窗口内容区里的页面(阶段 E-2).
+    """主窗口内容区里的页面.
 
     两个页面同格叠放, 同一时间只显示一个: **成员顺序即默认页面**, 当前第一位是
     游戏主页 —— 游戏变多以后, 打开软件先看到全局视图比直接进某个游戏的详情更有用。
@@ -222,7 +222,6 @@ class TaskStatus:
     progress: float  # 0..1
     next_run_label: str
     target_label: str
-    shortcut_label: str
     theme_name: str
     backend_ok: bool = True
     schedule_text: str = ""  # 原始周期配置(如 "30m"), 供编辑对话框回填
@@ -430,7 +429,7 @@ def branch_order(
 
 
 def group_by_parent(items: list[BackupItem]) -> list[BackupItem]:
-    """分支视图排序(阶段 D 起等于 :func:`branch_order`).
+    """分支视图排序(等价于 :func:`branch_order`).
 
     保留该名字是为了兼容既有调用点; 语义已由"按时间倒序"升级为"按分支树
     深度优先序", 使分支关系在列表中可见.
@@ -543,7 +542,7 @@ class CandidateItem:
     candidate_id: str
     name: str
     install_dir: str
-    source: str  # steam/epic/gog/battle_net/monitored/manual
+    source: str  # steam/epic/gog/ubisoft/monitored/manual
     confidence: str  # high/medium/low
     status: str  # new/imported/ignored
     health: str  # ok/missing/not_directory/unreadable/unsafe
@@ -621,7 +620,7 @@ class HomeGameItem:
 
     game_id: str
     name: str
-    origin: str  # steam/epic/gog/battle_net/monitored/manual
+    origin: str  # steam/epic/gog/ubisoft/monitored/manual
     location_count: int
     backup_count: int
     last_backup_label: str  # 已格式化时间; 从未备份时为空串

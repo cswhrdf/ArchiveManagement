@@ -1,12 +1,13 @@
-"""备份分支树纯计算模型的单元测试(阶段 D 第 5 条)."""
+"""备份分支树纯计算模型的单元测试."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 import pytest
 
 from archive_management.domain import BackupNode, TreeInput, build_tree, tree_depths
+from helpers import utc_moment
 
 pytestmark = [
     pytest.mark.domain,
@@ -19,7 +20,8 @@ pytestmark = [
 
 
 def _dt(day: int, hour: int = 9) -> datetime:
-    return datetime(2026, 9, day, hour, 0, tzinfo=UTC)
+    """返回固定 UTC 时刻(实现见 tests/helpers.py 的 utc_moment)."""
+    return utc_moment(day, hour)
 
 
 def _input(node_id: str, parent_id: str | None = None, day: int = 1) -> TreeInput:

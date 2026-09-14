@@ -23,6 +23,7 @@ from archive_management.infrastructure.repository import (
     SaveLocationRepository,
     ScheduledJobRepository,
 )
+from helpers import migrated_database
 
 pytestmark = [
     pytest.mark.repository,
@@ -35,9 +36,8 @@ pytestmark = [
 
 
 def _database(tmp_path: Path) -> Database:
-    database = Database(tmp_path / "app.db")
-    database.migrate()
-    return database
+    """创建并迁移一个临时数据库(共享实现见 tests/helpers.py)."""
+    return migrated_database(tmp_path)
 
 
 def _add_game(repo: GameRepository, name: str = "Demo") -> Game:

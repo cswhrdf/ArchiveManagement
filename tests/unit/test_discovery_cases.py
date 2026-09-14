@@ -1,4 +1,4 @@
-"""本地游戏探测与监控目录用例的单元测试(阶段 E-1).
+"""本地游戏探测与监控目录用例的单元测试.
 
 覆盖监控目录的增删改查与校验(存在性、类型、高风险路径、重复检测)、扫描结果的
 落库与去重(用户的"已忽略"决定不被下一次扫描覆盖)、候选的导入/忽略/恢复/修正
@@ -37,6 +37,7 @@ from archive_management.services.platform_scan import (
     NullRegistry,
     ScanRoots,
 )
+from helpers import migrated_database
 
 pytestmark = [
     pytest.mark.critical,
@@ -48,10 +49,8 @@ pytestmark = [
 
 
 def _database(tmp_path: Path) -> Database:
-    """创建并迁移一个临时数据库."""
-    database = Database(tmp_path / "app.db")
-    database.migrate()
-    return database
+    """创建并迁移一个临时数据库(共享实现见 tests/helpers.py)."""
+    return migrated_database(tmp_path)
 
 
 def _stub_scanner(
@@ -64,6 +63,7 @@ def _stub_scanner(
             empty = Path()
             super().__init__(
                 ScanRoots(
+                    platform="windows",
                     program_data=empty,
                     program_files=empty,
                     program_files_x86=empty,

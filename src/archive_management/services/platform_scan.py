@@ -1,20 +1,23 @@
-"""本地游戏探测服务(阶段 E-1).
+"""本地游戏探测服务.
 
 从主流平台的安装清单、Windows 注册表与本机常规安装目录中发现"已安装游戏",
 并把结果表达成 :class:`~archive_management.domain.GameCandidate`; 同时支持扫描
-用户自行添加的"监控目录", 覆盖平台客户端未安装、未登录或路径自定义的情况
-(PLAN 阶段 E-1 第 1~4 条)。
+用户自行添加的"监控目录", 覆盖平台客户端未安装、未登录或路径自定义的情况。
 
 设计要点:
 
 - **可解释**: 每个候选都带来源平台、得出它的规则代码(``reason_code``)与
   附加说明, 界面据此告诉用户"这条是怎么来的";
-- **可注入**: 环境根目录与注册表读取器全部通过 :class:`ScanRoots` 注入,
-  测试可以在临时目录里造出 Steam/Epic/GOG/Battle.net 的目录结构, 不需要
-  真实安装平台客户端;
-- **只读**: 探测阶段只读清单与注册表, 不修改任何用户数据目录;
+- **可注入**: 平台、环境根目录与注册表读取器全部通过 :class:`ScanRoots`
+  注入, 测试可以在临时目录里造出各平台的目录结构, 不需要真实安装平台客户端,
+  也不需要运行在对应平台上;
+- **平台适配**: 注册表只存在于 Windows, GOG/Ubisoft 的安装位置也只写在
+  注册表里, 因此这类探测被显式限制在 Windows(见
+  :meth:`LocalGameScanner._registry_source_available`), 其它平台返回空结果
+  并把缺口交回"监控目录"; Steam/Epic 则按各平台自己的清单目录探测。
+- **只读**: 探测时只读清单与注册表, 不修改任何用户数据目录;
 - **不静默信任**: 路径缺失、不可读或属于高风险位置(盘符根目录、用户主目录)
-  时给出明确的健康状态, 由用户决定是否导入(PLAN 阶段 C 第 5 条)。
+  时给出明确的健康状态, 由用户决定是否导入。
 """
 
 from __future__ import annotations
@@ -24,9 +27,9 @@ import json
 import logging
 import os
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
@@ -39,6 +42,11 @@ from archive_management.services.pathcheck import (
     dangerous_target_reason,
     normalize_path,
 )
+from archive_management.services.platforms import (
+    PlatformFamily,
+    current_platform,
+    platform_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +58,14 @@ HKLM = "HKLM"
 SOURCE_STEAM = "steam"
 SOURCE_EPIC = "epic"
 SOURCE_GOG = "gog"
-SOURCE_BATTLE_NET = "battle_net"
+SOURCE_UBISOFT = "ubisoft"
 SOURCE_MONITORED = "monitored"
 
 # 规则代码: 界面据此解释候选是怎么被发现的.
 REASON_STEAM_MANIFEST = "steam_manifest"
 REASON_EPIC_MANIFEST = "epic_manifest"
 REASON_GOG_REGISTRY = "gog_registry"
-REASON_BNET_REGISTRY = "battlenet_registry"
+REASON_UBISOFT_REGISTRY = "ubisoft_registry"
 REASON_MONITORED_CHILD = "monitored_child"
 REASON_MONITORED_ROOT = "monitored_root"
 
@@ -70,10 +78,18 @@ _HIVE_NAMES: dict[str, str] = {
     "HKLM": "HKEY_LOCAL_MACHINE",
 }
 
+# macOS 的跨用户共享目录: Epic 启动器的清单与安装记录写在这里.
+_MACOS_SHARED_ROOT = Path("/Users/Shared")
+
 
 @runtime_checkable
 class RegistryReader(Protocol):
-    """只读访问 Windows 注册表的能力(非 Windows 上返回空结果)."""
+    """只读访问 Windows 注册表的能力.
+
+    注册表是 Windows 独有的设施: 非 Windows 平台应当注入
+    :class:`NullRegistry`, 并且依赖注册表的探测本身也会按平台短路
+    (见 :meth:`LocalGameScanner._registry_source_available`)。
+    """
 
     def values(self, hive: str, subkey: str) -> dict[str, str]:
         """返回指定键下的字符串值(键不存在时返回空字典)."""
@@ -119,7 +135,12 @@ class WinRegModule(Protocol):
 
 
 class WinRegistry:
-    """基于 ``winreg`` 的注册表读取器; 非 Windows 或缺少权限时静默降级."""
+    """基于 ``winreg`` 的注册表读取器; 非 Windows 或缺少权限时静默降级.
+
+    ``winreg`` 只随 Windows 版 Python 提供, 因此本类在 macOS/Linux 上不应当被
+    构造(:func:`default_roots` 在这两个平台改用 :class:`NullRegistry`); 即使
+    被构造, 所有查询也只会返回空结果, 不会抛出异常。
+    """
 
     @staticmethod
     def _module() -> WinRegModule | None:
@@ -190,28 +211,98 @@ class WinRegistry:
 
 @dataclass(frozen=True)
 class ScanRoots:
-    """探测使用的环境根目录与注册表读取器(全部可注入)."""
+    """探测使用的平台、环境根目录与注册表读取器(全部可注入).
 
+    ``platform`` 决定使用哪套目录规则; ``user_profile`` 是用户主目录(macOS 的
+    ``~/Library`` 与 Linux 的 ``~/.local/share`` 都从它推导), ``local_app_data``
+    是"当前用户的应用数据目录"(Windows 的 ``%LOCALAPPDATA%``、macOS 的
+    ``~/Library/Application Support``、Linux 的 ``$XDG_DATA_HOME``)。
+    ``user_shared`` 只在 macOS 有意义(``/Users/Shared``)。
+    """
+
+    platform: PlatformFamily
     program_data: Path
     program_files: Path
     program_files_x86: Path
     local_app_data: Path
     user_profile: Path
-    registry: RegistryReader
+    registry: RegistryReader = field(default_factory=NullRegistry)
+    user_shared: Path | None = None
+
+    @property
+    def shared_root(self) -> Path:
+        """跨用户共享目录(macOS 的 ``/Users/Shared``, 其它平台回落到 program_data)."""
+        return self.program_data if self.user_shared is None else self.user_shared
 
 
-def default_roots(registry: RegistryReader | None = None) -> ScanRoots:
-    """从环境变量推导默认探测根目录(注册表缺省使用 :class:`WinRegistry`)."""
-    env = os.environ
-    home = Path.home()
+def default_roots(
+    registry: RegistryReader | None = None,
+    *,
+    platform: PlatformFamily | None = None,
+    env: Mapping[str, str] | None = None,
+) -> ScanRoots:
+    """按平台推导默认探测根目录.
+
+    Windows 从环境变量取系统目录, 并默认启用注册表读取器; macOS 与 Linux 用
+    家目录下的 Library/XDG 目录, 缺省注入 :class:`NullRegistry`——这两个平台
+    没有注册表, 构造真实读取器只会引入无意义的失败分支。
+
+    ``platform``/``env`` 用于测试: 传入平台族与假的环境变量即可在任意平台上
+    校验三套规则。
+    """
+    family = platform or current_platform()
+    source = os.environ if env is None else env
+    raw_home = source.get("HOME") or source.get("USERPROFILE")
+    home = Path(raw_home) if raw_home else Path.home()
+    if family == "windows":
+        return ScanRoots(
+            platform=family,
+            program_data=Path(source.get("PROGRAMDATA", r"C:\ProgramData")),
+            program_files=Path(source.get("PROGRAMFILES", r"C:\Program Files")),
+            program_files_x86=Path(
+                source.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+            ),
+            local_app_data=Path(
+                source.get("LOCALAPPDATA", str(home / "AppData" / "Local"))
+            ),
+            user_profile=Path(source.get("USERPROFILE", str(home))),
+            registry=WinRegistry() if registry is None else registry,
+        )
+    if family == "macos":
+        return ScanRoots(
+            platform=family,
+            program_data=Path("/usr/local/share"),
+            program_files=Path("/Applications"),
+            program_files_x86=Path("/Applications"),
+            local_app_data=Path(str(home / "Library" / "Application Support")),
+            user_profile=home,
+            registry=registry if registry is not None else NullRegistry(),
+            user_shared=_MACOS_SHARED_ROOT,
+        )
     return ScanRoots(
-        program_data=Path(env.get("PROGRAMDATA", r"C:\ProgramData")),
-        program_files=Path(env.get("PROGRAMFILES", r"C:\Program Files")),
-        program_files_x86=Path(env.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")),
-        local_app_data=Path(env.get("LOCALAPPDATA", str(home / "AppData" / "Local"))),
-        user_profile=Path(env.get("USERPROFILE", str(home))),
-        registry=WinRegistry() if registry is None else registry,
+        platform=family,
+        program_data=Path("/usr/share"),
+        program_files=Path("/opt"),
+        program_files_x86=Path("/opt"),
+        local_app_data=Path(
+            source.get("XDG_DATA_HOME", str(home / ".local" / "share"))
+        ),
+        user_profile=home,
+        registry=registry if registry is not None else NullRegistry(),
     )
+
+
+def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
+    """按字符串形式去重并保持顺序(大小写不敏感), 避免重复扫描同一目录."""
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in paths:
+        key = str(path).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
 
 
 def parse_vdf_pairs(text: str) -> list[tuple[str, str]]:
@@ -252,24 +343,34 @@ def path_health(raw: str) -> PathHealth:
 
 
 class LocalGameScanner:
-    """从平台清单、注册表与监控目录中发现已安装游戏."""
+    """从平台清单、注册表与监控目录中发现已安装游戏.
+
+    使用哪几个来源取决于 :attr:`ScanRoots.platform`: 注册表来源只在 Windows
+    上执行, Steam/Epic 按各平台的目录规则查找, 监控目录在所有平台上都可用。
+    """
 
     def __init__(self, roots: ScanRoots) -> None:
-        """绑定探测环境(根目录与注册表读取器)."""
+        """绑定探测环境(平台、根目录与注册表读取器)."""
         self._roots = roots
+
+    @property
+    def platform(self) -> PlatformFamily:
+        """本次探测使用的平台规则."""
+        return self._roots.platform
 
     def scan(self, *, monitored: Sequence[str] = ()) -> list[GameCandidate]:
         """返回本次探测的全部候选(已按路径去重并排序).
 
         单个来源出错不会影响其它来源: 平台清单损坏、权限不足都只记录一条
-        DEBUG 日志并跳过该项(PLAN 阶段 E-1 验收: 探测失败不阻断手动管理).
+        DEBUG 日志并跳过该项(探测失败不阻断手动管理).
         """
+        logger.debug("开始本地游戏探测(平台 %s)", platform_label(self._roots.platform))
         found: list[GameCandidate] = []
         probes: tuple[Callable[[], list[GameCandidate]], ...] = (
             self._steam,
             self._epic,
             self._gog,
-            self._battle_net,
+            self._ubisoft,
         )
         for probe in probes:
             found.extend(self._guard(probe))
@@ -319,42 +420,99 @@ class LocalGameScanner:
     # ------------------------------------------------------------------- Steam
 
     def _steam(self) -> list[GameCandidate]:
-        """从 Steam 库清单(appmanifest_*.acf)读取已安装游戏."""
-        steam_root = self._steam_root()
-        if steam_root is None:
-            return []
+        """从 Steam 库清单(appmanifest_*.acf)读取已安装游戏.
+
+        Steam 在三个平台上的清单格式完全相同, 区别只在主目录怎么找; 因此这里
+        先按平台列出可能的主目录, 再对每个库目录复用同一套解析逻辑。
+        """
         candidates: list[GameCandidate] = []
-        for library in self._steam_libraries(steam_root):
-            steamapps = library / "steamapps"
-            for manifest in sorted(steamapps.glob("appmanifest_*.acf")):
-                text = self._read_text(manifest)
-                if text is None:
-                    continue
-                pairs = parse_vdf_pairs(text)
-                name = vdf_first(pairs, "name")
-                installdir = vdf_first(pairs, "installdir")
-                if not name or not installdir:
-                    continue
-                candidates.append(
-                    self._candidate(
-                        name,
-                        steamapps / "common" / installdir,
-                        source=SOURCE_STEAM,
-                        confidence="high",
-                        reason_code=REASON_STEAM_MANIFEST,
-                        detail=manifest.name,
-                    )
-                )
+        for root in self._steam_roots():
+            for library in self._steam_libraries(root):
+                candidates.extend(self._steam_library(library))
         return candidates
 
-    def _steam_root(self) -> Path | None:
-        """返回 Steam 安装目录(来自注册表); 未安装时返回 None."""
-        values = self._roots.registry.values(HKCU, r"Software\Valve\Steam")
-        for key in ("SteamPath", "InstallPath"):
-            raw = values.get(key)
+    def _steam_library(self, library: Path) -> list[GameCandidate]:
+        """扫描一个 Steam 库目录下的全部应用清单."""
+        steamapps = library / "steamapps"
+        found: list[GameCandidate] = []
+        for manifest in sorted(steamapps.glob("appmanifest_*.acf")):
+            text = self._read_text(manifest)
+            if text is None:
+                continue
+            pairs = parse_vdf_pairs(text)
+            name = vdf_first(pairs, "name")
+            installdir = vdf_first(pairs, "installdir")
+            if not name or not installdir:
+                continue
+            found.append(
+                self._candidate(
+                    name,
+                    steamapps / "common" / installdir,
+                    source=SOURCE_STEAM,
+                    confidence="high",
+                    reason_code=REASON_STEAM_MANIFEST,
+                    detail=manifest.name,
+                )
+            )
+        return found
+
+    def _steam_roots(self) -> list[Path]:
+        """返回本机存在的 Steam 主目录(按平台规则, 只保留含 steamapps 的).
+
+        - Windows: 注册表登记的路径, 其次默认安装目录;
+        - macOS: ``~/Library/Application Support/Steam``;
+        - Linux: 原生安装目录、发行版包目录与 Flatpak/Snap 容器内的目录。
+
+        过滤掉不存在 ``steamapps`` 的候选: Steam 未安装时不去猜路径, 也就不会
+        产出一条注定不可用的候选。
+        """
+        if self._roots.platform == "windows":
+            candidates = [
+                *self._registry_paths(
+                    HKCU, r"Software\Valve\Steam", ("SteamPath", "InstallPath")
+                ),
+                self._roots.program_files_x86 / "Steam",
+                self._roots.program_files / "Steam",
+            ]
+        elif self._roots.platform == "macos":
+            candidates = [self._roots.local_app_data / "Steam"]
+        else:
+            home = self._roots.user_profile
+            candidates = [
+                home / ".steam" / "steam",
+                home / ".steam" / "root",
+                self._roots.local_app_data / "Steam",
+                home / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam",
+                home / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
+            ]
+        return [
+            root for root in _dedupe_paths(candidates) if (root / "steamapps").is_dir()
+        ]
+
+    def _registry_paths(
+        self, hive: str, subkey: str, names: tuple[str, ...]
+    ) -> list[Path]:
+        """读取注册表键下几个候选值并规范化成路径(非 Windows 返回空)."""
+        if not self._registry_source_available(subkey):
+            return []
+        values = self._roots.registry.values(hive, subkey)
+        paths: list[Path] = []
+        for name in names:
+            raw = values.get(name)
             if raw and raw.strip():
-                return Path(normalize_path(raw))
-        return None
+                paths.append(Path(normalize_path(raw)))
+        return paths
+
+    def _registry_source_available(self, source: str) -> bool:
+        """注册表探测只在 Windows 上有意义.
+
+        macOS 与 Linux 没有注册表: 在这里显式短路, 比让查询静默返回空结果更
+        可解释(日志能说明"这个来源在本平台不适用")。
+        """
+        if self._roots.platform == "windows":
+            return True
+        logger.debug("%s 的注册表探测仅 Windows 可用, 已跳过", source)
+        return False
 
     def _steam_libraries(self, steam_root: Path) -> list[Path]:
         """返回 Steam 的库目录列表(主目录 + libraryfolders.vdf 中登记的库)."""
@@ -378,16 +536,32 @@ class LocalGameScanner:
     # -------------------------------------------------------------------- Epic
 
     def _epic(self) -> list[GameCandidate]:
-        """从 Epic Games 启动器的清单目录读取已安装游戏."""
-        manifest_dir = (
-            self._roots.program_data
-            / "Epic"
-            / "EpicGamesLauncher"
-            / "Data"
-            / "Manifests"
-        )
-        if not manifest_dir.is_dir():
-            return []
+        """从 Epic Games 启动器的清单目录读取已安装游戏(Windows/macOS)."""
+        candidates: list[GameCandidate] = []
+        for manifest_dir in self._epic_manifest_dirs():
+            if manifest_dir.is_dir():
+                candidates.extend(self._epic_manifests(manifest_dir))
+        return candidates
+
+    def _epic_manifest_dirs(self) -> list[Path]:
+        """返回 Epic 的清单目录.
+
+        Linux 上没有官方 Epic 启动器(该平台的 Epic 游戏通常来自 Heroic 等
+        第三方客户端), 因此这个来源在 Linux 上明确为空, 缺口交给监控目录。
+        """
+        base = ("EpicGamesLauncher", "Data", "Manifests")
+        if self._roots.platform == "windows":
+            return [self._roots.program_data.joinpath("Epic", *base)]
+        if self._roots.platform == "macos":
+            return [
+                self._roots.shared_root.joinpath("Epic Games", *base),
+                self._roots.local_app_data.joinpath("Epic", *base),
+            ]
+        logger.debug("Epic 启动器没有 Linux 版本, 该来源请改用监控目录")
+        return []
+
+    def _epic_manifests(self, manifest_dir: Path) -> list[GameCandidate]:
+        """解析一个清单目录下的 ``*.item`` 文件."""
         candidates: list[GameCandidate] = []
         for item in sorted(manifest_dir.glob("*.item")):
             data = self._read_json(item)
@@ -426,7 +600,9 @@ class LocalGameScanner:
     # --------------------------------------------------------------------- GOG
 
     def _gog(self) -> list[GameCandidate]:
-        """从 GOG 注册表项读取已安装游戏(32 位与 64 位视图都尝试)."""
+        """从 GOG 注册表项读取已安装游戏(仅 Windows, 32 位与 64 位视图都尝试)."""
+        if not self._registry_source_available("GOG"):
+            return []
         candidates: list[GameCandidate] = []
         for subkey in (
             r"SOFTWARE\WOW6432Node\GOG.com\Games",
@@ -450,28 +626,40 @@ class LocalGameScanner:
                 )
         return candidates
 
-    # --------------------------------------------------------------- Battle.net
+    # ----------------------------------------------------------------- Ubisoft
 
-    def _battle_net(self) -> list[GameCandidate]:
-        """从 Blizzard Entertainment 注册表项读取已安装游戏."""
+    def _ubisoft(self) -> list[GameCandidate]:
+        """从 Ubisoft Connect 注册表项读取已安装游戏(仅 Windows, 64/32 位与旧版启动器都尝试).
+
+        Ubisoft 用数字安装 id 当子键, 子键里只保证有 ``InstallDir``: 游戏名优先取
+        ``GameName``/``DisplayName``, 两个都没有时退回安装目录的目录名(与监控目录
+        的取名规则一致), 不因为缺一个可选值就丢掉整条候选。
+        """
+        if not self._registry_source_available("Ubisoft"):
+            return []
         candidates: list[GameCandidate] = []
-        for subkey in (
-            r"SOFTWARE\WOW6432Node\Blizzard Entertainment",
-            r"SOFTWARE\Blizzard Entertainment",
+        for hive, subkey in (
+            (HKLM, r"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs"),
+            (HKLM, r"SOFTWARE\Ubisoft\Launcher\Installs"),
+            (HKCU, r"SOFTWARE\Ubisoft\Ubisoft Game Launcher\Installs"),
         ):
-            for game in self._roots.registry.subkeys(HKLM, subkey):
-                values = self._roots.registry.values(HKLM, f"{subkey}\\{game}")
-                location = str(values.get("InstallLocation") or "").strip()
+            for install_id in self._roots.registry.subkeys(hive, subkey):
+                values = self._roots.registry.values(hive, f"{subkey}\\{install_id}")
+                location = str(values.get("InstallDir") or "").strip()
                 if not location:
                     continue
+                name = str(
+                    values.get("GameName") or values.get("DisplayName") or ""
+                ).strip()
+                path = Path(location)
                 candidates.append(
                     self._candidate(
-                        game,
-                        Path(location),
-                        source=SOURCE_BATTLE_NET,
+                        name or path.name,
+                        path,
+                        source=SOURCE_UBISOFT,
                         confidence="high",
-                        reason_code=REASON_BNET_REGISTRY,
-                        detail=game,
+                        reason_code=REASON_UBISOFT_REGISTRY,
+                        detail=install_id,
                     )
                 )
         return candidates

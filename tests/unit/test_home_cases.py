@@ -1,4 +1,4 @@
-"""统一游戏主页用例的单元测试(阶段 E-2).
+"""统一游戏主页用例的单元测试.
 
 覆盖主页事实的取数(存档位置数量、备份计数、最近备份时间、路径风险、探测关联)、
 筛选条件的持久化与版本守卫、归档与自定义标签, 以及导入探测结果后游戏会带上来源
@@ -49,6 +49,7 @@ from archive_management.services.platform_scan import (
     NullRegistry,
     ScanRoots,
 )
+from helpers import migrated_database
 
 pytestmark = [
     pytest.mark.critical,
@@ -60,10 +61,8 @@ pytestmark = [
 
 
 def _database(tmp_path: Path) -> Database:
-    """创建并迁移一个临时数据库."""
-    database = Database(tmp_path / "app.db")
-    database.migrate()
-    return database
+    """创建并迁移一个临时数据库(共享实现见 tests/helpers.py)."""
+    return migrated_database(tmp_path)
 
 
 def _game(database: Database, name: str, *, path: Path | None = None) -> int:
@@ -240,6 +239,7 @@ def test_imported_candidate_carries_platform_origin(tmp_path: Path) -> None:
     add_monitored_directory(database, str(library))
     scanner = LocalGameScanner(
         ScanRoots(
+            platform="windows",
             program_data=tmp_path,
             program_files=tmp_path,
             program_files_x86=tmp_path,

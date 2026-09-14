@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
-from archive_management.logging_config import configure_logging
+from archive_management.config import DEFAULT_LOG_MAX_BYTES, LoggingSettings
+from archive_management.logging_config import (
+    configure_from_settings,
+    configure_logging,
+)
 from archive_management.services.audit import (
     _MAX_FIELD_LENGTH,
     AUDIT_LOGGER_NAME,
@@ -174,3 +179,61 @@ def test_verbose_logging_lowers_console_level_to_debug(tmp_path: Path) -> None:
         ]
     finally:
         configure_logging(tmp_path / "logs-again", console=False)
+
+
+def _detach_handlers() -> None:
+    """移除并关闭当前装配的日志处理器, 避免用例之间互相影响."""
+    root = logging.getLogger("archive_management")
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        handler.close()
+
+
+def test_default_log_file_limit_is_100_mib(tmp_path: Path) -> None:
+    """默认单文件上限 100 MiB: 上限太小会让刚发生的问题很快被轮转掉."""
+    settings = LoggingSettings()
+    assert settings.max_bytes == 100 * 1024 * 1024
+    assert settings.max_bytes == DEFAULT_LOG_MAX_BYTES
+    assert settings.backup_count == 5
+
+
+def test_configure_from_settings_honours_user_limits(tmp_path: Path) -> None:
+    """配置里的 logging 段决定滚动上限、保留份数、控制台开关与级别."""
+    settings = LoggingSettings(
+        level="WARNING", max_bytes=8 * 1024 * 1024, backup_count=2, console=True
+    )
+    configure_from_settings(tmp_path / "logs", settings)
+    try:
+        root = logging.getLogger("archive_management")
+        file_handler, console_handler = root.handlers
+        assert isinstance(file_handler, RotatingFileHandler)
+        assert file_handler.maxBytes == 8 * 1024 * 1024
+        assert file_handler.backupCount == 2
+        assert file_handler.level == logging.DEBUG
+        assert console_handler.level == logging.WARNING
+    finally:
+        _detach_handlers()
+
+
+def test_verbose_relaxes_console_level_only(tmp_path: Path) -> None:
+    """--verbose 只放宽控制台级别, 不会覆盖 console=False 这种显式设置."""
+    configure_from_settings(tmp_path / "logs", LoggingSettings(), verbose=True)
+    try:
+        root = logging.getLogger("archive_management")
+        assert [handler.level for handler in root.handlers] == [
+            logging.DEBUG,
+            logging.DEBUG,
+        ]
+    finally:
+        _detach_handlers()
+
+    # console=False 是显式设置: 即使加 --verbose 也不装配控制台处理器。
+    configure_from_settings(
+        tmp_path / "logs", LoggingSettings(console=False), verbose=True
+    )
+    try:
+        root = logging.getLogger("archive_management")
+        assert len(root.handlers) == 1
+        assert isinstance(root.handlers[0], RotatingFileHandler)
+    finally:
+        _detach_handlers()

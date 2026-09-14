@@ -256,7 +256,7 @@ class GameRepository:
         return int(row[0]) if row is not None else 0
 
     def count_backups(self, game_id: int) -> int:
-        """返回某游戏的备份节点数量(阶段 D 起才有真实记录)."""
+        """返回某游戏的备份节点数量."""
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) FROM backup_nodes WHERE game_id = ?", (game_id,)
@@ -437,7 +437,7 @@ class SaveLocationRepository:
 
 
 class BackupRepository:
-    """backup_nodes / backup_files 表的行级访问(阶段 D)."""
+    """backup_nodes / backup_files 表的行级访问."""
 
     def __init__(self, database: Database) -> None:
         """绑定到指定的数据库封装."""
@@ -662,7 +662,7 @@ class BackupRepository:
 
 
 class ScheduledJobRepository:
-    """scheduled_jobs 表的行级访问(阶段 D 定期备份)."""
+    """scheduled_jobs 表的行级访问(定期备份任务)."""
 
     def __init__(self, database: Database) -> None:
         """绑定到指定的数据库封装."""
@@ -799,7 +799,7 @@ def _row_to_candidate(row: sqlite3.Row) -> GameCandidate:
 
 
 class MonitoredDirectoryRepository:
-    """monitored_directories 表的行级访问(阶段 E-1)."""
+    """monitored_directories 表的行级访问."""
 
     def __init__(self, database: Database) -> None:
         """绑定到指定的数据库封装."""
@@ -920,7 +920,7 @@ class MonitoredDirectoryRepository:
 
 
 class CandidateRepository:
-    """game_candidates 表的行级访问(阶段 E-1)."""
+    """game_candidates 表的行级访问."""
 
     def __init__(self, database: Database) -> None:
         """绑定到指定的数据库封装."""
@@ -1105,7 +1105,7 @@ class HomeRow:
 
 
 class HomeRepository:
-    """主页所需的聚合查询与筛选条件持久化(阶段 E-2)."""
+    """主页所需的聚合查询与筛选条件持久化."""
 
     def __init__(self, database: Database) -> None:
         """绑定到指定的数据库封装."""

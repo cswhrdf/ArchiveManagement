@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - name: Check out repository
@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - name: Check out repository
@@ -94,8 +94,8 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
 
-      - name: Pytest with coverage (Windows)
-        if: runner.os == 'Windows'
+      - name: Pytest with coverage (Windows/macOS)
+        if: runner.os != 'Linux'
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
 
       - name: Attach coverage report to Allure
@@ -147,8 +147,8 @@ jobs:
           path: .allure
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate Allure report (Linux)
-        if: runner.os == 'Linux'
+      - name: Generate Allure report (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p .allure
@@ -188,7 +188,235 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-${{ matrix.os }}
+          path: allure-report/
+          if-no-files-found: ignore
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-${{ matrix.os }}
+          path: allure-results/
+          if-no-files-found: ignore
+
+  performance:
+    name: 性能基准 (ubuntu-latest)
+    runs-on: ubuntu-latest
+    # 基准只在单一平台采集: 跨运行比较需要稳定的运行环境, 换平台会让数值失去可比性.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run performance benchmarks
+        # 阈值写在用例里: 超出预算即失败, 性能回归直接体现在 CI 状态上.
+        run: uv run pytest tests/performance -m performance --alluredir=allure-results-performance
+
+      - name: Upload performance baseline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-results
+          path: |
+            performance-results.json
+            performance-results.csv
+          if-no-files-found: ignore
+
+      - name: Upload performance Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-performance
+          path: allure-results-performance/
+          if-no-files-found: ignore
+
+  security:
+    name: 安全测试 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # 安全防护是跨平台正确性属性: 路径越界、符号链接与权限差异都要在每个平台验证.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run security tests
+        run: uv run pytest tests/security -m security --alluredir=allure-results-security
+
+      - name: Upload security findings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-results-${{ matrix.os }}
+          path: security-results.json
+          if-no-files-found: ignore
+
+      - name: Upload security Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-security-${{ matrix.os }}
+          path: allure-results-security/
+          if-no-files-found: ignore
+
+  allure-summary:
+    name: Allure 汇总报告
+    runs-on: ubuntu-latest
+    needs: [quality, pytest, performance, security]
+    if: always()
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Allure 3 CLI
+        run: npm install --global allure@3
+
+      - name: Download all Allure results
+        if: always()
+        uses: actions/download-artifact@v7
+        with:
+          pattern: allure-results-*
+          path: allure-results
+          merge-multiple: true
+
+      - name: Download performance baseline
+        if: always()
+        uses: actions/download-artifact@v7
+        with:
+          pattern: performance-results
+          path: .
+          merge-multiple: true
+
+      - name: Download security findings
+        if: always()
+        uses: actions/download-artifact@v7
+        with:
+          pattern: security-results-*
+          path: security-findings
+          merge-multiple: true
+
+      - name: Resolve previous successful run
+        id: prev-run
+        if: always()
+        uses: actions/github-script@v9
+        env:
+          ARTIFACT_NAME: allure-history-final
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 30,
+            });
+            const candidates = runs.data.workflow_runs.filter(
+              (r) =>
+                r.name === "CI" &&
+                r.id !== context.runId &&
+                r.status === "completed" &&
+                r.conclusion === "success",
+            );
+            for (const candidate of candidates) {
+              const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: candidate.id,
+                per_page: 100,
+              });
+              const history = artifacts.data.artifacts.find(
+                (artifact) =>
+                  artifact.name === process.env.ARTIFACT_NAME &&
+                  !artifact.expired,
+              );
+              if (history) {
+                core.setOutput("run_id", String(candidate.id));
+                break;
+              }
+            }
+
+      - name: Download previous Allure history
+        if: steps.prev-run.outputs.run_id != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-history-final
+          run-id: ${{ steps.prev-run.outputs.run_id }}
+          path: .allure
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summarize performance and security into Allure
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p allure-results
+          cp security-findings/*.json . 2>/dev/null || true
+          uv run python scripts/create_allure_summary.py
+
+      - name: Generate final Allure report
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p .allure
+          cat > .allure/allurerc.json <<'JSON'
+          {"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}
+          JSON
+          if [ -n "$(ls -A allure-results)" ]; then
+            allure generate allure-results --output allure-report-final --config ./.allure/allurerc.json
+          else
+            echo "没有可用的 allure-results, 跳过报告生成"
+          fi
+
+      - name: Upload Allure history for next run
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-history-final
+          path: .allure/history.jsonl
+          if-no-files-found: ignore
+
+      - name: Upload final Allure report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-report-final
           path: |
             allure-results/
-            allure-report/
+            allure-report-final/
           if-no-files-found: ignore

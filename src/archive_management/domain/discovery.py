@@ -1,11 +1,11 @@
-"""本地游戏探测与监控目录的领域模型(阶段 E-1).
+"""本地游戏探测与监控目录的领域模型.
 
 探测结果刻意与"游戏"分开保存: 扫描到的东西只是**候选**, 用户确认之前不能
-进入游戏库(PLAN 阶段 E-1 第 5 条, 与阶段 C "不能静默信任猜测路径"一致)。
+进入游戏库; 与"不能静默信任猜测路径"的约定一致。
 因此这里有两个模型:
 
 - :class:`MonitoredDirectory`: 用户自行添加的监控目录, 用于覆盖主流平台
-  无法识别、路径自定义或平台客户端未安装的情况(PLAN 阶段 E-1 第 3 条);
+  无法识别、路径自定义或平台客户端未安装的情况;
 - :class:`GameCandidate`: 一次探测得到的候选游戏及其来源、可信度、路径健康
   状态与处理进度(新发现/已导入/已忽略)。
 
@@ -24,7 +24,7 @@ from archive_management.domain.entities import _RowModel
 
 # 候选的来源平台/渠道: 前四项来自安装目录/注册表探测, monitored 来自用户
 # 自行添加的监控目录, manual 保留给手工录入的候选.
-DiscoverySource = Literal["steam", "epic", "gog", "battle_net", "monitored", "manual"]
+DiscoverySource = Literal["steam", "epic", "gog", "ubisoft", "monitored", "manual"]
 # 候选可信度: 有平台清单/注册表背书的是 high, 监控目录子项是 medium, 其余 low.
 Confidence = Literal["high", "medium", "low"]
 # 候选的处理进度: 用户导入后置 imported, 忽略后置 ignored.
@@ -38,7 +38,7 @@ SOURCE_RANK: dict[str, int] = {
     "steam": 5,
     "epic": 4,
     "gog": 4,
-    "battle_net": 4,
+    "ubisoft": 4,
     "monitored": 2,
     "manual": 1,
 }

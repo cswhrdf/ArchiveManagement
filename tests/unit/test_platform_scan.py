@@ -1,13 +1,16 @@
-"""本地游戏探测服务的单元测试(阶段 E-1).
+"""本地游戏探测服务的单元测试.
 
-覆盖 Steam/Epic/GOG/Battle.net 四类来源的探测规则、监控目录扫描、路径健康
-判定与去重策略。全部探测都在临时目录里构造"平台目录结构", 注册表用替身注入,
-不读写真实注册表, 也不依赖本机是否安装过任何平台客户端。
+覆盖 Steam/Epic/GOG/Ubisoft 四类来源的探测规则、监控目录扫描、路径健康
+判定与去重策略, 以及 Windows/macOS/Linux 三个平台的差异: 注册表只存在于
+Windows, Steam/Epic 各平台的清单目录不同, 监控目录在所有平台都可用。
+全部探测都在临时目录里构造"平台目录结构", 注册表用替身注入, 不读写真实
+注册表, 也不依赖本机是否安装过任何平台客户端。
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,7 @@ from archive_management.services.platform_scan import (
     HKLM,
     LocalGameScanner,
     NullRegistry,
+    RegistryReader,
     ScanRoots,
     WinRegistry,
     default_roots,
@@ -24,6 +28,7 @@ from archive_management.services.platform_scan import (
     path_health,
     vdf_first,
 )
+from archive_management.services.platforms import PlatformFamily
 
 pytestmark = [
     pytest.mark.critical,
@@ -64,15 +69,25 @@ class BrokenRegistry:
         raise RuntimeError(f"注册表不可用: {hive}\\{subkey}")
 
 
-def _roots(tmp_path: Path, registry: object | None = None) -> ScanRoots:
-    """构造指向临时目录的探测环境(注册表缺省为空实现)."""
+def _roots(
+    tmp_path: Path,
+    registry: RegistryReader | None = None,
+    *,
+    platform: PlatformFamily = "windows",
+) -> ScanRoots:
+    """构造指向临时目录的探测环境(注册表缺省为空实现).
+
+    ``platform`` 决定使用哪套目录规则: 默认按 Windows 构造, 非 Windows 平台的
+    用例显式传入 ``macos``/``linux``。
+    """
     return ScanRoots(
+        platform=platform,
         program_data=tmp_path / "ProgramData",
         program_files=tmp_path / "Program Files",
         program_files_x86=tmp_path / "Program Files (x86)",
         local_app_data=tmp_path / "Local",
         user_profile=tmp_path,
-        registry=registry if registry is not None else NullRegistry(),  # type: ignore[arg-type]
+        registry=registry if registry is not None else NullRegistry(),
     )
 
 
@@ -197,27 +212,50 @@ def test_epic_manifests_are_discovered_and_broken_files_skipped(
 # --------------------------------------------------------------- 注册表来源
 
 
-def test_gog_and_battlenet_registry_entries_are_discovered(tmp_path: Path) -> None:
+def test_gog_and_ubisoft_registry_entries_are_discovered(tmp_path: Path) -> None:
     gog_root = r"SOFTWARE\WOW6432Node\GOG.com\Games"
-    bnet_root = r"SOFTWARE\WOW6432Node\Blizzard Entertainment"
+    ubisoft_root = r"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs"
     registry = FakeRegistry(
         values={
             (HKLM, f"{gog_root}\\1207664623"): {
                 "gameName": "The Witcher 3",
                 "path": str(tmp_path / "witcher"),
             },
-            (HKLM, f"{bnet_root}\\Overwatch"): {
-                "InstallLocation": str(tmp_path / "overwatch")
+            # Ubisoft 只保证 InstallDir 有值: 没有游戏名时退回目录名.
+            (HKLM, f"{ubisoft_root}\\1000"): {
+                "InstallDir": str(tmp_path / "Anno 1800")
             },
         },
-        subkeys={(HKLM, gog_root): ["1207664623"], (HKLM, bnet_root): ["Overwatch"]},
+        subkeys={(HKLM, gog_root): ["1207664623"], (HKLM, ubisoft_root): ["1000"]},
     )
 
     candidates = LocalGameScanner(_roots(tmp_path, registry)).scan()
 
     sources = {item.name: item.source for item in candidates}
-    assert sources == {"The Witcher 3": "gog", "Overwatch": "battle_net"}
+    assert sources == {"The Witcher 3": "gog", "Anno 1800": "ubisoft"}
     assert all(item.confidence == "high" for item in candidates)
+
+
+def test_ubisoft_prefers_game_name_over_folder_name(tmp_path: Path) -> None:
+    """Ubisoft 子键里有游戏名时用它, 并记录安装 id 供界面解释来源."""
+    root = r"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs"
+    registry = FakeRegistry(
+        values={
+            (HKLM, f"{root}\\2000"): {
+                "InstallDir": str(tmp_path / "AC Valhalla"),
+                "GameName": "Assassin's Creed Valhalla",
+            },
+            # 缺 InstallDir 的子键没有可用安装目录, 整条跳过.
+            (HKLM, f"{root}\\2001"): {"GameName": "No Location"},
+        },
+        subkeys={(HKLM, root): ["2000", "2001"]},
+    )
+
+    candidates = LocalGameScanner(_roots(tmp_path, registry)).scan()
+
+    assert [item.name for item in candidates] == ["Assassin's Creed Valhalla"]
+    assert candidates[0].reason_code == "ubisoft_registry"
+    assert candidates[0].detail == "2000"
 
 
 def test_win_registry_degrades_to_empty_results() -> None:
@@ -228,12 +266,170 @@ def test_win_registry_degrades_to_empty_results() -> None:
     assert reader.values("HKXX", "any") == {}
 
 
-def test_default_roots_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_roots_windows_reads_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("PROGRAMDATA", r"X:\ProgramData")
     monkeypatch.setenv("LOCALAPPDATA", r"X:\Local")
-    roots = default_roots(registry=NullRegistry())
+    roots = default_roots(registry=NullRegistry(), platform="windows")
+    assert roots.platform == "windows"
     assert roots.program_data == Path(r"X:\ProgramData")
     assert roots.local_app_data == Path(r"X:\Local")
+
+
+def test_default_roots_windows_uses_the_registry_reader() -> None:
+    """注册表只存在于 Windows, 因此只有这一平台默认启用真实读取器."""
+    roots = default_roots(platform="windows", env={})
+    assert isinstance(roots.registry, WinRegistry)
+
+
+def test_default_roots_macos_uses_library_and_shared_dirs() -> None:
+    """macOS 的应用数据在 ``~/Library/Application Support``, 且没有注册表."""
+    roots = default_roots(platform="macos", env={"HOME": "/Users/demo"})
+
+    assert roots.platform == "macos"
+    assert roots.user_profile == Path("/Users/demo")
+    assert roots.local_app_data == Path("/Users/demo/Library/Application Support")
+    assert roots.shared_root == Path("/Users/Shared")
+    assert isinstance(roots.registry, NullRegistry)
+
+
+def test_default_roots_linux_uses_xdg_dirs() -> None:
+    """Linux 用 XDG 目录, 没有共享目录概念, 也没有注册表."""
+    roots = default_roots(platform="linux", env={"HOME": "/home/demo"})
+
+    assert roots.platform == "linux"
+    assert roots.user_profile == Path("/home/demo")
+    assert roots.local_app_data == Path("/home/demo/.local/share")
+    assert roots.shared_root == roots.program_data
+    assert isinstance(roots.registry, NullRegistry)
+
+    custom = default_roots(
+        platform="linux", env={"HOME": "/home/demo", "XDG_DATA_HOME": "/data"}
+    )
+    assert custom.local_app_data == Path("/data")
+
+
+# --------------------------------------------------------------- 平台适配
+
+
+def test_macos_steam_is_found_in_application_support(tmp_path: Path) -> None:
+    support = tmp_path / "Library" / "Application Support"
+    steam = support / "Steam"
+    (steam / "steamapps" / "common").mkdir(parents=True)
+    _write_manifest(steam, "753640", "Outer Wilds", "OuterWilds")
+
+    roots = replace(
+        _roots(tmp_path, platform="macos"),
+        local_app_data=support,
+        user_profile=tmp_path,
+    )
+
+    candidates = LocalGameScanner(roots).scan()
+
+    assert [item.name for item in candidates] == ["Outer Wilds"]
+    assert candidates[0].source == "steam"
+    assert candidates[0].install_dir == str(
+        steam / "steamapps" / "common" / "OuterWilds"
+    )
+
+
+def test_linux_steam_is_found_in_native_and_flatpak_locations(tmp_path: Path) -> None:
+    """Linux 上 Steam 可能来自原生安装, 也可能被封进 Flatpak 沙箱."""
+    flatpak = tmp_path / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam"
+    (flatpak / "steamapps" / "common").mkdir(parents=True)
+    _write_manifest(flatpak, "1145360", "Hades", "Hades")
+    native = tmp_path / ".local" / "share" / "Steam"
+    (native / "steamapps" / "common").mkdir(parents=True)
+    _write_manifest(native, "646570", "Slay the Spire", "SlayTheSpire")
+
+    roots = replace(
+        _roots(tmp_path, platform="linux"),
+        local_app_data=tmp_path / ".local" / "share",
+    )
+
+    candidates = LocalGameScanner(roots).scan()
+
+    assert [item.name for item in candidates] == ["Hades", "Slay the Spire"]
+    assert all(item.source == "steam" for item in candidates)
+
+
+def test_windows_steam_falls_back_to_the_default_install_dir(tmp_path: Path) -> None:
+    """注册表没有 Steam 登记时, 仍能发现默认安装目录下的库(例如手动安装)."""
+    steam = tmp_path / "Program Files (x86)" / "Steam"
+    (steam / "steamapps" / "common").mkdir(parents=True)
+    _write_manifest(steam, "753640", "Outer Wilds", "OuterWilds")
+
+    candidates = LocalGameScanner(_roots(tmp_path)).scan()
+
+    assert [item.name for item in candidates] == ["Outer Wilds"]
+
+
+@pytest.mark.parametrize("platform", ["macos", "linux"])
+def test_registry_sources_are_windows_only(
+    tmp_path: Path, platform: PlatformFamily
+) -> None:
+    """macOS/Linux 没有注册表: 即使替身能回答, 也不应产生 GOG/Ubisoft 候选."""
+    gog_root = r"SOFTWARE\WOW6432Node\GOG.com\Games"
+    ubisoft_root = r"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs"
+    registry = FakeRegistry(
+        values={
+            (HKLM, f"{gog_root}\\1207664623"): {
+                "gameName": "The Witcher 3",
+                "path": str(tmp_path / "witcher"),
+            },
+            (HKLM, f"{ubisoft_root}\\1000"): {
+                "InstallDir": str(tmp_path / "Anno 1800")
+            },
+        },
+        subkeys={(HKLM, gog_root): ["1207664623"], (HKLM, ubisoft_root): ["1000"]},
+    )
+
+    candidates = LocalGameScanner(_roots(tmp_path, registry, platform=platform)).scan()
+
+    assert candidates == []
+
+
+def test_epic_manifests_are_found_in_the_macos_shared_dir(tmp_path: Path) -> None:
+    manifests = tmp_path / "Epic Games" / "EpicGamesLauncher" / "Data" / "Manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "celeste.item").write_text(
+        json.dumps({"DisplayName": "Celeste", "InstallLocation": str(tmp_path)}),
+        encoding="utf-8",
+    )
+
+    roots = replace(_roots(tmp_path, platform="macos"), user_shared=tmp_path)
+    candidates = LocalGameScanner(roots).scan()
+
+    assert [item.name for item in candidates] == ["Celeste"]
+    assert candidates[0].source == "epic"
+
+
+def test_epic_source_is_skipped_on_linux(tmp_path: Path) -> None:
+    """Linux 没有官方 Epic 启动器: 该来源不做无意义的目录猜测."""
+    manifests = tmp_path / "Local" / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "celeste.item").write_text(
+        json.dumps({"DisplayName": "Celeste", "InstallLocation": str(tmp_path)}),
+        encoding="utf-8",
+    )
+
+    assert LocalGameScanner(_roots(tmp_path, platform="linux")).scan() == []
+
+
+@pytest.mark.parametrize("platform", ["windows", "macos", "linux"])
+def test_monitored_directories_work_on_every_platform(
+    tmp_path: Path, platform: PlatformFamily
+) -> None:
+    games = tmp_path / "Games"
+    (games / "Stardew").mkdir(parents=True)
+
+    candidates = LocalGameScanner(_roots(tmp_path, platform=platform)).scan(
+        monitored=[str(games)]
+    )
+
+    assert [item.name for item in candidates] == ["Stardew"]
+    assert candidates[0].source == "monitored"
 
 
 # --------------------------------------------------------------- 监控目录

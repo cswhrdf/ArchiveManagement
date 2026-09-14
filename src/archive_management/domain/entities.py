@@ -2,7 +2,7 @@
 
 领域层只包含纯数据模型与序列化格式, 不调用 Tkinter、HTTP 或文件系统
 模型使用 pydantic 严格校验, 确保来自数据库行、JSON 或用户输入的字段
-在进入文件操作流程前都是完整且受控的(PLAN 3.2、第 7 节)
+在进入文件操作流程前都是完整且受控的
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ class Game(_RowModel):
     original_name: str = ""
     # 备份根目录下该游戏实际使用的目录名(首次备份时确定, 之后保持不变).
     storage_key: str = ""
-    # 游戏来源平台: steam/epic/gog/battle_net/monitored/manual(阶段 E-2 分类用).
+    # 游戏来源平台: steam/epic/gog/ubisoft/monitored/manual(主页分类用).
     origin: str = "manual"
     # 用户自定义标签(主页分类), 落库时按逗号拼接, 因此标签内不含逗号.
     tags: tuple[str, ...] = ()

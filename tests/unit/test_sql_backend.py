@@ -187,7 +187,7 @@ def test_verify_location_reports_status(tmp_path: Path) -> None:
     assert refreshed.ok is True
 
 
-def test_no_backups_yet_and_phase_errors(tmp_path: Path) -> None:
+def test_no_backups_yet_and_unavailable_actions_raise(tmp_path: Path) -> None:
     service = _service(tmp_path)
     game_id = service.add_game("Demo").game_id
     assert service.list_backups(game_id) == []
@@ -214,7 +214,7 @@ def test_task_status_reports_backup_root(tmp_path: Path) -> None:
     assert str(tmp_path / "backups") in status.target_label
 
 
-# ----------------------------------------------------- 阶段 D: 备份/分支/调度
+# ----------------------------------------------------- 备份/分支/调度
 
 
 def _advance(save: Path, text: str = "") -> None:
@@ -388,7 +388,7 @@ def test_task_status_without_game_reports_paused(tmp_path: Path) -> None:
     assert status.cancellable is False
 
 
-# --------------------------------------------- 阶段 D 迭代: 当前节点/删除/改名/保留
+# --------------------------------------------- 当前节点/删除/改名/保留份数
 
 
 def _service_with_scheduler(
@@ -740,7 +740,7 @@ def test_pause_keeps_interval_configuration(tmp_path: Path) -> None:
     assert item.next_run_label == "—"
 
 
-# ------------------------------------------------- 阶段 E: 恢复与删除原始位置
+# ------------------------------------------------- 恢复与删除原始位置
 
 
 def test_preview_restore_reports_targets_and_extra_files(tmp_path: Path) -> None:
@@ -844,7 +844,7 @@ def test_delete_save_location_uses_injected_trash(
     assert service.list_locations(game_id) == []
 
 
-# ------------------------------------------------- 本地游戏探测(阶段 E-1)
+# ------------------------------------------------- 本地游戏探测
 
 
 def test_monitored_directories_crud(tmp_path: Path) -> None:

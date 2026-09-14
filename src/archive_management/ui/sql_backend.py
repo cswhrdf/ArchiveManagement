@@ -1,9 +1,9 @@
-"""基于 SQLite 的真实后端(阶段 C/D/E).
+"""基于 SQLite 的真实后端.
 
 把 :mod:`archive_management.domain` 实体与仓库映射为 UI 展示模型,
 实现 :class:`~archive_management.ui.backend.ArchiveService`. 本后端是
 GUI 的默认数据来源; 备份、分支、恢复与删除原始存档目录都接入真实服务层,
-导入导出仍给出明确的阶段提示而非静默忽略.
+导入导出目前会给出明确的"尚未提供"提示, 不会静默忽略.
 """
 
 from __future__ import annotations
@@ -470,7 +470,6 @@ class SqlArchiveService:
             progress=active.fraction if active is not None else 0.0,
             next_run_label=_stamp(next_run) if next_run is not None else "—",
             target_label=str(self._backup_root),
-            shortcut_label="—",
             theme_name=self._theme,
             backend_ok=True,
             schedule_text=(
@@ -544,7 +543,7 @@ class SqlArchiveService:
         log_action("ui.set_theme", basic=True, theme=self._theme)
         return self._theme
 
-    # -- 本地游戏探测与监控目录(阶段 E-1) -------------------------------
+    # -- 本地游戏探测与监控目录 -------------------------------------------
 
     def list_monitored_directories(self) -> list[MonitoredDirItem]:
         """返回全部监控目录及其实时路径状态."""
@@ -671,7 +670,7 @@ class SqlArchiveService:
             game_id=None if candidate.game_id is None else str(candidate.game_id),
         )
 
-    # -- 统一游戏主页(阶段 E-2) -------------------------------------------
+    # -- 统一游戏主页 ------------------------------------------------------
 
     def load_home(self) -> HomeBoard:
         """返回主页数据, 沿用上次保存的筛选条件(第一次打开用默认视图)."""
@@ -737,7 +736,7 @@ class SqlArchiveService:
             tr("error.unknown_candidate_status", status=str(status))
         )
 
-    # -- 备份与分支(阶段 D) -----------------------------------------------
+    # -- 备份与分支 --------------------------------------------------------
 
     def run_backup_now(self, game_id: str) -> str:
         """立即创建一次备份(向下保存)."""
@@ -857,12 +856,12 @@ class SqlArchiveService:
         return tr("result.delete_single")
 
     def run_export(self, game_id: str) -> str:
-        """导出游戏(阶段 G 接入)."""
+        """导出游戏(尚未实现)."""
         game, _gid = self._game_ref(game_id)
         log_action("export.start", basic=True, game_id=game.id, name=game.name)
-        raise ArchiveManagementError(tr("error.not_in_this_phase", phase="G"))
+        raise ArchiveManagementError(tr("error.not_available"))
 
-    # -- 调度与生命周期(阶段 D) -------------------------------------------
+    # -- 调度与生命周期 ----------------------------------------------------
 
     def set_schedule(
         self,

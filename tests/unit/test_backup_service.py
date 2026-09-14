@@ -1,4 +1,4 @@
-"""备份用例(向下保存/创建分支)的单元测试(阶段 D 第 2 条).
+"""备份用例(向下保存/创建分支)的单元测试.
 
 重点验证"磁盘与数据库一致":
 - 成功时节点、文件清单与快照目录同时存在;
@@ -35,6 +35,7 @@ from archive_management.infrastructure.repository import (
 )
 from archive_management.services.naming import game_folder
 from archive_management.services.snapshot import MANIFEST_FILENAME, SnapshotSource
+from helpers import touch_save
 
 pytestmark = [
     pytest.mark.backend,
@@ -72,15 +73,13 @@ def _service(tmp_path: Path, *, saves: int = 1) -> tuple[BackupService, int]:
 
 
 def _touch_save(tmp_path: Path, *, index: int = 0, text: str = "") -> None:
-    """改动存档内容, 让下一次备份与当前节点不同.
+    """改动存档内容, 让下一次备份与当前节点不同(共享实现见 tests/helpers.py).
 
-    "内容没有变化就不产生新备份"是用例层的规则(见
+    "内容没有变化就不产生新备份"是备份服务层的规则(见
     :class:`ArchiveManagementError` 的 ContentUnchangedError), 因此需要连续
     备份的用例必须先推进一次存档状态.
     """
-    target = tmp_path / f"save{index}" / "slot.dat"
-    previous = target.read_text(encoding="utf-8")
-    target.write_text(text or f"{previous}+", encoding="utf-8")
+    touch_save(tmp_path, index=index, text=text)
 
 
 def test_create_backup_writes_node_files_and_snapshot(tmp_path: Path) -> None:
@@ -297,7 +296,7 @@ def test_snapshot_failure_leaves_no_node_or_directory(tmp_path: Path) -> None:
     assert game.id is not None
     service = BackupService(database, backup_root=tmp_path / "backups")
     with pytest.raises(ArchiveManagementError):
-        # 未配置存档位置 -> 快照阶段失败
+        # 未配置存档位置 -> 快照环节失败
         service.create_backup(game.id)
     assert service.list_nodes(game.id) == []
     assert not list((tmp_path / "backups").rglob("snapshot.json"))
@@ -400,7 +399,7 @@ def test_multiple_save_locations_are_all_backed_up(tmp_path: Path) -> None:
     assert files == ["loc-0/slot.dat", "loc-1/slot.dat"]
 
 
-# --------------------------------------------- 当前节点 / 继续保存(阶段 D 迭代)
+# --------------------------------------------- 当前节点 / 继续保存
 
 
 def test_current_node_defaults_to_latest(tmp_path: Path) -> None:
@@ -453,7 +452,7 @@ def test_set_current_rejects_unknown_backup(tmp_path: Path) -> None:
         service.set_current(game_id, 12345)
 
 
-# --------------------------------------------------------- 删除(阶段 D 迭代)
+# --------------------------------------------------------- 删除
 
 
 def test_delete_leaf_removes_node_and_snapshot(tmp_path: Path) -> None:
@@ -601,7 +600,7 @@ def test_branch_node_uses_branch_name_as_title(tmp_path: Path) -> None:
     assert branch.branch_name == "Branch"
 
 
-# --------------------------------------------- 自动备份保留份数(阶段 D 迭代)
+# --------------------------------------------- 自动备份保留份数
 
 
 def test_auto_backups_are_pruned_to_keep_count(tmp_path: Path) -> None:
