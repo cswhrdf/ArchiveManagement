@@ -54,7 +54,13 @@ uv run mypy
 uv run pytest --cov
 ```
 
-本地提交钩子只对本次变动的 Python 文件执行 Ruff、Black、mypy，并运行最高严重等级的`tests/unit`；CI 会在 Windows、Ubuntu、macOS 上运行全量测试，并单独执行性能基准与安全测试，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+本地提交钩子只对本次变动的 Python 文件执行 Ruff、Black、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表）；CI 会在 Windows、Ubuntu、macOS 上运行全量测试，并单独执行性能基准与安全测试，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+
+想在本地看 Allure 报告：
+1. `uv run pytest --alluredir=allure-results`
+1. `allure generate allure-results --output allure-report`
+1. `allure open allure-report --port 8080`
+（完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。
 
 ## 打包
 

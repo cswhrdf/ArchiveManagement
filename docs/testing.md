@@ -17,12 +17,43 @@ tests/
   security/              # 不可信输入与危险操作防护（只在 CI 执行）
 ```
 
-| 类别        | 标记                       | 本地 `pytest` | pre-commit | CI                                      |
-| ----------- | -------------------------- | ------------- | ---------- | --------------------------------------- |
-| unit        | 目录默认 `critical`        | 运行          | 运行       | 运行（三平台）                          |
-| integration | 目录默认 `normal`          | 运行          | 不运行     | 运行（三平台）                          |
-| performance | `@pytest.mark.performance` | **不运行**    | 不运行     | `performance` job（ubuntu，单平台采集） |
-| security    | `@pytest.mark.security`    | **不运行**    | 不运行     | `security` job（ubuntu/windows/macos）  |
+| 类别        | 标记                       | 本地 `pytest` | pre-commit               | CI                                      |
+| ----------- | -------------------------- | ------------- | ------------------------ | --------------------------------------- |
+| unit        | 按目录（无专用标记）       | 运行          | 部分（blocker+critical） | 运行（三平台）                          |
+| integration | 按目录（无专用标记）       | 运行          | 部分（blocker+critical） | 运行（三平台）                          |
+| performance | `@pytest.mark.performance` | **不运行**    | 不运行                   | `performance` job（ubuntu，单平台采集） |
+| security    | `@pytest.mark.security`    | **不运行**    | 不运行                   | `security` job（ubuntu/windows/macos）  |
+
+### 严重等级（失败影响面）
+
+每个模块在 `pytestmark` 里声明一个等级，`tests/conftest.py` 把它写成 Allure 的 `severity`。**等级表达“失败的影响面”，与测试层次无关**（层次用 `layer`），并且决定 pre-commit 跑哪些用例：
+
+| 等级       | 判定标准                   | 例子                                                                            | 本地 pre-commit |
+| ---------- | -------------------------- | ------------------------------------------------------------------------------- | --------------- |
+| `blocker`  | 安全与数据完整性底线       | 路径越界 / 危险目标必须被拒、快照或清单被篡改必须拒绝恢复                       | 运行            |
+| `critical` | 核心业务不可用或结果不正确 | 备份 / 快照 / 恢复 / 删除计划、仓储事务、迁移、调度、GUI 真实后端、全链路流水线 | 运行            |
+| `normal`   | 常规功能与交互             | 配置、平台探测、主页聚合、对话框、CLI、热键、审计、存档位置与命名               | 仅 CI           |
+| `minor`    | 展示与辅助                 | 调色板 / 控件样式 / 渲染修正、i18n 文案、打包元数据、演示后端、性能基准         | 仅 CI           |
+| `trivial`  | 极低影响                   | 色值、脚本生成的报告汇总项（覆盖率 / 性能 / 安全摘要）                          | 仅 CI           |
+
+约定：
+
+- 每个模块**恰好声明一个等级**；单个用例可用 `@pytest.mark.blocker` 等覆盖模块默认值。`tests/unit/test_test_config.py` 会校验“恰好一个”，并要求**五个等级都至少有一个模块在用**（否则报告分布会退化回一边倒）。
+- 漏写时按目录兜底（unit/integration=normal、performance=minor、security=critical），兜底只是为了不冒出 `no_severity` 桶。
+- **别按目录或层次照搬等级**：`tests/unit` 里既有 blocker（危险目标判定）也有 minor（调色板色值）。
+- 复现本地钩子跑的子集：`uv run pytest --min-severity=critical`。
+
+### 层级（Allure 测试金字塔）
+
+每个模块用 `pytest.mark.layer(...)` 声明测试层次，Allure 的“测试金字塔”与“按层耗时”控件直接读它。**层次描述“用例实际接了什么”，不完全等于所在目录**：
+
+| 层次          | 判定标准                                                                     | 例子                                                             |
+| ------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `unit`        | 单个组件 + 替身或内存数据                                                    | 解析器、格式化函数、纯逻辑校验、可注入替身的服务                 |
+| `integration` | 真实数据库 / 文件系统 / 领域服务之间的协作（不要求位于 `tests/integration`） | 真 SQLite 的仓储与迁移、真实快照与恢复、跨层备份→恢复→删除流水线 |
+| `e2e`         | 从真实入口走完整用户流程                                                     | 真实窗口 + 按钮/菜单操作、命令行入口的完整流程                   |
+
+因此 `tests/unit/` 下的真实 SQLite / 文件系统模块（`test_repository.py`、`test_sql_backend.py`、`test_restore.py`、`test_backup_service.py`、`test_snapshot.py` 等）声明为 `integration`：它们确实在做跨组件协作，报告应当如实反映这一点。审查时如发现“目录层次”与“实际接的东西”不一致，以实际为准。
 
 默认收集范围由 `pyproject.toml` 的 `testpaths` 决定（只有 `tests/unit` 与`tests/integration`）。性能与安全测试需要显式指定：
 
@@ -87,6 +118,8 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 - 每条安全结论记录：类别、场景、输入摘要、期望拦截行为、实际结果、是否拦截。
 - 环境信息记录：操作系统与平台族、Python 版本与实现、提交 SHA、分支与 CI run id、测试类别是否执行、覆盖率门槛（`scripts/create_allure_summary.py` 写入`allure-results/environment.properties`）。
 - 覆盖率摘要由 `scripts/create_allure_coverage.py` 生成；性能与安全结果由`scripts/create_allure_summary.py` 生成，原始 JSON/CSV 作为附件保留，保证结论可下载、可追溯。
+- 汇总报告把三个平台的结果合并在一起，因此**平台用例身份**必须区分：每个用例都会写入平台参数（Allure 用它算用例身份）、`os` 标签（筛选）与套件名后缀（套件树）。缺了参数时三次执行会被并成"同一个用例重试了多次"，看不出结果来自哪台机器；性能/安全/覆盖率摘要也各平台各占一条。
+- 用例标题会还原 pytest 对参数化 id 做的 ASCII 转义（`\u7528\u6237` → `用户`），并写在 `@allure.title` 使用的同一属性上（`allure.dynamic.title` 会被 allure-pytest 用 `item.name` 覆盖）。
 
 ## 6. CI 流程
 
@@ -101,11 +134,69 @@ allure-summary (合并全部 allure-results-* → 写入环境信息与性能/�
 
 每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
 
-## 7. 新增测试清单
+### 报告自检与发布（不要跳过）
+
+报告是一套静态站点：用例详情页打开时才去取`data/test-results/<结果 id>.json`。这个目录一旦在传输或解压环节被丢掉，报告就只剩汇总与用例树——界面能看到用例通过与否，点开用例却是空的（生成阶段本身没问题，用同一个 allure 版本本地生成就有这些文件）。
+
+因此每个生成报告的作业在发布前都要跑 `scripts/verify_allure_report.py`：
+
+- 检查入口资源：`index.html`、单个 `app-*.js`、`summary.json`、`test-results.json`、`widgets/**/statistic.json`、`widgets/**/tree.json`；
+- 逐条核对结果索引（`test-results.json` 的 `byId`）引用的详情文件是否存在，并确认条数与 `allure-results` 里的结果文件一致；
+- 校验用例分组（`data/test-env-groups/*.json`）引用的结果 id 都在索引里。
+
+任一项不通过即作业失败，且**不发布报告**（`Upload Allure report` 只在自检成功时执行）；标准输出里的"结果索引 / 详情文件 / 用例分组"三个计数就是排查入口。自检通过后用 `--zip` 把报告打成单个 `allure-report.zip` 发布：单文件要么完整到达、要么直接报错，不会出现"整个目录被悄悄丢掉"的半损坏状态（改动前的 artifact 就踩过一次）。
+
+Windows runner 的控制台是 cp1252：Python 默认按该编码输出，**打印中文会直接 `UnicodeEncodeError` 打断步骤**（报告自检在 CI 上踩过）。因此工作流最外层设了 `PYTHONUTF8=1`，两个报告脚本自己也会把标准输出切成 UTF-8（取不到 `reconfigure` 的替身如 pytest `capsys` 就跳过）。新增会向终端打中文的脚本时注意这条。
+
+下载 artifact 后本地核对（先解压外层 artifact，再解压其中的 `allure-report.zip`）：
+
+```shell
+uv run python scripts/verify_allure_report.py allure-report          # 只自检
+uv run python scripts/verify_allure_report.py allure-report --zip    # 自检并重新打包
+```
+
+## 7. 本地生成与查看报告
+
+前置：Allure 3 CLI，与 CI 同一条安装命令（`npm install --global allure@3`；本地与 CI 的报告目录结构一致，本地报告包可以直接用上一节的自检脚本核对）。`allure-results/`、`allure-report*/`、`.allure/` 都在 `.gitignore` 里，不会进版本库。
+
+```shell
+# 1) 跑本地测试并产出 Allure 结果(目录名与 CI 一致, 后续命令可直接复用)
+uv run pytest --alluredir=allure-results
+
+# 2) 由结果生成静态报告
+allure generate allure-results --output allure-report
+
+# 3) 生成后直接打开浏览器(等价于 generate 之后再 open)
+allure generate allure-results --output allure-report --open
+
+# 4) 打开已经生成好的报告(端口省略时用随机端口)
+allure open allure-report --port 8080
+
+# 5) 一步到位: 直接从结果目录生成并打开(不落地产出报告目录)
+allure open allure-results
+```
+
+只想看某一类用例时，把第 1 步换成对应目录（性能/安全测试必须显式指定）：
+
+```shell
+uv run pytest tests/performance -m performance --alluredir=allure-results
+uv run pytest tests/security -m security --alluredir=allure-results
+```
+
+也可以用下载下来的 CI 结果（artifact `allure-resources-*` 里的 `allure-results/`）在本地复现 CI 报告，命令与上面完全相同；`allure generate` 之后建议先跑一次自检再打开。
+
+四个容易踩的坑：
+
+- **报告要经 HTTP 提供**：控件数据与用例详情都是前端按需 `fetch` 的相对路径，直接双击 `allure-report/index.html`（`file://`）会被浏览器的跨域策略拦掉，界面只剩加载动画或空壳。用 `allure open`，或任意静态服务器。
+- **`allure open` 的目录是必填参数**：只写 `allure open --port 8080` 会直接报错退出，正确写法是 `allure open allure-report --port 8080`。
+- **报告目录已存在时 `allure generate` 不会刷新数据**：实测先删一个 `data/test-results/*.json` 再生成，该文件仍然缺失（2634 → 2633）。要重新生成就先删掉 `allure-report` 目录。
+- **打开前先自检**（见上一节）：缺 `data/test-results/*.json` 时界面照样显示"通过/失败"，点开用例却是空的。
+
+## 8. 新增测试清单
 
 1. 选对目录：纯逻辑进 `unit`，需要真实文件/数据库协作进 `integration`，规模基准进`performance`，防护类进 `security`。
 2. 声明四层 Allure 标签（`epic`/`feature`/`story`/`layer`）。`tests/unit/test_test_config.py`会扫描全部测试模块，缺标签会直接失败。
-3. 选择严重等级：默认 unit=critical、integration=normal，性能/安全=normal；需要时用`@pytest.mark.blocker` / `minor` 等覆盖。
+3. 选择严重等级：按**失败影响面**在模块 `pytestmark` 里声明一个等级（blocker/critical/normal/minor/trivial，判定标准见第 1 节的严重等级表）；需要更细的区分时，给单个用例加 `@pytest.mark.blocker` 等标记。
 4. 优先用 `tests/helpers.py` 的构造器，避免在模块里再抄一份临时数据库/游戏数据构造。
 5. 性能测试必须给出规模与阈值，安全测试必须用 `security_recorder.expect_blocked`记录结论。
 6. 本地验证：

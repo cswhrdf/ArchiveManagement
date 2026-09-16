@@ -31,7 +31,7 @@ from reporting import SecurityRecorder
 
 pytestmark = [
     pytest.mark.security,
-    pytest.mark.normal,
+    pytest.mark.critical,
     pytest.mark.epic("工程与发布"),
     pytest.mark.feature("不可信输入防护"),
     pytest.mark.story("拒绝恶意配置与脏数据"),

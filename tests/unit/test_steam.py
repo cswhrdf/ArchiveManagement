@@ -12,7 +12,7 @@ from archive_management.services.steam import LocalSteamDataReader
 
 pytestmark = [
     pytest.mark.steam,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("Steam 数据读取"),
     pytest.mark.story("读取 Steam 库"),

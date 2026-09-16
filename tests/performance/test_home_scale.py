@@ -32,7 +32,7 @@ from reporting import PerformanceRecorder
 
 pytestmark = [
     pytest.mark.performance,
-    pytest.mark.normal,
+    pytest.mark.minor,
     pytest.mark.epic("工程与发布"),
     pytest.mark.feature("主页规模基准"),
     pytest.mark.story("大规模游戏库的主页响应"),

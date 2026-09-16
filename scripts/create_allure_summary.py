@@ -2,10 +2,11 @@
 
 汇总要做三件事:
 
-1. 写入环境信息(操作系统、Python、提交 SHA、测试类别、覆盖率门槛), 让每份
-   报告都能回答"这次结果是在哪个平台、哪个提交上跑出来的";
+1. 写入环境信息(操作系统、Python、提交 SHA、测试类别、覆盖率门槛、本次涉及的
+   平台), 让每份报告都能回答"这次结果是在哪个平台、哪个提交上跑出来的";
 2. 把 ``performance-results.json`` / ``security-results.json`` 转成 Allure 里
    可检索的测试项: 指标表写进描述, 原始 JSON/CSV 作为附件, 保证结论可下载;
+   每个平台各写一条(名称/参数/标签都带平台), 三个平台的安全结论不会互相覆盖;
 3. 缺少某类结果时不报错(例如只跑了单元测试), 只是跳过该类并写进环境信息。
 
 用法(CI 汇总 job): ``uv run python scripts/create_allure_summary.py``
@@ -13,6 +14,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -25,10 +27,30 @@ RESULTS_DIRECTORY = Path("allure-results")
 PERFORMANCE_JSON = Path("performance-results.json")
 PERFORMANCE_CSV = Path("performance-results.csv")
 SECURITY_JSON = Path("security-results.json")
+# CI 把三个平台的同名结果分目录下载(merge-multiple: false), 这里逐个收集,
+# 否则后写的那份会盖掉先写的, 汇总报告里就只剩一个平台的安全结论。
+SECURITY_FINDINGS_DIRECTORY = Path("security-findings")
+RESULT_FILE_SUFFIX = "-result.json"
 
 ENVIRONMENT_FILENAME = "environment.properties"
+# 性能/安全汇总项的严重等级: 它们不验证行为, 只承载原始结论与附件, 但不打等级
+# 会让报告里多出一个 no_severity 桶(和覆盖摘要项保持一致)。
+SUMMARY_SEVERITY = "trivial"
 # 覆盖率门槛与 pytest 配置保持一致(低于该值 pytest 已经失败, 这里只作记录).
 COVERAGE_THRESHOLD = "80"
+
+
+def ensure_utf8_output() -> None:
+    """把标准输出/错误切成 UTF-8(Windows 控制台默认 cp1252, 打印中文会崩).
+
+    ``scripts/verify_allure_report.py`` 里有同样的一份: 两个脚本都是独立入口,
+    不互相导入(scripts 不是包)。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            with contextlib.suppress(OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
@@ -65,17 +87,68 @@ def git_commit() -> str:
     return head
 
 
+def security_files() -> list[Path]:
+    """列出所有待汇总的安全结果文件(单文件 + 各平台子目录), 按路径去重排序."""
+    candidates = [
+        SECURITY_JSON,
+        *SECURITY_FINDINGS_DIRECTORY.glob(f"*/{SECURITY_JSON.name}"),
+    ]
+    return sorted({path for path in candidates if path.is_file()})
+
+
+def platform_of(payload: dict[str, Any] | None) -> str:
+    """从结果文件的环境信息里取平台展示名, 与 pytest 结果上的 ``os`` 标签一致.
+
+    结果文件里 ``os`` 是 ``platform.platform()`` 的长串(如 ``Windows-11-...``),
+    ``os_family`` 才是归一化的平台族, 因此优先用它, 再映射成展示名。
+    """
+    info = (payload or {}).get("environment", {})
+    raw = str(info.get("os_family") or "").lower()
+    if raw.startswith("win"):
+        return "Windows"
+    if raw.startswith(("darwin", "mac")):
+        return "macOS"
+    if raw.startswith("linux"):
+        return "Linux"
+    return str(info.get("os") or "unknown")
+
+
+def tested_platforms(results_dir: Path) -> list[str]:
+    """扫描合并进来的结果, 列出本次运行涉及的所有平台.
+
+    合并报告里环境信息只能写一份, 单看 ``os`` 会误以为全部结果都来自汇总 job 的
+    机器; 各平台的 pytest 结果带着平台参数与 ``os`` 标签, 这里把它们汇总出来。
+    """
+    found: set[str] = set()
+    for path in results_dir.rglob(f"*{RESULT_FILE_SUFFIX}"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        labels = payload.get("labels", []) if isinstance(payload, dict) else []
+        found.update(
+            str(label.get("value"))
+            for label in labels
+            if isinstance(label, dict) and label.get("name") == "os"
+        )
+    return sorted(found)
+
+
 def environment_lines(
-    performance: dict[str, Any] | None, security: dict[str, Any] | None
+    performance: dict[str, Any] | None,
+    security: dict[str, Any] | None,
+    platforms: list[str],
 ) -> list[tuple[str, str]]:
     """组装环境信息(平台、Python、提交、测试类别与门槛)."""
     payload = performance if performance is not None else (security or {})
     info = payload.get("environment", {})
     return [
         ("os", str(info.get("os", "unknown"))),
+        # 展示名与用例上的平台参数/os 标签保持一致(Windows/Linux/macOS).
+        ("os.family", platform_of(payload)),
         (
-            "os.family",
-            str(info.get("os_family", os.environ.get("RUNNER_OS", "unknown"))),
+            "tested.platforms",
+            ", ".join(platforms) if platforms else "unknown",
         ),
         ("python.version", str(info.get("python", "unknown"))),
         ("python.implementation", str(info.get("python_implementation", "unknown"))),
@@ -174,15 +247,23 @@ def write_result(
     title: str,
     description: str,
     attachments: list[dict[str, str]],
+    platform: str,
 ) -> None:
-    """写入一条 passed 状态的 Allure 结果(承载该类测试的汇总信息)."""
+    """写入一条 passed 状态的 Allure 结果(承载该类测试的汇总信息).
+
+    全名与 historyId 都带平台: 三个平台的结论在报告里各占一行, 也能各自与
+    历史运行对上(同平台的趋势连得上, 不会被当成彼此的"重试")。
+
+    严重等级固定为 ``trivial``: 汇总项本身不验证任何行为, 只是把原始结论与附件
+    带进报告; 不打等级的话报告里会多出一个 no_severity 桶。
+    """
     timestamp = time.time_ns() // 1_000_000
     result: dict[str, Any] = {
         "uuid": result_id,
         "historyId": str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f"archive-management-{category}")
+            uuid.uuid5(uuid.NAMESPACE_URL, f"archive-management-{category}-{platform}")
         ),
-        "fullName": f"archive-management.{category}",
+        "fullName": f"archive-management.{category}.{platform}",
         "name": title,
         "status": "passed",
         "stage": "finished",
@@ -190,12 +271,15 @@ def write_result(
         "stop": timestamp,
         "labels": [
             {"name": "suite", "value": "Test report"},
+            {"name": "os", "value": platform},
             {"name": "feature", "value": title},
             {"name": "epic", "value": "工程与发布"},
             {"name": "story", "value": title},
             {"name": "layer", "value": category},
             {"name": "testCategory", "value": category},
+            {"name": "severity", "value": SUMMARY_SEVERITY},
         ],
+        "parameters": [{"name": "平台", "value": platform}],
         "description": description,
         "attachments": attachments,
     }
@@ -212,15 +296,28 @@ def main() -> int:
         return 1
 
     performance = read_json(PERFORMANCE_JSON)
-    security = read_json(SECURITY_JSON)
+    security_payloads = [
+        payload for payload in (read_json(path) for path in security_files()) if payload
+    ]
 
-    lines = environment_lines(performance, security)
+    platforms = sorted(
+        {
+            *tested_platforms(results_dir),
+            *([platform_of(performance)] if performance is not None else []),
+            *(platform_of(payload) for payload in security_payloads),
+        }
+        - {"unknown"}
+    )
+    lines = environment_lines(
+        performance, security_payloads[0] if security_payloads else None, platforms
+    )
     (results_dir / ENVIRONMENT_FILENAME).write_text(
         "".join(f"{key}={value}\n" for key, value in lines), encoding="utf-8"
     )
 
     if performance is not None:
         measurements = list(performance.get("measurements", []))
+        platform = platform_of(performance)
         result_id = str(uuid.uuid4())
         attachments = [
             item
@@ -234,35 +331,42 @@ def main() -> int:
             results_dir,
             result_id=result_id,
             category="performance",
-            title="Performance baseline",
+            title=f"Performance baseline · {platform}",
             description=performance_table(measurements),
             attachments=attachments,
+            platform=platform,
         )
-        print(f"性能基准已写入 Allure: {len(measurements)} 条测量")
+        print(f"性能基准已写入 Allure: {len(measurements)} 条测量({platform})")
 
-    if security is not None:
-        findings = list(security.get("findings", []))
+    for source in security_files():
+        payload = read_json(source)
+        if payload is None:
+            continue
+        findings = list(payload.get("findings", []))
+        platform = platform_of(payload)
         result_id = str(uuid.uuid4())
         attachments = [
             item
-            for item in (write_attachment(results_dir, SECURITY_JSON, result_id),)
+            for item in (write_attachment(results_dir, source, result_id),)
             if item is not None
         ]
         write_result(
             results_dir,
             result_id=result_id,
             category="security",
-            title="Security findings",
+            title=f"Security findings · {platform}",
             description=security_table(findings),
             attachments=attachments,
+            platform=platform,
         )
-        print(f"安全结论已写入 Allure: {len(findings)} 条结论")
+        print(
+            f"安全结论已写入 Allure: {len(findings)} 条结论({platform}, 来源 {source})"
+        )
 
-    missing = [
-        str(path) for path in (PERFORMANCE_JSON, SECURITY_JSON) if not path.is_file()
-    ]
-    if missing:
-        print(f"未找到以下结果文件, 已跳过: {', '.join(missing)}")
+    if performance is None:
+        print(f"未找到性能结果文件, 已跳过: {PERFORMANCE_JSON}")
+    if not security_payloads:
+        print(f"未找到安全结果文件, 已跳过: {SECURITY_JSON}")
     return 0
 
 

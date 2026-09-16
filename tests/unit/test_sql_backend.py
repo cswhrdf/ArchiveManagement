@@ -26,7 +26,8 @@ pytestmark = [
     pytest.mark.epic("数据持久化"),
     pytest.mark.feature("真实 SQLite 后端"),
     pytest.mark.story("备份恢复与删除数据流"),
-    pytest.mark.layer("unit"),
+    # 真实 SQLite + 文件系统 + 调度后端, 按层定义归入 integration.
+    pytest.mark.layer("integration"),
 ]
 
 

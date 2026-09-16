@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sqlite3
 import threading
 import tkinter as tk
 from collections.abc import Callable
@@ -79,7 +80,9 @@ _TONE_COLORS: dict[str, str] = {
     "green": "#3b806e",
     "default": "#405685",
 }
-_WINDOW_MIN = (1200, 720)
+# 支持的最小窗口尺寸: 主页里那些固定宽度的行必须能放进"最小窗口下的内容区",
+# 否则在更窄的屏幕(窗口被窗口管理器再压小)上会越界并盖住描边。
+WINDOW_MIN_SIZE = (1200, 720)
 _RAIL_WIDTH = 350
 # 分支视图中用于标示层级的连接符(与缩进配合).
 _BRANCH_MARK = "└ "
@@ -176,7 +179,7 @@ class ArchiveApp(ctk.CTk):
         self._paths = paths
         self._shortcuts = self._load_shortcuts()
         self.title(title)
-        self.minsize(*_WINDOW_MIN)
+        self.minsize(*WINDOW_MIN_SIZE)
         self.geometry("1360x860")
         self.configure(fg_color=self.p.background)
 
@@ -817,7 +820,17 @@ class ArchiveApp(ctk.CTk):
         )
 
     def _load_first_game(self) -> None:
-        """启动时选中第一款游戏(详情页有内容), 默认页面仍是游戏主页."""
+        """启动时选中第一款游戏(详情页有内容), 默认页面仍是游戏主页.
+
+        启动阶段的读取失败只记日志: 这里抛异常等于应用根本起不来。
+        """
+        try:
+            self._load_first_game_now()
+        except (ArchiveManagementError, sqlite3.Error) as exc:
+            self._report_read_failure(exc)
+
+    def _load_first_game_now(self) -> None:
+        """执行一次真实的启动加载(异常由 :meth:`_load_first_game` 统一兜住)."""
         games = self.backend.list_games()
         self._refresh_usage()
         if games:
@@ -948,14 +961,29 @@ class ArchiveApp(ctk.CTk):
         self._task_ticks += 1
         if not (self._busy or self._task_running) and self._task_ticks % 5:
             return
-        task = self.backend.task_status(self._game_id)
+        try:
+            task = self.backend.task_status(self._game_id)
+        except (ArchiveManagementError, sqlite3.Error) as exc:
+            self._report_read_failure(exc)
+            return
         self._render_task(task)
         self._task_running = task.running
         if task.revision != self._revision:
             self._reload_data(task)
 
     def _reload_data(self, task: TaskStatus | None = None) -> None:
-        """重载备份列表与概要, 并同步数据版本号与选中项."""
+        """重载备份列表与概要; 读取失败只记日志并保留上次画面.
+
+        轮询与界面回调都会走到这里: 异常冒到 Tk 回调里会让整个窗口报错, 而数据层
+        这类失败(磁盘/文件被外部短暂占用)通常下一秒就会恢复。
+        """
+        try:
+            self._reload_data_now(task)
+        except (ArchiveManagementError, sqlite3.Error) as exc:
+            self._report_read_failure(exc)
+
+    def _reload_data_now(self, task: TaskStatus | None) -> None:
+        """执行一次实际重载(业务/数据库异常由 :meth:`_reload_data` 统一兜住)."""
         status = task if task is not None else self.backend.task_status(self._game_id)
         if status.revision != self._revision:
             self._refresh_usage()
@@ -971,6 +999,11 @@ class ArchiveApp(ctk.CTk):
         self._render_list()
         self._render_hero(self.backend.get_detail(self._game_id))
         self._restore_selection()
+
+    def _report_read_failure(self, exc: Exception) -> None:
+        """读取失败: 记日志 + 状态栏提示(同样文案重复设置不会闪烁)."""
+        logger.error("读取数据失败: %s", exc)
+        self._feedback(FeedbackKind.ERROR, tr("error.read_failed", reason=str(exc)))
 
     def _restore_selection(self) -> None:
         """按最新数据重绘选中项(选中节点已消失时清空选择)."""

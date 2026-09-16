@@ -14,7 +14,7 @@ from archive_management.services.processes import (
 )
 
 pytestmark = [
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("备份与分支"),
     pytest.mark.feature("进程探测"),
     pytest.mark.story("恢复前检查游戏进程"),

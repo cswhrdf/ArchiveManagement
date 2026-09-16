@@ -5,7 +5,9 @@
 
 1. **绝不覆盖**: 目标目录已存在时直接失败, 不会把新快照写进旧备份.
 2. **临时目录**: 所有写入先落在目标同级的 ``*.partial-*`` 目录中, 复制完成
-   并通过哈希复核后, 才用 ``os.replace`` 原子改名为正式目录.
+   并通过哈希复核后, 才用 ``os.replace`` 原子改名为正式目录; 改名遇到
+   "拒绝访问/共享冲突"这类瞬时占用(杀毒软件、系统索引器正在扫描刚写入的文件)
+   时会短暂重试, 连续失败则按真实错误上报。
 3. **失败即清理**: 任一环节异常都会删除临时目录, 不会留下可被误认为完整
    备份的半成品.
 4. **符号链接不跟随**: 链接按 ``symlink`` 类型记入清单但不复制内容, 避免把
@@ -16,9 +18,12 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import logging
 import shutil
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -32,11 +37,22 @@ from archive_management.exceptions import (
     SnapshotError,
 )
 
+logger = logging.getLogger(__name__)
+
 SNAPSHOT_FORMAT_VERSION = 1
 MANIFEST_FILENAME = "snapshot.json"
 _CHUNK_SIZE = 1024 * 1024
 _DIRECTORY_SHA256 = hashlib.sha256(b"directory").hexdigest()
 _SYMLINK_SHA256 = hashlib.sha256(b"symlink").hexdigest()
+
+# 提交阶段的重试参数: 杀毒软件/索引器会在文件刚刚写完后短暂持有句柄, 让改名报
+# "拒绝访问"; 这类错误稍等即可成功。真正的权限问题会连着失败, 因此重试必须有
+# 上限, 且失败时保留原始原因与重试次数供审计排查。
+_COMMIT_ATTEMPTS = 5
+_COMMIT_DELAY_SECONDS = 0.05
+# Windows 错误码: 拒绝访问(5) / 共享冲突(32) / 锁定冲突(33).
+_RETRYABLE_WINERRORS = frozenset({5, 32, 33})
+_RETRYABLE_ERRNOS = frozenset({errno.EACCES, errno.EBUSY, errno.EPERM})
 
 # 快照进度回调: 接收 0..1 的比例与人类可读说明.
 # 用 Callable 别名而不是 Protocol: 这样普通函数/lambda/可调用对象都能直接
@@ -164,7 +180,7 @@ def create_snapshot(
             encoding="utf-8",
         )
         _report(progress, 1.0, "提交快照")
-        temporary.replace(destination)
+        _commit_snapshot(temporary, destination)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
@@ -174,6 +190,51 @@ def create_snapshot(
         content_hash=content_hash,
         total_size=sum(entry.size for entry in entries if entry.file_kind == "file"),
     )
+
+
+def _commit_snapshot(temporary: Path, destination: Path) -> None:
+    """把临时目录改名为正式目录; 对瞬时文件系统错误做有界重试.
+
+    Windows 上杀毒软件与系统索引器会短暂持有刚写入文件的句柄, 使改名报
+    "拒绝访问"(5)或"共享冲突"(32)/"锁定冲突"(33); 这类占用稍后即释放, 重试
+    通常立刻成功。重试次数与总等待都有上限, 连续失败说明是真实的权限问题,
+    此时仍抛 :class:`SnapshotError`, 但保留原始原因并注明重试次数, 便于
+    审计日志(`backup.create.failed`)直接看出"是重试过的瞬时故障还是硬性拒绝"。
+    """
+    delay = _COMMIT_DELAY_SECONDS
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            temporary.replace(destination)
+            return
+        except OSError as exc:
+            if attempts >= _COMMIT_ATTEMPTS or not _is_transient_os_error(exc):
+                raise SnapshotError(_commit_failure_message(exc, attempts)) from exc
+            logger.debug(
+                "快照提交遇到瞬时占用, %.0f ms 后重试(第 %d/%d 次): %s",
+                delay * 1000,
+                attempts,
+                _COMMIT_ATTEMPTS - 1,
+                exc,
+            )
+            time.sleep(delay)
+            delay *= 2
+
+
+def _is_transient_os_error(error: OSError) -> bool:
+    """判断错误是否属于"稍后重试可能成功"的瞬时文件系统占用."""
+    winerror = getattr(error, "winerror", None)
+    if isinstance(winerror, int) and winerror in _RETRYABLE_WINERRORS:
+        return True
+    return error.errno in _RETRYABLE_ERRNOS
+
+
+def _commit_failure_message(error: OSError, attempts: int) -> str:
+    """渲染提交失败信息(重试过则注明次数)."""
+    if attempts <= 1:
+        return f"提交快照失败: {error}"
+    return f"提交快照失败(已重试 {attempts - 1} 次): {error}"
 
 
 def verify_snapshot(root: Path, *, deep: bool = True) -> SnapshotVerification:

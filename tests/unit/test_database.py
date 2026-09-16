@@ -16,7 +16,8 @@ pytestmark = [
     pytest.mark.epic("数据持久化"),
     pytest.mark.feature("数据库迁移"),
     pytest.mark.story("数据库结构与版本"),
-    pytest.mark.layer("unit"),
+    # 跑真实 SQLite 引擎(而非替身), 按层定义归入 integration.
+    pytest.mark.layer("integration"),
 ]
 
 EXPECTED_TABLES = {

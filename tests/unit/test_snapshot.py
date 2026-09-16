@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -16,6 +19,7 @@ from archive_management.services.snapshot import (
     MANIFEST_FILENAME,
     SnapshotEntry,
     SnapshotSource,
+    _is_transient_os_error,
     content_hash_of,
     create_snapshot,
     read_manifest_entries,
@@ -291,3 +295,181 @@ def test_remove_snapshot_is_idempotent(tmp_path: Path) -> None:
     target.mkdir()
     remove_snapshot(target)
     assert not target.exists()
+
+
+# --- 提交阶段: 瞬时占用重试 ----------------------------------------------------
+
+
+class _CommitProbe:
+    """记录改名次数并按脚本抛错的替身(前 ``failures`` 次失败)."""
+
+    def __init__(self, error: OSError, *, failures: int) -> None:
+        self.error = error
+        self.failures = failures
+        self.calls = 0
+
+    def handler(self) -> Callable[[Path, Path | str], Path]:
+        """返回可直接赋给 ``Path.replace`` 的函数(以方法形式被调用)."""
+        original = Path.replace
+
+        def replace(source: Path, target: Path | str) -> Path:
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise self.error
+            return original(source, target)
+
+        return replace
+
+    def attach(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """把替身装到 ``Path.replace`` 上."""
+        monkeypatch.setattr(Path, "replace", self.handler())
+
+
+def _blocked_by_scanner() -> OSError:
+    """构造"杀毒软件/索引器正在扫描"造成的改名失败.
+
+    Windows 用错误码 5(拒绝访问); 其它平台没有 ``winerror``, 退回 ``EACCES`` ——
+    两者都在可重试集合里, 用例因此在三个平台上验证的是同一条重试路径(早先只造
+    Windows 错误码, 在 Linux/macOS 上会被归为"硬性失败"而不重试)。
+    """
+    if os.name == "nt":
+        return OSError(errno.EACCES, "拒绝访问。", "temporary", 5)
+    return PermissionError(errno.EACCES, "拒绝访问。")
+
+
+class _FakeWindowsError(OSError):
+    """带 Windows 错误码的异常替身.
+
+    POSIX 上 ``OSError`` 没有 ``winerror`` 槽位(直接赋值会 ``AttributeError``), 用子类
+    实例(自带 ``__dict__``)挂上错误码, 就能在三个平台上验证同一段分类逻辑。
+    """
+
+    def __init__(self, winerror: int) -> None:
+        super().__init__(0, "拒绝访问")
+        self.winerror = winerror
+
+
+def _windows_error(winerror: int) -> OSError:
+    """构造带 Windows 错误码的异常(供跨平台验证可重试分类)."""
+    return _FakeWindowsError(winerror)
+
+
+@pytest.mark.parametrize(
+    ("error", "retryable"),
+    [
+        (PermissionError(errno.EACCES, "拒绝访问"), True),
+        (OSError(errno.EBUSY, "设备忙"), True),
+        (OSError(errno.EPERM, "不允许"), True),
+        (OSError(errno.ENOSPC, "磁盘已满"), False),
+        (FileNotFoundError(errno.ENOENT, "找不到"), False),
+    ],
+)
+def test_transient_error_classification_covers_posix_codes(
+    error: OSError, retryable: bool
+) -> None:
+    """可重试判定要按 errno 认瞬时占用, 硬性失败不能误判."""
+    assert _is_transient_os_error(error) is retryable
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_transient_error_classification_covers_windows_codes(winerror: int) -> None:
+    """Windows 上"拒绝访问/共享冲突/锁定冲突"都算瞬时占用."""
+    assert _is_transient_os_error(_windows_error(winerror)) is True
+
+
+def test_transient_error_classification_rejects_unknown_windows_code() -> None:
+    """其它 Windows 错误码(例如 2 找不到路径)不算瞬时占用."""
+    assert _is_transient_os_error(_windows_error(2)) is False
+
+
+def _snapshot_dir(tmp_path: Path) -> Path:
+    """造一个最小存档目录, 供提交用例使用."""
+    save = tmp_path / "save"
+    save.mkdir()
+    (save / "slot1.dat").write_text("alpha", encoding="utf-8")
+    return save
+
+
+def test_commit_retries_transient_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """改名被瞬时占用拒绝时重试: 前两次失败、第三次成功, 快照照常提交."""
+    probe = _CommitProbe(_blocked_by_scanner(), failures=2)
+    probe.attach(monkeypatch)
+    destination = tmp_path / "backup" / "node1"
+
+    result = create_snapshot(
+        [SnapshotSource(path=str(_snapshot_dir(tmp_path)), kind="directory", index=0)],
+        destination,
+    )
+
+    assert probe.calls == 3
+    assert result.root.is_dir()
+    assert (destination / "loc-0" / "slot1.dat").read_text(encoding="utf-8") == "alpha"
+    assert not list(destination.parent.glob("*.partial-*"))
+
+
+def test_commit_retries_errno_based_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX 上的 EACCES(权限暂时不满足)同样按瞬时错误重试一次即可成功."""
+    probe = _CommitProbe(PermissionError(errno.EACCES, "拒绝访问"), failures=1)
+    probe.attach(monkeypatch)
+
+    result = create_snapshot(
+        [SnapshotSource(path=str(_snapshot_dir(tmp_path)), kind="directory", index=0)],
+        tmp_path / "backup" / "node2",
+    )
+
+    assert probe.calls == 2
+    assert result.root.is_dir()
+
+
+def test_commit_does_not_retry_hard_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """磁盘写满这类硬性失败立刻上报: 重试只会让用户多等, 不会成功."""
+    probe = _CommitProbe(OSError(errno.ENOSPC, "磁盘已满"), failures=99)
+    probe.attach(monkeypatch)
+    destination = tmp_path / "backup" / "node3"
+
+    with pytest.raises(SnapshotError, match="提交快照失败: "):
+        create_snapshot(
+            [
+                SnapshotSource(
+                    path=str(_snapshot_dir(tmp_path)), kind="directory", index=0
+                )
+            ],
+            destination,
+        )
+
+    assert probe.calls == 1
+    assert not destination.exists()
+    assert not list(destination.parent.glob("*.partial-*"))
+
+
+def test_commit_reports_retry_count_when_occupation_persists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一直占用时在上限处失败, 且错误里保留原始原因与重试次数, 供审计排查."""
+    probe = _CommitProbe(_blocked_by_scanner(), failures=99)
+    probe.attach(monkeypatch)
+    destination = tmp_path / "backup" / "node4"
+
+    with pytest.raises(SnapshotError) as failure:
+        create_snapshot(
+            [
+                SnapshotSource(
+                    path=str(_snapshot_dir(tmp_path)), kind="directory", index=0
+                )
+            ],
+            destination,
+        )
+
+    message = str(failure.value)
+    assert "已重试 4 次" in message
+    assert "拒绝访问" in message
+    assert probe.calls == 5
+    # 失败仍要清理临时目录, 不留半成品.
+    assert not destination.exists()
+    assert not list(destination.parent.glob("*.partial-*"))

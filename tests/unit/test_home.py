@@ -33,7 +33,7 @@ from archive_management.domain.home import (
 )
 
 pytestmark = [
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("统一游戏主页"),
     pytest.mark.story("分类与筛选规则"),

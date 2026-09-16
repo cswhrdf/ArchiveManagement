@@ -17,7 +17,7 @@ from archive_management.ui.palette import DARK
 
 pytestmark = [
     pytest.mark.ui,
-    pytest.mark.critical,
+    pytest.mark.minor,
     pytest.mark.epic("界面框架"),
     pytest.mark.feature("通用控件"),
     pytest.mark.story("控件主题重绘"),

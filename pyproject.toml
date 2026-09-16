@@ -178,10 +178,10 @@ addopts = [
 ]
 markers = [
     "backend: tests for an application backend implementation",
-    "blocker: highest-severity tests (run by local pre-commit)",
+    "blocker: safety and data-integrity guard tests (run by local pre-commit)",
     "cli: tests for command-line entry points",
     "config: tests for configuration parsing and persistence",
-    "critical: high-severity core tests (run by local pre-commit)",
+    "critical: core business logic tests (run by local pre-commit)",
     "database: tests for database access and persistence",
     "dialogs: tests for dialog behavior",
     "discovery: tests for game or save-location discovery",
@@ -191,9 +191,9 @@ markers = [
     "i18n: tests for localization behavior",
     "integration: tests that use the filesystem or other infrastructure",
     "layer: Allure test layer label (unit/integration/e2e)",
-    "minor: low-severity tests (skipped by local pre-commit)",
+    "minor: presentation and helper-feature tests (CI only)",
     "no_severity: tests without an assigned severity",
-    "normal: standard tests run in CI only",
+    "normal: standard functional and interaction tests (CI only)",
     "package: tests for package imports and metadata",
     "paths: tests for filesystem path handling",
     "performance: benchmark and scale tests (CI only, excluded locally)",
@@ -202,7 +202,7 @@ markers = [
     "smoke: smoke tests for startup or package availability",
     "steam: tests for Steam data integration",
     "story: Allure user-scenario label",
-    "trivial: cosmetic tests (skipped by local pre-commit)",
+    "trivial: negligible-impact tests, e.g. palette values or report summaries (CI only)",
     "ui: tests for user-interface behavior",
 ]
 

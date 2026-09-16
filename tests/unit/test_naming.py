@@ -21,7 +21,7 @@ from archive_management.services.naming import (
 
 pytestmark = [
     pytest.mark.backend,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("备份与分支"),
     pytest.mark.feature("目录命名"),
     pytest.mark.story("按游戏名称定位备份目录"),

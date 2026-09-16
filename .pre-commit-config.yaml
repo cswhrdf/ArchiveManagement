@@ -22,6 +22,9 @@ repos:
         types: [python]
 
       - id: pytest
+        # 只跑 blocker+critical(= 数据安全 + 核心逻辑): 等级按"失败影响面"划分,
+        # 详见 docs/testing.md 的严重等级表。其余等级交给 CI 全量执行 —— 本地钩子要快,
+        # 但"会丢数据"的回归不能漏。
         name: pytest (blocker+critical)
         entry: uv run pytest --min-severity=critical
         language: system

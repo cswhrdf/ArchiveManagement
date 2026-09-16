@@ -11,7 +11,7 @@ from archive_management.domain import BackupFileEntry, BackupNode, Game, SaveLoc
 
 pytestmark = [
     pytest.mark.domain,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("领域模型"),
     pytest.mark.story("游戏与存档位置建模"),

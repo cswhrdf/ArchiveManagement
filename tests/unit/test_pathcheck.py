@@ -104,6 +104,7 @@ def test_is_within_compares_lexically(tmp_path: Path) -> None:
     assert is_within(tmp_path / "a", tmp_path / "a" / "b") is False
 
 
+@pytest.mark.blocker  # 危险目标判定是"写回用户目录"之前的最后一道闸
 def test_dangerous_target_reason_covers_protected_and_roots(tmp_path: Path) -> None:
     backup_root = tmp_path / "backups"
     backup_root.mkdir()

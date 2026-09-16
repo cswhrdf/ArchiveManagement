@@ -12,7 +12,7 @@ from archive_management.services.discovery import (
 
 pytestmark = [
     pytest.mark.discovery,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("存档位置发现"),
     pytest.mark.story("发现游戏存档位置"),

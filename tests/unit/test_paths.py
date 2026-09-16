@@ -10,7 +10,7 @@ from archive_management.infrastructure.paths import ApplicationPaths
 
 pytestmark = [
     pytest.mark.paths,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("基础工程"),
     pytest.mark.feature("应用目录"),
     pytest.mark.story("应用数据目录布局"),

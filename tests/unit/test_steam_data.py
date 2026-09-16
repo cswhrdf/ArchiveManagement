@@ -13,7 +13,7 @@ from archive_management.domain.steam_data import (
 
 pytestmark = [
     pytest.mark.steam,
-    pytest.mark.critical,
+    pytest.mark.minor,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("Steam 数据模型"),
     pytest.mark.story("Steam 配置建模"),

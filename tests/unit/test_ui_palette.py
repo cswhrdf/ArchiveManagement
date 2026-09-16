@@ -14,7 +14,7 @@ from archive_management.ui.palette import (
 
 pytestmark = [
     pytest.mark.ui,
-    pytest.mark.critical,
+    pytest.mark.trivial,
     pytest.mark.epic("界面框架"),
     pytest.mark.feature("主题调色板"),
     pytest.mark.story("深浅色主题切换"),

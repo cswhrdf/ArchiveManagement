@@ -26,7 +26,7 @@ from archive_management.infrastructure.repository import (
 from archive_management.services.pathcheck import is_within
 
 pytestmark = [
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("原始目录删除"),
     pytest.mark.story("删除原始存档位置"),

@@ -38,7 +38,7 @@ DEFAULT_ACCELERATOR = DEFAULT_SAVE_ACCELERATOR
 
 pytestmark = [
     pytest.mark.domain,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("备份与分支"),
     pytest.mark.feature("全局快捷键"),
     pytest.mark.story("快捷键触发备份"),

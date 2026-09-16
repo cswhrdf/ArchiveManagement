@@ -31,7 +31,7 @@ from reporting import SecurityRecorder
 
 pytestmark = [
     pytest.mark.security,
-    pytest.mark.normal,
+    pytest.mark.blocker,
     pytest.mark.epic("工程与发布"),
     pytest.mark.feature("快照完整性防护"),
     pytest.mark.story("损坏备份不得被恢复"),

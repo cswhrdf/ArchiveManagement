@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from math import ceil
@@ -52,6 +54,8 @@ from archive_management.ui.pickers import pick_directory
 
 _ChangeCallback = Callable[[], None]
 _DetailCallback = Callable[[str], None]
+
+logger = logging.getLogger(__name__)
 
 # 列表列: (表头文案 key, 列宽, 文本对齐). 名称列与状态列自适应(最小宽度仅供收窄
 # 窗口时兜底), 其余列固定宽度; 所有行与表头使用同一套 grid 列配置, 因此各列上下
@@ -179,7 +183,13 @@ class HomePage:
         self._library_hint.grid(row=0, column=len(HomeSection), sticky="e")
 
     def _build_toolbar(self) -> None:
-        """筛选行: 视图页签(带数量) + 平台/类型下拉框 + 名称搜索."""
+        """筛选行: 视图页签(带数量) + 平台/类型下拉框 + 名称搜索.
+
+        这一行的控件宽度是**固定的**, 它们的总和就是主页能容纳的最小宽度: 必须放得
+        进"支持的最小窗口(主窗口 minsize 1200)下的内容宽度"。否则在比设计尺寸窄的
+        屏幕上(例如 CI 的虚拟显示器), 最后一个控件会越出行右边界并盖住描边——
+        ``tests/integration/test_gui_layout.py`` 会直接报出来, 改宽度后请同步跑它。
+        """
         palette = self._palette
         bar = ctk.CTkFrame(
             self._library,
@@ -189,14 +199,18 @@ class HomePage:
             border_color=palette.border,
         )
         bar.grid(row=0, column=0, sticky="ew", padx=24, pady=(0, 6))
-        bar.grid_columnconfigure(len(HomeView), weight=1)
+        # 多余宽度全部落在"页签与筛选控件之间"的空白列上: 页签保持左对齐, 平台/
+        # 类型下拉与搜索框在右侧紧挨着对齐。把 weight 给筛选控件所在的列会让它在很宽
+        # 的单元格里居中(看起来像没对齐), 因此这里留一列不放控件专门吸收空白。
+        spacer = len(HomeView)
+        bar.grid_columnconfigure(spacer, weight=1)
         self._tabs: dict[HomeView, ctk.CTkButton] = {}
         for index, view in enumerate(HomeView):
             tab = ctk.CTkButton(
                 bar,
                 text=view.label,
                 command=lambda selected=view: self._on_view(selected),
-                width=136,
+                width=112,
                 height=32,
                 corner_radius=8,
                 border_width=1,
@@ -204,16 +218,16 @@ class HomePage:
             )
             tab.grid(row=0, column=index, padx=(10, 6), pady=10)
             self._tabs[view] = tab
-        self._origin_box = self._combo(bar, 152, self._on_origin_change)
-        self._origin_box.grid(row=0, column=len(HomeView), padx=(0, 8), pady=10)
-        self._category_box = self._combo(bar, 178, self._on_category_change)
-        self._category_box.grid(row=0, column=len(HomeView) + 1, padx=(0, 8), pady=10)
+        self._origin_box = self._combo(bar, 112, self._on_origin_change)
+        self._origin_box.grid(row=0, column=spacer + 1, padx=(0, 8), pady=10)
+        self._category_box = self._combo(bar, 136, self._on_category_change)
+        self._category_box.grid(row=0, column=spacer + 2, padx=(0, 8), pady=10)
 
         search = ctk.CTkFrame(bar, fg_color="transparent")
-        search.grid(row=0, column=len(HomeView) + 2, padx=(0, 12), pady=10)
+        search.grid(row=0, column=spacer + 3, padx=(0, 12), pady=10)
         self._search_entry = ctk.CTkEntry(
             search,
-            width=180,
+            width=150,
             height=32,
             placeholder_text=tr("home.search_placeholder"),
             fg_color=palette.input_bg,
@@ -223,11 +237,11 @@ class HomePage:
         self._search_entry.pack(side="left")
         self._search_entry.bind("<Return>", lambda _event: self._submit_search())
         self._search_btn = self._button(
-            search, tr("home.search"), self._submit_search, width=64
+            search, tr("home.search"), self._submit_search, width=58
         )
         self._search_btn.pack(side="left", padx=(6, 0))
         self._clear_btn = self._button(
-            search, tr("home.clear"), self._clear_search, width=64
+            search, tr("home.clear"), self._clear_search, width=58
         )
         self._clear_btn.pack(side="left", padx=(6, 0))
 
@@ -543,9 +557,22 @@ class HomePage:
     # -- 数据加载与渲染 -----------------------------------------------------
 
     def reload(self) -> None:
-        """重新读取主页数据并重绘(进入页面或数据变化后调用)."""
-        self._board = self._backend.load_home()
-        self._filter = self._board.filter
+        """重新读取主页数据并重绘(进入页面或数据变化后调用).
+
+        读取失败时保留上次画面并记录日志: 主页在窗口构造时就会加载, 异常冒到
+        Tk 回调里会把整个窗口带崩, 而这类失败通常是瞬时的(下一次轮询就好了)。
+        """
+        try:
+            board = self._backend.load_home()
+        except (ArchiveManagementError, sqlite3.Error) as exc:
+            logger.error("读取游戏主页数据失败: %s", exc)
+            self._summary_label.configure(
+                text=tr("error.read_failed", reason=str(exc)),
+                text_color=self._palette.danger,
+            )
+            return
+        self._board = board
+        self._filter = board.filter
         self._page_index = 0
         self._render()
 

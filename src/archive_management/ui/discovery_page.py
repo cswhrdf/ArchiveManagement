@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from collections.abc import Callable
 
 import customtkinter as ctk
@@ -36,6 +38,8 @@ from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
 
 _ChangeCallback = Callable[[], None]
+
+logger = logging.getLogger(__name__)
 
 # 卡片内文字/列表相对卡片边缘的内缩: 与游戏库的卡片保持一致(那里也是 10).
 _PANEL_PAD = 10
@@ -340,12 +344,34 @@ class DiscoveryPanel:
     # -- 数据加载与渲染 -----------------------------------------------------
 
     def reload(self) -> None:
-        """重新读取监控目录与探测结果, 并尽量保持选中项."""
-        self._dirs = self._backend.list_monitored_directories()
-        self._candidates = self._backend.list_candidates()
+        """重新读取监控目录与探测结果, 并尽量保持选中项.
+
+        读取失败时保留上次内容并记录日志: 本方法在构造过程中也会被调用,
+        让异常逃出去等于整个主窗口起不来(磁盘/数据库瞬时不可读时尤其明显)。
+        """
+        try:
+            dirs = self._backend.list_monitored_directories()
+            candidates = self._backend.list_candidates()
+        except (ArchiveManagementError, sqlite3.Error) as exc:
+            self._fail_read(exc)
+            return
+        self._dirs = dirs
+        self._candidates = candidates
         self._render_dirs()
         self._render_candidates()
         self._render_counts()
+
+    def _fail_read(self, exc: Exception) -> None:
+        """读取失败: 只记日志与状态文案.
+
+        这里不能弹模态框: 构造阶段与轮询路径都可能走到, 弹窗会挂在事件循环里。
+        下次 reload()(切分区/重新扫描)会自行恢复。
+        """
+        logger.error("读取游戏发现数据失败: %s", exc)
+        self._summary_label.configure(
+            text=tr("error.read_failed", reason=str(exc)),
+            text_color=self._palette.danger,
+        )
 
     def _render_counts(self) -> None:
         """按当前数据刷新底部计数文案(扫描完成后会被结果摘要覆盖).

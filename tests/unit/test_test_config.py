@@ -12,19 +12,26 @@
 - ``pyproject.toml`` 的 ``mypy_path`` 包含 ``tests`` 目录: pre-commit 与编辑器会用
   "只检查改动文件"的方式词用 mypy, 此时 ``files`` 配置不生效, 找不到共享模块的
   导入会被静默当成 ``Any``(表现为 ``no-any-return`` 误报)。
+- 合并报告里每条结果都看得出平台, 标题也没有残留的参数化转义: 三个平台的用例实际
+  由不同机器跑出, 平台必须写进用例身份, 否则只会显示"同一个用例重试了多次"。
 """
 
 from __future__ import annotations
 
 import ast
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import allure
 import pytest
+from allure_pytest.utils import allure_name
+
+import conftest
 
 pytestmark = [
-    pytest.mark.critical,
+    pytest.mark.minor,
     pytest.mark.epic("工程与发布"),
     pytest.mark.feature("测试基础设施"),
     pytest.mark.story("测试配置约束"),
@@ -35,6 +42,8 @@ pytestmark = [
 _EXPECTED_TIMEOUT_SECONDS = 60
 # 四层 Allure 标签: 缺任何一层都会让报告对应控件少数据.
 _REQUIRED_LABELS = ("layer", "epic", "feature", "story")
+# 严重等级(闭集): 每个模块必须显式声明恰好一个, 分布不允许退化到单一等级.
+_SEVERITY_MARKERS = ("blocker", "critical", "normal", "minor", "trivial")
 # 默认只跑单元与集成测试: 性能/安全测试只在 CI 执行.
 _DEFAULT_SUITES = ("tests/unit", "tests/integration")
 # 只在 CI 执行的测试类别: 目录名与 -m 标记名一致.
@@ -151,3 +160,167 @@ def test_layer_label_is_written_as_raw_label() -> None:
     """allure-pytest 没有 layer 装饰器: 只能通过原始标签写 layer(易被误改)."""
     assert hasattr(allure.dynamic, "label")
     assert not hasattr(allure, "layer")
+
+
+def test_every_test_module_declares_exactly_one_severity(
+    pytestconfig: pytest.Config,
+) -> None:
+    """每个模块恰好声明一个严重等级, 且五个等级都要有模块使用.
+
+    等级既是报告里的"影响面"分级, 也是 pre-commit 选子集的依据(blocker+critical):
+    模块不声明就会退回目录兜底, 全挤在一个等级上则说明没有按影响面分过级。
+    """
+    root = Path(str(pytestconfig.rootpath)) / "tests"
+    modules = sorted(root.rglob("test_*.py"))
+    assert modules, "未找到任何测试模块"
+    declared = {
+        module.relative_to(root).as_posix(): sorted(
+            set(_SEVERITY_MARKERS) & _declared_markers(module)
+        )
+        for module in modules
+    }
+    wrong = {name: found for name, found in declared.items() if len(found) != 1}
+    assert not wrong, f"每个模块必须声明恰好一个严重等级: {wrong}"
+    used = {level for found in declared.values() for level in found}
+    assert not set(_SEVERITY_MARKERS) - used, (
+        f"以下严重等级没有任何模块使用, 报告分布会失真: "
+        f"{sorted(set(_SEVERITY_MARKERS) - used)}"
+    )
+
+
+# --- 汇总报告: 标题可读性与平台可区分 ------------------------------------------
+
+# 参数化用例的中文 id 会被 pytest 转义成 ``\uXXXX``, 报告标题要用可读文字.
+_ESCAPED_NAME = "test_rejects_hostile_field[\\u5e03\\u5c14\\u5b57\\u6bb5-payload1]"
+_EXPECTED_TITLE = "Rejects hostile field[布尔字段-payload1]"
+
+
+class _DynamicRecorder:
+    """记录 ``allure.dynamic`` 调用的替身(真实实现要跑完整个会话才能观察结果)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        def record(*args: Any) -> None:
+            self.calls.append((name, args))
+
+        return record
+
+    def arguments(self, name: str) -> tuple[Any, ...]:
+        """返回最后一次 ``name`` 调用的参数."""
+        matches = [arguments for call, arguments in self.calls if call == name]
+        assert matches, f"未调用 allure.dynamic.{name}: {self.calls}"
+        return matches[-1]
+
+
+class _ProbeItem:
+    """只实现 ``_configure_allure`` 读取的那几个属性的最小替身."""
+
+    def __init__(self, name: str, function: object | None = None) -> None:
+        self.name = name
+        self.obj = function
+        self.function = function
+        self.funcargs: dict[str, object] = {}
+        self.module = None
+        self.fspath = Path("tests/unit/test_probe.py")
+
+    def get_closest_marker(self, name: str) -> None:
+        return None
+
+    def iter_markers(self) -> list[object]:
+        return []
+
+
+def _probe_function() -> None:
+    """被写入 Allure 标题的"用例函数"(占位, 只需是个可写属性的对象)."""
+
+
+def test_readable_restores_unicode_escapes() -> None:
+    """参数化 id 里的转义要还原成原字符, 其余文本保持不变."""
+    assert conftest._readable("field[\\u5e03\\u5c14-1]") == "field[布尔-1]"
+    assert conftest._readable("field[\\U0001F600]") == "field[😀]"
+    # 反斜杠在 id 里是双写的, 还原成原始路径才看得懂.
+    assert conftest._readable("C:\\\\Users\\\\ycswh") == "C:\\Users\\ycswh"
+    # 已经是可读文字时不能解码: unicode_escape 会把 UTF-8 字节按 latin-1 解读成乱码.
+    assert conftest._readable("主题取值非法") == "主题取值非法"
+    assert conftest._readable("plain ascii") == "plain ascii"
+    # 截断的转义不能抛错.
+    assert conftest._readable("field[\\u12]") == "field[\\u12]"
+
+
+def test_title_is_readable_after_allure_pytest_renaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """标题要写在 allure-pytest 会读取的位置, 否则报告里会变成一串转义编码.
+
+    allure-pytest 在 fixture 跑完后用 ``allure_name()`` 重新命名用例, 因此只调
+    ``allure.dynamic.title`` 会被 ``item.name`` 覆盖 —— 这条用例走的就是它取名时
+    真实的取值路径.
+    """
+    monkeypatch.setattr(conftest, "_ALLURE_DYNAMIC", _DynamicRecorder())
+    item = _ProbeItem(_ESCAPED_NAME, _probe_function)
+
+    conftest._configure_allure(cast(pytest.Item, item))
+
+    assert conftest._title_of(cast(pytest.Item, item)) == _EXPECTED_TITLE
+    assert allure_name(cast(pytest.Item, item), {}, None) == _EXPECTED_TITLE
+
+
+def test_title_follows_each_parametrized_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """参数化用例共用同一个函数对象: 每个用例都必须刷新标题.
+
+    否则后面的用例会沿用第一个用例的标题(报告里十几个参数只显示同一个名字),
+    以及花括号标题被当成格式化模板直接报错.
+    """
+    monkeypatch.setattr(conftest, "_ALLURE_DYNAMIC", _DynamicRecorder())
+
+    def probe() -> None:
+        """探针函数(多个参数共用这个对象)."""
+
+    first = _ProbeItem("test_probe[case\\u4e00]", probe)
+    second = _ProbeItem("test_probe[rejects {invalid" + "]", probe)
+
+    conftest._configure_allure(cast(pytest.Item, first))
+    assert allure_name(cast(pytest.Item, first), {}, None) == "Probe[case一]"
+
+    conftest._configure_allure(cast(pytest.Item, second))
+    assert allure_name(cast(pytest.Item, second), {}, None) == "Probe[rejects {invalid]"
+
+
+def test_explicit_allure_title_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """用例用 ``@allure.title`` 指定标题时不覆盖(与 allure-pytest 行为一致)."""
+    monkeypatch.setattr(conftest, "_ALLURE_DYNAMIC", _DynamicRecorder())
+
+    def probe() -> None:
+        """探针函数."""
+
+    setattr(probe, "__allure_display_name__", "自定义标题")  # noqa: B010
+    item = _ProbeItem("test_probe", probe)
+
+    conftest._configure_allure(cast(pytest.Item, item))
+
+    assert allure_name(cast(pytest.Item, item), {}, None) == "自定义标题"
+
+
+def test_allure_result_carries_the_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """平台要写成参数(进用例身份), 并同步写标签与套件名(便于按平台查看).
+
+    平台不是参数时, 三个平台跑出的同名结果在合并报告里只会显示成
+    "同一个用例重试了多次"; 写成参数才会被当成各自独立的用例.
+    """
+    recorder = _DynamicRecorder()
+    monkeypatch.setattr(conftest, "_ALLURE_DYNAMIC", recorder)
+    item = _ProbeItem("test_carries_platform", _probe_function)
+
+    conftest._configure_allure(cast(pytest.Item, item))
+
+    platform = conftest._current_platform_label()
+    assert platform in {"Windows", "Linux", "macOS"}
+    assert recorder.arguments("parameter") == ("平台", platform)
+    assert recorder.arguments("label") == ("os", platform)
+    assert str(recorder.arguments("parent_suite")[0]).endswith(f"· {platform}")

@@ -35,7 +35,7 @@ from reporting import SecurityRecorder
 
 pytestmark = [
     pytest.mark.security,
-    pytest.mark.normal,
+    pytest.mark.blocker,
     pytest.mark.epic("工程与发布"),
     pytest.mark.feature("路径与越界防护"),
     pytest.mark.story("拒绝越界与危险路径"),
@@ -289,14 +289,24 @@ def test_symlinked_file_is_not_copied_into_snapshot(tmp_path: Path) -> None:
         [SnapshotSource(path=str(save), kind="directory", index=0)], destination
     )
 
+    # 链接本身不进入快照, 链接指向的内容也不会被复制.
+    assert not (destination / "loc-0" / "linked.dat").exists()
     copied = [
         path
         for path in destination.rglob("*")
         if path.is_file() and "外部敏感内容" in path.read_text(errors="ignore")
     ]
     assert copied == []
-    manifest = (destination / MANIFEST_FILENAME).read_text(encoding="utf-8")
-    assert str(secret) in manifest  # 只保留链接目标字符串
+
+    # 清单里按 symlink 记录并保留目标字符串.
+    # 注意必须**解析 JSON 后比较**, 不能拿路径去搜清单文本: JSON 会把反斜杠转义成
+    # `\\`, Windows 上直接搜 `C:\...` 永远搜不到(只有 Linux/macOS 的正斜杠能命中).
+    manifest = json.loads((destination / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    entries = {entry["relative_path"]: entry for entry in manifest["entries"]}
+    linked = entries["loc-0/linked.dat"]
+    assert linked["file_kind"] == "symlink"
+    # 目标字符串的写法由平台决定(Windows 可能带 `\\?\` 前缀), 因此只比较文件名.
+    assert Path(str(linked["link_target"])).name == secret.name
 
 
 def test_domain_model_rejects_blank_location_path() -> None:

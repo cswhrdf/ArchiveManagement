@@ -52,7 +52,7 @@ from archive_management.services.platform_scan import (
 from helpers import migrated_database
 
 pytestmark = [
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("统一游戏主页"),
     pytest.mark.story("主页取数与筛选持久化"),

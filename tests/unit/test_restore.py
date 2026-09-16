@@ -42,7 +42,8 @@ pytestmark = [
     pytest.mark.epic("备份与分支"),
     pytest.mark.feature("恢复用例"),
     pytest.mark.story("写回原始存档"),
-    pytest.mark.layer("unit"),
+    # 真实数据库 + 文件系统 + 备份/恢复服务协作, 按层定义归入 integration.
+    pytest.mark.layer("integration"),
 ]
 
 
@@ -156,6 +157,7 @@ def test_plan_marks_snapshot_invalid_when_content_changed(tmp_path: Path) -> Non
         env.restore.restore(env.game_id, _node_id(node))
 
 
+@pytest.mark.blocker  # 允许写回备份根就等于让备份被自己的恢复流程改掉
 def test_plan_blocks_target_inside_backup_root(tmp_path: Path) -> None:
     env = _setup(tmp_path)
     # 把备份根目录里的子目录当成存档位置: 快照会记录它, 恢复必须拦住写回.
@@ -220,6 +222,7 @@ def test_target_problem_codes_cover_kind_and_permission(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.blocker  # 清单是外部输入: 越界路径必须写成不可达而不是试着写
 def test_safe_path_rejects_traversal_and_absolute_entries(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -316,6 +319,7 @@ def test_restore_creates_safety_point_with_given_title(tmp_path: Path) -> None:
     assert (snapshot / "loc-0" / "slot1.dat").read_text(encoding="utf-8") == "changed"
 
 
+@pytest.mark.blocker  # 游戏运行中覆盖存档是真正的数据损坏场景
 def test_restore_requires_force_when_game_process_running(tmp_path: Path) -> None:
     # 游戏名是 Demo, 候选进程名来自游戏名与存档目录名.
     env = _setup(tmp_path, process_provider=lambda: ["DemoGame.exe", "explorer.exe"])
@@ -396,6 +400,7 @@ def test_restore_reports_progress_fraction(tmp_path: Path) -> None:
     assert all(0.0 <= value <= 1.0 for value in seen)
 
 
+@pytest.mark.blocker  # 篡改清单是攻击面: 拒绝恢复比"尽力而为"重要
 def test_restore_rejects_manipulated_manifest(tmp_path: Path) -> None:
     env = _setup(tmp_path)
     node = env.backup()

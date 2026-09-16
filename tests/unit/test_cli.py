@@ -17,7 +17,7 @@ from archive_management.infrastructure.database import Database
 
 pytestmark = [
     pytest.mark.cli,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("基础工程"),
     pytest.mark.feature("命令行入口"),
     pytest.mark.story("初始化与自检命令"),

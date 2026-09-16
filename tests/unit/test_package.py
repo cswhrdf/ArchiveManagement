@@ -9,7 +9,7 @@ import pytest
 pytestmark = [
     pytest.mark.package,
     pytest.mark.smoke,
-    pytest.mark.critical,
+    pytest.mark.minor,
     pytest.mark.epic("工程与发布"),
     pytest.mark.feature("打包与版本信息"),
     pytest.mark.story("包结构与版本"),

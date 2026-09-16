@@ -19,7 +19,7 @@ from archive_management.ui.palette import DARK
 pytestmark = [
     pytest.mark.dialogs,
     pytest.mark.ui,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("界面框架"),
     pytest.mark.feature("对话框"),
     pytest.mark.story("输入与确认对话框"),

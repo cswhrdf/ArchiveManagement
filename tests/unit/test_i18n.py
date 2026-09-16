@@ -12,7 +12,7 @@ from archive_management.i18n import available_locales, current_locale, tr
 
 pytestmark = [
     pytest.mark.i18n,
-    pytest.mark.critical,
+    pytest.mark.minor,
     pytest.mark.epic("基础工程"),
     pytest.mark.feature("国际化"),
     pytest.mark.story("中英文文案与格式化"),

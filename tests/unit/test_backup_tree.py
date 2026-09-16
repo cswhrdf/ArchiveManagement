@@ -11,7 +11,7 @@ from helpers import utc_moment
 
 pytestmark = [
     pytest.mark.domain,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("备份与分支"),
     pytest.mark.feature("分支树计算"),
     pytest.mark.story("分支树与时间线排序"),

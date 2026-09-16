@@ -407,6 +407,7 @@
   "dialog.home_location_title": "Add save location",
   "dialog.home_location_prompt": "Enter the save folder for this game (type it or browse):",
   "error.home_location_required": "Add a save location for this game before backing up",
+  "error.read_failed": "Failed to read data: {reason}",
   "topbar.add_game": "+ Add game",
   "topbar.nav_scheduled": "Schedules",
   "topbar.nav_settings": "Settings",

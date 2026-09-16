@@ -31,7 +31,7 @@ from archive_management.services.audit import (
 
 pytestmark = [
     pytest.mark.backend,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("基础工程"),
     pytest.mark.feature("审计日志"),
     pytest.mark.story("记录用户操作"),

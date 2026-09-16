@@ -407,6 +407,7 @@
   "dialog.home_location_title": "添加存档位置",
   "dialog.home_location_prompt": "输入该游戏的存档目录(可直接输入或点浏览选择):",
   "error.home_location_required": "请先为该游戏添加存档位置再执行备份",
+  "error.read_failed": "读取数据失败: {reason}",
   "topbar.add_game": "+ 添加游戏",
   "topbar.nav_scheduled": "定时任务",
   "topbar.nav_settings": "设置",

@@ -9,6 +9,12 @@ permissions:
   contents: read
   actions: read
 
+# Windows runner 的控制台是 cp1252: Python 默认按该编码输出, 打中文日志会直接报
+# UnicodeEncodeError 把步骤打断(2026-09-17 的报告自检就踩过)。统一开 UTF-8 模式,
+# 顺带让文件默认编码与仓库约定一致(代码里本来就处处显式写 utf-8)。
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   quality:
     name: 代码质量检查 (${{ matrix.os }})
@@ -25,7 +31,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          enable-cache: false
+          enable-cache: true
+          save-cache: false
 
       - name: Set up Python
         run: uv python install 3.12
@@ -57,7 +64,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
+          # 本 job 是依赖缓存的唯一写入者: 同一个 uv.lock 在所有 job 里会算出同一个
+          # cache key, 并行保存时只有第一个能成功, 其余会打印
+          # "Unable to reserve cache ... another job may be creating this cache"。
+          # 其它 job 因此只读复用(见各自的 save-cache: false), 既没有警告也不多占缓存.
           enable-cache: true
+          save-cache: true
 
       - name: Set up Python
         run: uv python install 3.12
@@ -99,13 +111,14 @@ jobs:
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
 
       - name: Attach coverage report to Allure
+        if: always()
         run: uv run python scripts/create_allure_coverage.py
 
       - name: Resolve previous successful run
         id: prev-run
         uses: actions/github-script@v9
         env:
-          ARTIFACT_NAME: allure-history-${{ matrix.os }}
+          ARTIFACT_NAME: allure-resources-${{ matrix.os }}
         with:
           script: |
             const runs = await github.rest.actions.listWorkflowRunsForRepo({
@@ -142,35 +155,69 @@ jobs:
         if: steps.prev-run.outputs.run_id != ''
         uses: actions/download-artifact@v7
         with:
-          name: allure-history-${{ matrix.os }}
+          name: allure-resources-${{ matrix.os }}
           run-id: ${{ steps.prev-run.outputs.run_id }}
-          path: .allure
+          path: .previous-allure-resources
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Restore previous Allure history (Linux/macOS)
+        if: steps.prev-run.outputs.run_id != '' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p .allure
+          cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
+
+      - name: Restore previous Allure history (Windows)
+        if: steps.prev-run.outputs.run_id != '' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .allure | Out-Null
+          Copy-Item .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
+
       - name: Generate Allure report (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: always() && runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p .allure
           cat > .allure/allurerc.json <<'JSON'
           {"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}
           JSON
-          allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+          if [ -n "$(find allure-results -type f -print -quit 2>/dev/null)" ]; then
+            allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+          else
+            echo "没有可用的 allure-results, 跳过报告生成"
+          fi
 
       - name: Generate Allure report (Windows)
-        if: runner.os == 'Windows'
+        if: always() && runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .allure | Out-Null
           Set-Content -Path .allure/allurerc.json -Encoding ascii -Value '{"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}'
-          allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+          if (Get-ChildItem allure-results -File -ErrorAction SilentlyContinue | Select-Object -First 1) {
+            allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+          } else {
+            Write-Host "没有可用的 allure-results, 跳过报告生成"
+          }
 
-      - name: Upload Allure history for next run
+      - name: Verify Allure report
+        # 报告是静态站点: 用例详情页要按需取 data/test-results/*.json。这个目录一旦
+        # 在传输/解压环节丢掉, 报告就只剩"通过/失败", 点开用例是空的 —— 所以发布前
+        # 先自检, 并通过 --zip 打成单个文件发布(整目录被静默丢掉的情况不会再出现)。
+        id: verify-report
+        if: always()
+        shell: bash
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip
+
+      - name: Upload Allure resources
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: allure-history-${{ matrix.os }}
-          path: .allure/history.jsonl
+          name: allure-resources-${{ matrix.os }}
+          path: |
+            .allure/history.jsonl
+            allure-results/
+          include-hidden-files: true
           if-no-files-found: ignore
 
       - name: Upload coverage report
@@ -184,19 +231,12 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Allure report
-        if: always()
+        # 自检不通过时不发布报告: 宁可让作业红着, 也不要把"打不开详情"的报告发出去。
+        if: always() && steps.verify-report.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-${{ matrix.os }}
-          path: allure-report/
-          if-no-files-found: ignore
-
-      - name: Upload Allure results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: allure-results-${{ matrix.os }}
-          path: allure-results/
+          path: allure-report.zip
           if-no-files-found: ignore
 
   performance:
@@ -210,7 +250,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
+          # 只读复用依赖缓存(写入交给 pytest job).
           enable-cache: true
+          save-cache: false
 
       - name: Set up Python
         run: uv python install 3.12
@@ -255,7 +297,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
+          # 只读复用依赖缓存(写入交给 pytest job).
           enable-cache: true
+          save-cache: false
 
       - name: Set up Python
         run: uv python install 3.12
@@ -294,7 +338,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
+          # 只读复用依赖缓存(写入交给 pytest job).
           enable-cache: true
+          save-cache: false
 
       - name: Set up Python
         run: uv python install 3.12
@@ -310,17 +356,46 @@ jobs:
       - name: Install Allure 3 CLI
         run: npm install --global allure@3
 
-      - name: Download all Allure results
+      - name: Download Allure resources
         if: always()
         uses: actions/download-artifact@v7
+        continue-on-error: true
         with:
-          pattern: allure-results-*
+          pattern: allure-resources-*
+          path: downloaded-allure-resources
+          merge-multiple: false
+
+      - name: Collect platform Allure results
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p allure-results
+          if [ -d downloaded-allure-resources ]; then
+            find downloaded-allure-resources -type f -path '*/allure-results/*' \
+              -exec cp {} allure-results/ \;
+          fi
+
+      - name: Download performance Allure results
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          name: allure-results-performance
+          path: allure-results
+
+      - name: Download security Allure results
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: allure-results-security-*
           path: allure-results
           merge-multiple: true
 
       - name: Download performance baseline
         if: always()
         uses: actions/download-artifact@v7
+        continue-on-error: true
         with:
           pattern: performance-results
           path: .
@@ -329,17 +404,19 @@ jobs:
       - name: Download security findings
         if: always()
         uses: actions/download-artifact@v7
+        continue-on-error: true
         with:
           pattern: security-results-*
           path: security-findings
-          merge-multiple: true
+          # 各平台的产物同名, 分开存放才能各自出现在汇总报告里(不能被后写的覆盖).
+          merge-multiple: false
 
       - name: Resolve previous successful run
         id: prev-run
         if: always()
         uses: actions/github-script@v9
         env:
-          ARTIFACT_NAME: allure-history-final
+          ARTIFACT_NAME: allure-resources-final
         with:
           script: |
             const runs = await github.rest.actions.listWorkflowRunsForRepo({
@@ -376,17 +453,23 @@ jobs:
         if: steps.prev-run.outputs.run_id != ''
         uses: actions/download-artifact@v7
         with:
-          name: allure-history-final
+          name: allure-resources-final
           run-id: ${{ steps.prev-run.outputs.run_id }}
-          path: .allure
+          path: .previous-allure-resources
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore previous final Allure history
+        if: steps.prev-run.outputs.run_id != ''
+        shell: bash
+        run: |
+          mkdir -p .allure
+          cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
 
       - name: Summarize performance and security into Allure
         if: always()
         shell: bash
         run: |
           mkdir -p allure-results
-          cp security-findings/*.json . 2>/dev/null || true
           uv run python scripts/create_allure_summary.py
 
       - name: Generate final Allure report
@@ -398,25 +481,33 @@ jobs:
           {"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}
           JSON
           if [ -n "$(ls -A allure-results)" ]; then
-            allure generate allure-results --output allure-report-final --config ./.allure/allurerc.json
+            allure generate allure-results --output allure-report --config ./.allure/allurerc.json
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi
 
-      - name: Upload Allure history for next run
+      - name: Verify final Allure report
+        # 与 pytest 作业同一套自检: 缺 data/test-results 的报告只能看到用例是否通过。
+        id: verify-report
+        if: always()
+        shell: bash
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip
+
+      - name: Upload final Allure resources
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: allure-history-final
-          path: .allure/history.jsonl
+          name: allure-resources-final
+          path: |
+            .allure/history.jsonl
+            allure-results/
+          include-hidden-files: true
           if-no-files-found: ignore
 
       - name: Upload final Allure report
-        if: always()
+        if: always() && steps.verify-report.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-final
-          path: |
-            allure-results/
-            allure-report-final/
+          path: allure-report.zip
           if-no-files-found: ignore

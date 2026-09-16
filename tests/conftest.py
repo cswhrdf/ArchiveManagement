@@ -1,10 +1,26 @@
 """测试严重等级与 Allure 元数据(含四层标签).
 
-严重等级使用 Allure 官方分级: blocker/critical/normal/minor/trivial/no_severity.
-解析优先级: 用例或模块上显式标注的等级(如 ``@pytest.mark.blocker``)优先, 否则
-按目录默认(unit=critical, integration=normal, 其余 no_severity)。本地 CI
-(pre-commit)通过 ``--min-severity`` 只保留 normal 以上(不含 normal)即
-blocker+critical 的用例; GitHub Actions 仍运行全部用例。
+严重等级使用 Allure 官方分级: blocker/critical/normal/minor/trivial/no_severity,
+**语义是"用例失败的影响面", 与测试层次无关**(层次用 ``layer`` 表达):
+
+- ``blocker``: 安全与数据完整性底线 —— 路径越界/危险目标必须被拒、快照或清单被篡改
+  必须拒绝恢复、游戏运行中不得静默覆盖存档;
+- ``critical``: 核心业务不可用或结果不正确 —— 备份/快照/恢复/删除计划、仓储事务、
+  数据库迁移、调度、GUI 真实后端、全链路流水线;
+- ``normal``: 常规功能与交互 —— 配置、平台探测、主页聚合、对话框、CLI、热键、
+  审计、存档位置与命名、展示模型;
+- ``minor``: 展示与辅助 —— 调色板/控件样式/渲染修正、i18n 文案、打包元数据、
+  演示后端、性能基准;
+- ``trivial``: 极低影响 —— 色值、以及脚本生成的报告汇总项(覆盖率/性能/安全摘要).
+
+解析优先级: 用例或模块上显式标注的等级优先(如 ``@pytest.mark.blocker`` 可覆盖模块级
+``critical``), 否则按目录兜底(unit/integration=normal, performance=minor,
+security=critical)。**每个测试模块都必须显式声明等级**(守卫见
+``tests/unit/test_test_config.py``), 兜底只是防止新目录在报告里冒出 no_severity 桶。
+
+本地 CI(pre-commit)通过 ``--min-severity=critical`` 只保留 blocker+critical, 即
+"数据安全 + 核心逻辑"子集; 其余等级交给 GitHub Actions 的全量执行。调整等级请按
+影响面判断, 不要按目录/层次照搬 —— 这个选择同时决定了本地钩子能拦到哪些回归。
 
 Allure 标签语义(与 Allure 3 报告控件一一对应):
 
@@ -13,12 +29,27 @@ Allure 标签语义(与 Allure 3 报告控件一一对应):
 - ``feature``: 功能模块, 与生产模块一一对应(如 快照服务、数据仓储);
 - ``story``: 具体用户场景(如 删除备份节点、创建备份与分支);
 - ``layer``: 测试层次, ``unit`` / ``integration`` / ``e2e`` / ``performance`` /
-  ``security``, 供"按层耗时"直方图使用。
+  ``security``, 供 Allure 的"测试金字塔"与"按层耗时"控件使用。判定标准是**用例实际
+  接了什么**而不是它放在哪个目录: ``unit`` = 单个组件 + 替身/内存数据;
+  ``integration`` = 真实数据库/文件系统/领域服务之间的协作(例如真 SQLite 的仓储与
+  迁移、真实快照与恢复); ``e2e`` = 从真实入口(窗口/命令行)走完整用户流程。
+  因此 ``tests/unit`` 下真实读写 SQLite 与文件系统的模块声明为 ``integration``。
 
 测试模块用 ``pytestmark`` 声明默认标签, 单个用例可用同名标记覆盖
 (``@pytest.mark.story("...")``)。``layer`` 未声明时按 ``integration`` 标记或目录推断,
 保证直方图不会缺数据; 声明的 ``epic``/``layer`` 必须属于闭集, 拼错在收集期直接报错,
 以避免报告里冒出只有一个用例的畸形分类。
+
+另外两个跨平台相关的约定:
+
+- **平台参与用例身份**: CI 会把三个平台的结果合并成一份报告, 同一个用例会在
+  Windows/Linux/macOS 各跑一次。平台写成**参数**(并同步写 suite 层级与 ``os`` 标签),
+  因为 Allure 的 ``historyId`` 由"用例全名 + 非 excluded 参数"算出 —— 不加参数时
+  三份结果会被当成"同一个用例重试了多次", 报告里只看得到重复执行、看不出是哪台机器;
+- **标题还原转义**: pytest 会把非 ASCII 的参数 id 转义成 Unicode 转义序列, 直接用会
+  变成一串编码, 因此展示前先还原成可读文字; 标题要通过 ``__allure_display_name__``
+  (即 ``@allure.title`` 的属性)交给 allure-pytest, 因为 ``allure.dynamic.title`` 在
+  fixture 之后会被它用 ``item.name`` 覆盖。
 """
 
 from __future__ import annotations
@@ -33,6 +64,7 @@ import allure
 import pytest
 
 from archive_management.services.audit import AUDIT_LOGGER_NAME
+from archive_management.services.platforms import current_platform, platform_label
 
 _SEVERITY_LEVELS = ("blocker", "critical", "normal", "minor", "trivial")
 _SEVERITY_RANK = {
@@ -63,7 +95,7 @@ _LAYER_SUITES = {
     "performance": "性能测试 performance",
     "security": "安全测试 security",
 }
-# 目录名到默认层次的映射(未显式声明 layer 时的兵底).
+# 目录名到默认层次的映射(未显式声明 layer 时的兜底).
 _DIRECTORY_LAYERS = {
     "integration": "integration",
     "performance": "performance",
@@ -89,8 +121,80 @@ _METADATA_MARKERS = frozenset(_LABEL_ALLOWED)
 # 元数据与等级标记不再重复当作 tag(其余标记如 backend/ui 保留为标签).
 _TAG_EXCLUDED = _METADATA_MARKERS | set(_SEVERITY_LEVELS) | {"integration"}
 _UNCLASSIFIED = "未分类"
+_FALLBACK_DESCRIPTION = "ArchiveManagement 测试用例"
+# 本钩子写进函数对象的标题(键为 id(对象))。参数化用例共用同一个函数对象, 必须靠
+# 这张表区分"我们自己写的"(每个用例都要刷新)与"@allure.title 写的"(不覆盖)。
+_OUR_TITLES: dict[int, str] = {}
 # allure.dynamic 的函数没有类型标注, 统一按 Any 调用, 避免满屏 no-untyped-call 忽略.
 _ALLURE_DYNAMIC: Any = allure.dynamic
+
+# pytest 把非 ASCII 的参数 id 用 ``unicode_escape`` 转义(中文变成 ``\u5e03\u5c14``,
+# 反斜杠变成 ``\\``), 报告标题要用可读文字, 所以展示前按同样的规则解回去。
+
+
+def _readable(value: str) -> str:
+    """把参数化 id 里的 ASCII 转义还原成可读文字(``\u5e03\u5c14`` -> ``布尔``).
+
+    只对纯 ASCII 取值解码: 非 ASCII 文字会被 ``unicode_escape`` 按 latin-1 重新解读
+    而变成乱码, 而本来就含中文的取值已经不需要还原。
+    """
+    if not value.isascii():
+        return value
+    try:
+        return value.encode("ascii").decode("unicode_escape")
+    except UnicodeDecodeError:  # 截断或未知的转义: 宁可不还原, 也不能报错
+        return value
+
+
+def _current_platform_label() -> str:
+    """返回当前平台的可读名称(Windows/Linux/macOS), 供报告区分多平台结果."""
+    return platform_label(current_platform())
+
+
+def _title_of(item: pytest.Item) -> str:
+    """用例标题: 去掉 ``test_`` 前缀、下划线转空格、首字母大写, 并还原参数化 id 的转义."""
+    return _readable(item.name.removeprefix("test_").replace("_", " ").capitalize())
+
+
+def _description_of(item: pytest.Item) -> str:
+    """用例描述: 模块文档字符串 + 该用例验证的行为."""
+    module = getattr(item, "module", None)
+    return f"{inspect.getdoc(module) or _FALLBACK_DESCRIPTION}\n\n验证行为: {_title_of(item)}。"
+
+
+def _apply_display_name(item: pytest.Item, title: str) -> None:
+    """把可读标题写到用例函数上, 让 allure-pytest 自己用它命名.
+
+    ``allure.dynamic.title`` 存不住: allure-pytest 的 ``pytest_runtest_setup`` 在所有
+    fixture 跑完后会用 ``item.name`` 重新赋值(见 ``allure_pytest.utils.allure_name``),
+    所以标题必须落到它读取的属性 ``__allure_display_name__`` 上 —— 也就是
+    ``@allure.title`` 装饰器写的同一个属性。
+    """
+    obj = getattr(item, "obj", None)
+    if obj is None:
+        _ALLURE_DYNAMIC.title(title)
+        return
+    existing = getattr(obj, "__allure_display_name__", None)
+    if existing is not None and _OUR_TITLES.get(id(obj)) != existing:
+        return  # 用例自己用 @allure.title 指定了标题, 不覆盖
+    # allure-pytest 会把标题当格式化模板处理, 花括号需要转义才能原样显示.
+    template = title.replace("{", "{{").replace("}", "}}")
+    obj.__allure_display_name__ = template
+    _OUR_TITLES[id(obj)] = template
+
+
+def _restore_description(item: pytest.Item) -> None:
+    """函数没有文档字符串时补回描述。
+
+    allure-pytest 同样在 ``pytest_runtest_setup`` 收尾把描述换成
+    ``item.function.__doc__``(或 ``@allure.description`` 标记), 没有文档字符串就变成
+    空; 此时在用例收尾阶段把生成的描述补回去。
+    """
+    if getattr(getattr(item, "function", None), "__doc__", None):
+        return
+    if item.get_closest_marker("allure_description"):
+        return
+    _ALLURE_DYNAMIC.description(_description_of(item))
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -105,19 +209,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def _resolve_severity(item: pytest.Item) -> str:
-    """解析用例严重等级: 显式标记优先, 否则按目录默认."""
+    """解析用例严重等级: 显式标记优先, 否则按目录兜底."""
     for level in _SEVERITY_LEVELS:
         if item.get_closest_marker(level):
             return level
     parts = Path(str(item.fspath)).parts
-    if "unit" in parts:
+    if "security" in parts:
         return "critical"
-    if "integration" in parts:
-        return "normal"
-    # 性能与安全测试只在 CI 执行, 默认等级 normal(本地 pre-commit 子集不跑).
-    if "performance" in parts or "security" in parts:
-        return "normal"
-    return "no_severity"
+    if "performance" in parts:
+        return "minor"
+    # 单元与集成测试兜底 normal: 核心模块必须自己声明 critical/blocker, 否则新模块
+    # 会静默落进(或错过)pre-commit 子集 —— 守卫用例保证每个模块都显式声明了等级。
+    return "normal"
 
 
 def _where(item: pytest.Item) -> str:
@@ -145,7 +248,7 @@ def _label_value(
 
 
 def _default_layer(item: pytest.Item) -> str:
-    """未显式声明 layer 时的兵底: 目录名, 否则按 integration 标记, 再兵底 unit."""
+    """未显式声明 layer 时的兜底: 目录名, 否则按 integration 标记, 再兜底 unit."""
     parts = Path(str(item.fspath)).parts
     for directory, layer in _DIRECTORY_LAYERS.items():
         if directory in parts:
@@ -185,26 +288,31 @@ def pytest_collection_modifyitems(
 
 
 def _configure_allure(item: pytest.Item) -> None:
-    """把名称、描述、四层标签、分类与严重等级写入 Allure 元数据."""
-    title = item.name.removeprefix("test_").replace("_", " ").capitalize()
-    module = getattr(item, "module", None)
-    module_description = inspect.getdoc(module) or "ArchiveManagement 测试用例"
+    """把名称、描述、四层标签、平台、分类与严重等级写入 Allure 元数据."""
+    title = _title_of(item)
 
     epic = _label_value(item, "epic", _EPICS) or _UNCLASSIFIED
     feature = _label_value(item, "feature") or _UNCLASSIFIED
     story = _label_value(item, "story") or title
     layer = _label_value(item, "layer", _LAYERS) or _default_layer(item)
+    platform = _current_platform_label()
 
-    _ALLURE_DYNAMIC.title(title)
-    _ALLURE_DYNAMIC.description(f"{module_description}\n\n验证行为: {title}。")
+    _apply_display_name(item, title)
+    _ALLURE_DYNAMIC.description(_description_of(item))
     # epic/feature/story 驱动 "按产品级模块/功能模块/用户场景的稳定性分布" 控件.
     _ALLURE_DYNAMIC.epic(epic)
     _ALLURE_DYNAMIC.feature(feature)
     _ALLURE_DYNAMIC.story(story)
     # allure-pytest 没有 layer 装饰器, 只能写原始标签(Allure 3 "按层耗时" 直方图读它).
     _ALLURE_DYNAMIC.label("layer", layer)
-    # suite 三层与 layer/epic/feature 对齐, 作为只认 suite 标签的控件兵底.
-    _ALLURE_DYNAMIC.parent_suite(_LAYER_SUITES.get(layer, layer))
+    # 平台写成**参数**而不只是标签: Allure 用"用例全名 + 非 excluded 参数"算用例身份
+    # (retryHash/historyId), 少了参数, 三个平台的同名结果会被并成"同一用例重试三次";
+    # os 标签同时作为筛选维度。
+    _ALLURE_DYNAMIC.parameter("平台", platform)
+    _ALLURE_DYNAMIC.label("os", platform)
+    # suite 三层与 layer/epic/feature 对齐, 作为只认 suite 标签的控件兜底;
+    # 平台加在 parentSuite 末尾, 合并报告的套件树里能一眼看出用例跑在哪台机器上.
+    _ALLURE_DYNAMIC.parent_suite(f"{_LAYER_SUITES.get(layer, layer)} · {platform}")
     _ALLURE_DYNAMIC.suite(epic)
     _ALLURE_DYNAMIC.sub_suite(feature)
 
@@ -218,9 +326,11 @@ def _configure_allure(item: pytest.Item) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _allure_metadata(request: pytest.FixtureRequest) -> None:
-    """在每个测试开始后写入 Allure 元数据。"""
+def _allure_metadata(request: pytest.FixtureRequest) -> Iterator[None]:
+    """在每个测试开始后写入 Allure 元数据, 结束时补回被 allure-pytest 清掉的描述。"""
     _configure_allure(request.node)
+    yield
+    _restore_description(request.node)
 
 
 class _RecordingHandler(logging.Handler):

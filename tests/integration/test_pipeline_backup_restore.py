@@ -27,7 +27,7 @@ from helpers import make_save_folder, migrated_database, touch_save
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.normal,
+    pytest.mark.critical,
     pytest.mark.epic("备份与分支"),
     pytest.mark.feature("跨层协作"),
     pytest.mark.story("备份恢复删除与定时任务"),

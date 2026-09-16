@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -117,18 +118,39 @@ def _pump(app: ArchiveApp) -> None:
 
 
 def _drain(app: ArchiveApp) -> None:
-    """等后台线程结果经消息队列回到主线程(忙碌标志复位).
+    """等后台线程结果经消息队列回到主线程(忙碌标志复位且消息已分发).
 
     恢复与会话级的备份会真的读写文件, 在带覆盖率或高负载机器上会明显变慢,
-    因此把等待上限放宽并在超时时给出明确失败信息(而不是让后续断言莫名失败)。
+    因此这里等的是"条件成立"(忙碌标志复位), 而不是固定睡多久; 超时时给出
+    指向审计日志的失败信息, 免得后续断言莫名失败。
     """
     deadline = time.monotonic() + _DRAIN_TIMEOUT_SECONDS
-    while getattr(app, "_busy", False) and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
         _pump(app)
+        app._poll_messages()  # 把后台结果搬回主线程
+        _pump(app)
+        if not getattr(app, "_busy", False):
+            return
         time.sleep(0.005)
-    app._poll_messages()  # 手动分发消息队列
-    _pump(app)
-    assert not getattr(app, "_busy", False), "后台操作在等待上限内未完成"
+    raise AssertionError(
+        f"后台操作在 {_DRAIN_TIMEOUT_SECONDS:.0f} 秒内未完成: "
+        "若属于备份/恢复, 请查审计日志(backup.* / restore.*)确认是否已失败"
+    )
+
+
+def _service_backups(service: ArchiveService, game_id: str) -> list[Any]:
+    """读取真实后端的备份列表, 数量不足时给出可诊断的失败信息.
+
+    后台备份失败(例如 Windows 上临时目录被扫描器占用)时, 直接写
+    ``service.list_backups(...)[0]`` 只会抛 IndexError, 看不出"备份根本没成功";
+    审计日志里对应的是 ``backup.create.failed``。
+    """
+    items = service.list_backups(game_id)
+    if not items:
+        raise AssertionError(
+            "预期至少一个备份, 实际为空: 后台备份未成功, 请查审计日志 backup.create.failed"
+        )
+    return list(items)
 
 
 def _feedback_kind(app: ArchiveApp) -> FeedbackKind:
@@ -285,6 +307,89 @@ def test_empty_database_polling_does_not_crash(
             app._poll_messages()
             _pump(app)
         assert app._items == []
+    finally:
+        app.destroy()
+
+
+def test_window_build_survives_a_transient_database_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """回归: 数据库瞬时读失败(CI 上出现过 OperationalError: unsupported file format)
+    时窗口仍能构造; 故障过去后重新加载能自行恢复.
+
+    读取失败发生在构造过程中(游戏发现面板会立即读监控目录), 让异常冒出去就等于
+    整个窗口起不来 —— 而这类失败通常是瞬时的。
+    """
+    from archive_management.infrastructure.database import Database
+    from archive_management.infrastructure.repository import (
+        MonitoredDirectoryRepository,
+    )
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    _patch_dialogs(monkeypatch)
+    db = Database(tmp_path / "flaky.db")
+    db.migrate()
+    service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    service.add_monitored_directory(str(saves))
+
+    original = MonitoredDirectoryRepository.list_all
+    state: dict[str, Any] = {"broken": True, "calls": 0}
+
+    def flaky(self: MonitoredDirectoryRepository) -> list[Any]:
+        state["calls"] += 1
+        if state["broken"]:
+            raise sqlite3.OperationalError("unsupported file format")
+        return original(self)
+
+    monkeypatch.setattr(MonitoredDirectoryRepository, "list_all", flaky)
+    try:
+        app = _new_app(service)
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        # 故障期间: 面板空着, 但既没抛异常也没弹出模态框。
+        assert state["calls"] >= 1
+        assert app._home_page._discovery._dirs == []
+        # 故障过去后重新加载: 数据回来, 不需要重建窗口。
+        state["broken"] = False
+        app._home_page._discovery.reload()
+        assert [item.path for item in app._home_page._discovery._dirs] == [str(saves)]
+    finally:
+        app.destroy()
+
+
+def test_polling_survives_a_transient_database_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """回归: 轮询时数据库报错不得让窗口崩掉(记日志 + 状态栏提示即可)."""
+    from archive_management.infrastructure.database import Database
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    _patch_dialogs(monkeypatch)
+    db = Database(tmp_path / "poll.db")
+    db.migrate()
+    service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+
+    def broken(_game_id: str | None) -> Any:
+        raise sqlite3.OperationalError("unsupported file format")
+
+    monkeypatch.setattr(service, "task_status", broken)
+    try:
+        app = _new_app(service)
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        for _index in range(3):
+            app._poll_messages()
+            _pump(app)
+        assert _feedback_kind(app) == FeedbackKind.ERROR
+        assert "unsupported file format" in app._last_feedback[1]
     finally:
         app.destroy()
 
@@ -2179,7 +2284,7 @@ def test_sql_backend_backup_creates_node_and_unfinished_actions_report_clearly(
         app._on_backup()
         _drain(app)
         assert app._last_feedback[0] == FeedbackKind.SUCCESS
-        items = service.list_backups(game.game_id)
+        items = _service_backups(service, game.game_id)
         assert len(items) == 1
         assert items[0].verified is True
 
@@ -2189,7 +2294,7 @@ def test_sql_backend_backup_creates_node_and_unfinished_actions_report_clearly(
         _drain(app)
         assert app._last_feedback[0] == FeedbackKind.SUCCESS
         assert "当前节点" in app._last_feedback[1]
-        assert service.list_backups(game.game_id)[0].is_current is True
+        assert _service_backups(service, game.game_id)[0].is_current is True
 
         # 导出尚未实现, 当前必须给出明确提示而不是静默成功.
         app._on_export()
@@ -2233,7 +2338,7 @@ def test_gui_backup_reports_unchanged_save_with_dialog(
         app._select_game(game.game_id)
         app._on_backup()
         _drain(app)
-        items = service.list_backups(game.game_id)
+        items = _service_backups(service, game.game_id)
         assert len(items) == 1
 
         # 存档没有任何改动: 再次备份应被拒绝并给出弹窗提示.
@@ -2329,7 +2434,7 @@ def test_gui_restore_writes_files_back_through_service(
         app._select_game(game.game_id)
         app._on_backup()
         _drain(app)
-        items = service.list_backups(game.game_id)
+        items = _service_backups(service, game.game_id)
         (save_dir / "slot1.dat").write_text("changed", encoding="utf-8")
         (save_dir / "extra.txt").write_text("extra", encoding="utf-8")
 
@@ -2376,7 +2481,7 @@ def test_gui_safety_point_stays_out_of_branch_view(
         app._select_game(game.game_id)
         app._on_backup()
         _drain(app)
-        items = service.list_backups(game.game_id)
+        items = _service_backups(service, game.game_id)
         (save_dir / "slot1.dat").write_text("changed", encoding="utf-8")
         app._select_backup(items[0])
         app._on_restore()
@@ -2429,7 +2534,7 @@ def test_gui_restore_reports_snapshot_damage(
         app._select_game(game.game_id)
         app._on_backup()
         _drain(app)
-        items = service.list_backups(game.game_id)
+        items = _service_backups(service, game.game_id)
         snapshots = sorted(backup_root.glob("*/*/loc-0/slot1.dat"))
         assert snapshots
         snapshots[0].write_text("tampered", encoding="utf-8")

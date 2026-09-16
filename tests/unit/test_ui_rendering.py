@@ -17,7 +17,7 @@ from archive_management.ui.rendering import apply_border_rendering_fix
 
 pytestmark = [
     pytest.mark.ui,
-    pytest.mark.critical,
+    pytest.mark.minor,
     pytest.mark.epic("界面框架"),
     pytest.mark.feature("通用控件"),
     pytest.mark.story("控件边框渲染"),

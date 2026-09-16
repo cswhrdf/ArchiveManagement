@@ -20,7 +20,7 @@ from archive_management.services.platforms import (
 )
 
 pytestmark = [
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("游戏与存档位置"),
     pytest.mark.feature("本地游戏探测"),
     pytest.mark.story("按平台选择探测来源"),

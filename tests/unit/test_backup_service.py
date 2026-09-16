@@ -43,7 +43,8 @@ pytestmark = [
     pytest.mark.epic("备份与分支"),
     pytest.mark.feature("备份用例服务"),
     pytest.mark.story("创建备份与分支"),
-    pytest.mark.layer("unit"),
+    # 真实数据库 + 文件系统的跨组件协作, 按层定义归入 integration.
+    pytest.mark.layer("integration"),
 ]
 
 

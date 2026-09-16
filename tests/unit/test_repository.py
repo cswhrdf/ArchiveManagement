@@ -31,7 +31,8 @@ pytestmark = [
     pytest.mark.epic("数据持久化"),
     pytest.mark.feature("数据仓储"),
     pytest.mark.story("游戏位置与备份读写"),
-    pytest.mark.layer("unit"),
+    # 真实 SQLite 文件 + 领域对象, 按层定义归入 integration.
+    pytest.mark.layer("integration"),
 ]
 
 

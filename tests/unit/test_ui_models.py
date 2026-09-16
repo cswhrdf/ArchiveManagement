@@ -46,7 +46,7 @@ from archive_management.ui.models import (
 
 pytestmark = [
     pytest.mark.ui,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("界面框架"),
     pytest.mark.feature("展示模型"),
     pytest.mark.story("备份列表展示"),

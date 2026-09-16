@@ -24,7 +24,7 @@ from archive_management.services.hotkeys import (
 
 pytestmark = [
     pytest.mark.config,
-    pytest.mark.critical,
+    pytest.mark.normal,
     pytest.mark.epic("基础工程"),
     pytest.mark.feature("应用配置"),
     pytest.mark.story("配置读写与校验"),

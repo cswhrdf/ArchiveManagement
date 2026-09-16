@@ -12,7 +12,7 @@ from archive_management.ui.demo_backend import DemoArchiveService
 pytestmark = [
     pytest.mark.backend,
     pytest.mark.ui,
-    pytest.mark.critical,
+    pytest.mark.minor,
     pytest.mark.epic("界面框架"),
     pytest.mark.feature("演示后端"),
     pytest.mark.story("演示数据后端"),
