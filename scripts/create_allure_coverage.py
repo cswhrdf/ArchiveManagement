@@ -1,4 +1,10 @@
-"""根据 pytest-cov 生成的 Cobertura XML 创建可读的 Allure 结果."""
+"""根据 pytest-cov 生成的 Cobertura XML 创建可读的 Allure 结果.
+
+除了把覆盖率摘要写进描述, **原始覆盖率报告会作为附件一并放进 Allure 结果目录**
+(默认是 ``coverage.xml``) —— 与性能/安全汇总项(``scripts/create_allure_summary.py``)
+同一做法: 报告里能直接下载原始数据, 而不只是看到一张渲染过的表。HTML 报告是整站,
+仍旧由 CI 的 ``coverage-<os>`` artifact 提供。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,18 @@ from typing import Any
 
 RESULTS_DIRECTORY = Path("allure-results")
 COVERAGE_XML = Path("coverage.xml")
+# 作为附件带进报告的原始覆盖率报告: 存在哪个带哪个。Cobertura XML 是主数据源,
+# 另外两个是可选的附加输出 —— 以后在 CI 里加 `coverage.json`、或把终端的
+# `--cov-report=term-missing` 输出重定向成文件时, 不用改代码就会一并带上。
+RAW_REPORT_FILES = (COVERAGE_XML, Path("coverage-report.txt"), Path("coverage.json"))
+# 附件媒体类型(Allure 用它决定预览方式); 未登记的后缀按纯文本处理。
+ATTACHMENT_MEDIA_TYPES = {
+    "json": "application/json",
+    "xml": "application/xml",
+    "txt": "text/plain",
+    "csv": "text/csv",
+    "html": "text/html",
+}
 # 覆盖率摘要项的严重等级: 它不验证行为, 只把 Cobertura 报告带进 Allure;
 # 不打等级会让报告出现一个只有摘要项的 no_severity 桶。
 COVERAGE_SEVERITY = "trivial"
@@ -100,6 +118,47 @@ def build_description(root: ET.Element) -> str:
     return "\n".join(lines)
 
 
+def write_attachment(source: Path, result_id: str) -> dict[str, str] | None:
+    """把一份原始报告复制成 Allure 附件(与性能/安全汇总项同一做法).
+
+    附件名保留原文件名(``coverage.xml``), 报告里一眼能看出带的是哪份原始数据;
+    文件不存在时返回 None(例如手改过的运行只产出了 XML)。
+    """
+    if not source.is_file():
+        return None
+    suffix = source.suffix.lstrip(".") or "txt"
+    RESULTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    target = RESULTS_DIRECTORY / f"{result_id}-attachment.{suffix}"
+    target.write_bytes(source.read_bytes())
+    return {
+        "name": source.name,
+        "source": target.name,
+        "type": ATTACHMENT_MEDIA_TYPES.get(suffix, "text/plain"),
+    }
+
+
+def raw_report_attachments(result_id: str) -> list[dict[str, str]]:
+    """收集所有存在的原始报告附件(按 :data:`RAW_REPORT_FILES` 的顺序)."""
+    return [
+        item
+        for item in (write_attachment(source, result_id) for source in RAW_REPORT_FILES)
+        if item is not None
+    ]
+
+
+def with_raw_report_note(description: str, attachments: list[dict[str, str]]) -> str:
+    """在描述末尾补一段“原始报告已作为附件”的说明(没有附件时原样返回)."""
+    if not attachments:
+        return description
+    names = ", ".join(f"`{item['name']}`" for item in attachments)
+    return (
+        f"{description}\n\n"
+        "## Raw report\n\n"
+        f"- Attached to this item: {names}.\n"
+        "- The HTML coverage report is published as the `coverage-<os>` CI artifact.\n"
+    )
+
+
 def write_result(result: dict[str, Any], result_id: str) -> None:
     """将一条覆盖率结果写入 Allure 结果目录."""
     RESULTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -108,10 +167,11 @@ def write_result(result: dict[str, Any], result_id: str) -> None:
 
 
 def main() -> None:
-    """创建一条包含覆盖率摘要的 Allure 结果."""
+    """创建一条包含覆盖率摘要与原始报告附件的 Allure 结果."""
     result_id = str(uuid.uuid4())
     timestamp = time.time_ns() // 1_000_000
     name = platform_name()
+    attachments = raw_report_attachments(result_id)
     result: dict[str, Any] = {
         "uuid": result_id,
         "historyId": str(uuid.uuid5(uuid.NAMESPACE_URL, "archive-management-coverage")),
@@ -130,15 +190,17 @@ def main() -> None:
         ],
         "parameters": [{"name": "Platform", "value": name}],
         "description": "",
+        "attachments": attachments,
     }
     if not COVERAGE_XML.exists():
         result["status"] = "broken"
         result["statusDetails"] = {
             "message": f"Coverage file not found: {COVERAGE_XML}"
         }
-        result["description"] = (
+        result["description"] = with_raw_report_note(
             "## Coverage unavailable\n\n"
-            f"The coverage command did not produce `{COVERAGE_XML}`."
+            f"The coverage command did not produce `{COVERAGE_XML}`.",
+            attachments,
         )
         write_result(result, result_id)
         return
@@ -148,13 +210,14 @@ def main() -> None:
     except (ET.ParseError, OSError) as exc:
         result["status"] = "broken"
         result["statusDetails"] = {"message": f"Unable to read coverage XML: {exc}"}
-        result["description"] = (
-            f"## Coverage unavailable\n\nThe coverage file could not be parsed: `{exc}`"
+        result["description"] = with_raw_report_note(
+            f"## Coverage unavailable\n\nThe coverage file could not be parsed: `{exc}`",
+            attachments,
         )
         write_result(result, result_id)
         return
 
-    result["description"] = build_description(root)
+    result["description"] = with_raw_report_note(build_description(root), attachments)
     write_result(result, result_id)
 
 

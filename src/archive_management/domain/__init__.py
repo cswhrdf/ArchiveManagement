@@ -54,6 +54,17 @@ from archive_management.domain.home import (
     origin_counts,
     parse_category,
 )
+from archive_management.domain.platform_meta import (
+    ARTWORK_KINDS,
+    PLATFORM_DATA_FORMAT_VERSION,
+    PLATFORM_IDS,
+    ArtworkKind,
+    ArtworkRef,
+    PlatformGame,
+    PlatformId,
+    SavePathCandidate,
+    parse_platform_game,
+)
 from archive_management.domain.steam_data import (
     STEAM_DATA_FORMAT_VERSION,
     SteamDataFile,
@@ -70,6 +81,7 @@ from archive_management.domain.tree import (
 )
 
 __all__ = [
+    "ARTWORK_KINDS",
     "CONFIDENCE_RANK",
     "DEFAULT_KEEP_AUTO",
     "DEFAULT_PAGE_SIZE",
@@ -77,10 +89,14 @@ __all__ = [
     "MAX_TAGS",
     "MAX_TAG_LENGTH",
     "PAGE_SIZES",
+    "PLATFORM_DATA_FORMAT_VERSION",
+    "PLATFORM_IDS",
     "RECENT_DAYS",
     "SOURCE_RANK",
     "STALE_DAYS",
     "STEAM_DATA_FORMAT_VERSION",
+    "ArtworkKind",
+    "ArtworkRef",
     "BackupFileEntry",
     "BackupNode",
     "CandidateStatus",
@@ -102,7 +118,10 @@ __all__ = [
     "NodeKind",
     "PathHealth",
     "PathKind",
+    "PlatformGame",
+    "PlatformId",
     "SaveLocation",
+    "SavePathCandidate",
     "SaveSource",
     "ScheduledJob",
     "SteamDataFile",
@@ -123,6 +142,7 @@ __all__ = [
     "normalize_tags",
     "origin_counts",
     "parse_category",
+    "parse_platform_game",
     "plan_deletion",
     "tree_depths",
     "tree_inputs",

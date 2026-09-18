@@ -62,3 +62,7 @@ class SchedulingError(ArchiveManagementError):
 
 class SteamIntegrationError(ArchiveManagementError):
     """Steam 探测或 API 相关的可恢复错误."""
+
+
+class PlatformIntegrationError(ArchiveManagementError):
+    """平台数据格式不兼容或字段非法(适配器与领域模型之间的契约错误)."""

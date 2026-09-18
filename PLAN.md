@@ -253,6 +253,8 @@ SQLite 至少包含以下实体：
 | **G-6（可选）Steam Web API 增强** | keyring 存取密钥 + 用户显式启用的开关 + 仅用于补充展示信息                                                                                                                      | S    | G-4      | 无密钥/超时/限流/HTTP 错误全部降级；日志与导出不含密钥                                                    |
 | **G-7 文档与门禁收尾**            | `docs/platforms.md` 平台矩阵与可信来源清单、`docs/library.md` 封面行为、i18n 两份同键、新测试模块声明严重等级、README 文档表                                                    | S    | 全部     | 质量门禁四钩子全绿；文档描述与实现一致                                                                    |
 
+进度（2026-09-18）：**G-1 与 G-2 已完成**。版本化模型与适配器边界在 `domain/platform_meta.py` 与 `services/platform_adapters.py`，Steam 云端清单解析与 `root` 映射在 `services/steam_cloud.py`（复用 `platform_scan` 新增的模块级 `steam_roots`/`steam_libraries`/`read_steam_installs`，不再写第二份 VDF 解析）；契约、降级与越界拒绝由 `tests/unit/test_platform_adapters.py`、`tests/unit/test_steam_cloud.py`、`tests/unit/test_platform_meta.py` 覆盖。`root` 编号映射已用本机真实清单核对：`1` = 游戏安装目录、`2` = 用户的“文档”、`3` = `%LOCALAPPDATA%`、`12` = `%LOCALAPPDATA%Low`，与 Steam SDK 的 `ERemoteStorageFileRoot` 枚举一致。
+
 #### 与既有实现的对接点（复用而非重写）
 
 - `services/platform_scan`：Steam 主目录/库清单/manifest 解析、`ScanRoots` 注入、单来源失败隔离（`_guard`）、路径健康判定。
@@ -419,5 +421,17 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 13. M7.3：界面接入与封面显示（G-5，含 Pillow 依赖）。
 14. M7.4（可选）：Steam Web API 增强（G-6）。
 15. M8：Windows 可执行文件打包和发布验证。
+16. M8.1（延后验证，不阻塞当前开发）：Ubuntu 26.04 迁移后的 CI 兼容性。
+    `ubuntu-latest` 目前是 Ubuntu 24.04，GitHub 公告 2026-10-19 起用 1–2 个月渐进切到 26.04。
+    已逐项评估现有 Linux 步骤，结论是**无需提前改动**：`Install Xvfb` 那一步已经同时处理
+    `.list` 与 `.sources`（26.04 用新式 `.sources`），`uv python install` 用 uv 自带 standalone
+    CPython 不依赖镜像里的 Python，Node 与 Allure CLI 由 `setup-node` 提供，GUI 用例只靠
+    `xvfb-run`；仓库、工作流与文档里也没有任何 `24.04` 之类的版本字符串需要同步修改。
+    迁移真正开始后跑一轮 CI，只确认三件事：
+    ① `Install Xvfb` 的 `apt-get update` / `install` 正常；
+    ② 三个平台的 GUI 用例没有被环境守卫成片 skip（成片 skip 会把覆盖率门槛变成难定位的失败）；
+    ③ `performance` job 的绝对预算（`budget_seconds`、内存预算）没有因镜像换代整体位移到踩线。
+    任何一项不达标就把对应 job 显式钉到 `ubuntu-24.04`（`performance` 优先：基准可比性依赖稳定
+    环境），并在工作流里写明取值理由。
 
 每个里程碑都必须有可运行的垂直切片和对应测试，不等到所有 UI 完成后才验证核心文件操作。

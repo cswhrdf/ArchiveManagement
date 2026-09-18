@@ -8,6 +8,7 @@ CI 里出现过"报告只剩通过/失败, 点开用例是空的" —— 该目�
 - 结果条数与 ``allure-results`` 不一致(合并或生成掉数据)必须判为不完整;
 - 没有报告时(本次没跑出结果)不算失败;
 - 环境维度必须生效: 只剩单个 ``default`` 环境(生成时没读到 ``allurerc.mjs``)要判为不完整;
+- 结果声明的附件必须真的在(覆盖率/性能/安全汇总项把原始报告挂在条目上);
 - CI 只在自检通过后发布, 且发布的是单个 zip。
 """
 
@@ -116,6 +117,24 @@ def layout(tmp_path: Path) -> _Layout:
     results.mkdir()
     for rid in _RESULT_IDS:
         (results / f"{rid}-result.json").write_text("{}", encoding="utf-8")
+    # 汇总项(覆盖率/性能/安全/质量)把原始报告作为附件挂在结果上: 附件文件也要跟着到达。
+    attachment = results / f"{_RESULT_IDS[0]}-attachment.xml"
+    attachment.write_text("<coverage/>", encoding="utf-8")
+    (results / f"{_RESULT_IDS[0]}-result.json").write_text(
+        json.dumps(
+            {
+                "uuid": _RESULT_IDS[0],
+                "attachments": [
+                    {
+                        "name": "coverage.xml",
+                        "source": attachment.name,
+                        "type": "application/xml",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     return _Layout(report=report, results=results)
 
 
@@ -129,6 +148,7 @@ def test_complete_report_has_no_problems(layout: _Layout) -> None:
     assert facts.detail_files == len(_RESULT_IDS)
     assert facts.env_groups == 1
     assert facts.result_files == len(_RESULT_IDS)
+    assert facts.attachments == 1
 
 
 def test_missing_detail_directory_fails_with_exit_code(
@@ -196,6 +216,21 @@ def test_missing_environment_widget_is_reported(layout: _Layout) -> None:
     _, problems = verifier.verify_report(layout.report)
 
     assert any("environments.json" in problem for problem in problems)
+
+
+def test_declared_attachment_must_exist(
+    layout: _Layout, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """结果里声明的附件被丢掉时必须报错(否则报告里只剩一个打不开的附件)."""
+    (layout.results / f"{_RESULT_IDS[0]}-attachment.xml").unlink()
+
+    exit_code = verifier.main([str(layout.report), "--results", str(layout.results)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "缺少 1 个结果附件" in captured.err
+    assert "-attachment.xml" in captured.err
+    assert "结果附件: 1 个" in captured.out
 
 
 def test_absent_report_is_not_a_failure(
@@ -319,6 +354,77 @@ def test_coverage_item_lands_in_the_platform_environment(
     assert platform not in payload["fullName"]
     assert platform not in payload["historyId"]
     assert "Coverage by package" in payload["description"]
+
+
+def test_coverage_item_carries_the_raw_report_as_an_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """原始覆盖率报告要作为附件随条目一起进报告(与性能/安全汇总项同一做法)."""
+    module = _load_script("create_allure_coverage")
+    results = tmp_path / "allure-results"
+    coverage_xml = tmp_path / "coverage.xml"
+    coverage_xml.write_text(_COVERAGE_XML, encoding="utf-8")
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
+    monkeypatch.setattr(module, "RAW_REPORT_FILES", (coverage_xml,))
+
+    module.main()
+
+    payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
+    attachment = payload["attachments"]
+    assert [item["name"] for item in attachment] == ["coverage.xml"]
+    assert attachment[0]["type"] == "application/xml"
+    assert (results / attachment[0]["source"]).read_bytes() == coverage_xml.read_bytes()
+    assert "## Raw report" in payload["description"]
+
+
+def test_coverage_item_attaches_only_the_raw_reports_that_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """存在哪个原始报告就带哪个: 多出来的终端文本照带, 缺失的不报错也不要占位."""
+    module = _load_script("create_allure_coverage")
+    results = tmp_path / "allure-results"
+    coverage_xml = tmp_path / "coverage.xml"
+    coverage_xml.write_text(_COVERAGE_XML, encoding="utf-8")
+    text_report = tmp_path / "coverage-report.txt"
+    text_report.write_text("Name  Stmts  Miss\n", encoding="utf-8")
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
+    monkeypatch.setattr(
+        module,
+        "RAW_REPORT_FILES",
+        (coverage_xml, text_report, tmp_path / "coverage.json"),
+    )
+
+    module.main()
+
+    payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
+    assert [item["name"] for item in payload["attachments"]] == [
+        "coverage.xml",
+        "coverage-report.txt",
+    ]
+    assert [item["type"] for item in payload["attachments"]] == [
+        "application/xml",
+        "text/plain",
+    ]
+
+
+def test_coverage_item_without_the_raw_file_has_no_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """覆盖率文件缺失时条目照旧写成 broken, 但不挂一个不存在的附件."""
+    module = _load_script("create_allure_coverage")
+    results = tmp_path / "allure-results"
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "COVERAGE_XML", tmp_path / "coverage.xml")
+    monkeypatch.setattr(module, "RAW_REPORT_FILES", (tmp_path / "coverage.xml",))
+
+    module.main()
+
+    payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
+    assert payload["status"] == "broken"
+    assert payload["attachments"] == []
+    assert "Raw report" not in payload["description"]
 
 
 def test_quality_items_record_pass_and_fail(

@@ -29,7 +29,7 @@
  */
 export default {
   // 报告标题(显示在报告头部与 <title> 上). 不写就是通用的 "Allure Report"。
-  name: "存档管理 · 测试报告",
+  name: "存档管理工具 · 测试报告",
   // `allure open <报告目录>`(以及 `allure generate --open`)默认使用这个端口.
   // CLI 不传 --port 时才会用到它; 端口被占用就临时换一个: `allure open allure-report --port 8081`.
   port: "8080",

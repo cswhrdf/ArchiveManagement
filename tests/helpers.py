@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import platform
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,7 +38,12 @@ from archive_management.infrastructure.repository import (
     GameRepository,
     SaveLocationRepository,
 )
-from archive_management.services.platforms import current_platform
+from archive_management.services.platform_scan import (
+    NullRegistry,
+    RegistryReader,
+    ScanRoots,
+)
+from archive_management.services.platforms import PlatformFamily, current_platform
 from archive_management.services.scheduler import BackupScheduler, ManualBackend
 from archive_management.ui.sql_backend import SqlArchiveService
 
@@ -179,6 +184,93 @@ def sql_archive_service(
         backup_root=root / backup_dir,
         scheduler=scheduler if scheduler is not None else manual_scheduler(),
     )
+
+
+# 测试用 Steam 账号目录名: 真实 Steam 用纯数字的 SteamID.
+STEAM_ACCOUNT = "76561198000000001"
+
+
+def scan_roots(
+    root: Path,
+    *,
+    platform: PlatformFamily = "windows",
+    registry: RegistryReader | None = None,
+) -> ScanRoots:
+    """构造指向临时目录的探测环境(注册表缺省为空实现, 需要时由调用方注入).
+
+    ``root`` 同时充当用户主目录与各系统目录的父目录; 需要
+    ``<root>/Program Files (x86)/Steam`` 这类结构时继续用 :func:`steam_tree`
+    创建, 这样平台目录规则与本地游戏探测保持一致。
+    """
+    return ScanRoots(
+        platform=platform,
+        program_data=root / "ProgramData",
+        program_files=root / "Program Files",
+        program_files_x86=root / "Program Files (x86)",
+        local_app_data=root / "Local",
+        user_profile=root,
+        registry=registry if registry is not None else NullRegistry(),
+    )
+
+
+def steam_tree(root: Path) -> Path:
+    """造出 Steam 主目录并返回它.
+
+    位置用 Windows 的默认安装目录: 这样不需要注册表替身也能被
+    :func:`archive_management.services.platform_scan.steam_roots` 找到。
+    """
+    steam = root / "Program Files (x86)" / "Steam"
+    (steam / "steamapps" / "common").mkdir(parents=True, exist_ok=True)
+    return steam
+
+
+def write_steam_manifest(
+    library: Path, app_id: str, name: str, installdir: str
+) -> Path:
+    """写入一个 Steam 应用清单(``appmanifest_<appid>.acf``)并返回它的路径."""
+    manifest = library / "steamapps" / f"appmanifest_{app_id}.acf"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        '"AppState"\n{\n'
+        f'\t"appid"\t\t"{app_id}"\n'
+        f'\t"name"\t\t"{name}"\n'
+        f'\t"installdir"\t\t"{installdir}"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def write_remotecache(
+    steam: Path,
+    app_id: str,
+    entries: Mapping[str, int],
+    *,
+    account: str = STEAM_ACCOUNT,
+    size: int = 128,
+    sha: str = "0" * 40,
+) -> Path:
+    """写入一份云端同步清单(``userdata/<account>/<appid>/remotecache.vdf``).
+
+    ``entries`` 是"清单里的相对路径 → root 编号"; 结构参照真实清单(头部是
+    ``ChangeNumber``/``OSType``, 每个文件一个条目). 返回清单路径, 便于用例
+    再把它改成损坏/不可读的形态。
+    """
+    folder = steam / "userdata" / account / app_id
+    folder.mkdir(parents=True, exist_ok=True)
+    body = f'"{app_id}"\n{{\n\t"ChangeNumber"\t\t"0"\n\t"OSType"\t\t"0"\n'
+    for relative, root_id in entries.items():
+        body += (
+            f'\t"{relative}"\n\t{{\n'
+            f'\t\t"root"\t\t"{root_id}"\n'
+            f'\t\t"size"\t\t"{size}"\n'
+            f'\t\t"sha"\t\t"{sha}"\n'
+            "\t}\n"
+        )
+    body += "}\n"
+    manifest = folder / "remotecache.vdf"
+    manifest.write_text(body, encoding="utf-8")
+    return manifest
 
 
 def write_json_report(path: Path, payload: dict[str, Any]) -> Path:

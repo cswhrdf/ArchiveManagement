@@ -23,6 +23,7 @@ from archive_management.ui.models import LocationItem, size_label
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory, pick_file
 from archive_management.ui.schedule_window import edit_schedule
+from archive_management.ui.textfit import fit_text
 
 _ChangeCallback = Callable[[], None]
 
@@ -30,6 +31,14 @@ _ChangeCallback = Callable[[], None]
 def _kind_text(kind: PathKind) -> str:
     """返回目录/文件的展示文案."""
     return tr("loc.kind_dir") if kind == "directory" else tr("loc.kind_file")
+
+
+# 窗口是固定的 600x600, 标题左边只腾得下 150px(右边四个动作按钮占 414px): 长名称
+# 如果不受限, 头部请求宽度会到 1202px —— 整个头部被挤到窗口之外, 按钮也看不到。
+# 上限取下实测值再去掉标签自身的内边距, 最多两行, 超出补省略号(完整名称在
+# 重命名对话框与游戏主页里都能看到)。
+_TITLE_TEXT_WIDTH = 118
+_TITLE_TEXT_LINES = 2
 
 
 class ManageGameWindow:
@@ -82,11 +91,19 @@ class ManageGameWindow:
         header = ctk.CTkFrame(container, fg_color=palette.panel, corner_radius=10)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         header.grid_columnconfigure(0, weight=1)
+        self._title_font = ctk.CTkFont(size=16, weight="bold")
         self._title_label = ctk.CTkLabel(
             header,
-            text=self._name,
+            text=fit_text(
+                self._name,
+                self._title_font,
+                _TITLE_TEXT_WIDTH,
+                max_lines=_TITLE_TEXT_LINES,
+            ),
             anchor="w",
-            font=ctk.CTkFont(size=16, weight="bold"),
+            justify="left",
+            wraplength=_TITLE_TEXT_WIDTH,
+            font=self._title_font,
             text_color=palette.text_primary,
         )
         self._title_label.grid(row=0, column=0, padx=16, pady=(14, 0), sticky="w")
@@ -358,7 +375,15 @@ class ManageGameWindow:
             self._show_error(exc)
             return
         self._name = summary.name
-        self._title_label.configure(text=self._name)
+        # 重命名后同样要重新裁剪: 新名字可能比原来的长.
+        self._title_label.configure(
+            text=fit_text(
+                self._name,
+                self._title_font,
+                _TITLE_TEXT_WIDTH,
+                max_lines=_TITLE_TEXT_LINES,
+            )
+        )
         self._on_change()
 
     def _on_toggle_enabled(self) -> None:

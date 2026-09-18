@@ -22,10 +22,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
+import tkinter as tk
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from math import ceil
 
 import customtkinter as ctk
@@ -51,22 +53,24 @@ from archive_management.ui.models import (
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
+from archive_management.ui.textfit import fit_text
 
 _ChangeCallback = Callable[[], None]
 _DetailCallback = Callable[[str], None]
 
 logger = logging.getLogger(__name__)
 
-# 列表列: (表头文案 key, 列宽, 文本对齐). 名称列与状态列自适应(最小宽度仅供收窄
-# 窗口时兜底), 其余列固定宽度; 所有行与表头使用同一套 grid 列配置, 因此各列上下
-# 对齐。总最小宽度 840px, 对应主窗口最小宽度 1200。
+# 固定列: (表头文案 key, 列宽, 文本对齐). 这些列的内容长短可预期(平台名、数字、
+# 时间、状态标签), 因此宽度固定, 并且**整块贴靠界面右侧**; 除它们之外的所有宽度
+# 都留给游戏名称 —— 名称的长度无法预期, 而且越长越有价值。状态列取 200px: 标签是
+# 应用自己拼的(平台 + 是否已备份 + 是否来自探测 + 风险 + 归档), 够放三个。
 _COLUMNS: tuple[tuple[str, int, str], ...] = (
     ("home.col_platform", 108, "w"),
     ("home.col_locations", 92, "center"),
     ("home.col_backups", 88, "center"),
     ("home.col_last_backup", 140, "w"),
     ("home.col_activity", 140, "w"),
-    ("home.col_state", 150, "w"),
+    ("home.col_state", 200, "w"),
 )
 # 列之间的横向间距: 数值列与时间列的标题容易读成一串("备份最近备份"), 因此留出
 # 明显的空隙, 再配合数值列居中, 每一列都自成一项。
@@ -74,19 +78,60 @@ _COLUMN_GAP = 18
 # 头像色块基调: 与详情页的概要卡使用同一套映射.
 _TONE_KEYS: dict[str, str] = {"orange": "danger", "green": "success"}
 _DOT_COLUMN = 28
-_NAME_MIN_WIDTH = 130
+# 表头与数据行的左右内边距: 左边给色块、右边给固定列块, 两侧结构一致才能上下对齐.
+_TABLE_SIDE_PAD = 10
+# 名称块与固定列块之间的最小空隙.
+_TABLE_BLOCK_GAP = 12
+# 表头左边距 = 滚动区 10 + 数据行自己的 4(pack padx): 表头与数据行落在同一条竖线上.
+_HEAD_LEFT_PAD = _TABLE_SIDE_PAD + 4
+# 色块与名称之间的空隙(表头与数据行一致).
+_NAME_PAD = 8
+# 名称的初始宽度: 真正显示多少字由名称块的**实际宽度**决定(见 _refit_row_names),
+# 窗口变宽就多显示几个字; 这个值只在控件尺寸还没测量出来时(启动首屏)兜底。
+_NAME_FALLBACK_WIDTH = 200
+# 拖窗口时把"表头对齐 + 名称重裁"合并成一次: 每个像素都跑一遍会卡.
+_SYNC_DELAY_MS = 60
+# 表头对齐最多迭代几轮(表头几何变化不会触发滚动区的 Configure, 得主动再量一轮).
+_ALIGN_MAX_ATTEMPTS = 4
 # 海报卡片尺寸: 固定宽高, 保证封面始终是竖屏(高比宽大); 封面暂时没有图片,
 # 用游戏名前两个字代替, 备份数量贴在封面右下角.
 _POSTER_WIDTH = 190
 # 卡片高度要容下封面(250 + 上下间距 14)、名称(28)与活动时间(28 + 上下间距 12),
-# 合计 332; 留一点余量, 否则最后一行文字会被压到底边并盖住卡片的下边框。
+# 合计 332; 留一点余量, 否则最后一行文字会被压到底边并盖住卡片的下边框。名称放
+# 不下时最多折两行(仍在 336 之内, 因此卡片尺寸不变)。
 _POSTER_HEIGHT = 336
 _COVER_HEIGHT = 250
+# 海报卡片在网格里的占位宽度(卡片 + 左右各 4 的间距).
+_POSTER_SLOT_WIDTH = _POSTER_WIDTH + 8
+# 海报卡片里名称的可用宽度: 卡片宽减左右各 10 的内边距.
+_POSTER_TEXT_WIDTH = _POSTER_WIDTH - 20
+_POSTER_NAME_LINES = 2
+# 滚动区宽度还没测量出来时的兜底宽度(启动首屏的 winfo_width() 只有 1): 否则首帧
+# 会按"很窄的窗口"算列数, 4 款游戏被排成两行 —— 首帧之后 _on_frame_resize 会用
+# 真实宽度重排一次。
+_POSTER_FALLBACK_WIDTH = 1000
 
 
 def _sizes_text() -> list[str]:
     """每页条数下拉框的取值."""
     return [str(size) for size in PAGE_SIZES]
+
+
+def _cell_pad(index: int) -> tuple[int, int] | int:
+    """固定列块里第 ``index`` 列的左右间距: 最后一列不留右侧空隙(它贴右边界)."""
+    return (0, _COLUMN_GAP) if index < len(_COLUMNS) - 1 else 0
+
+
+@dataclass
+class _RowParts:
+    """一行的关键部件: 表头对齐与名称重裁都要用到(不必再从控件树里找)."""
+
+    # 名称块(色块 + 名称)与固定列块(右侧那一排固定列).
+    name_block: ctk.CTkFrame
+    columns: ctk.CTkFrame
+    # 名称标签与它的**完整**名称(标签上只放裁剪后的文本).
+    label: ctk.CTkLabel
+    full_name: str
 
 
 class HomePage:
@@ -110,6 +155,19 @@ class HomePage:
         self._board: HomeBoard | None = None
         self._rows: dict[str, ctk.CTkFrame] = {}
         self._selected: str | None = None
+        # 每行的关键部件: 名称按真实宽度重裁、表头对齐都要用(键是游戏 id).
+        self._row_parts: dict[str, _RowParts] = {}
+        # 表头的左右内边距(会按实测差值调整, 见 _align_table_header).
+        self._head_pads: tuple[int, int] = (_HEAD_LEFT_PAD, _TABLE_SIDE_PAD)
+        # 表头对齐已经调过几轮(收敛后就归零).
+        self._align_attempts = 0
+        # 与行内标签同规格的字体对象, 用来量文本宽度(CTkFont 本身就是 Tk 字体).
+        self._name_font = ctk.CTkFont(size=13, weight="bold")
+        self._value_font = ctk.CTkFont(size=11)
+        # 延后的列表同步任务与海报模式当前的每行张数/已配置列数.
+        self._sync_job: str | None = None
+        self._poster_columns = 0
+        self._poster_slots = 0
         self._filter = HomeFilter()
         # 分页当前页(0 基)与每页条数由 HomeFilter.page_size 决定.
         self._page_index = 0
@@ -302,29 +360,54 @@ class HomePage:
         card.grid_rowconfigure(1, weight=1)
 
         self._head = ctk.CTkFrame(card, fg_color="transparent")
-        self._head.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-        self._configure_columns(self._head)
-        ctk.CTkLabel(
-            self._head,
-            text=tr("home.col_name"),
-            anchor="w",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=palette.text_muted,
-        ).grid(row=0, column=1, sticky="w")
-        for index, (key, _width, anchor) in enumerate(_COLUMNS, start=2):
+        # 左边距要跟数据行一致(滚动区 10 + 行自己的 4); 右边距随后由
+        # _align_table_header() 按实测差值补齐 —— 表头在卡片里, 数据行在滚动区里
+        # (滚动条还占掉几十像素), 不补齐的话"贴右"的固定列会与表头整体错开。
+        self._head.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=self._head_pads,
+            pady=(10, 6),
+        )
+        # 表头与数据行是同一套结构: 左侧"名称块"(自适应宽度) + 右侧"固定列块"(贴右).
+        self._head_columns = ctk.CTkFrame(self._head, fg_color="transparent")
+        self._head_columns.pack(side="right", padx=(_TABLE_BLOCK_GAP, _TABLE_SIDE_PAD))
+        self._configure_columns(self._head_columns)
+        for index, (key, _width, anchor) in enumerate(_COLUMNS):
             ctk.CTkLabel(
-                self._head,
+                self._head_columns,
                 text=tr(key),
                 anchor=anchor,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 text_color=palette.text_muted,
-            ).grid(row=0, column=index, sticky="ew", padx=(0, _COLUMN_GAP))
+            ).grid(row=0, column=index, sticky="ew", padx=_cell_pad(index))
+        head_name = ctk.CTkFrame(self._head, fg_color="transparent")
+        self._head_name = head_name
+        head_name.pack(side="left", fill="x", expand=True, padx=(_TABLE_SIDE_PAD, 0))
+        # 名称列头要从色块之后开始: 与数据行共用同一个色块宽度, 两边自然对齐.
+        ctk.CTkLabel(
+            head_name,
+            text="",
+            width=_DOT_COLUMN,
+            font=ctk.CTkFont(size=11, weight="bold"),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            head_name,
+            text=tr("home.col_name"),
+            anchor="w",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=palette.text_muted,
+        ).pack(side="left", padx=(_NAME_PAD, 0))
 
         self._list_box = ctk.CTkScrollableFrame(
             card, fg_color=palette.well, corner_radius=8
         )
         self._list_box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self._list_box.grid_columnconfigure(0, weight=1)
+        # 宽度变化时重排海报: 启动首屏渲染时控件尺寸还没测量出来
+        # (``winfo_width()`` 只有 1), 算出的列数会偏少 —— 4 款游戏会被排成两行。
+        self._list_box.bind("<Configure>", self._on_list_box_resize)
 
     def _build_footer(self) -> None:
         """底栏: 左侧是计数, 右下角是"每页条数 + 翻页"控件."""
@@ -393,19 +476,14 @@ class HomePage:
         self._next_btn.pack(side="left")
 
     @staticmethod
-    def _configure_columns(frame: ctk.CTkFrame) -> None:
-        """给表头与数据行设置同一套列宽, 保证各列上下对齐.
+    def _configure_columns(block: ctk.CTkFrame) -> None:
+        """给"固定列块"设置列宽: 表头与数据行共用同一套, 因此各列一定上下对齐.
 
-        名称列与最后一列(状态标签)分配剩余宽度: 窗口变宽时表格跟着变宽, 收窄时
-        先压缩这两列, 固定列(数量与时间)不会被挤掉。
+        列宽固定且**不分配权重**: 整块贴右, 宽度由这些列求和而来; 文本再用 fit_text
+        封在自己的列宽以内, 于是内容长短也不会把列推动一下。
         """
-        frame.grid_columnconfigure(0, minsize=_DOT_COLUMN)
-        frame.grid_columnconfigure(1, weight=1, minsize=_NAME_MIN_WIDTH)
-        last = len(_COLUMNS) + 1
-        for index, (_key, width, _anchor) in enumerate(_COLUMNS, start=2):
-            frame.grid_columnconfigure(index, minsize=width)
-            if index == last:
-                frame.grid_columnconfigure(index, weight=1)
+        for index, (_key, width, _anchor) in enumerate(_COLUMNS):
+            block.grid_columnconfigure(index, minsize=width)
 
     def _button(
         self,
@@ -657,9 +735,11 @@ class HomePage:
         for child in self._list_box.winfo_children():
             child.destroy()
         self._rows = {}
+        self._row_parts = {}
+        self._align_attempts = 0
         if self._filter.layout is HomeLayout.LIST:
-            # 列表行用 pack 布局, 这里把海报模式关掉的列权重恢复回来.
-            self._list_box.grid_columnconfigure(0, weight=1)
+            # 列表行用 pack 布局: 先把海报模式留下的列宽清干净.
+            self._apply_poster_columns(0)
             self._head.grid()
         else:
             self._head.grid_remove()
@@ -678,6 +758,9 @@ class HomePage:
                 row = self._build_row(item)
                 row.pack(fill="x", padx=4, pady=3)
                 self._rows[item.game_id] = row
+            # 名称按**实际可用宽度**裁剪, 而宽度要等布局完成才知道 —— 这里先排一次
+            # (用兜底宽度), 首帧之后再精确重裁一次。
+            self._schedule_list_sync()
         else:
             self._render_posters(games)
         self._paint_rows()
@@ -689,13 +772,32 @@ class HomePage:
         列宽固定且**不分配权重**: 否则第 0 列会吸走全部剩余宽度, 卡片被挤到
         行中间偏右, 看起来就不是左对齐了。
         """
-        columns = poster_columns(self._list_box.winfo_width() or 1000)
-        for index in range(columns):
+        columns = self._poster_capacity()
+        self._poster_columns = columns
+        self._apply_poster_columns(columns)
+        for item in games:
+            self._rows[item.game_id] = self._build_poster(item)
+        self._place_cards()
+
+    def _poster_capacity(self) -> int:
+        """按滚动区当前宽度算每行能放几张海报(宽度还没测量出来时用兜底值)."""
+        width = self._list_box.winfo_width()
+        return poster_columns(width if width > 1 else _POSTER_FALLBACK_WIDTH)
+
+    def _apply_poster_columns(self, columns: int) -> None:
+        """把前 ``columns`` 列设成固定列宽, 并清掉不再使用的列(收窄窗口时要用)."""
+        for index in range(max(columns, self._poster_slots)):
             self._list_box.grid_columnconfigure(
-                index, weight=0, minsize=_POSTER_WIDTH + 8
+                index,
+                weight=0,
+                minsize=_POSTER_SLOT_WIDTH if index < columns else 0,
             )
-        for index, item in enumerate(games):
-            card = self._build_poster(item)
+        self._poster_slots = columns
+
+    def _place_cards(self) -> None:
+        """按当前每行张数把已建好的卡片重新摆放一遍(启动首屏与窗口缩放都会用到)."""
+        columns = self._poster_columns
+        for index, card in enumerate(self._rows.values()):
             card.grid(
                 row=index // columns,
                 column=index % columns,
@@ -703,7 +805,93 @@ class HomePage:
                 padx=4,
                 pady=4,
             )
-            self._rows[item.game_id] = card
+
+    def _on_list_box_resize(self, event: tk.Event) -> None:
+        """滚动区宽度变化时按新宽度重排内容.
+
+        海报: 列数由可用宽度决定, 而**启动首屏**渲染时控件尺寸还没测量出来
+        (``winfo_width()`` 只有 1), 于是 4 款游戏会被排成两行; 首帧布局完成后这里
+        按真实宽度再排一次。宽度用事件自带的值 —— 事件到达时 ``winfo_width()``
+        可能还停在上一轮的尺寸。
+
+        列表: 名称块吸收的宽度变了, 表头也要重新对齐(见 :meth:`_sync_list_layout`)。
+        """
+        if self._filter.layout is HomeLayout.POSTER:
+            if self._rows:
+                self._relayout_posters(event.width)
+            return
+        if self._rows:
+            self._schedule_list_sync()
+
+    def _relayout_posters(self, width: int) -> None:
+        """按给定宽度重算每行张数, 变了就重新摆放卡片(启动首屏与窗口缩放都会用到)."""
+        columns = poster_columns(width)
+        if columns == self._poster_columns:
+            return
+        self._poster_columns = columns
+        self._apply_poster_columns(columns)
+        self._place_cards()
+
+    def _schedule_list_sync(self) -> None:
+        """延后合并一次"表头对齐 + 名称重裁"(拖窗口时别每个像素都跑一遍)."""
+        if self._sync_job is not None:
+            with contextlib.suppress(tk.TclError):
+                self.frame.after_cancel(self._sync_job)
+        self._sync_job = self.frame.after(_SYNC_DELAY_MS, self._sync_list_layout)
+
+    def _sync_list_layout(self) -> None:
+        """把表头对齐到数据行, 并按名称块的**实际宽度**重新裁剪每行的名称."""
+        self._sync_job = None
+        if self._filter.layout is not HomeLayout.LIST or not self._rows:
+            return
+        self._align_table_header()
+        self._refit_row_names()
+
+    def _align_table_header(self) -> None:
+        """把表头的内容对齐到数据行.
+
+        表头在卡片里, 而数据行在滚动区里(滚动条与内边距还占掉几十像素), 两者宽度
+        并不相等; 不补的话左边"名称"列头与右边"贴右"的固定列都会错开。量出两边的
+        偏移后**一次算准**新的左右内边距(几何对两边都是线性的), 不会来回抖。
+        """
+        parts = next(iter(self._row_parts.values()), None)
+        if parts is None or not parts.columns.winfo_ismapped():
+            return
+        if not self._head_columns.winfo_ismapped():
+            return
+        # 正数表示表头的内容偏右, 要往左挪.
+        off_left = self._head_name.winfo_rootx() - parts.name_block.winfo_rootx()
+        off_right = (
+            self._head_columns.winfo_rootx() + self._head_columns.winfo_width()
+        ) - (parts.columns.winfo_rootx() + parts.columns.winfo_width())
+        if off_left == 0 and off_right == 0:
+            self._align_attempts = 0
+            return
+        if self._align_attempts >= _ALIGN_MAX_ATTEMPTS:
+            return  # 调了几轮还不齐就不再折腾(窗口极窄等边界情况)
+        left, right = self._head_pads
+        # 左边距变化会**整体平移**表头内容, 所以右边距要把这部分再补回来.
+        pads = (max(0, left - off_left), max(0, right + off_right - off_left))
+        if pads == self._head_pads:
+            return  # 已经调到边上了(不能再挪), 就此停手
+        self._align_attempts += 1
+        self._head_pads = pads
+        self._head.grid_configure(padx=pads)
+        # 表头自己的几何变化不会再触发滚动区的 Configure, 所以主动再量一轮.
+        self._schedule_list_sync()
+
+    def _refit_row_names(self) -> None:
+        """按名称标签的实际宽度重新裁剪名称: 窗口变宽就能多显示几个字.
+
+        名称是唯一长度无法预期的内容, 所以它的可用宽度就是"剩下多少算多少"; 每次
+        宽度变化都按真实宽度重裁一次, 长名称才会随窗口变宽而多显示。
+        """
+        for parts in self._row_parts.values():
+            width = parts.label.winfo_width()
+            if width > 1:
+                parts.label.configure(
+                    text=fit_text(parts.full_name, self._name_font, width)
+                )
 
     def _build_poster(self, item: HomeGameItem) -> ctk.CTkFrame:
         """一张海报卡片: 竖屏封面(文字占位 + 右下角备份数) + 名称 + 最近活动时间."""
@@ -745,11 +933,17 @@ class HomePage:
             font=ctk.CTkFont(size=10, weight="bold"),
         )
         badge.grid(row=0, column=0, sticky="se", padx=6, pady=6)
+        name_font = self._name_font
         name = ctk.CTkLabel(
             card,
-            text=item.name,
+            text=fit_text(
+                item.name, name_font, _POSTER_TEXT_WIDTH, max_lines=_POSTER_NAME_LINES
+            ),
             anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            justify="left",
+            # 同上: wraplength 兜住测量误差, 最多两行, 不会溢出卡片.
+            wraplength=_POSTER_TEXT_WIDTH,
+            font=name_font,
             text_color=palette.text_body,
         )
         name.grid(row=1, column=0, sticky="ew", padx=10)
@@ -795,46 +989,60 @@ class HomePage:
         ).pack(fill="x", padx=8, pady=(2, 10))
 
     def _build_row(self, item: HomeGameItem) -> ctk.CTkFrame:
-        """一行游戏: 头像点 + 名称 + 各数据列(与表头使用同一套列宽)."""
+        """一行游戏: 左侧"色块 + 名称"(占满剩余宽度) + 右侧贴靠的固定列块."""
         palette = self._palette
         row = ctk.CTkFrame(self._list_box, corner_radius=8)
-        self._configure_columns(row)
+        # 先放右侧的固定列块, 再把剩下的宽度**全部**给名称块: 名称想显示多长就多长.
+        columns = ctk.CTkFrame(row, fg_color="transparent")
+        columns.pack(side="right", padx=(_TABLE_BLOCK_GAP, _TABLE_SIDE_PAD), pady=8)
+        self._configure_columns(columns)
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True, padx=(_TABLE_SIDE_PAD, 0), pady=8)
         dot = ctk.CTkLabel(
-            row,
+            left,
             text="●",
+            width=_DOT_COLUMN,
+            anchor="center",
             font=ctk.CTkFont(size=14),
             text_color=self._tone_color(item.tone),
         )
-        dot.grid(row=0, column=0, padx=(10, 0), pady=8)
+        dot.pack(side="left")
         name = ctk.CTkLabel(
-            row,
-            text=item.name,
+            left,
+            # 先用兜底宽度裁一次: 直接放完整名称会让标签请求出上千像素, 把整张表
+            # 撑到窗口之外(布局算出来的宽度跟着变, 会来回抖)。真实宽度由
+            # _refit_row_names() 在首帧之后补上。
+            text=fit_text(item.name, self._name_font, _NAME_FALLBACK_WIDTH),
             anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            justify="left",
+            font=self._name_font,
             text_color=palette.text_body,
         )
-        name.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=8)
+        name.pack(side="left", fill="x", expand=True, padx=(_NAME_PAD, 0))
+        self._row_parts[item.game_id] = _RowParts(left, columns, name, item.name)
+        # 状态标签也封顶: 标签变多时它会把整行撑宽(横向溢出), 超出部分补省略号.
+        chips = fit_text(" · ".join(item.chips), self._value_font, _COLUMNS[-1][1])
         values = (
-            (item.platform_label, 2),
-            (str(item.location_count), 3),
-            (str(item.backup_count), 4),
-            (item.last_backup_label or "—", 5),
-            (item.activity_label or "—", 6),
-            (" · ".join(item.chips), 7),
+            (item.platform_label, 0),
+            (str(item.location_count), 1),
+            (str(item.backup_count), 2),
+            (item.last_backup_label or "—", 3),
+            (item.activity_label or "—", 4),
+            (chips, 5),
         )
-        widgets: list[ctk.CTkBaseClass] = [row, dot, name]
-        for text, column in values:
-            anchor = _COLUMNS[column - 2][2]
+        widgets: list[ctk.CTkBaseClass] = [row, left, columns, dot, name]
+        for text, index in values:
+            _key, width, anchor = _COLUMNS[index]
             label = ctk.CTkLabel(
-                row,
-                text=text,
+                columns,
+                text=fit_text(text, self._value_font, width),
                 anchor=anchor,
-                font=ctk.CTkFont(size=11),
+                font=self._value_font,
                 text_color=(
-                    palette.danger if item.risk and column == 7 else palette.text_muted
+                    palette.danger if item.risk and index == 5 else palette.text_muted
                 ),
             )
-            label.grid(row=0, column=column, sticky="ew", padx=(0, _COLUMN_GAP), pady=8)
+            label.grid(row=0, column=index, sticky="ew", padx=_cell_pad(index))
             widgets.append(label)
         for widget in widgets:
             widget.bind(

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from dataclasses import replace
+from math import ceil
 from typing import Any
 
 import pytest
@@ -31,12 +33,33 @@ try:
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
+from archive_management.domain import HomeFilter, HomeLayout
 from archive_management.services.hotkeys import (
     GlobalHotkeyService,
     UnavailableBackend,
 )
-from archive_management.ui.main_window import WINDOW_MIN_SIZE, ArchiveApp
-from archive_management.ui.models import DiscoveryPage, HomeSection
+from archive_management.ui.demo_backend import DemoArchiveService
+from archive_management.ui.home_page import (
+    _COLUMNS,
+    _POSTER_HEIGHT,
+    _POSTER_NAME_LINES,
+    _POSTER_TEXT_WIDTH,
+    _POSTER_WIDTH,
+)
+from archive_management.ui.main_window import (
+    _HEADER_NAME_LINES,
+    _HERO_NAME_LINES,
+    WINDOW_MIN_SIZE,
+    ArchiveApp,
+)
+from archive_management.ui.models import (
+    DiscoveryPage,
+    GameDetail,
+    GameSummary,
+    HomeBoard,
+    HomeSection,
+    poster_columns,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -402,5 +425,302 @@ def test_discovery_uses_same_page_margin_as_library() -> None:
         page._discovery._show_page(DiscoveryPage.MONITORED)
         _settle_layout(app)
         assert _insets(page, page._discovery._dirs_box) == library_insets
+    finally:
+        app.destroy()
+
+
+# ------------------------------------------------------------ 长名称不挤坏布局
+
+# 真实世界里出现过的长名称(60+ 字符, 中英混排; 标点用半角, 见仓库的行文约定).
+_LONG_NAME = (
+    "Kaiju Princess 2: Poochi Q ASMR - A Magic Ticket That Grants Any Desire - "
+    "超长的游戏名称示例"
+)
+# 再长一倍: 详情页的标题在两行(约 900px)里肯定放不下, 用来验证"截断 + 省略号".
+_HUGE_NAME = _LONG_NAME * 2
+
+
+class _LongNameService(DemoArchiveService):
+    """演示后端, 但把每款游戏都改成 ``name_text`` 指定的长名称.
+
+    名称撑破布局的几种形态都在同一个窗口里验证: 列表行的请求宽度被撑到容器之外
+    (与表头错位、滚动区横向溢出)、海报卡片里的名称被卡片裁掉、详情页标题把右侧
+    按钮挤出可视范围。
+
+    主页数据走 ``load_home``(进入页面)与 ``apply_home_filter``(切换筛选/展示),
+    侧栏与详情页分别走 ``list_games`` 与 ``get_detail`` —— 全部改名才能保证整窗
+    一致。
+    """
+
+    name_text: str = _LONG_NAME
+
+    def __init__(self, *, delay: float = 0, name_text: str = _LONG_NAME) -> None:
+        """``delay`` 与演示后端一致, ``name_text`` 是要替换成的长名称."""
+        super().__init__(delay=delay)
+        self.name_text = name_text
+
+    def list_games(self) -> list[GameSummary]:
+        return [replace(game, name=self.name_text) for game in super().list_games()]
+
+    def get_detail(self, game_id: str) -> GameDetail:
+        return replace(super().get_detail(game_id), name=self.name_text)
+
+    def load_home(self) -> HomeBoard:
+        return self._rename(super().load_home())
+
+    def apply_home_filter(self, active: HomeFilter) -> HomeBoard:
+        return self._rename(super().apply_home_filter(active))
+
+    def _rename(self, board: HomeBoard) -> HomeBoard:
+        """把主页里的每款游戏都换成长名称(``games`` 是元组)."""
+        return replace(
+            board,
+            games=tuple(replace(game, name=self.name_text) for game in board.games),
+        )
+
+
+def _long_name_app(name: str = _LONG_NAME) -> ArchiveApp:
+    """构造使用长名称的主窗口(尺寸与其它布局用例一致)."""
+    app = ArchiveApp(
+        _LongNameService(delay=0, name_text=name),
+        title="长名称测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+def _visible_text(widget: Any) -> str:
+    """取控件上**实际显示**的文本.
+
+    CTkLabel 把文字画在自己的 canvas 上, 内部的 tkinter Label 没有文本, 因此
+    ``cget("text")`` 取到的是空串 —— 这里读它保存文本的属性。
+    """
+    return str(getattr(widget, "_text", ""))
+
+
+def _fixed_cells(block: Any) -> list[Any]:
+    """取"固定列块"里的单元格(表头与数据行结构相同, 只有它带 len(_COLUMNS) 个格子)."""
+    for child in block.winfo_children():
+        cells = child.winfo_children()
+        if len(cells) == len(_COLUMNS):
+            return sorted(cells, key=lambda cell: int(cell.grid_info()["column"]))
+    raise AssertionError("没有找到固定列块")
+
+
+def _place(cell: Any) -> tuple[int, int]:
+    """单元格在屏幕上的水平位置与宽度: 跨越不同父控件比较列对齐时用它."""
+    return (cell.winfo_rootx(), cell.winfo_width())
+
+
+def test_long_game_name_does_not_widen_the_list_rows() -> None:
+    """名称是唯一可变长的一列: 长名称不能推走固定列, 也不能把行撑宽 or 推挤对齐.
+
+    预算用 ``_supported_content_width`` 折算到"支持的最小窗口", 因此这条断言与
+    当前窗口大小无关(小屏上窗口被窗口管理器压小时同样成立)。
+    """
+    try:
+        app = _long_name_app()
+    except TclError as exc:  # pragma: no cover - 无显示环境
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        _settle_layout(app)
+
+        budget = _supported_content_width(app, page._list_box.winfo_width())
+        rows = list(page._rows.values())
+        assert rows, "演示数据应当有游戏"
+        # 固定列块本身必须放得进"最小窗口"的内容区, 否则名称在最小窗口下没有位置.
+        block = next(iter(page._row_parts.values())).columns.winfo_width()
+        too_wide = f"固定列块 {block}px 放不进最小窗口的内容区({budget}px)"
+        assert block <= budget, too_wide
+
+        parts = next(iter(page._row_parts.values()))
+        shown = _visible_text(parts.label)
+        assert shown.endswith("…"), f"名称应当截断显示: {shown!r}"
+        assert len(shown) < len(parts.full_name), "截断后的名称必须比原名短"
+
+        # 各行的固定列必须落在同一个 (屏幕) x 上: 名称长的行不能把后面的列右推.
+        places = [[_place(cell) for cell in _fixed_cells(row)] for row in rows]
+        misaligned = f"各行列位置不一致: {places}"
+        assert all(place == places[0] for place in places), misaligned
+
+        # 表头与数据行的固定列也在同一条竖线上(表头在卡片里, 宽度原本不同).
+        header = [_place(cell) for cell in _fixed_cells(page._head)]
+        assert header == places[0], f"表头与数据行没有对齐: {header} != {places[0]}"
+        # 名称列头与名称文本也落在同一个 x 上.
+        assert page._head_name.winfo_rootx() == parts.name_block.winfo_rootx()
+
+        # 固定列块**贴靠右侧**: 最后一列的右边界离行的右边界只差一个内边距.
+        row = rows[0]
+        row_right = row.winfo_rootx() + row.winfo_width()
+        last = _fixed_cells(row)[-1]
+        gap = row_right - (last.winfo_rootx() + last.winfo_width())
+        assert 0 <= gap <= 20, f"固定列块没有贴右: 右侧还空着 {gap}px"
+    finally:
+        app.destroy()
+
+
+def test_long_game_name_wraps_inside_the_poster_card() -> None:
+    """海报卡片里的名称最多折两行并截断, 且卡片尺寸不变、内容不越出卡片."""
+    try:
+        app = _long_name_app()
+    except TclError as exc:  # pragma: no cover - 无显示环境
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        page._on_layout_change(HomeLayout.POSTER.label)
+        _settle_layout(app)
+        assert page._rows, "演示数据应当有游戏"
+
+        for card in page._rows.values():
+            assert (card.winfo_reqwidth(), card.winfo_reqheight()) == (
+                _POSTER_WIDTH,
+                _POSTER_HEIGHT,
+            ), "卡片尺寸由常量固定, 长名称不应该把它撑大"
+            label = next(
+                child
+                for child in card.winfo_children()
+                if _visible_text(child).startswith(_LONG_NAME[:5])
+            )
+            text = _visible_text(label)
+            assert text.count("\n") + 1 <= _POSTER_NAME_LINES, f"名称超过两行: {text!r}"
+            assert "…" in text, f"两行放不下时应当截断: {text!r}"
+            assert label.winfo_reqwidth() <= _POSTER_TEXT_WIDTH
+            # 名称必须落在卡片内: 越界就会盖住卡片下边框(或直接看不到).
+            bottom = label.winfo_y() + label.winfo_height()
+            overflow = f"名称溢出卡片: {bottom} > {_POSTER_HEIGHT}"
+            assert bottom <= _POSTER_HEIGHT, overflow
+    finally:
+        app.destroy()
+
+
+def test_long_game_name_is_capped_in_the_detail_header() -> None:
+    """详情页的名称最多两行(超出补省略号), 不能无限折行把下面的内容推下去."""
+    try:
+        app = _long_name_app(_HUGE_NAME)
+    except TclError as exc:  # pragma: no cover - 无显示环境
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        page._open(next(iter(page._rows)))
+        _settle_layout(app)
+
+        title = app._title_label
+        text = _visible_text(title)
+        assert text.startswith(_LONG_NAME[:5]), "至少要能看出是哪款游戏"
+        assert text.endswith("…"), f"放不下就该补省略号: {text!r}"
+        assert text != _HUGE_NAME, "超长名称不应原样显示"
+        lines = text.count("\n") + 1
+        too_many = f"标题折了 {lines} 行(上限 {_HEADER_NAME_LINES})"
+        assert lines <= _HEADER_NAME_LINES, too_many
+        # 名称按控件当前宽度裁剪: 请求宽度不会超过它自己分到的那一格.
+        width = title.winfo_reqwidth()
+        too_wide = f"标题请求 {width}px, 超过可用 {title.winfo_width()}px"
+        assert width <= title.winfo_width(), too_wide
+        # 右侧按钮不能被名称挤出表头.
+        export = app._export_btn
+        export_edge = export.winfo_rootx() + export.winfo_width()
+        header_edge = title.master.winfo_rootx() + title.master.winfo_width()
+        assert export_edge <= header_edge + 1, "名称把右侧按钮挤出了表头"
+
+        hero_name = app._hero_name_label
+        hero_text = _visible_text(hero_name)
+        hero_lines = hero_text.count("\n") + 1
+        hero_limit = f"概要卡名称折了 {hero_lines} 行(上限 {_HERO_NAME_LINES})"
+        assert hero_lines <= _HERO_NAME_LINES, hero_limit
+        assert hero_text.endswith("…"), f"概要卡名称应当截断: {hero_text!r}"
+        assert hero_name.winfo_reqwidth() <= hero_name.winfo_width()
+    finally:
+        app.destroy()
+
+
+def test_list_and_detail_names_grow_with_the_window() -> None:
+    """名称按可用宽度动态裁剪: 窗口变宽就多显示几个字(列表与详情页都算)."""
+    try:
+        app = _long_name_app(_HUGE_NAME)
+    except TclError as exc:  # pragma: no cover - 无显示环境
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        _settle_layout(app)
+        game_id = next(iter(page._row_parts))
+        label = page._row_parts[game_id].label
+        narrow = len(_visible_text(label))
+
+        # 先在主页上把窗口拉宽: 名称块分到的宽度变大, 显示的字就应当变多.
+        app.geometry("1900x820")
+        _settle_layout(app)
+        wide = len(_visible_text(label))
+        list_hint = f"列表名称没有随窗口变宽: {narrow} -> {wide}"
+        assert wide > narrow, list_hint
+
+        # 详情页同理: 在详情页上收窄窗口, 标题显示的字应当变少.
+        page._open(game_id)
+        _settle_layout(app)
+        title_wide = len(_visible_text(app._title_label))
+        app.geometry("1200x820")
+        _settle_layout(app)
+        title_narrow = len(_visible_text(app._title_label))
+        detail_hint = f"详情标题没有随窗口变宽: {title_narrow} -> {title_wide}"
+        assert title_wide > title_narrow, detail_hint
+        # 详情标题仍然受行数上限约束.
+        lines = _visible_text(app._title_label).count("\n") + 1
+        assert lines <= _HEADER_NAME_LINES, f"标题折了 {lines} 行"
+    finally:
+        app.destroy()
+
+
+class _PosterStartService(DemoArchiveService):
+    """启动时读到的偏好就是海报模式(相当于 home_state 里存着海报)."""
+
+    def load_home(self) -> HomeBoard:
+        return self._poster(super().load_home())
+
+    def apply_home_filter(self, active: HomeFilter) -> HomeBoard:
+        return self._poster(super().apply_home_filter(active))
+
+    @staticmethod
+    def _poster(board: HomeBoard) -> HomeBoard:
+        return replace(board, filter=replace(board.filter, layout=HomeLayout.POSTER))
+
+
+def _poster_start_app() -> ArchiveApp:
+    """构造"启动首屏即海报模式"的主窗口."""
+    app = ArchiveApp(
+        _PosterStartService(delay=0),
+        title="海报首屏测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+def test_poster_layout_is_reflowed_after_the_first_render() -> None:
+    """启动首屏就是海报模式时, 卡片要按**真实宽度**排布.
+
+    首屏渲染发生在控件尺寸测量出来之前(此时 ``winfo_width()`` 只有 1), 列数会被
+    算得很小 —— 4 款游戏于是排成两行; 首帧完成后必须按真实宽度重排一次。
+    """
+    try:
+        app = _poster_start_app()
+    except TclError as exc:  # pragma: no cover - 无显示环境
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        _settle_layout(app)
+        assert page._rows, "演示数据应当有游戏"
+
+        columns = poster_columns(page._list_box.winfo_width())
+        stale = f"列数没有按真实宽度重算: {page._poster_columns} != {columns}"
+        assert page._poster_columns == columns, stale
+        placed = sorted({int(card.grid_info()["row"]) for card in page._rows.values()})
+        expected = list(range(ceil(len(page._rows) / columns)))
+        assert placed == expected, f"卡片行列不对: {placed} != {expected}"
     finally:
         app.destroy()

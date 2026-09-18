@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import sqlite3
@@ -70,6 +71,7 @@ from archive_management.ui.models import (
 from archive_management.ui.palette import DEFAULT_THEME, Palette
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
+from archive_management.ui.textfit import fit_text
 from archive_management.ui.widgets import UiKit
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,17 @@ _TONE_COLORS: dict[str, str] = {
 # 支持的最小窗口尺寸: 主页里那些固定宽度的行必须能放进"最小窗口下的内容区",
 # 否则在更窄的屏幕(窗口被窗口管理器再压小)上会越界并盖住描边。
 WINDOW_MIN_SIZE = (1200, 720)
+# 头部标题与概要卡里的游戏名**按控件实际宽度**裁剪: 窗口变宽就能多显示几个字。
+# 两个常量只是"控件尺寸还没测量出来时"的落位预算(取自最小窗口下的实测可用宽度:
+# 头部标题区 922px、概要卡信息区约 720px), 之后由 _refit_detail_names() 按真实
+# 宽度重裁。名称最多显示两行, 超出补省略号, 否则会把下面的内容整排推下去。
+_HEADER_TEXT_WIDTH = 900
+_HERO_TEXT_WIDTH = 640
+# 名称最多显示的行数(超出补省略号): 完整名称仍可在游戏设置/重命名对话框里看到。
+_HEADER_NAME_LINES = 2
+_HERO_NAME_LINES = 2
+# 拖窗口时把名称重裁合并成一次(每个像素都跑一遍会卡).
+_REFIT_DELAY_MS = 60
 _RAIL_WIDTH = 350
 # 分支视图中用于标示层级的连接符(与缩进配合).
 _BRANCH_MARK = "└ "
@@ -164,6 +177,10 @@ class ArchiveApp(ctk.CTk):
         self._cards: dict[str, ctk.CTkFrame] = {}
         self._card_painters: dict[str, Callable[[Palette], None]] = {}
         self._card_unregisters: list[Callable[[], None]] = []
+        # 详情页当前显示的**完整**名称与副标题: 窗口宽度变化时要按新的可用宽度重裁。
+        self._detail_name = ""
+        self._detail_subtitle = ""
+        self._refit_job: str | None = None
 
         self._messages: queue.Queue[
             tuple[Literal["ok", "err", "unchanged", "hotkey"], str]
@@ -373,6 +390,8 @@ class ArchiveApp(ctk.CTk):
     def _build_content(self) -> None:
         self._content.grid_columnconfigure(0, weight=1)
         self._content.grid_rowconfigure(3, weight=1)
+        # 窗口宽度变了, 名称的可用宽度也变了: 重新裁一次(不是所有控件都能自动重排).
+        self._content.bind("<Configure>", self._on_content_resize)
 
         header = self.kit.frame(self._content, bg_key="background", corner_radius=0)
         header.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 4))
@@ -380,9 +399,15 @@ class ArchiveApp(ctk.CTk):
         self._title_label = self.kit.label(
             header, "", style="primary", size=26, weight="bold"
         )
-        self._title_label.grid(row=0, column=0, sticky="w")
+        # 与 _title_label 同规格的字体对象: 用来把名称量进固定的行数与宽度.
+        self._title_font = ctk.CTkFont(size=26, weight="bold")
+        self._title_label.configure(wraplength=_HEADER_TEXT_WIDTH, justify="left")
+        # sticky="ew" 让标签占满整格: 它的宽度就是名称可用的宽度(据此重裁文本).
+        self._title_label.grid(row=0, column=0, sticky="ew")
         self._subtitle_label = self.kit.label(header, "", style="muted", size=13)
-        self._subtitle_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self._subtitle_font = ctk.CTkFont(size=13)
+        self._subtitle_label.configure(wraplength=_HEADER_TEXT_WIDTH, justify="left")
+        self._subtitle_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         self._export_btn = self.kit.button(
             header,
             tr("action.export"),
@@ -464,14 +489,17 @@ class ArchiveApp(ctk.CTk):
         self._hero_tile.pack(side="left")
 
         info = ctk.CTkFrame(left, fg_color="transparent")
-        info.pack(side="left", fill="y", padx=(18, 0))
+        # expand=True: 信息块占满色块右边的全部宽度, 名称因此能"撑满一行".
+        info.pack(side="left", fill="both", expand=True, padx=(18, 0))
         self.kit.label(info, tr("hero.current_game"), style="muted", size=11).pack(
             anchor="w", pady=(2, 0)
         )
         self._hero_name_label = self.kit.label(
             info, "", style="primary", size=20, weight="bold"
         )
-        self._hero_name_label.pack(anchor="w", pady=(2, 0))
+        self._hero_name_font = ctk.CTkFont(size=20, weight="bold")
+        self._hero_name_label.configure(wraplength=_HERO_TEXT_WIDTH, justify="left")
+        self._hero_name_label.pack(fill="x", anchor="w", pady=(2, 0))
         self._hero_location_label = self.kit.label(info, "", style="body", size=13)
         self._hero_location_label.pack(anchor="w", pady=(3, 0))
         self._hero_verified_label = ctk.CTkLabel(
@@ -852,6 +880,9 @@ class ArchiveApp(ctk.CTk):
         self._items = []
         self._cards = {}
         self._hover_id = None
+        # 没有选中游戏时不要把名称留在状态里, 否则缩放窗口会盖掉占位文案.
+        self._detail_name = ""
+        self._detail_subtitle = ""
         self._list_title.configure(text=tr("list.fallback_title"))
         self._list_sub.configure(text=tr("list.no_games"))
         self._title_label.configure(text=tr("hero.no_game"))
@@ -913,7 +944,8 @@ class ArchiveApp(ctk.CTk):
 
     def _render_hero(self, detail: GameDetail) -> None:
         self._verified = detail.location_verified
-        self._hero_name_label.configure(text=detail.name)
+        self._detail_name = detail.name
+        self._set_detail_names()
         self._render_origin(detail)
         if detail.main_location:
             location = f"{detail.location_note}  ·  {detail.main_location}"
@@ -930,8 +962,69 @@ class ArchiveApp(ctk.CTk):
         self._stat_next_value.configure(text=detail.next_backup_label)
 
     def _render_toolbar_header(self, detail: GameDetail) -> None:
-        self._title_label.configure(text=detail.name)
-        self._subtitle_label.configure(text=detail.subtitle)
+        """写头部标题/副标题(按控件实际宽度裁剪, 见 _refit_detail_names)."""
+        self._detail_name = detail.name
+        self._detail_subtitle = detail.subtitle
+        self._set_detail_names()
+
+    def _name_budget(self, label: ctk.CTkLabel, fallback: int) -> int:
+        """控件当前的可用宽度(还没测量出来时用设计预算兜底)."""
+        width = label.winfo_width()
+        return width if width > 1 else fallback
+
+    def _set_detail_names(self) -> None:
+        """按各控件**当前宽度**裁剪名称: 窗口变宽就多显示几个字.
+
+        超出部分补省略号并限制行数 —— 否则超长名称会把下面的内容整排推下去。
+        """
+        if not self._detail_name:
+            return
+        title_budget = self._name_budget(self._title_label, _HEADER_TEXT_WIDTH)
+        self._title_label.configure(
+            wraplength=title_budget,
+            text=fit_text(
+                self._detail_name,
+                self._title_font,
+                title_budget,
+                max_lines=_HEADER_NAME_LINES,
+            ),
+        )
+        # 副标题里带存档位置(可能是很长的路径): 同样封顶两行, 头部高度有上限.
+        subtitle_budget = self._name_budget(self._subtitle_label, _HEADER_TEXT_WIDTH)
+        self._subtitle_label.configure(
+            wraplength=subtitle_budget,
+            text=fit_text(
+                self._detail_subtitle,
+                self._subtitle_font,
+                subtitle_budget,
+                max_lines=_HEADER_NAME_LINES,
+            ),
+        )
+        hero_budget = self._name_budget(self._hero_name_label, _HERO_TEXT_WIDTH)
+        self._hero_name_label.configure(
+            wraplength=hero_budget,
+            text=fit_text(
+                self._detail_name,
+                self._hero_name_font,
+                hero_budget,
+                max_lines=_HERO_NAME_LINES,
+            ),
+        )
+
+    def _refit_detail_names(self) -> None:
+        """窗口宽度变化后按新宽度重裁详情页里的名称(延后合并成一次)."""
+        self._refit_job = None
+        if self._page is AppPage.DETAIL:
+            self._set_detail_names()
+
+    def _on_content_resize(self, _event: tk.Event) -> None:
+        """内容区尺寸变化: 名称的可用宽度变了, 延后重新裁一次."""
+        if self._page is not AppPage.DETAIL or not self._detail_name:
+            return
+        if self._refit_job is not None:
+            with contextlib.suppress(tk.TclError):
+                self._content.after_cancel(self._refit_job)
+        self._refit_job = self._content.after(_REFIT_DELAY_MS, self._refit_detail_names)
 
     def _render_task(self, task: TaskStatus) -> None:
         """刷新任务状态卡: 运行中的操作优先, 否则显示定时任务的启用状态."""

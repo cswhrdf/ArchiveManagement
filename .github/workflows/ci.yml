@@ -129,6 +129,8 @@ jobs:
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
 
       - name: Attach coverage report to Allure
+        # 脚本把覆盖率摘要写成一条结果(按平台归到各环境), 并把原始 coverage.xml 作为
+        # 附件一起放进 allure-results —— 报告里能直接下载原始数据, 不只是渲染好的表。
         if: always()
         run: uv run python scripts/create_allure_coverage.py
 

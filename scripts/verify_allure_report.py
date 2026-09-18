@@ -15,7 +15,9 @@
 4. 环境列表(``widgets/environments.json``)里有非 ``default`` 的环境: 平台是靠
    ``env`` 标签 + 仓库根的 ``allurerc.mjs`` 变成 Allure 环境的, 生成时没读到配置
    就会静默退回单个 ``default`` 环境(详见 :func:`environment_problems`);
-5. ``--zip`` 额外把报告打成单个 ``<报告目录>.zip``: 单个文件发布不会出现"整个目录
+5. 结果文件声明的**附件**都在(覆盖率/性能/安全/质量汇总项把原始报告挂在条目上,
+   附件文件与结果文件同在 ``allure-results`` 里, 详见 :func:`attachment_problems`);
+6. ``--zip`` 额外把报告打成单个 ``<报告目录>.zip``: 单个文件发布不会出现"整个目录
    被悄悄丢掉"的静默损坏, 并打印条目数与 SHA256 便于人工核对.
 
 报告目录不存在视为"本次没有结果, 未生成报告"(退出码 0); 其余情况缺资源即退出码 1.
@@ -64,6 +66,7 @@ class ReportFacts:
     env_groups: int
     result_files: int | None
     environments: tuple[str, ...] = ()
+    attachments: int | None = None
     archive_entries: int | None = None
 
 
@@ -107,6 +110,43 @@ def count_result_files(results_dir: Path | None) -> int | None:
     if results_dir is None:
         return None
     return sum(1 for _ in results_dir.glob(f"*{RESULT_FILE_SUFFIX}"))
+
+
+def declared_attachments(results_dir: Path | None) -> list[Path]:
+    """列出结果文件里声明的附件文件路径(按路径去重排序; 未提供目录时为空)."""
+    if results_dir is None or not results_dir.is_dir():
+        return []
+    found: set[Path] = set()
+    for path in sorted(results_dir.glob(f"*{RESULT_FILE_SUFFIX}")):
+        payload = load_object(path)
+        if payload is None:
+            continue
+        entries = payload.get("attachments")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                source = entry.get("source")
+                if isinstance(source, str) and source.strip():
+                    found.add(results_dir / source)
+    return sorted(found)
+
+
+def attachment_problems(declared: Sequence[Path]) -> list[str]:
+    """要求结果里声明的附件真的存在.
+
+    覆盖率/性能/安全/质量的汇总项都把原始报告作为**附件**挂在条目上; 附件文件与
+    结果文件同在 ``allure-results`` 里, 一旦在打包或下载环节被丢掉, 报告里只会剩下
+    一个打不开的附件 —— 与"详情页变空"是同一类静默损坏, 因此在这里显式校验。
+    """
+    missing = [path for path in declared if not path.is_file()]
+    if not missing:
+        return []
+    shown = ", ".join(path.name for path in missing[:MAX_REPORTED_MISSING])
+    return [
+        f"缺少 {len(missing)} 个结果附件(allure-results 里的结果引用了它们): "
+        f"例如: {shown}"
+    ]
 
 
 def environment_ids(report_dir: Path) -> set[str] | None:
@@ -218,6 +258,8 @@ def verify_report(
         group_reference_problems(report_dir, expected, grouped_result_ids(report_dir))
     )
     problems.extend(environment_problems(report_dir))
+    declared = declared_attachments(results_dir)
+    problems.extend(attachment_problems(declared))
     result_files = count_result_files(results_dir)
     if result_files is not None and result_files != len(expected):
         problems.append(
@@ -230,6 +272,7 @@ def verify_report(
         env_groups=sum(1 for _ in (report_dir / GROUP_DIRECTORY).glob("*.json")),
         result_files=result_files,
         environments=tuple(sorted(environment_ids(report_dir) or ())),
+        attachments=None if results_dir is None else len(declared),
     )
     return facts, problems
 
@@ -263,11 +306,13 @@ def package_report(report_dir: Path, archive: Path) -> tuple[int, str]:
 def report_facts(facts: ReportFacts, report_dir: Path) -> None:
     """打印计数事实, 让日志本身就能回答"报告是不是完整的"."""
     results_text = "未提供" if facts.result_files is None else str(facts.result_files)
+    attachments_text = "未提供" if facts.attachments is None else str(facts.attachments)
     print(f"报告目录: {report_dir}")
     print(f"结果索引: {facts.indexed_results} 条")
     print(f"详情文件: {facts.detail_files} 个 (data/test-results)")
     print(f"用例分组: {facts.env_groups} 个 (data/test-env-groups)")
     print(f"环境: {', '.join(facts.environments) or '未识别'}")
+    print(f"结果附件: {attachments_text} 个")
     print(f"allure-results 结果文件: {results_text}")
 
 

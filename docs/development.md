@@ -10,6 +10,8 @@ uv sync --locked     # 安装依赖（含 dev 组），不安装当前项目本�
 uv run pre-commit install
 ```
 
+上面的命令在**仓库根目录**执行。本项目以工具形式开发、**不作为包安装**（不发布到 PyPI，也不声明 `[project.scripts]`），自身源码靠仓库根的 `.env` 进入导入路径：`uv run` 会自动加载它（内容是 `PYTHONPATH=src`），所以 `python -m archive_management` 不需要安装就能运行。绕过 `uv run`（例如直接调用 `.venv\Scripts\python.exe -m archive_management`）时该文件不会生效，需要自己设置 `PYTHONPATH=src`；个人本地覆盖请另建 `.env.local` 并用 `uv run --env-file .env.local ...`——仓库自带的 `.env` 会被提交，不要往里放密钥（凭据走系统凭据库）。
+
 项目采用 `src` 布局（包名 `archive_management`），业务层不直接调用 Tkinter、HTTP 或文件系统：领域模型与用例通过接口注入基础设施，便于替换实现与测试。
 
 ```text
@@ -38,6 +40,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - 不带子命令运行时默认执行 `init`。
 - `--root` 可以把全部数据收敛到指定目录（便携模式与开发调试），此时配置、数据、日志、缓存都在该目录下；不加则使用系统约定的应用目录。
 - 全局 `--verbose` 让控制台也打印 DEBUG 级基础操作（默认只有 INFO 及以上的高风险操作会打印）。
+- 命令要在**仓库根目录**执行：仓库根的 `.env` 提供 `PYTHONPATH=src`（`uv run` 自动加载），其中的 `src` 是相对当前目录解析的。
 
 ## 配置文件
 

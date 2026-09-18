@@ -17,7 +17,10 @@
   并把缺口交回"监控目录"; Steam/Epic 则按各平台自己的清单目录探测。
 - **只读**: 探测时只读清单与注册表, 不修改任何用户数据目录;
 - **不静默信任**: 路径缺失、不可读或属于高风险位置(盘符根目录、用户主目录)
-  时给出明确的健康状态, 由用户决定是否导入。
+  时给出明确的健康状态, 由用户决定是否导入;
+- **单一解析入口**: Steam 主目录/库目录/清单的解析以模块级函数暴露(见
+  :func:`steam_roots` / :func:`steam_libraries` / :func:`read_steam_installs`),
+  平台适配器与后续的云端清单解析复用同一份实现, 不再写第二遍 VDF 解析。
 """
 
 from __future__ import annotations
@@ -72,6 +75,9 @@ REASON_MONITORED_ROOT = "monitored_root"
 # Valve VDF 里的 ``"key" "value"`` 键值对(嵌套结构由调用方按需解释).
 _VDF_PAIR = re.compile(r'"((?:[^"\\]|\\.)*)"\s+"((?:[^"\\]|\\.)*)"')
 _STEAM_LIBRARY_FILES = ("libraryfolders.vdf",)
+# 应用清单文件名里带着 AppID(appmanifest_<appid>.acf): 这是本地最能确认
+# "这个游戏在 Steam 里是谁"的依据, 平台适配器要用它去查云端同步清单。
+_STEAM_MANIFEST = re.compile(r"appmanifest_(\d+)\.acf", re.IGNORECASE)
 # 注册表根键名 → winreg 常量名.
 _HIVE_NAMES: dict[str, str] = {
     "HKCU": "HKEY_CURRENT_USER",
@@ -342,6 +348,144 @@ def path_health(raw: str) -> PathHealth:
     return "ok"
 
 
+@dataclass(frozen=True)
+class SteamInstall:
+    """一个已安装的 Steam 应用(应用清单文件的解析结果).
+
+    保留 ``app_id``/``manifest``/``library`` 而不只是路径: 平台适配器要用 AppID
+    去查云端同步清单与缓存资源, 界面要用清单文件名解释"这条是怎么来的"。
+    ``app_id`` 在文件名不符合 ``appmanifest_<数字>.acf`` 时为空字符串(不改写
+    清单内容, 也不因此丢掉整条记录)。
+    """
+
+    app_id: str
+    name: str
+    installdir: str
+    install_dir: Path
+    manifest: Path
+    library: Path
+
+
+def read_text(path: Path) -> str | None:
+    """读取文本文件; 不存在或不可读时返回 None."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def registry_source_available(roots: ScanRoots, source: str) -> bool:
+    """注册表探测只在 Windows 上有意义.
+
+    macOS 与 Linux 没有注册表: 在这里显式短路, 比让查询静默返回空结果更
+    可解释(日志能说明"这个来源在本平台不适用")。
+    """
+    if roots.platform == "windows":
+        return True
+    logger.debug("%s 的注册表探测仅 Windows 可用, 已跳过", source)
+    return False
+
+
+def registry_paths(
+    roots: ScanRoots, hive: str, subkey: str, names: tuple[str, ...]
+) -> list[Path]:
+    """读取注册表键下几个候选值并规范化成路径(非 Windows 返回空)."""
+    if not registry_source_available(roots, subkey):
+        return []
+    values = roots.registry.values(hive, subkey)
+    paths: list[Path] = []
+    for name in names:
+        raw = values.get(name)
+        if raw and raw.strip():
+            paths.append(Path(normalize_path(raw)))
+    return paths
+
+
+def steam_roots(roots: ScanRoots) -> list[Path]:
+    """返回本机存在的 Steam 主目录(按平台规则, 只保留含 steamapps 的).
+
+    - Windows: 注册表登记的路径, 其次默认安装目录;
+    - macOS: ``~/Library/Application Support/Steam``;
+    - Linux: 原生安装目录、发行版包目录与 Flatpak/Snap 容器内的目录。
+
+    过滤掉不存在 ``steamapps`` 的候选: Steam 未安装时不去猜路径, 也就不会
+    产出一条注定不可用的候选。
+    """
+    if roots.platform == "windows":
+        candidates = [
+            *registry_paths(
+                roots, HKCU, r"Software\Valve\Steam", ("SteamPath", "InstallPath")
+            ),
+            roots.program_files_x86 / "Steam",
+            roots.program_files / "Steam",
+        ]
+    elif roots.platform == "macos":
+        candidates = [roots.local_app_data / "Steam"]
+    else:
+        home = roots.user_profile
+        candidates = [
+            home / ".steam" / "steam",
+            home / ".steam" / "root",
+            roots.local_app_data / "Steam",
+            home / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam",
+            home / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
+        ]
+    return [root for root in _dedupe_paths(candidates) if (root / "steamapps").is_dir()]
+
+
+def steam_libraries(steam_root: Path) -> list[Path]:
+    """返回 Steam 的库目录列表(主目录 + libraryfolders.vdf 中登记的库)."""
+    libraries = [steam_root]
+    steamapps = steam_root / "steamapps"
+    for filename in _STEAM_LIBRARY_FILES:
+        text = read_text(steamapps / filename)
+        if text is None:
+            continue
+        for key, value in parse_vdf_pairs(text):
+            # 新版格式是 ``"path" "D:\\Steam"``, 旧版是 ``"1" "D:\\Steam"``.
+            if key.casefold() != "path" and not key.isdigit():
+                continue
+            if not value.strip():
+                continue
+            library = Path(normalize_path(value))
+            if library not in libraries:
+                libraries.append(library)
+    return libraries
+
+
+def read_steam_installs(roots: ScanRoots) -> list[SteamInstall]:
+    """读取本机所有库目录下的应用清单, 返回已安装游戏的记录.
+
+    这是 Steam 本地清单的**唯一**解析入口: 本地游戏探测与平台适配器都从这里取。
+    清单缺失、损坏或缺少 ``name``/``installdir`` 时跳过该条, 不影响其它游戏。
+    """
+    installs: list[SteamInstall] = []
+    for root in steam_roots(roots):
+        for library in steam_libraries(root):
+            steamapps = library / "steamapps"
+            for manifest in sorted(steamapps.glob("appmanifest_*.acf")):
+                text = read_text(manifest)
+                if text is None:
+                    continue
+                pairs = parse_vdf_pairs(text)
+                name = vdf_first(pairs, "name")
+                installdir = vdf_first(pairs, "installdir")
+                if not name or not installdir:
+                    continue
+                matched = _STEAM_MANIFEST.fullmatch(manifest.name)
+                installs.append(
+                    SteamInstall(
+                        app_id=matched.group(1) if matched else "",
+                        name=name,
+                        installdir=installdir,
+                        install_dir=steamapps / "common" / installdir,
+                        manifest=manifest,
+                        library=library,
+                    )
+                )
+    return installs
+
+
 class LocalGameScanner:
     """从平台清单、注册表与监控目录中发现已安装游戏.
 
@@ -411,127 +555,33 @@ class LocalGameScanner:
 
     @staticmethod
     def _read_text(path: Path) -> str | None:
-        """读取文本文件; 不存在或不可读时返回 None."""
-        try:
-            return path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
+        """读取文本文件; 不存在或不可读时返回 None(见模块级 :func:`read_text`)."""
+        return read_text(path)
 
     # ------------------------------------------------------------------- Steam
 
     def _steam(self) -> list[GameCandidate]:
         """从 Steam 库清单(appmanifest_*.acf)读取已安装游戏.
 
-        Steam 在三个平台上的清单格式完全相同, 区别只在主目录怎么找; 因此这里
-        先按平台列出可能的主目录, 再对每个库目录复用同一套解析逻辑。
+        Steam 在三个平台上的清单格式完全相同, 区别只在主目录怎么找; 解析本身在
+        模块级的 :func:`read_steam_installs` 里, 平台适配器复用同一份实现, 这里只
+        把记录翻译成本地探测的候选模型。
         """
-        candidates: list[GameCandidate] = []
-        for root in self._steam_roots():
-            for library in self._steam_libraries(root):
-                candidates.extend(self._steam_library(library))
-        return candidates
-
-    def _steam_library(self, library: Path) -> list[GameCandidate]:
-        """扫描一个 Steam 库目录下的全部应用清单."""
-        steamapps = library / "steamapps"
-        found: list[GameCandidate] = []
-        for manifest in sorted(steamapps.glob("appmanifest_*.acf")):
-            text = self._read_text(manifest)
-            if text is None:
-                continue
-            pairs = parse_vdf_pairs(text)
-            name = vdf_first(pairs, "name")
-            installdir = vdf_first(pairs, "installdir")
-            if not name or not installdir:
-                continue
-            found.append(
-                self._candidate(
-                    name,
-                    steamapps / "common" / installdir,
-                    source=SOURCE_STEAM,
-                    confidence="high",
-                    reason_code=REASON_STEAM_MANIFEST,
-                    detail=manifest.name,
-                )
-            )
-        return found
-
-    def _steam_roots(self) -> list[Path]:
-        """返回本机存在的 Steam 主目录(按平台规则, 只保留含 steamapps 的).
-
-        - Windows: 注册表登记的路径, 其次默认安装目录;
-        - macOS: ``~/Library/Application Support/Steam``;
-        - Linux: 原生安装目录、发行版包目录与 Flatpak/Snap 容器内的目录。
-
-        过滤掉不存在 ``steamapps`` 的候选: Steam 未安装时不去猜路径, 也就不会
-        产出一条注定不可用的候选。
-        """
-        if self._roots.platform == "windows":
-            candidates = [
-                *self._registry_paths(
-                    HKCU, r"Software\Valve\Steam", ("SteamPath", "InstallPath")
-                ),
-                self._roots.program_files_x86 / "Steam",
-                self._roots.program_files / "Steam",
-            ]
-        elif self._roots.platform == "macos":
-            candidates = [self._roots.local_app_data / "Steam"]
-        else:
-            home = self._roots.user_profile
-            candidates = [
-                home / ".steam" / "steam",
-                home / ".steam" / "root",
-                self._roots.local_app_data / "Steam",
-                home / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam",
-                home / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
-            ]
         return [
-            root for root in _dedupe_paths(candidates) if (root / "steamapps").is_dir()
+            self._candidate(
+                install.name,
+                install.install_dir,
+                source=SOURCE_STEAM,
+                confidence="high",
+                reason_code=REASON_STEAM_MANIFEST,
+                detail=install.manifest.name,
+            )
+            for install in read_steam_installs(self._roots)
         ]
 
-    def _registry_paths(
-        self, hive: str, subkey: str, names: tuple[str, ...]
-    ) -> list[Path]:
-        """读取注册表键下几个候选值并规范化成路径(非 Windows 返回空)."""
-        if not self._registry_source_available(subkey):
-            return []
-        values = self._roots.registry.values(hive, subkey)
-        paths: list[Path] = []
-        for name in names:
-            raw = values.get(name)
-            if raw and raw.strip():
-                paths.append(Path(normalize_path(raw)))
-        return paths
-
     def _registry_source_available(self, source: str) -> bool:
-        """注册表探测只在 Windows 上有意义.
-
-        macOS 与 Linux 没有注册表: 在这里显式短路, 比让查询静默返回空结果更
-        可解释(日志能说明"这个来源在本平台不适用")。
-        """
-        if self._roots.platform == "windows":
-            return True
-        logger.debug("%s 的注册表探测仅 Windows 可用, 已跳过", source)
-        return False
-
-    def _steam_libraries(self, steam_root: Path) -> list[Path]:
-        """返回 Steam 的库目录列表(主目录 + libraryfolders.vdf 中登记的库)."""
-        libraries = [steam_root]
-        steamapps = steam_root / "steamapps"
-        for filename in _STEAM_LIBRARY_FILES:
-            text = self._read_text(steamapps / filename)
-            if text is None:
-                continue
-            for key, value in parse_vdf_pairs(text):
-                # 新版格式是 ``"path" "D:\\Steam"``, 旧版是 ``"1" "D:\\Steam"``.
-                if key.casefold() != "path" and not key.isdigit():
-                    continue
-                if not value.strip():
-                    continue
-                library = Path(normalize_path(value))
-                if library not in libraries:
-                    libraries.append(library)
-        return libraries
+        """注册表探测是否可用(见模块级 :func:`registry_source_available`)."""
+        return registry_source_available(self._roots, source)
 
     # -------------------------------------------------------------------- Epic
 

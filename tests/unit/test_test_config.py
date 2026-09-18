@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import tomllib
 from collections.abc import Callable
@@ -93,6 +94,35 @@ def test_mypy_path_covers_the_shared_test_modules(pytestconfig: pytest.Config) -
     has_tests = any(entry.endswith("/tests") for entry in entries)
     hint = "mypy_path 缺少 tests: 单独检查测试文件时 import helpers 会变成 Any"
     assert has_tests, hint
+
+
+def test_the_cli_runs_without_installing_the_project(
+    pytestconfig: pytest.Config,
+) -> None:
+    """ "不作为包安装"与仓库根的 ``.env`` 是配套的: 少任何一个, CLI 都导入不了自身.
+
+    实测(2026-09-18): 只有 ``[tool.uv] package = false`` 时, README/docs 里的
+    ``uv run python -m archive_management ...`` 会以 ``No module named
+    archive_management`` 结束; ``.env`` 里的 ``PYTHONPATH=src`` 由 ``uv run`` 自动
+    加载, 命令才成立。改安装方式就必须同步改 ``.env`` 与文档里的说明。
+    """
+    root = Path(str(pytestconfig.rootpath))
+    with (root / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    package = config["tool"]["uv"]["package"]
+    assert package is False, "安装方式变了: 请同步调整 .env 与文档里的 CLI 说明"
+
+    lines = (root / ".env").read_text(encoding="utf-8").splitlines()
+    entries = {
+        key.strip(): value.strip()
+        for key, _, value in (line.partition("=") for line in lines if "=" in line)
+        if not key.strip().startswith("#")
+    }
+    paths = [item for item in entries.get("PYTHONPATH", "").split(os.pathsep) if item]
+    hint = (
+        ".env 必须提供 PYTHONPATH=src, 否则 uv run python -m archive_management 会失败"
+    )
+    assert "src" in paths, hint
 
 
 def test_ci_only_suites_exist_and_are_marked(pytestconfig: pytest.Config) -> None:

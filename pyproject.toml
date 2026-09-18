@@ -54,10 +54,13 @@ include = ["src/archive_management"]
 path = "src/archive_management/packaging.py"
 
 [tool.uv]
-# 本项目以工具形式开发, **不作为包安装**(不发布到 PyPI): uv 只负责解析与安装依赖,
-# 自身源码靠 src 布局 + pytest 的 pythonpath 使用。因此这里也不能声明
-# 实际入口有两个: `uv run python -m archive_management ...` 与 PyInstaller 打包出的
-# 可执行文件(见 packaging/archive-management.spec)。
+# 本项目以工具形式开发, **不作为包安装**(不发布到 PyPI): uv 只负责解析与安装依赖。
+# 因此这里也不声明 `[project.scripts]`(声明了也装不上, 只会让每次 uv sync 打印
+# "Skipping installation of entry points")。实际入口有两个:
+# 1. `uv run python -m archive_management ...` —— 靠仓库根的 `.env`(PYTHONPATH=src,
+#    `uv run` 会自动加载)把 src 加进导入路径, 所以不安装也能运行(见 docs/development.md);
+# 2. PyInstaller 打包出的可执行文件(见 packaging/archive-management.spec; 它用 pathex
+#    指向 src, 与上面的机制无关)。
 package = false
 
 [tool.ruff]
