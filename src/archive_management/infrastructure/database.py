@@ -69,7 +69,7 @@ class Database:
         """返回当前已应用的 schema 版本(0 表示尚未初始化)."""
         with self.connect() as connection:
             exists = connection.execute(
-                "SELECT 1 FROM sqlite_master" " WHERE type = 'table' AND name = ?",
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 (MIGRATION_TABLE,),
             ).fetchone()
             if exists is None:
@@ -101,8 +101,7 @@ class Database:
                 for statement in statements:
                     connection.execute(statement)
                 connection.execute(
-                    "INSERT INTO schema_migrations (version, applied_at)"
-                    " VALUES (?, ?)",
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                     (version, iso_utc_now()),
                 )
         return self.schema_version()

@@ -18,11 +18,15 @@ COVERAGE_SEVERITY = "trivial"
 
 
 def platform_name() -> str:
-    """返回覆盖率测量平台的显示名称.
+    """返回覆盖率测量平台的显示名称(Windows/Linux/macOS).
 
-    每个平台都会生成自己的覆盖率摘要. 如果不将平台写入身份信息
-    (fullName / historyId / parameter), 合并报告会将它们显示为同一测试的重试,
-    而不是三个平台各自独立的结果.
+    这个名称写进 ``env`` 与 ``os`` 标签、以及 ``Platform`` 参数:
+
+    - ``env`` 标签 + 仓库根的 ``allurerc.mjs`` 把它变成 Allure 的"环境", 三个平台的
+      覆盖率摘要各归各自的环境(报告顶部可切换, 用例详情页的环境分页能逐个对照),
+      因此**标题里不再拼平台名**;
+    - ``平台`` 参数与 ``os`` 标签是兼底: 生成报告时没读到报告配置的话, 环境会静默退回
+      ``default``, 那时至少还能从参数/标签看出结果来自哪台机器。
     """
     system = platform.system()
     return {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}.get(
@@ -110,11 +114,9 @@ def main() -> None:
     name = platform_name()
     result: dict[str, Any] = {
         "uuid": result_id,
-        "historyId": str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f"archive-management-coverage-{name}")
-        ),
-        "fullName": f"archive-management.coverage.{name}",
-        "name": f"Coverage report · {name}",
+        "historyId": str(uuid.uuid5(uuid.NAMESPACE_URL, "archive-management-coverage")),
+        "fullName": "archive-management.coverage",
+        "name": "Coverage report",
         "status": "passed",
         "stage": "finished",
         "start": timestamp,
@@ -123,6 +125,7 @@ def main() -> None:
             {"name": "suite", "value": "Coverage"},
             {"name": "feature", "value": "Test coverage"},
             {"name": "os", "value": name},
+            {"name": "env", "value": name},
             {"name": "severity", "value": COVERAGE_SEVERITY},
         ],
         "parameters": [{"name": "Platform", "value": name}],
@@ -146,8 +149,7 @@ def main() -> None:
         result["status"] = "broken"
         result["statusDetails"] = {"message": f"Unable to read coverage XML: {exc}"}
         result["description"] = (
-            "## Coverage unavailable\n\n"
-            f"The coverage file could not be parsed: `{exc}`"
+            f"## Coverage unavailable\n\nThe coverage file could not be parsed: `{exc}`"
         )
         write_result(result, result_id)
         return

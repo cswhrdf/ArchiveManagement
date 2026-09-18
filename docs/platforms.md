@@ -1,16 +1,16 @@
 # 平台支持（Windows / macOS / Linux）
 
-| 能力                                   | Windows                    | macOS                                   | Linux                                  |
-| -------------------------------------- | -------------------------- | --------------------------------------- | -------------------------------------- |
-| 应用目录 / 配置 / 日志 / 数据库 / 备份 | ✅                          | ✅                                       | ✅                                      |
-| 图形界面                               | ✅                          | ✅                                       | ✅ 需图形环境                           |
-| 备份 / 恢复 / 删除到系统回收站         | ✅                          | ✅                                       | ✅                                      |
-| 全局快捷键                             | ✅                          | ✅ 需授予"辅助功能"权限                  | ✅ 需图形环境与监听权限                 |
-| 探测：Steam                            | ✅ 注册表 + 默认安装目录    | ✅ `~/Library/Application Support/Steam` | ✅ `~/.steam`、XDG 与 Flatpak/Snap 目录 |
-| 探测：Epic                             | ✅ `%PROGRAMDATA%\Epic\...` | ✅ `/Users/Shared/Epic Games/...`        | ❌ 无官方启动器，用监控目录             |
-| 探测：GOG / Ubisoft                    | ✅ 注册表                   | ❌ 没有注册表，用监控目录                | ❌ 同 macOS                             |
-| 监控目录                               | ✅                          | ✅                                       | ✅                                      |
-| PyInstaller 打包                       | ✅ onedir + onefile         | ⏳ 未纳入                                | ⏳ 未纳入                               |
+| 能力                                   | Windows                    | Linux                                  | macOS (未进行实机测试)                  |
+| -------------------------------------- | -------------------------- | -------------------------------------- | --------------------------------------- |
+| 应用目录 / 配置 / 日志 / 数据库 / 备份 | ✅                          | ✅                                      | ✅                                       |
+| 图形界面                               | ✅                          | ✅ 需图形环境                           | ✅                                       |
+| 备份 / 恢复 / 删除到系统回收站         | ✅                          | ✅                                      | ✅                                       |
+| 全局快捷键                             | ✅                          | ✅ 需图形环境与监听权限                 | ✅ 需授予"辅助功能"权限                  |
+| 探测：Steam                            | ✅ 注册表 + 默认安装目录    | ✅ `~/.steam`、XDG 与 Flatpak/Snap 目录 | ✅ `~/Library/Application Support/Steam` |
+| 探测：Epic                             | ✅ `%PROGRAMDATA%\Epic\...` | ❌ 无官方启动器，用监控目录             | ✅ `/Users/Shared/Epic Games/...`        |
+| 探测：GOG / Ubisoft                    | ✅ 注册表                   | ❌ 同 macOS                             | ❌ 没有注册表，用监控目录                |
+| 监控目录                               | ✅                          | ✅                                      | ✅                                       |
+| PyInstaller 打包                       | ✅ onedir + onefile         | ⏳ 未纳入                               | ⏳ 未纳入                                |
 
 平台相关实现集中在 `services/platforms.py`（平台识别）、`services/platform_scan.py`（按平台选择探测来源）、`services/hotkeys.py`（默认组合键与权限检测）。`uv run python -m archive_management doctor` 会先打印当前平台与注册表探测是否可用。
 

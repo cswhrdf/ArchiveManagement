@@ -223,9 +223,8 @@ def test_home_widgets_fit_the_supported_minimum_window() -> None:
             if frame.winfo_reqwidth() > budget
         ]
         detail = "; ".join(too_wide)
-        assert (
-            not too_wide
-        ), f"下列容器的最小宽度超过支持的最小窗口下的可用宽度 {budget}px: {detail}"
+        hint = f"下列容器的最小宽度超过支持的最小窗口下的可用宽度 {budget}px: {detail}"
+        assert not too_wide, hint
     finally:
         app.destroy()
 

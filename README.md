@@ -16,17 +16,6 @@
 - **全局快捷键**：默认 `Win+Alt+S`（保存）与 `Win+Alt+Z`（创建分支），可在设置里现场录制修改（必须含 Win/Ctrl/Alt/Shift 之一且至少一个字母键）。
 - **可追溯**：所有用户操作写入滚动日志文件（不落数据库），高风险操作用 INFO、基础操作用DEBUG；日志不含凭据、文件内容与完整敏感路径。
 
-## 文档
-
-| 文档                                    | 内容                                                       |
-| --------------------------------------- | ---------------------------------------------------------- |
-| [features.md](./docs/features.md)       | 界面结构、备份/分支/定时任务、恢复、原始目录管理、操作日志 |
-| [library.md](./docs/library.md)         | 统一游戏主页、列表与海报、分类筛选、本地游戏发现           |
-| [hotkeys.md](./docs/hotkeys.md)         | 全局快捷键的默认键位、自定义流程与实现约定                 |
-| [platforms.md](./docs/platforms.md)     | Windows / macOS / Linux 支持矩阵与平台注意事项             |
-| [development.md](./docs/development.md) | 开发环境、命令行、配置文件、质量门禁、打包与发布           |
-| [testing.md](./docs/testing.md)         | 测试分类、性能基准与安全测试、Allure 报告汇总              |
-
 ## 快速开始
 
 要求：Python >= 3.12 与 uv。
@@ -44,13 +33,13 @@ uv run pre-commit install                                     # 安装 Git 提�
 
 ## 平台支持
 
-| 能力                           | Windows             | macOS                  | Linux                  |
+| 能力                           | Windows             | Linux                  | macOS(未进行实机测试)  |
 | ------------------------------ | ------------------- | ---------------------- | ---------------------- |
 | 应用目录/配置/日志/数据库/备份 | ✅                   | ✅                      | ✅                      |
-| 图形界面                       | ✅                   | ✅                      | ✅ 需图形环境           |
+| 图形界面                       | ✅                   | ✅ 需图形环境           | ✅                      |
 | 备份/恢复/删除到系统回收站     | ✅                   | ✅                      | ✅                      |
-| 全局快捷键                     | ✅                   | ✅ 需授予"辅助功能"权限 | ✅ 需图形环境与监听权限 |
-| 本地游戏发现                   | ✅ 安装清单 + 注册表 | ✅ 安装清单(macOS 路径) | ✅ Steam 清单与监控目录 |
+| 全局快捷键                     | ✅                   | ✅ 需图形环境与监听权限 | ✅ 需授予"辅助功能"权限 |
+| 本地游戏发现                   | ✅ 安装清单 + 注册表 | ✅ Steam 清单与监控目录 | ✅ 安装清单(macOS 路径) |
 | PyInstaller 打包               | ✅ onedir + onefile  | ⏳ 未纳入               | ⏳ 未纳入               |
 
 表中的"图形环境"指系统提供的图形显示服务（Windows 与 macOS 自带，Linux 上是 X11 或
@@ -62,7 +51,7 @@ Wayland）：没有显示器的服务器或 CI 可以先用虚拟显示，例如
 
 ```shell
 uv run ruff check .
-uv run black --check .
+uv run ruff format --check .
 uv run mypy
 uv run pytest --cov
 ```
@@ -79,3 +68,16 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
 构建读取 `packaging.py` 中的源码版本，产出 Windows x64 的 onedir 压缩包、onefile 可执行
 文件、SHA-256 校验文件与构建元数据。构建与发布流程见 [development.md](./docs/development.md)。
+
+---
+
+## 文档
+
+| 文档                                    | 内容                                                       |
+| --------------------------------------- | ---------------------------------------------------------- |
+| [features.md](./docs/features.md)       | 界面结构、备份/分支/定时任务、恢复、原始目录管理、操作日志 |
+| [library.md](./docs/library.md)         | 统一游戏主页、列表与海报、分类筛选、本地游戏发现           |
+| [hotkeys.md](./docs/hotkeys.md)         | 全局快捷键的默认键位、自定义流程与实现约定                 |
+| [platforms.md](./docs/platforms.md)     | Windows / macOS / Linux 支持矩阵与平台注意事项             |
+| [development.md](./docs/development.md) | 开发环境、命令行、配置文件、质量门禁、打包与发布           |
+| [testing.md](./docs/testing.md)         | 测试分类、性能基准与安全测试、Allure 报告汇总              |

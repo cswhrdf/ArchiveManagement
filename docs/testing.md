@@ -22,7 +22,7 @@ tests/
 | unit        | 按目录（无专用标记）       | 运行          | 部分（blocker+critical） | 运行（三平台）                          |
 | integration | 按目录（无专用标记）       | 运行          | 部分（blocker+critical） | 运行（三平台）                          |
 | performance | `@pytest.mark.performance` | **不运行**    | 不运行                   | `performance` job（ubuntu，单平台采集） |
-| security    | `@pytest.mark.security`    | **不运行**    | 不运行                   | `security` job（ubuntu/windows/macos）  |
+| security    | `@pytest.mark.security`    | **不运行**    | 不运行                   | `security` job（三平台）                |
 
 ### 严重等级（失败影响面）
 
@@ -118,21 +118,39 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 - 每条安全结论记录：类别、场景、输入摘要、期望拦截行为、实际结果、是否拦截。
 - 环境信息记录：操作系统与平台族、Python 版本与实现、提交 SHA、分支与 CI run id、测试类别是否执行、覆盖率门槛（`scripts/create_allure_summary.py` 写入`allure-results/environment.properties`）。
 - 覆盖率摘要由 `scripts/create_allure_coverage.py` 生成；性能与安全结果由`scripts/create_allure_summary.py` 生成，原始 JSON/CSV 作为附件保留，保证结论可下载、可追溯。
-- 汇总报告把三个平台的结果合并在一起，因此**平台用例身份**必须区分：每个用例都会写入平台参数（Allure 用它算用例身份）、`os` 标签（筛选）与套件名后缀（套件树）。缺了参数时三次执行会被并成"同一个用例重试了多次"，看不出结果来自哪台机器；性能/安全/覆盖率摘要也各平台各占一条。
+- **平台以 Allure 的"环境"维度呈现**（这是看出"结果来自哪台机器"的主路径）：每个用例都会写入 `env` 标签（取值就是平台展示名），仓库根的 **`allurerc.mjs`** 用 matcher 把它映射成 Allure 3 的环境。于是一份合并报告里有 `Windows / macOS / Linux` 三个环境：报告顶部出现环境选择器，每个用例详情页的「环境」分页会逐个列出它在三个平台上的结果（含状态、耗时与跳转链接），而不是只能从参数或套件名后缀里去认平台。
+  另保留两样兜底：`平台` 参数（平台也进结果身份：三个平台的同名结果 `retryHash` 各不相同、`isRetry` 均为 `false`，不会互相并成重试；`historyId` 共享，所以历史趋势能连上）与 `os` 标签 + `parentSuite` 后缀（筛选与只认 suite 标签的控件）。
+  **生成报告必须在仓库根目录执行**（CI 与本文档的命令都是如此）：环境不会仅因结果带 `env` 标签就生效，CLI 得读到 `allurerc.mjs` 才会识别；读不到时环境会静默退回单个 `default`，`scripts/verify_allure_report.py` 会把这种退化判为报告不完整（它同时打印 `环境: ...` 一行）。性能/安全/覆盖率摘要项也按同一规则处理：带 `env` 标签、**标题不再拼平台名**（三个环境里的标题完全一致，都是 `Coverage report` / `Performance baseline` / `Security findings`），平台由环境表达；`平台` 参数与 `os` 标签作为兜底（与用例结果一致）。
 - 用例标题会还原 pytest 对参数化 id 做的 ASCII 转义（`\u7528\u6237` → `用户`），并写在 `@allure.title` 使用的同一属性上（`allure.dynamic.title` 会被 allure-pytest 用 `item.name` 覆盖）。
 
 ## 6. CI 流程
 
 ```text
-quality (3 平台: ruff / black / mypy)
+quality (3 平台: ruff check / ruff format / mypy; 结论只把 Ubuntu 那份带进报告)
 pytest  (3 平台: 单元 + 集成 + 覆盖率 + Allure)
 performance (ubuntu: 基准与阈值)
 security    (3 平台: 越权与危险操作防护)
       ↓
-allure-summary (合并全部 allure-results-* → 写入环境信息与性能/安全汇总 → 生成最终报告)
+allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全汇总 → 生成最终报告)
 ```
 
 每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
+
+质量门禁本身也由脚本执行：`scripts/create_allure_quality.py` 依次跑 ruff check / ruff format --check / mypy，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。只有 **Ubuntu** 那份会上传（质量结论与平台无关），所以汇总报告里只出现一条，位于 Linux 环境下；性能之外的第二类"脚本生成项"就长这样（详见第 5 节）。
+
+### GUI 用例必须真的跑起来（skip 是有代价的）
+
+`tests/integration/test_gui_*.py` 会把"Tk 起不来"当作环境问题处理：文件级守卫与每个用例的 `except TclError: pytest.skip(f"tk 环境不可用: ...")`。这样没有显示环境的机器不会一片红，但**代价是真正的 Tcl 故障会伪装成一堆 skip**，而 GUI 用例占覆盖率的很大一块——本机实测（把 `TCL_LIBRARY` 指向不存在的目录来模拟）：全量 `769 passed / 68 skipped`，覆盖率 **67.88% < 85%**，作业会以覆盖率门槛失败，且失败信息里看不出 CLI 之外的原因。
+
+所以 CI 在 Windows/macOS 上、pytest 之前多跑一步显式自检：
+
+```shell
+uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK')"
+```
+
+Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable init.tcl ...` 并以非 0 退出，直接把原因抬到表面（Linux 的显示环境由 `xvfb-run` 提供，不重复检查）。
+
+这条曾经真实发生过：跑测试的解释器是 `uv python install 3.12` 下载的 uv 托管 standalone 构建，它靠**自身目录里的 tcl 数据文件**定位 Tcl（`<托管目录>/tcl/tcl8.6`），那份副本一旦陈旧或不完整，`tkinter` 就报 `Can't find a usable init.tcl`（上游是 python-build-standalone 的已知怪癖，见 astral-sh/uv#7036；本机 venv 用的是 python.org 的 CPython，自带完整 tcl，所以本机复现不出来）。既然重建解释器就能修好，工作流里用 `uv python install --reinstall 3.12`，而不是事后设 `TCL_LIBRARY`/`TK_LIBRARY`——后者路径随平台变，还会影响其它 Tcl 使用者。
 
 ### 报告自检与发布（不要跳过）
 
@@ -169,12 +187,14 @@ allure generate allure-results --output allure-report
 # 3) 生成后直接打开浏览器(等价于 generate 之后再 open)
 allure generate allure-results --output allure-report --open
 
-# 4) 打开已经生成好的报告(端口省略时用随机端口)
-allure open allure-report --port 8080
+# 4) 打开已经生成好的报告(端口用 allurerc.mjs 里的默认值 8080; 冲突时加 `--port 8081`)
+allure open allure-report
 
 # 5) 一步到位: 直接从结果目录生成并打开(不落地产出报告目录)
 allure open allure-results
 ```
+
+报告的标题、界面语言与默认端口都在仓库根的 `allurerc.mjs` 里（`name` / `plugins.awesome.options.reportLanguage` / `port`），所以上面这些命令不需要额外参数：报告标题是 `存档管理 · 测试报告`，界面固定中文（与浏览器语言无关）。另外两个刻意**不**设的选项写在配置的注释里：`open: true`（CI 上会去拉起浏览器）与 `singleFile: true`（会拆掉 `data/test-results/*.json` 这些按需拉的资源，直接打破自检与单 zip 发布）。
 
 只想看某一类用例时，把第 1 步换成对应目录（性能/安全测试必须显式指定）：
 
@@ -199,11 +219,12 @@ uv run pytest tests/security -m security --alluredir=allure-results
 3. 选择严重等级：按**失败影响面**在模块 `pytestmark` 里声明一个等级（blocker/critical/normal/minor/trivial，判定标准见第 1 节的严重等级表）；需要更细的区分时，给单个用例加 `@pytest.mark.blocker` 等标记。
 4. 优先用 `tests/helpers.py` 的构造器，避免在模块里再抄一份临时数据库/游戏数据构造。
 5. 性能测试必须给出规模与阈值，安全测试必须用 `security_recorder.expect_blocked`记录结论。
-6. 本地验证：
+6. 断言消息写成单行：长提示先存进变量（`hint = "..."`），`assert` 本身保持一行。Ruff 与 Black 对"折行的断言消息"排布不同，只有单行写法能让两个工具输出一致（见 [development.md](development.md) 的质量门禁一节）。
+7. 本地验证：
 
 ```shell
 uv run ruff check .
-uv run black --check .
+uv run ruff format --check .
 uv run mypy
 uv run pytest --cov
 uv run pytest tests/performance -m performance

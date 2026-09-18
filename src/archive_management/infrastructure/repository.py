@@ -285,8 +285,7 @@ class GameRepository:
         """清除引用了该备份的"当前节点"指针(删除备份前调用)."""
         with self._database.session() as connection:
             connection.execute(
-                "UPDATE games SET current_backup_id = NULL"
-                " WHERE current_backup_id = ?",
+                "UPDATE games SET current_backup_id = NULL WHERE current_backup_id = ?",
                 (backup_id,),
             )
 
@@ -419,8 +418,7 @@ class SaveLocationRepository:
                 (game_id,),
             )
             connection.execute(
-                "UPDATE save_locations SET is_primary = 1"
-                " WHERE game_id = ? AND id = ?",
+                "UPDATE save_locations SET is_primary = 1 WHERE game_id = ? AND id = ?",
                 (game_id, location_id),
             )
 
@@ -913,8 +911,7 @@ class MonitoredDirectoryRepository:
         """返回全部已启用监控目录的路径(参与扫描)."""
         with self._database.connect() as connection:
             rows = connection.execute(
-                "SELECT path FROM monitored_directories WHERE enabled = 1"
-                " ORDER BY path"
+                "SELECT path FROM monitored_directories WHERE enabled = 1 ORDER BY path"
             ).fetchall()
         return [str(row["path"]) for row in rows]
 

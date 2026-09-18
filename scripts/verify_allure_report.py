@@ -12,7 +12,10 @@
 2. 结果索引(``test-results.json`` 的 ``byId``)里每个结果都要有详情文件
    ``data/test-results/<id>.json``, 且条数与 ``allure-results`` 里的结果文件一致;
 3. 用例分组(``data/test-env-groups/*.json``)引用的结果 id 都能在索引里找到;
-4. ``--zip`` 额外把报告打成单个 ``<报告目录>.zip``: 单个文件发布不会出现"整个目录
+4. 环境列表(``widgets/environments.json``)里有非 ``default`` 的环境: 平台是靠
+   ``env`` 标签 + 仓库根的 ``allurerc.mjs`` 变成 Allure 环境的, 生成时没读到配置
+   就会静默退回单个 ``default`` 环境(详见 :func:`environment_problems`);
+5. ``--zip`` 额外把报告打成单个 ``<报告目录>.zip``: 单个文件发布不会出现"整个目录
    被悄悄丢掉"的静默损坏, 并打印条目数与 SHA256 便于人工核对.
 
 报告目录不存在视为"本次没有结果, 未生成报告"(退出码 0); 其余情况缺资源即退出码 1.
@@ -38,6 +41,9 @@ from pathlib import Path
 DETAIL_DIRECTORY = Path("data") / "test-results"
 GROUP_DIRECTORY = Path("data") / "test-env-groups"
 REQUIRED_FILES = ("index.html", "summary.json", "test-results.json")
+# 环境列表: 报告里有非 default 的环境, 才说明平台真的成了 Allure 3 的"环境"维度.
+ENVIRONMENTS_WIDGET = "environments.json"
+DEFAULT_ENVIRONMENT = "default"
 
 # 报告里的 JSON 对象(只做按键取值, 具体字段仍逐个校验类型).
 JsonObject = dict[str, object]
@@ -57,6 +63,7 @@ class ReportFacts:
     detail_files: int
     env_groups: int
     result_files: int | None
+    environments: tuple[str, ...] = ()
     archive_entries: int | None = None
 
 
@@ -100,6 +107,43 @@ def count_result_files(results_dir: Path | None) -> int | None:
     if results_dir is None:
         return None
     return sum(1 for _ in results_dir.glob(f"*{RESULT_FILE_SUFFIX}"))
+
+
+def environment_ids(report_dir: Path) -> set[str] | None:
+    """返回报告里的环境 id 集合; 文件缺失或无法解析时返回 None."""
+    path = report_dir / "widgets" / ENVIRONMENTS_WIDGET
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, list):
+        return None
+    return {
+        str(entry["id"])
+        for entry in payload
+        if isinstance(entry, dict) and entry.get("id") is not None
+    }
+
+
+def environment_problems(report_dir: Path) -> list[str]:
+    """要求报告里存在非 default 的环境, 否则环境维度是静默失效的.
+
+    ``env`` 标签要变成 Allure 的环境, 需要生成报告时读到仓库根的 ``allurerc.mjs``;
+    一旦没读到(例如在别的目录执行 ``allure generate``), 所有结果都会落回隐式的
+    ``default``, 三平台结果又退化成"只能从参数/套件名里认平台", 而且**不会有任何
+    报错** —— 所以这里把它当成报告不完整。
+    """
+    ids = environment_ids(report_dir)
+    if ids is None:
+        return [f"缺少或无法解析 widgets/{ENVIRONMENTS_WIDGET}"]
+    if ids - {DEFAULT_ENVIRONMENT}:
+        return []
+    return [
+        "报告里只有 default 环境: 生成时没读到仓库根的 allurerc.mjs"
+        "(或结果缺 env 标签), 多平台结果会退化成只能靠参数/套件名辨认"
+    ]
 
 
 def static_problems(report_dir: Path) -> list[str]:
@@ -173,6 +217,7 @@ def verify_report(
     problems.extend(
         group_reference_problems(report_dir, expected, grouped_result_ids(report_dir))
     )
+    problems.extend(environment_problems(report_dir))
     result_files = count_result_files(results_dir)
     if result_files is not None and result_files != len(expected):
         problems.append(
@@ -184,6 +229,7 @@ def verify_report(
         detail_files=detail_filenames(report_dir),
         env_groups=sum(1 for _ in (report_dir / GROUP_DIRECTORY).glob("*.json")),
         result_files=result_files,
+        environments=tuple(sorted(environment_ids(report_dir) or ())),
     )
     return facts, problems
 
@@ -221,6 +267,7 @@ def report_facts(facts: ReportFacts, report_dir: Path) -> None:
     print(f"结果索引: {facts.indexed_results} 条")
     print(f"详情文件: {facts.detail_files} 个 (data/test-results)")
     print(f"用例分组: {facts.env_groups} 个 (data/test-env-groups)")
+    print(f"环境: {', '.join(facts.environments) or '未识别'}")
     print(f"allure-results 结果文件: {results_text}")
 
 

@@ -251,8 +251,10 @@ def write_result(
 ) -> None:
     """写入一条 passed 状态的 Allure 结果(承载该类测试的汇总信息).
 
-    全名与 historyId 都带平台: 三个平台的结论在报告里各占一行, 也能各自与
-    历史运行对上(同平台的趋势连得上, 不会被当成彼此的"重试")。
+    身份**不带平台**: 三个平台的同一类汇总(覆盖率/性能/安全)是"同一份摘要、分属三个环境",
+    与报告里用例结果的写法一致 —— 平台由 ``env`` 标签(配合仓库根的 ``allurerc.mjs``)
+    变成 Allure 的环境, 因此标题里也不再拼平台名; ``平台`` 参数与 ``os`` 标签是兼底
+    (生成端没读到报告配置时, 环境会静默退回 ``default``)。
 
     严重等级固定为 ``trivial``: 汇总项本身不验证任何行为, 只是把原始结论与附件
     带进报告; 不打等级的话报告里会多出一个 no_severity 桶。
@@ -261,9 +263,9 @@ def write_result(
     result: dict[str, Any] = {
         "uuid": result_id,
         "historyId": str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f"archive-management-{category}-{platform}")
+            uuid.uuid5(uuid.NAMESPACE_URL, f"archive-management-{category}")
         ),
-        "fullName": f"archive-management.{category}.{platform}",
+        "fullName": f"archive-management.{category}",
         "name": title,
         "status": "passed",
         "stage": "finished",
@@ -272,6 +274,9 @@ def write_result(
         "labels": [
             {"name": "suite", "value": "Test report"},
             {"name": "os", "value": platform},
+            # 与环境维度对齐: 仓库根的 allurerc.mjs 用 env 标签把结果归到各平台的环境,
+            # 缺了它这些汇总项只会出现在 default 环境里(按环境筛选时就看不到了)。
+            {"name": "env", "value": platform},
             {"name": "feature", "value": title},
             {"name": "epic", "value": "工程与发布"},
             {"name": "story", "value": title},
@@ -331,7 +336,7 @@ def main() -> int:
             results_dir,
             result_id=result_id,
             category="performance",
-            title=f"Performance baseline · {platform}",
+            title="Performance baseline",
             description=performance_table(measurements),
             attachments=attachments,
             platform=platform,
@@ -354,7 +359,7 @@ def main() -> int:
             results_dir,
             result_id=result_id,
             category="security",
-            title=f"Security findings · {platform}",
+            title="Security findings",
             description=security_table(findings),
             attachments=attachments,
             platform=platform,

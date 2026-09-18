@@ -9,9 +9,9 @@ repos:
         language: system
         types: [python]
 
-      - id: black-check
-        name: black check
-        entry: uv run black --check
+      - id: ruff-format
+        name: ruff format check
+        entry: uv run ruff format --check
         language: system
         types: [python]
 

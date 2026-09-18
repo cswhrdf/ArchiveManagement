@@ -305,11 +305,17 @@ def _configure_allure(item: pytest.Item) -> None:
     _ALLURE_DYNAMIC.story(story)
     # allure-pytest 没有 layer 装饰器, 只能写原始标签(Allure 3 "按层耗时" 直方图读它).
     _ALLURE_DYNAMIC.label("layer", layer)
-    # 平台写成**参数**而不只是标签: Allure 用"用例全名 + 非 excluded 参数"算用例身份
-    # (retryHash/historyId), 少了参数, 三个平台的同名结果会被并成"同一用例重试三次";
+    # 平台写成**参数**而不只是标签: Allure 用"用例全名 + 非 excluded 参数 + 标签"算重试
+    # 身份(retryHash), 少了参数, 三个平台的同名结果容易被并成"同一用例重试了多次";
     # os 标签同时作为筛选维度。
     _ALLURE_DYNAMIC.parameter("平台", platform)
     _ALLURE_DYNAMIC.label("os", platform)
+    # env 标签把平台升级成 Allure 3 的一等维度"环境": 仓库根的 ``allurerc.mjs`` 用它把结果
+    # 归到 windows/macos/linux 三个环境, 于是合并报告里能按环境筛选, 每个用例的"环境"分页
+    # 会列出它在三台机器上的结果(而不是只能从参数/套件名里认平台)。
+    # 参数与套件名都保留: 它们是"配置没被生成端读到"时的兜底(那时环境会退化成 default),
+    # 自检脚本 ``scripts/verify_allure_report.py`` 会把这种退化报成失败。
+    _ALLURE_DYNAMIC.label("env", platform)
     # suite 三层与 layer/epic/feature 对齐, 作为只认 suite 标签的控件兜底;
     # 平台加在 parentSuite 末尾, 合并报告的套件树里能一眼看出用例跑在哪台机器上.
     _ALLURE_DYNAMIC.parent_suite(f"{_LAYER_SUITES.get(layer, layer)} · {platform}")

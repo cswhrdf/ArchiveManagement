@@ -12,13 +12,15 @@
 - ``pyproject.toml`` 的 ``mypy_path`` 包含 ``tests`` 目录: pre-commit 与编辑器会用
   "只检查改动文件"的方式词用 mypy, 此时 ``files`` 配置不生效, 找不到共享模块的
   导入会被静默当成 ``Any``(表现为 ``no-any-return`` 误报)。
-- 合并报告里每条结果都看得出平台, 标题也没有残留的参数化转义: 三个平台的用例实际
-  由不同机器跑出, 平台必须写进用例身份, 否则只会显示"同一个用例重试了多次"。
+- 合并报告里每条结果都看得出平台: 平台写进"参数 + os 标签 + env 标签", 其中 env 标签
+  由仓库根的 ``allurerc.mjs`` 映射成 Allure 3 的"环境"维度(三平台的结果互为独立条目,
+  用例详情页的环境分页里能逐个对照); 标题同时还原参数化转义。
 """
 
 from __future__ import annotations
 
 import ast
+import re
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -29,6 +31,7 @@ import pytest
 from allure_pytest.utils import allure_name
 
 import conftest
+from archive_management.services.platforms import PLATFORM_LABELS
 
 pytestmark = [
     pytest.mark.minor,
@@ -37,6 +40,10 @@ pytestmark = [
     pytest.mark.story("测试配置约束"),
     pytest.mark.layer("unit"),
 ]
+
+# 仓库根目录: 报告配置(allurerc.mjs)与本文件所在的 tests/unit 差两级.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 # 与 pyproject.toml 的 addopts 保持一致: 单个用例最长 60 秒.
 _EXPECTED_TIMEOUT_SECONDS = 60
@@ -83,9 +90,9 @@ def test_mypy_path_covers_the_shared_test_modules(pytestconfig: pytest.Config) -
     entries = [entry.replace("\\", "/").rstrip("/") for entry in mypy_path.split(":")]
 
     assert any(entry.endswith("/src") for entry in entries), "mypy_path 缺少 src"
-    assert any(
-        entry.endswith("/tests") for entry in entries
-    ), "mypy_path 缺少 tests: 单独检查测试文件时 import helpers 会变成 Any"
+    has_tests = any(entry.endswith("/tests") for entry in entries)
+    hint = "mypy_path 缺少 tests: 单独检查测试文件时 import helpers 会变成 Any"
+    assert has_tests, hint
 
 
 def test_ci_only_suites_exist_and_are_marked(pytestconfig: pytest.Config) -> None:
@@ -213,6 +220,10 @@ class _DynamicRecorder:
         assert matches, f"未调用 allure.dynamic.{name}: {self.calls}"
         return matches[-1]
 
+    def all_arguments(self, name: str) -> list[tuple[Any, ...]]:
+        """返回所有 ``name`` 调用的参数(同名方法被调用多次时用, 例如多个标签)."""
+        return [arguments for call, arguments in self.calls if call == name]
+
 
 class _ProbeItem:
     """只实现 ``_configure_allure`` 读取的那几个属性的最小替身."""
@@ -308,10 +319,11 @@ def test_explicit_allure_title_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_allure_result_carries_the_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """平台要写成参数(进用例身份), 并同步写标签与套件名(便于按平台查看).
+    """平台要写成参数 + os/env 标签, 并同步写套件名(便于按平台/环境查看).
 
-    平台不是参数时, 三个平台跑出的同名结果在合并报告里只会显示成
-    "同一个用例重试了多次"; 写成参数才会被当成各自独立的用例.
+    参数与套件名是"生成端没读到 allurerc.mjs"时的兼底(那时环境会退化成 default),
+    env 标签则是平台成为 Allure 3 "环境"维度的入口; 两者缺一都会让三平台结果
+    在合并报告里难以分辨。
     """
     recorder = _DynamicRecorder()
     monkeypatch.setattr(conftest, "_ALLURE_DYNAMIC", recorder)
@@ -322,5 +334,53 @@ def test_allure_result_carries_the_platform(
     platform = conftest._current_platform_label()
     assert platform in {"Windows", "Linux", "macOS"}
     assert recorder.arguments("parameter") == ("平台", platform)
-    assert recorder.arguments("label") == ("os", platform)
+    labels = recorder.all_arguments("label")
+    assert ("os", platform) in labels
+    assert ("env", platform) in labels
     assert str(recorder.arguments("parent_suite")[0]).endswith(f"· {platform}")
+
+
+def _allure_config_text() -> str:
+    """读取仓库根的 Allure 报告配置(环境映射与历史设置都在这里)."""
+    return (_REPO_ROOT / "allurerc.mjs").read_text(encoding="utf-8")
+
+
+def _environment_block() -> str:
+    """截出配置里的 ``environments`` 块(块内的键就是环境 id, 缩进用于区分层级)."""
+    return _allure_config_text().split("environments: {", 1)[-1]
+
+
+def test_report_config_maps_every_platform_to_an_environment() -> None:
+    """``allurerc.mjs`` 必须为每个平台声明一个环境 matcher。
+
+    环境不会只因为结果上有 ``env`` 标签就生效: Allure 3 在结果没有显式 environment 字段
+    时会退到配置里的 matcher, 匹配不到就落到隐式的 default —— 那时三平台的结果会重新
+    退化成"只能从参数/套件名里认平台"。这里锁住"代码能生成的每个平台展示名都在配置里
+    有对应环境", 并顺便校验环境 id 合法(Allure 只接受 latin 字母/数字/下划线/连字符).
+
+    断言只看 ``environments`` 块内部: 配置顶层也有 ``name``(报告标题), 用整份文本去
+    匹配会把它当成环境名。
+    """
+    block = _environment_block()
+    names = re.findall(r'^\s{6}name: "([^"]+)"', block, re.MULTILINE)
+    hint = f"allurerc.mjs 环境名 {names} 与平台名 {sorted(PLATFORM_LABELS.values())} 不一致"
+
+    assert set(names) == set(PLATFORM_LABELS.values()), hint
+    for name in names:
+        assert f'value === "{name}"' in block, f"缺少 {name} 的 matcher"
+    env_ids = re.findall(r"^\s{4}([A-Za-z0-9_-]+): \{", block, re.MULTILINE)
+    assert env_ids == ["windows", "macos", "linux"]
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]+", env_id) for env_id in env_ids)
+
+
+def test_report_config_keeps_the_history_settings() -> None:
+    """历史趋势设置也要留在仓库的 ``allurerc.mjs`` 里。
+
+    CI 会在生成报告前把上一次成功运行的历史文件下载回 ``.allure/history.jsonl``;
+    如果配置里没有 ``historyPath``/``appendHistory``, 下载会变成白做(报告里不再有趋势),
+    而这两项以前是写死在 CI 的三处报告生成步骤里的。
+    """
+    config = _allure_config_text()
+
+    assert 'historyPath: "./.allure/history.jsonl"' in config
+    assert "appendHistory: true" in config

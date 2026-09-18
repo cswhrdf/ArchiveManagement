@@ -9,7 +9,6 @@ dependencies = [
     "apscheduler~=3.11.3",
     "customtkinter~=6.0.0",
     "httpx~=0.28.1",
-    "keyring~=25.7.0",
     "platformdirs~=4.11.8",
     "psutil~=7.2.2",
     "pydantic~=2.13.5",
@@ -27,7 +26,6 @@ license-files = ["LICENSE"]
 
 [dependency-groups]
 dev = [
-    "black>=26",
     "mypy>=2.3",
     "pre-commit>=4",
     "pyinstaller>=6",
@@ -46,10 +44,6 @@ BugTracker = "https://github.com/cswhrdf/ArchiveManagement/issues"
 Changelog = "https://github.com/cswhrdf/ArchiveManagement/releases"
 
 
-[project.scripts]
-archive-management = "archive_management.app:main"
-
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/archive_management"]
 
@@ -60,26 +54,11 @@ include = ["src/archive_management"]
 path = "src/archive_management/packaging.py"
 
 [tool.uv]
+# 本项目以工具形式开发, **不作为包安装**(不发布到 PyPI): uv 只负责解析与安装依赖,
+# 自身源码靠 src 布局 + pytest 的 pythonpath 使用。因此这里也不能声明
+# 实际入口有两个: `uv run python -m archive_management ...` 与 PyInstaller 打包出的
+# 可执行文件(见 packaging/archive-management.spec)。
 package = false
-
-[tool.black]
-line-length = 88
-target-version = ["py312"]
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-    \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | _build
-  | buck-out
-  | build
-  | dist
-)/
-'''
 
 [tool.ruff]
 target-version = "py312"
@@ -142,6 +121,12 @@ max-complexity = 10
 convention = "google"
 
 [tool.ruff.format]
+# 格式化统一交给 `ruff format`(已替代 Black): 下面的取值就是 **Black 稳定版的默认风格**,
+# 不要随意改动 —— 否则缩进/引号/尾随逗号会立刻与 Black 风格分叉。
+# preview = false 也是刻意为之: preview 的排布规则偏离 Black 稳定版。
+# 另注: `skip-magic-trailing-comma = false` 表示"尊重魔法尾随逗号"(与 Black 相同) ——
+# 多行容器里写了尾随逗号就会保持展开, 不会因为放得下被折叠成一行。
+preview = false
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"

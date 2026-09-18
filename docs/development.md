@@ -49,18 +49,32 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 ```shell
 uv run ruff check .
-uv run black --check .
+uv run ruff format --check .
 uv run mypy
 uv run pytest --cov
 ```
 
-本地提交钩子只对本次变动的 Python 文件执行 Ruff、Black、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表）；CI 会在 Windows、Ubuntu、macOS 上运行全量测试，并单独执行性能基准与安全测试，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+格式化用 `ruff format`，其配置项**刻意锁定为 Black 稳定版的默认风格**（`preview = false`、双引号、空格缩进、尊重魔法尾随逗号），所以换成 ruff 不会把存量代码重排。两处已知差异没有用配置去弥合，而是写成了编码约定：
 
-想在本地看 Allure 报告：
+- **行宽按显示宽度计算**：Ruff 把中日韩宽字符算 2 列（Black 只按字符数），所以含中文的长字符串会比 Black 更早折行；
+- **断言消息保持单行**：`assert cond, msg` 放不下时两个工具的折行位置不同（Ruff 折消息、Black 折条件），因此约定把长提示先存进变量（如 `hint = "..."`），断言本身保持一行。若拆分，钩子会永远在两个工具的输出来回跳。
+
+想核实"代码确实仍然符合 Black 风格"，可以用一次性环境跑 Black（不必装进项目依赖）：
+
+```shell
+uvx black --diff --line-length 88 --target-version py312 src tests scripts
+```
+
+输出应为 **0 个文件需要改动**，且与 `ruff format --check .` 同时成立。
+
+本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表）；CI 会在 Windows、Ubuntu、macOS 上运行全量测试，并单独执行性能基准与安全测试，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+
+### 想在本地看 Allure 报告：
+
 1. `uv run pytest --alluredir=allure-results`
 1. `allure generate allure-results --output allure-report`
-1. `allure open allure-report --port 8080`
-（完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。
+1. `allure open allure-report`（标题、界面语言与端口都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）
+（完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
 
 ## 打包
 
@@ -68,7 +82,7 @@ uv run pytest --cov
 uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 ```
 
-- 构建前应先通过全部门禁：`uv sync --locked`、Ruff、Black、mypy、pytest。
+- 构建前应先通过全部门禁：`uv sync --locked`、Ruff（`check` + `format`）、mypy、pytest。
 - 版本直接读取 `packaging.py` 中的源码版本。
 - 产物为 Windows x64 的 **onedir** 压缩包、**onefile** 可执行文件、SHA-256 校验文件与构建元数据；发布包不得包含 API Key、开发机绝对路径或测试数据。`spec` 文件显式声明入口模块、图标与 CustomTkinter 主题资源，并按需补充隐藏导入。
 - GitHub Actions 在 Windows runner 上构建并上传 `dist` 产物（手动触发也支持）。当前以Windows 为首要发布平台，macOS/Linux 打包未纳入。

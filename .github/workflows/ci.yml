@@ -40,14 +40,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Ruff check
-        run: uv run ruff check .
+      - name: Run quality gates (ruff / format / mypy)
+        # 三项检查在脚本里依次执行: 未通过时脚本以非 0 退出(作业照常红), 但结论与完整输出
+        # 已经写进 allure-results-quality, 汇总报告里能看到"哪一项没过 + 原始输出"。
+        run: uv run python scripts/create_allure_quality.py --results-dir allure-results-quality
 
-      - name: Black check
-        run: uv run black --check .
-
-      - name: Mypy type check
-        run: uv run mypy
+      - name: Upload quality Allure results (Linux)
+        # 质量结论与平台无关, 只上传 Ubuntu 这一份: 汇总报告里只出现一条(Linux 环境)。
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-quality
+          path: allure-results-quality/
+          if-no-files-found: ignore
 
   pytest:
     name: Pytest 测试与报告 (${{ matrix.os }})
@@ -72,13 +77,26 @@ jobs:
           save-cache: true
 
       - name: Set up Python
-        run: uv python install 3.12
+        # --reinstall 是刻意的: uv 托管的 standalone 构建靠自身目录里的 tcl 数据文件
+        # 定位 Tcl, 那份副本一旦陈旧或不完整(缓存复用后出现过), tkinter 就会以
+        # "Can't find a usable init.tcl" 失败(上游: astral-sh/uv#7036)。重建解释器
+        # 比事后设 TCL_LIBRARY/TK_LIBRARY 更可靠, 也不影响其它平台。
+        run: uv python install --reinstall 3.12
 
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Verify Tkinter works (Windows/macOS)
+        # GUI 用例把"Tk 起不来"当作环境问题 skip(见 tests/integration/test_gui_*.py 的
+        # 环境守卫), 于是 Tcl 坏掉只会表现为一堆 skip —— 而 GUI 用例占覆盖率很大一块,
+        # 默不作声地全 skip 会让覆盖率门槛变成一个难定位的失败(实测 67.88% < 85%)。
+        # 这里先显式确认一次: 坏掉时就用一行清楚的错误把原因抬到表面。
+        # Linux 的显示环境由下面的 xvfb 提供, 不在这里检查。
+        if: runner.os != 'Linux'
+        run: uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK')"
+
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -175,15 +193,15 @@ jobs:
           Copy-Item .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
 
       - name: Generate Allure report (Linux/macOS)
+        # 历史设置(historyPath/appendHistory/historyLimit)与环境映射都在仓库根的
+        # allurerc.mjs 里, CLI 会从工作目录自动读取 —— 不再临时写 `.allure/allurerc.json`
+        # 再 `--config` 指定(那样会忽略仓库配置, 平台也就不会成为报告的"环境").
         if: always() && runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p .allure
-          cat > .allure/allurerc.json <<'JSON'
-          {"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}
-          JSON
           if [ -n "$(find allure-results -type f -print -quit 2>/dev/null)" ]; then
-            allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+            allure generate allure-results --output allure-report
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi
@@ -193,9 +211,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .allure | Out-Null
-          Set-Content -Path .allure/allurerc.json -Encoding ascii -Value '{"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}'
           if (Get-ChildItem allure-results -File -ErrorAction SilentlyContinue | Select-Object -First 1) {
-            allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+            allure generate allure-results --output allure-report
           } else {
             Write-Host "没有可用的 allure-results, 跳过报告生成"
           }
@@ -392,6 +409,15 @@ jobs:
           path: allure-results
           merge-multiple: true
 
+      - name: Download quality Allure results
+        # 只有 Ubuntu 上传了这一份(见 quality job), 所以报告里只有一条质量结论。
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          name: allure-results-quality
+          path: allure-results
+
       - name: Download performance baseline
         if: always()
         uses: actions/download-artifact@v7
@@ -473,15 +499,13 @@ jobs:
           uv run python scripts/create_allure_summary.py
 
       - name: Generate final Allure report
+        # 同 pytest 作业: 历史与环境设置都在仓库根的 allurerc.mjs 里。
         if: always()
         shell: bash
         run: |
           mkdir -p .allure
-          cat > .allure/allurerc.json <<'JSON'
-          {"historyPath": "./.allure/history.jsonl", "appendHistory": true, "historyLimit": 40}
-          JSON
           if [ -n "$(ls -A allure-results)" ]; then
-            allure generate allure-results --output allure-report --config ./.allure/allurerc.json
+            allure generate allure-results --output allure-report
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi

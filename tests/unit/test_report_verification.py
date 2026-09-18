@@ -7,6 +7,7 @@ CI 里出现过"报告只剩通过/失败, 点开用例是空的" —— 该目�
 - 缺详情目录 / 缺单个详情文件都必须判为不完整;
 - 结果条数与 ``allure-results`` 不一致(合并或生成掉数据)必须判为不完整;
 - 没有报告时(本次没跑出结果)不算失败;
+- 环境维度必须生效: 只剩单个 ``default`` 环境(生成时没读到 ``allurerc.mjs``)要判为不完整;
 - CI 只在自检通过后发布, 且发布的是单个 zip。
 """
 
@@ -34,20 +35,26 @@ pytestmark = [
 ]
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT = _REPO_ROOT / "scripts" / "verify_allure_report.py"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _RESULT_IDS = ("aaa111", "bbb222")
 
 
-def _load_verifier() -> Any:
-    """按路径加载校验脚本(``scripts`` 不在 pythonpath 里, 不能直接 import)."""
-    spec = importlib.util.spec_from_file_location("verify_allure_report", _SCRIPT)
+def _load_script(name: str) -> Any:
+    """按路径加载 ``scripts/`` 下的脚本(``scripts`` 不在 pythonpath 里, 不能直接 import)."""
+    spec = importlib.util.spec_from_file_location(
+        name, _REPO_ROOT / "scripts" / f"{name}.py"
+    )
     assert spec is not None
     assert spec.loader is not None
     module: ModuleType = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_verifier() -> Any:
+    """按路径加载校验脚本(``scripts`` 不在 pythonpath 里, 不能直接 import)."""
+    return _load_script("verify_allure_report")
 
 
 # 模块级加载一次: 脚本无副作用(入口在 __main__ 守卫里)。
@@ -84,6 +91,13 @@ def layout(tmp_path: Path) -> _Layout:
     )
     for name in ("statistic.json", "tree.json"):
         (widgets / name).write_text("{}", encoding="utf-8")
+    # 环境列表: 平台以"环境"形式出现(没有非 default 环境会被判为不完整).
+    (widgets / "environments.json").write_text(
+        json.dumps(
+            [{"id": "default", "name": "default"}, {"id": "windows", "name": "Windows"}]
+        ),
+        encoding="utf-8",
+    )
     for rid in _RESULT_IDS:
         (details / f"{rid}.json").write_text(
             json.dumps({"id": rid, "steps": []}), encoding="utf-8"
@@ -164,6 +178,26 @@ def test_dangling_group_reference_is_reported(layout: _Layout) -> None:
     assert any("zzz999" in problem for problem in problems)
 
 
+def test_single_default_environment_is_reported(layout: _Layout) -> None:
+    """只剩 default 环境时判为不完整: 平台不再作为环境出现(且不会有任何报错)."""
+    (layout.report / "widgets" / "environments.json").write_text(
+        json.dumps([{"id": "default", "name": "default"}]), encoding="utf-8"
+    )
+
+    _, problems = verifier.verify_report(layout.report)
+
+    assert any("只有 default 环境" in problem for problem in problems)
+
+
+def test_missing_environment_widget_is_reported(layout: _Layout) -> None:
+    """环境列表本身缺失(报告结构不对)也要报错."""
+    (layout.report / "widgets" / "environments.json").unlink()
+
+    _, problems = verifier.verify_report(layout.report)
+
+    assert any("environments.json" in problem for problem in problems)
+
+
 def test_absent_report_is_not_a_failure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -212,7 +246,13 @@ def test_ci_publishes_only_verified_report() -> None:
 
 
 def test_report_summary_items_declare_a_severity() -> None:
-    """脚本生成的汇总项要带严重等级, 否则报告里会多出一个 no_severity 桶."""
+    """脚本生成的汇总项要带严重等级与环境标签, 名称里不再拼平台名.
+
+    严重等级: 缺了会在报告里多出一个 ``no_severity`` 桶;
+    环境标签: 缺了会被归到 ``default``, 按环境筛选时就看不到性能/安全/覆盖率结论;
+    名称不拼平台: 平台现在由"环境"表达(见 docs/testing.md 第 5 节), 写进名称会让报告里
+    多出三个同名的独立条目。
+    """
     scripts = (
         _REPO_ROOT / "scripts" / "create_allure_coverage.py",
         _REPO_ROOT / "scripts" / "create_allure_summary.py",
@@ -221,6 +261,127 @@ def test_report_summary_items_declare_a_severity() -> None:
     for script in scripts:
         text = script.read_text(encoding="utf-8")
         assert '"name": "severity"' in text, f"{script.name} 未给汇总项写 severity 标签"
+        assert '"name": "env"' in text, f"{script.name} 未给汇总项写 env 标签"
+
+    summary = scripts[1].read_text(encoding="utf-8")
+    assert 'title="Performance baseline"' in summary, "性能汇总项的标题不应再拼平台名"
+    assert 'title="Security findings"' in summary, "安全汇总项的标题不应再拼平台名"
+
+
+_COVERAGE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<coverage line-rate="0.9" branch-rate="0.8" lines-covered="9" lines-valid="10"
+          branches-covered="8" branches-valid="10">
+  <packages>
+    <package name="archive_management" line-rate="0.9" branch-rate="0.8">
+      <classes>
+        <class name="widgets.py" filename="src/archive_management/ui/widgets.py">
+          <lines>
+            <line number="1" hits="1"/>
+            <line number="2" hits="0"/>
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>
+"""
+
+
+def test_coverage_item_lands_in_the_platform_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """覆盖率汇总项要归到本平台的"环境"里, 名称与身份都不再拼平台名.
+
+    三个平台各跑一次这个脚本, 结果在汇总报告里合并: 靠 ``env`` 标签(配合仓库根的
+    ``allurerc.mjs``)归到 Windows/macOS/Linux 三个环境; 平台若写进名称或身份, 报告里
+    就会多出三个同名的独立条目 —— 与"用环境区分平台"的初衷相反。
+    """
+    module = _load_script("create_allure_coverage")
+    results = tmp_path / "allure-results"
+    coverage_xml = tmp_path / "coverage.xml"
+    coverage_xml.write_text(_COVERAGE_XML, encoding="utf-8")
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
+
+    module.main()
+
+    written = next(results.glob("*-result.json"))
+    payload = json.loads(written.read_text(encoding="utf-8"))
+    platform = module.platform_name()
+    labels = {label["name"]: label["value"] for label in payload["labels"]}
+
+    assert payload["status"] == "passed"
+    assert payload["name"] == "Coverage report"
+    assert labels["env"] == platform
+    assert labels["os"] == platform
+    assert labels["severity"] == "trivial"
+    assert payload["parameters"] == [{"name": "Platform", "value": platform}]
+    assert platform not in payload["fullName"]
+    assert platform not in payload["historyId"]
+    assert "Coverage by package" in payload["description"]
+
+
+def test_quality_items_record_pass_and_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """质量门禁项: 逐项写成结果(状态跟随退出码), 带 env 标签与原始输出附件.
+
+    用例用 ``sys.executable -c`` 冒充两项检查, 免得在用例里真跑 ruff/mypy
+    (几秒到一分钟)。
+    """
+    module = _load_script("create_allure_quality")
+    results = tmp_path / "allure-results"
+    checks = (
+        module.Check("ok", "OK check", (sys.executable, "-c", "print('all good')")),
+        module.Check(
+            "bad", "Bad check", (sys.executable, "-c", "import sys; sys.exit(3)")
+        ),
+    )
+    monkeypatch.setattr(module, "CHECKS", checks)
+
+    exit_code = module.main(["--results-dir", str(results)])
+
+    assert exit_code == 1, "有检查未通过时脚本必须以非 0 退出(否则质量门禁形同虚设)"
+    items = {
+        str(payload["name"]): payload
+        for payload in (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(results.glob("*-result.json"))
+        )
+    }
+    assert set(items) == {"OK check", "Bad check"}
+
+    passed = items["OK check"]
+    failed = items["Bad check"]
+    platform = module.platform_name()
+    assert passed["status"] == "passed"
+    assert failed["status"] == "failed"
+    assert "退出码 3" in failed["statusDetails"]["message"]
+    assert "all good" in passed["description"]
+
+    for payload in items.values():
+        labels = {label["name"]: label["value"] for label in payload["labels"]}
+        assert labels["env"] == platform
+        assert labels["severity"] == "trivial"
+        assert payload["parameters"] == [{"name": "Platform", "value": platform}]
+        assert platform not in payload["fullName"]
+        assert platform not in payload["historyId"]
+        assert payload["attachments"], "原始输出要作为附件带进报告"
+        assert (results / payload["attachments"][0]["source"]).is_file()
+
+
+def test_quality_items_cover_every_ci_gate() -> None:
+    """三项门禁都在脚本里: CI 不再分三条命令跑, 否则报告会缺项。"""
+    module = _load_script("create_allure_quality")
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+
+    keys = [check.key for check in module.CHECKS]
+    assert keys == ["ruff-check", "ruff-format", "mypy"]
+    assert "scripts/create_allure_quality.py" in workflow
+    assert "allure-results-quality" in workflow
+    # 旧的散装命令不应再单独出现(否则同一批检查会跑两遍).
+    assert "run: uv run ruff check ." not in workflow
+    assert "run: uv run mypy" not in workflow
 
 
 def test_main_survives_a_cp1252_console(
