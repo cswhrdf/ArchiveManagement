@@ -45,6 +45,13 @@ ENVIRONMENT_FILENAME = "environment.properties"
 QUALITY_GATE_REPORT = Path("allure-run-ledger.md")
 # 覆盖率项的全名: 它没有 testCategory 标签(见 create_allure_coverage.py), 用全名认。
 COVERAGE_FULL_NAME = "archive-management.coverage"
+# Allure CLI 原生质量门的输出: CI 在生成报告前跑一次并留日志(见 ci.yml), 工作流会在
+# 末尾追一行 `退出码: N`; 总账据此给出结论, 而不是去猜 CLI 的输出文本。
+NATIVE_GATE_LOG = Path("allure-quality-gate.txt")
+# 终端控制序列(CLI 输出带颜色) —— 与 create_allure_quality.py 同一个小助手(scripts 不是包)。
+ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+# 总账里最多展示多少行质量门原始输出(它通常只有几行).
+MAX_GATE_LINES = 20
 # 质量检查项的识别方式: create_allure_quality.py 给每个检查项打的标签。
 QUALITY_CATEGORY_LABEL = "testCategory"
 QUALITY_CATEGORY = "quality"
@@ -294,6 +301,10 @@ def coverage_rates(payload: dict[str, Any], results_dir: Path) -> tuple[str, str
 
     只读文件头部的根节点属性: 为了两个数字引入 XML 解析不合算(coverage.xml 动辄几百
     KB), 而根节点上的 ``line-rate`` / ``branch-rate`` 就足以回答"这份报告多少覆盖率"。
+
+    **不能**简单取"第一个 ``>`` 之前的内容": coverage.py 写的文件带一行
+    ``<?xml version="1.0" ?>`` 声明, 那样只会拿到声明本身 —— 实测总账里三个平台的
+    覆盖率因此全显示成 ``?``。这里显式匹配 ``<coverage ...>`` 根标签再读它的属性。
     """
     for attachment in payload.get("attachments") or []:
         if not isinstance(attachment, dict):
@@ -305,7 +316,10 @@ def coverage_rates(payload: dict[str, Any], results_dir: Path) -> tuple[str, str
         if not path.is_file():
             continue
         head = path.read_text(encoding="utf-8", errors="replace")[:4096]
-        attributes = dict(re.findall(r'([\w-]+)="([^"]*)"', head.split(">", 1)[0]))
+        root = re.search(r"<coverage\b([^>]*)>", head)
+        if root is None:
+            continue
+        attributes = dict(re.findall(r'([\w-]+)="([^"]*)"', root.group(1)))
         return percentage(attributes.get("line-rate")), percentage(
             attributes.get("branch-rate")
         )
@@ -353,14 +367,14 @@ def security_rows(payloads: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
 
 
 def _file_state(results_dir: Path, source: object) -> tuple[str, str]:
-    """附件文件的 (大小, 状态): 在结果目录里就报大小, 不在就明确标成缺失."""
+    """附件文件的 (大小, 状态): 已收录时给大小, 缺失时明确标出来."""
     if not isinstance(source, str) or not source:
         return "-", "缺失(结果里没写来源)"
     path = results_dir / source
     if not path.is_file():
         return "-", "**缺失**"
     size = path.stat().st_size
-    return (f"{size / 1024:.1f} KB" if size >= 1024 else f"{size} B"), "在"
+    return (f"{size / 1024:.1f} KB" if size >= 1024 else f"{size} B"), "已收录"
 
 
 def artifact_rows(
@@ -392,6 +406,40 @@ def artifact_rows(
     return sorted(rows)
 
 
+def native_gate_section() -> list[str]:
+    """原生质量门(Allure CLI)一节: 退出码 + 原始输出.
+
+    日志文件由 CI 在生成报告前写好(工作流会在末尾追一行 `退出码: N`); 本地直接跑汇总
+    脚本时没有它, 这一节会写明"未执行", 而不是装作通过。
+    """
+    heading = "## 原生质量门(Allure CLI)"
+    if not NATIVE_GATE_LOG.is_file():
+        return [heading, "", "本次没有质量门输出(未执行或未留日志)。", ""]
+    text = ANSI_SEQUENCE.sub(
+        "", NATIVE_GATE_LOG.read_text(encoding="utf-8", errors="replace")
+    )
+    code = "?"
+    body: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"退出码:\s*(\d+)", line.strip())
+        if match:
+            code = match.group(1)
+        elif line.strip():
+            body.append(line)
+    verdict = "**通过**" if code == "0" else f"**未通过(退出码 {code})**"
+    return [
+        heading,
+        "",
+        f"- 结论: {verdict}(规则写在仓库根的 `allurerc.mjs`)",
+        "- 与上面的逐项检查互补: 这里管整次运行 —— 失败数 / 用例数 / 通过率 / 平台是否齐全。",
+        "",
+        "```text",
+        *(body[:MAX_GATE_LINES] or ["(没有输出)"]),
+        "```",
+        "",
+    ]
+
+
 def run_ledger(
     results_dir: Path,
     payloads: list[dict[str, Any]],
@@ -414,6 +462,7 @@ def run_ledger(
             quality_checks(results_dir),
             heading="## 质量门(与平台无关, 只在 Linux 跑一遍; 归入 `Common` 环境)",
         ),
+        *native_gate_section(),
         "## 覆盖率",
         "",
     ]
@@ -444,13 +493,18 @@ def run_ledger(
     security = security_rows(security_payloads)
     if security:
         lines += [
-            "| 平台 | 结论数 | 未拦截 | 原始结论 |",
+            "| 平台 | 结论条数 | 未拦截条数 | 原始结论 |",
             "| --- | ---: | ---: | --- |",
         ]
         lines += [
             f"| {_cell(env)} | {_cell(total)} | {_cell(not_blocked)} | "
             "`security-results.json`(见结论项 `Security findings`) |"
             for env, total, not_blocked in security
+        ]
+        lines += [
+            "",
+            "- 「结论条数」是安全用例给出的结论总数; 「未拦截条数」是期望被拦下、"
+            "实际没拦住的条数(应为 **0**; 非 0 说明存在安全问题, 详情见对应结论项)。",
         ]
     else:
         lines.append("本次运行没有安全结论文件。")
@@ -467,9 +521,10 @@ def run_ledger(
     ]
     lines += [
         "",
+        "- 状态列: `已收录` = 原始文件确实在结果目录里(报告里点得开); "
+        "**缺失** = 结论项声明了它但文件不在 —— 说明这段证据在打包/下载环节丢了。",
         "- 说明: 全局附件不在 `scripts/verify_allure_report.py` 的校验范围内"
-        "(它只核对结果声明的附件), 上面的状态列就是补上的那道核对; "
-        "出现 **缺失** 说明报告里少了原始数据。",
+        "(它只核对结果声明的附件), 上面的状态列就是补上的那道核对。",
     ]
     return "\n".join(lines) + "\n"
 
@@ -681,7 +736,7 @@ def main() -> int:
         encoding="utf-8",
     )
     artifacts = artifact_rows(results_dir, payloads)
-    missing = [row for row in artifacts if row[3] != "在"]
+    missing = [row for row in artifacts if row[3] != "已收录"]
     print(
         f"运行总账已写入 {QUALITY_GATE_REPORT}: 质量门 {len(checks)} 项, "
         f"产物 {len(artifacts)} 个(缺失 {len(missing)} 个)"

@@ -26,6 +26,7 @@ from archive_management.config import (
     load_or_reset_config,
     save_config,
 )
+from archive_management.domain import GameAction, action_allowed
 from archive_management.exceptions import (
     ArchiveManagementError,
     ContentUnchangedError,
@@ -1421,19 +1422,37 @@ class ArchiveApp(ctk.CTk):
     def _update_actions(self) -> None:
         busy = self._busy
         game = self._game
-        can_do_backup = game is not None and game.has_locations and not busy
+        can_do_backup = (
+            game is not None
+            and game.has_locations
+            and not busy
+            and game.allow("backup")
+        )
         self._backup_btn.configure(state="normal" if can_do_backup else "disabled")
-        self._export_btn.configure(state="normal" if not busy else "disabled")
+        can_export = game is not None and not busy and game.allow("export")
+        self._export_btn.configure(state="normal" if can_export else "disabled")
         selected = self._backup_id is not None
-        enabled = "normal" if selected and not busy else "disabled"
-        self._restore_btn.configure(state=enabled)
-        self._branch_btn.configure(state=enabled)
-        self._rename_btn.configure(state=enabled)
-        self._delete_btn.configure(state=enabled)
+        nodes_ready = selected and not busy and game is not None
+        # 恢复/分支/重命名/删除备份都属于"备份管理": 归档的游戏不允许其中任何一项.
+        self._restore_btn.configure(
+            state=_node_state(game, "restore", ready=nodes_ready)
+        )
+        self._branch_btn.configure(state=_node_state(game, "branch", ready=nodes_ready))
+        self._rename_btn.configure(
+            state=_node_state(game, "backup_edit", ready=nodes_ready)
+        )
+        self._delete_btn.configure(
+            state=_node_state(game, "backup_delete", ready=nodes_ready)
+        )
 
     def _on_backup(self) -> None:
         game = self._game
         if game is None or self._busy:
+            return
+        if not action_allowed("backup", archived=game.archived):
+            self._feedback(
+                FeedbackKind.INFO, tr("home.archived_blocked", name=game.name)
+            )
             return
         self._set_busy(True)
         self._feedback(
@@ -1463,6 +1482,11 @@ class ArchiveApp(ctk.CTk):
         game = self._game
         item = self._selected_item()
         if game is None or item is None or self._busy:
+            return
+        if not action_allowed("restore", archived=game.archived):
+            self._feedback(
+                FeedbackKind.INFO, tr("home.archived_blocked", name=game.name)
+            )
             return
         try:
             plan = self.backend.preview_restore(game.game_id, item.backup_id)
@@ -1563,6 +1587,11 @@ class ArchiveApp(ctk.CTk):
         """创建分支; ``quick`` 为 True 时使用默认分支名且不弹窗(全局快捷键)."""
         game = self._game
         if game is None or self._backup_id is None or self._busy:
+            return
+        if not action_allowed("branch", archived=game.archived):
+            self._feedback(
+                FeedbackKind.INFO, tr("home.archived_blocked", name=game.name)
+            )
             return
         branch_name: str | None = tr("dialog.branch_default")
         if not quick:
@@ -1751,7 +1780,10 @@ class ArchiveApp(ctk.CTk):
             self._feedback(FeedbackKind.ERROR, str(exc))
             return
         log_action("game.add", game_id=summary.game_id, name=summary.name)
-        self._feedback(FeedbackKind.SUCCESS, tr("result.game_added", name=summary.name))
+        self._feedback(
+            FeedbackKind.SUCCESS,
+            tr("result.game_added_disabled", name=summary.name),
+        )
         self._refresh_after_manage(select=summary.game_id)
 
     def _on_open_schedules(self) -> None:
@@ -1824,6 +1856,7 @@ class ArchiveApp(ctk.CTk):
             game_id=game.game_id,
             name=game.name,
             enabled=game.enabled,
+            archived=game.archived,
             backup_location=backup_path,
             on_change=lambda: self._refresh_after_manage(),
         )
@@ -1961,14 +1994,25 @@ class ArchiveApp(ctk.CTk):
             except queue.Empty:
                 break
             if kind == "hotkey":
-                if payload == ACTION_CREATE_BRANCH:
-                    self._on_branch(quick=True)
-                else:
-                    self._on_backup()
+                self._run_hotkey(payload)
                 continue
             self._finish_message(kind, payload)
         self._refresh_task()
         self.after(100, self._poll_messages)
+
+    def _run_hotkey(self, payload: str) -> None:
+        """执行快捷键请求; 停用或归档的游戏不触发(全局只有一款游戏启用)."""
+        game = self._game
+        if game is None:
+            return
+        if not (game.enabled and not game.archived):
+            log_action("hotkey.skipped", game_id=game.game_id, reason="inactive")
+            self._feedback(FeedbackKind.INFO, tr("hotkey.game_inactive"))
+            return
+        if payload == ACTION_CREATE_BRANCH:
+            self._on_branch(quick=True)
+        else:
+            self._on_backup()
 
     def _finish_message(
         self, kind: Literal["ok", "err", "unchanged", "hotkey"], payload: str
@@ -2002,6 +2046,13 @@ class ArchiveApp(ctk.CTk):
 
     def _tone_color(self, tone: str | None) -> str:
         return _TONE_COLORS.get(tone or "", _TONE_COLORS["default"])
+
+
+def _node_state(game: GameSummary | None, action: GameAction, *, ready: bool) -> str:
+    """备份管理类按钮的状态: 未选中节点或动作被规则禁用时置灰."""
+    if not ready or game is None:
+        return "disabled"
+    return "normal" if game.allow(action) else "disabled"
 
 
 def colors_by(kind: FeedbackKind, palette: Palette) -> str:

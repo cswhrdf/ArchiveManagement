@@ -602,20 +602,35 @@ def test_global_attachment_matches_what_the_summary_writes() -> None:
     assert f'globalAttachments: ["{module.QUALITY_GATE_REPORT.name}"]' in config
 
 
-def test_native_quality_gate_stays_out_of_the_config() -> None:
-    """刻意不配 Allure 原生 ``qualityGate``, 并把实证原因留在注释里(两处都别删).
+def test_native_quality_gate_is_configured_and_pinned() -> None:
+    """Allure 原生质量门: 规则写在配置里, CI 跑它并用退出码定成败, CLI 钉在 3.18.0.
 
-    实测(3.16.1 与 3.17.0): `allure generate` 不执行校验 —— 首页「质量门」页签靠
-    `allure run` 实时回传的数据填充, 所以 generate 出来的报告里它恒为空; 更麻疃的是配上
-    `historyPath` 后 `allure quality-gate` 会谎报通过(连 `minTestsCount: 99999` 这种
-    不可能满足的阀值都退 0 且无输出), 而本仓库必须有 `historyPath`。结论因此改由
-    `scripts/create_allure_summary.py` 汇总成全局附件。这条守卫防止把坑重新埋回去。
+    曾经的结论是"不用原生门禁": 3.13~3.17 一旦配了 ``historyPath`` 就静默放行(退 0
+    且不输出任何内容 —— 本地历史流句柄悬空, ``AllureReport.done()`` 永不返回, issue
+    #895), 而本仓库必须有 ``historyPath``。3.18.0 的 PR #962 修好后它才可用, 所以这里
+    同时锁住"配了规则"与"CLI 钉在修好的版本上" —— 版本一旦被改回浮动标签或降到 3.18
+    以下, 门禁会静默失效而没人发现。
+
+    另外: ``allure generate`` 不执行校验, 所以首页「质量门」页签仍靠 ``allure run`` 填;
+    CI 把这里门的输出写进日志, 由运行总账收进报告首页「全局附件」。
     """
     config = _ALLURE_CONFIG.read_text(encoding="utf-8")
-    assert re.search(r"^\s*qualityGate\s*:", config, re.MULTILINE) is None
-    assert "谎报通过" in config
+    assert re.search(r"^\s*qualityGate\s*:", config, re.MULTILINE) is not None
+    for rule in ("maxFailures", "minTestsCount", "successRate", "environmentsTested"):
+        assert rule in config, f"配置里缺少规则 {rule}"
+    assert "3.18.0" in config, "注释里要写明版本要求与原因"
+    assert "#895" in config, "注释里要留 issue 号, 便于日后重测"
+
     workflow = _WORKFLOW.read_text(encoding="utf-8")
-    assert "allure quality-gate" not in workflow
+    gate = "allure quality-gate --config allurerc.mjs allure-results"
+    assert gate in workflow, "CI 要真的跑原生质量门"
+    assert "npm install --global allure@3.18.0" in workflow, "CLI 必须钉在修好的版本"
+    assert "npm install --global allure@3\n" not in workflow, (
+        "不能再用浮动标签 allure@3"
+    )
+    assert "Report quality gate verdict" in workflow, "门禁结论要能决定作业成败"
+    # 先跑门禁(留日志给总账), 再生成报告: 顺序反了日志就进不了报告。
+    assert workflow.index(gate) < workflow.index("Generate final Allure report")
 
 
 def test_run_ledger_has_every_section_and_flags_missing_artifacts(
@@ -631,6 +646,7 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
     results.mkdir()
     _write_result(results, "ruff", "Ruff check", "passed", "quality")
     (results / "cov-attachment.xml").write_text(
+        '<?xml version="1.0" ?>\n'
         '<coverage line-rate="0.9182" branch-rate="0.75" version="7.5.0">\n</coverage>\n',
         encoding="utf-8",
     )
@@ -672,6 +688,9 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         assert section in ledger
     assert "91.82%" in ledger, "覆盖率数字要取自原始 XML"
     assert "75.00%" in ledger, "分支覆盖率也要写出来"
+    assert "?" not in ledger.split("## 覆盖率")[1].split("##")[0], "覆盖率不该是问号"
+    assert "| 平台 | 结论条数 | 未拦截条数 | 原始结论 |" in ledger, "表头要说清两列含义"
+    assert "已收录" in ledger, "产物清单的状态列要用能看懂的词"
     assert "| Windows |" in ledger, "覆盖率按平台各一行"
     assert "全部达标(1 项)" in ledger, "性能基准给一行结论"
     assert "| Linux | 1 | 0 |" in ledger, "安全那一行要给出结论数与未拦截数"
@@ -792,3 +811,50 @@ def test_run_ledger_artifact_list_covers_summary_items_only(tmp_path: Path) -> N
 
     assert [row[1] for row in rows] == ["coverage.xml"], "只该列汇总结论项的原始产物"
     assert rows[0][0].startswith("Coverage report")
+
+
+def test_run_ledger_includes_the_native_quality_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """总账要收录原生质量门: 有日志时报出退出码与原始输出, 没日志时明说未执行.
+
+    CI 会在生成报告前跑一次门禁并把输出(末尾带一行 ``退出码: N``)留在仓库根; 总账
+    据此给出结论 —— 不去猜 CLI 的输出文本。本地直接跑汇总脚本时没有这份日志, 那一节
+    要写"未执行", 而不是让读者以为门禁通过了。
+    """
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    (results / "t1-result.json").write_text(
+        json.dumps(
+            {
+                "uuid": "t1",
+                "name": "某个用例",
+                "fullName": "demo#case",
+                "status": "passed",
+                "labels": [{"name": "env", "value": "Linux"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    payloads = module.result_payloads(results)
+
+    # 没有日志: 写明未执行, 不能看起来像通过。
+    empty = module.run_ledger(results, payloads, None, [])
+    assert "## 原生质量门(Allure CLI)" in empty
+    assert "未执行" in empty
+
+    # 有日志: 退出码 1 → 未通过; 颜色码要剥掉, 退出码那行翻成结论后不再照抄。
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "allure-quality-gate.txt").write_text(
+        "\x1b[31mQuality Gate failed with following issues:\x1b[m\n"
+        "maxFailures: 1 exceeds 0\n"
+        "退出码: 1\n",
+        encoding="utf-8",
+    )
+    ledger = module.run_ledger(results, payloads, None, [])
+
+    assert "**未通过(退出码 1)**" in ledger
+    assert "Quality Gate failed" in ledger
+    assert "\x1b" not in ledger, "CLI 输出的颜色码不能进报告"
+    assert "退出码: 1" not in ledger, "退出码翻成结论后不该再原文照抄"

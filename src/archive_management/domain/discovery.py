@@ -7,7 +7,9 @@
 - :class:`MonitoredDirectory`: 用户自行添加的监控目录, 用于覆盖主流平台
   无法识别、路径自定义或平台客户端未安装的情况;
 - :class:`GameCandidate`: 一次探测得到的候选游戏及其来源、可信度、路径健康
-  状态与处理进度(新发现/已导入/已忽略)。
+  状态与处理进度(新发现/已导入/已忽略);
+- :class:`SaveCandidate`: 平台清单给出的存档**路径**候选, 同样需要用户确认
+  才写进存档位置, 危险目标(主目录/盘符根/游戏安装目录)只标记不采用。
 
 模型是纯数据, 不触碰文件系统; 探测与校验在
 :mod:`archive_management.services.platform_scan` 与
@@ -20,7 +22,9 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Literal
 
-from archive_management.domain.entities import _RowModel
+from pydantic import Field
+
+from archive_management.domain.entities import PathKind, _RowModel
 
 # 候选的来源平台/渠道: 前四项来自安装目录/注册表探测, monitored 来自用户
 # 自行添加的监控目录, manual 保留给手工录入的候选.
@@ -29,6 +33,8 @@ DiscoverySource = Literal["steam", "epic", "gog", "ubisoft", "monitored", "manua
 Confidence = Literal["high", "medium", "low"]
 # 候选的处理进度: 用户导入后置 imported, 忽略后置 ignored.
 CandidateStatus = Literal["new", "imported", "ignored"]
+# 存档路径候选的处理进度: 用户确认后置 confirmed, 忽略后置 ignored.
+SaveCandidateStatus = Literal["suggested", "confirmed", "ignored"]
 # 候选/监控目录路径的健康状态: 只有 ok 才能直接用于后续操作.
 PathHealth = Literal["ok", "missing", "not_directory", "unreadable", "unsafe"]
 
@@ -75,6 +81,34 @@ class GameCandidate(_RowModel):
     health: PathHealth = "ok"
     # 已导入的游戏 id(导入后才有值); 导入的游戏被删除时置空.
     game_id: int | None = None
+
+
+class SaveCandidate(_RowModel):
+    """平台清单给出的一条存档路径候选(用户确认前不进存档位置).
+
+    ``risk_reason`` 非空表示该路径被判定为危险目标(主目录、盘符根或游戏安装
+    目录), 这类候选只展示不采用; ``health`` 是探测时的路径健康快照。
+    """
+
+    id: int | None = None
+    game_id: int
+    # 产出该候选的平台与平台自己的游戏标识(Steam 为 AppID 文本).
+    platform: str = ""
+    platform_game_id: str = ""
+    path: str = Field(min_length=1)
+    path_kind: PathKind = "directory"
+    # 得出该候选的规则代码(如 steam_remotecache)与附加说明.
+    reason_code: str = ""
+    detail: str = ""
+    # 平台清单里的相对路径, 供界面解释这条候选的来源.
+    relative_path: str = ""
+    confidence: Confidence = "high"
+    health: PathHealth = "ok"
+    # 非空即危险: 值为 pathcheck.dangerous_target_reason 给出的原因码.
+    risk_reason: str = ""
+    status: SaveCandidateStatus = "suggested"
+    found_at: datetime | None = None
+    decided_at: datetime | None = None
 
 
 def candidate_sort_key(candidate: GameCandidate) -> tuple[int, int, str]:

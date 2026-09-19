@@ -73,7 +73,7 @@ uv run xenon --max-absolute B --max-modules F --max-average F src # 复杂度门
 
 **复杂度的两把尺子同分**：门槛取 `10`，与 Ruff 的 `[tool.ruff.lint.mccabe] max-complexity`完全相同；Radon 的等级对应 1-5 / 6-10 / 11-20 / …，所以“不超过 10”就是“最差只能到 B 级”，`xenon` 的模块级与平均复杂度不设限（Ruff 并不检查这两项）。但两者的**刻度不同**：Radon 会把 `with`、`assert`、布尔运算也算作分支，同一段代码通常比 Ruff 的 C901 高 2~5 分，因此写新函数时以 Radon 为准（`radon cc --min C src` 当前为空，说明全部函数都在 B 级以内）。`tests/unit/test_report_verification.py` 里有守卫，保证两处数值不会各自漂移。
 
-`deptry` 的两处说明：本项目不作为包安装，所以 `known_first_party` 里同时列了 `archive_management` 与 `tests` 下的共享辅助模块；`httpx` 目前在依赖清单里但还没有调用点（留给后续接入平台封面/图标接口），它的 DEP002 报告在 `pyproject.toml` 里显式豁免。
+`deptry` 的两处说明：本项目不作为包安装，所以 `known_first_party` 里同时列了 `archive_management` 与 `tests` 下的共享辅助模块。
 
 `bandit` 只扫 `src`：用例里满是 `assert` 与故意构造的脏数据，扫它们只会制造噪音；运行期行为由 `tests/security` 负责（两者互补：Bandit 拦“写法危险”，安全用例拦“行为可被利用”）。
 

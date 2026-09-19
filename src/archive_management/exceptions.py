@@ -66,3 +66,11 @@ class SteamIntegrationError(ArchiveManagementError):
 
 class PlatformIntegrationError(ArchiveManagementError):
     """平台数据格式不兼容或字段非法(适配器与领域模型之间的契约错误)."""
+
+
+class SaveCandidateError(ArchiveManagementError):
+    """存档路径候选被拒绝(危险目标或处理进度不允许确认)."""
+
+
+class ArtworkError(ArchiveManagementError):
+    """封面/图标的下载、内容校验或缓存写入失败."""

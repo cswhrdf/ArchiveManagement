@@ -17,6 +17,8 @@ from archive_management.domain.discovery import (
     GameCandidate,
     MonitoredDirectory,
     PathHealth,
+    SaveCandidate,
+    SaveCandidateStatus,
     candidate_sort_key,
     dedupe_candidates,
 )
@@ -30,6 +32,12 @@ from archive_management.domain.entities import (
     SaveLocation,
     SaveSource,
     ScheduledJob,
+)
+from archive_management.domain.game_rules import (
+    ARCHIVED_ACTIONS,
+    GameAction,
+    action_allowed,
+    is_active,
 )
 from archive_management.domain.home import (
     DEFAULT_PAGE_SIZE,
@@ -81,6 +89,7 @@ from archive_management.domain.tree import (
 )
 
 __all__ = [
+    "ARCHIVED_ACTIONS",
     "ARTWORK_KINDS",
     "CONFIDENCE_RANK",
     "DEFAULT_KEEP_AUTO",
@@ -107,6 +116,7 @@ __all__ = [
     "DiscoverySource",
     "FileKind",
     "Game",
+    "GameAction",
     "GameCandidate",
     "GameCategory",
     "GameFacts",
@@ -120,6 +130,8 @@ __all__ = [
     "PathKind",
     "PlatformGame",
     "PlatformId",
+    "SaveCandidate",
+    "SaveCandidateStatus",
     "SaveLocation",
     "SavePathCandidate",
     "SaveSource",
@@ -128,6 +140,7 @@ __all__ = [
     "SteamGameEntry",
     "TreeInput",
     "TreeNode",
+    "action_allowed",
     "auto_prune_ids",
     "branch_lineage",
     "build_tree",
@@ -138,6 +151,7 @@ __all__ = [
     "filter_games",
     "home_sort_key",
     "home_stats",
+    "is_active",
     "keep_surviving",
     "normalize_tags",
     "origin_counts",

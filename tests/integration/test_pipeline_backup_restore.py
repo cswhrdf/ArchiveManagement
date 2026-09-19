@@ -56,6 +56,9 @@ def test_backup_restore_and_schedule_flow(tmp_path: Path, audit_log: list[str]) 
     """完整流程: 备份两份 → 恢复旧节点 → 配置并触发定时备份 → 重启后调度仍生效."""
     database, service, scheduler = _service(tmp_path)
     game_id = service.add_game("管道游戏").game_id
+    # 定时备份只对启用的游戏生效(新建游戏默认停用), 这条流水线要验证调度本身,
+    # 因此显式启用; 停用/归档的跳过行为另有用例覆盖.
+    service.set_game_enabled(game_id, True)
     save = make_save_folder(tmp_path, content="state-v1")
     service.add_location(game_id, path=str(save), kind="directory")
 

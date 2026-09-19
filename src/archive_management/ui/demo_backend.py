@@ -411,7 +411,13 @@ class DemoArchiveService:
     ) -> TaskStatus:
         """记录演示用的定时备份周期与自动备份保留份数(按游戏)."""
         self._require_game(game_id)
+        summary = self._meta[game_id]
         clean = interval_text.strip()
+        if clean and self._archived.get(game_id, False):
+            # 与真实后端一致: 归档游戏只保留删除/导出/取消归档/打开详情.
+            raise ArchiveManagementError(
+                tr("error.archived_game_schedule", name=summary.name)
+            )
         if clean and not self._locations[game_id]:
             # 与真实后端一致: 没有存档位置就不能定时备份.
             raise ArchiveManagementError(tr("error.no_locations_schedule", name=""))
@@ -419,8 +425,23 @@ class DemoArchiveService:
             # 空周期 = 删除任务(暂停状态也不再保留).
             self._schedules.pop(game_id, None)
         else:
+            existing = bool(self._schedule_of(game_id)[0])
+            if enabled and not summary.enabled:
+                # 停用中的游戏允许先配好周期, 但任务只能暂停; 已有任务时说明用户在
+                # "继续", 与真实后端一样明确拒绝.
+                if existing:
+                    raise ArchiveManagementError(
+                        tr("error.disabled_game_schedule", name=summary.name)
+                    )
+                enabled = False
             self._schedules[game_id] = (clean, enabled, max(1, keep_auto))
         return self.task_status(game_id)
+
+    def _pause_schedule(self, game_id: str) -> None:
+        """把演示游戏的定时任务置为暂停(保留周期配置)."""
+        interval, _enabled, keep = self._schedule_of(game_id)
+        if interval:
+            self._schedules[game_id] = (interval, False, keep)
 
     def list_schedules(self) -> list[ScheduleItem]:
         """返回全部游戏的定时备份配置."""
@@ -439,6 +460,8 @@ class DemoArchiveService:
                     auto_count=len(autos),
                     tone=summary.tone,
                     has_locations=summary.has_locations,
+                    game_enabled=summary.enabled,
+                    archived=self._archived.get(summary.game_id, False),
                 )
             )
         return items
@@ -767,18 +790,39 @@ class DemoArchiveService:
         )
 
     def delete_game(self, game_id: str) -> None:
-        """删除游戏记录及其存档位置."""
+        """删除游戏记录及其存档位置, 并把它的探测候选退回待处理."""
         self._require_game(game_id)
         self._meta.pop(game_id)
         self._details.pop(game_id)
         self._locations.pop(game_id, None)
         self._items.pop(game_id, None)
         self._current.pop(game_id, None)
+        self._archived.pop(game_id, None)
+        self._tags.pop(game_id, None)
+        self._schedules.pop(game_id, None)
+        # 与真实后端一致: 挂着该游戏的"已导入"候选要退回待处理, 否则它们会停在
+        # "已导入"却指向一个不存在的游戏, 既看不到也导不进来.
+        for candidate_id, item in list(self._candidates.items()):
+            if item.game_id == game_id and item.status == "imported":
+                self._candidates[candidate_id] = replace(
+                    item, status="new", game_id=None
+                )
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
-        """启用或停用一个游戏."""
+        """启用或停用一个游戏(启用时会自动停用其它启用中的游戏)."""
         self._require_game(game_id)
+        if enabled and self._archived.get(game_id, False):
+            raise ArchiveManagementError(tr("error.archived_game_enable"))
+        if enabled:
+            for other_id, other in list(self._meta.items()):
+                if other_id != game_id and other.enabled:
+                    self._meta[other_id] = replace(other, enabled=False)
+                    self._pause_schedule(other_id)
         self._meta[game_id] = replace(self._meta[game_id], enabled=enabled)
+        if not enabled:
+            self._pause_schedule(game_id)
+        # 启用态会显示在详情页与管理窗口, 因此要刷新数据版本让界面重读.
+        self._revision += 1
         return self._live_summary(game_id)
 
     def list_locations(self, game_id: str) -> list[LocationItem]:
@@ -1078,8 +1122,11 @@ class DemoArchiveService:
         return self._board()
 
     def set_game_archived(self, game_id: str, archived: bool) -> HomeBoard:
-        """归档或取消归档一个演示游戏."""
+        """归档或取消归档一个演示游戏(归档会同时停用并暂停定时备份)."""
         self._require_game(game_id)
+        if archived:
+            self._meta[game_id] = replace(self._meta[game_id], enabled=False)
+            self._pause_schedule(game_id)
         self._archived[game_id] = archived
         self._revision += 1
         return self._board()
@@ -1190,6 +1237,7 @@ class DemoArchiveService:
             backup_count=len(self.list_backups(game_id)),
             tone=meta.tone,
             enabled=meta.enabled,
+            archived=self._archived.get(game_id, False),
         )
 
     def _find_location(self, location_id: str) -> LocationItem:

@@ -334,12 +334,16 @@ class HomePage:
         self._archive_btn = self._button(
             actions, tr("home.action_archive"), self._on_archive, width=96
         )
+        self._enable_btn = self._button(
+            actions, tr("home.action_enable"), self._on_toggle_enabled, width=88
+        )
         self._action_buttons = (
             self._detail_btn,
             self._backup_btn,
             self._location_btn,
             self._manage_btn,
             self._tags_btn,
+            self._enable_btn,
             self._archive_btn,
         )
         for index, button in enumerate(self._action_buttons):
@@ -1113,20 +1117,37 @@ class HomePage:
         )
 
     def _update_actions(self) -> None:
-        """按选中项决定按钮可用性与文案."""
+        """按选中项及其状态决定按钮可用性与文案.
+
+        归档的游戏只保留"删除游戏、导出游戏、取消归档、打开详情": 规则来自
+        ``domain.game_rules``, 界面只负责落位。管理窗口是归档游戏删除自己的唯一
+        入口, 因此它仍然可用, 只是按钮改名为"删除游戏"。
+        """
         item = self._item()
         for button in self._action_buttons:
             button.configure(state="normal" if item is not None else "disabled")
-        if item is not None:
-            # 没有存档位置的游戏无法备份(与详情页的规则保持一致).
-            self._backup_btn.configure(
-                state="normal" if item.backup_enabled else "disabled"
-            )
-            self._archive_btn.configure(
-                text=tr(
-                    "home.action_unarchive" if item.archived else "home.action_archive"
-                )
-            )
+        if item is None:
+            self._paint_buttons()
+            return
+        self._backup_btn.configure(
+            state="normal" if item.backup_enabled else "disabled"
+        )
+        self._location_btn.configure(
+            state="normal" if item.allow("locations") else "disabled"
+        )
+        self._tags_btn.configure(state="normal" if item.allow("tags") else "disabled")
+        self._enable_btn.configure(
+            state="normal" if item.allow("enable") else "disabled"
+        )
+        self._manage_btn.configure(
+            text=tr("home.action_delete" if item.archived else "home.action_manage")
+        )
+        self._enable_btn.configure(
+            text=tr("home.action_disable" if item.enabled else "home.action_enable")
+        )
+        self._archive_btn.configure(
+            text=tr("home.action_unarchive" if item.archived else "home.action_archive")
+        )
         self._paint_buttons()
 
     def _paint_buttons(self) -> None:
@@ -1229,6 +1250,9 @@ class HomePage:
         if item is None:
             self._summary_label.configure(text=tr("home.require_game"))
             return
+        if not item.allow("backup"):
+            self._report_archived(item)
+            return
         if not item.backup_enabled:
             self._show_error(ArchiveManagementError(tr("error.home_location_required")))
             return
@@ -1251,6 +1275,9 @@ class HomePage:
         item = self._item()
         if item is None:
             self._summary_label.configure(text=tr("home.require_game"))
+            return
+        if not item.allow("locations"):
+            self._report_archived(item)
             return
         path = ask_text(
             self.frame,
@@ -1285,6 +1312,7 @@ class HomePage:
             game_id=item.game_id,
             name=item.name,
             enabled=item.enabled,
+            archived=item.archived,
             backup_location=backup_location,
             on_change=self._refresh,
         )
@@ -1294,6 +1322,9 @@ class HomePage:
         item = self._item()
         if item is None:
             self._summary_label.configure(text=tr("home.require_game"))
+            return
+        if not item.allow("tags"):
+            self._report_archived(item)
             return
         value = ask_text(
             self.frame,
@@ -1331,6 +1362,50 @@ class HomePage:
         self._refresh()
         self._summary_label.configure(
             text=tr("home.archived" if archived else "home.unarchived", name=item.name)
+        )
+
+    def _on_toggle_enabled(self) -> None:
+        """启用或停用选中的游戏(启用会自动停用其它启用中的游戏)."""
+        item = self._item()
+        if item is None:
+            self._summary_label.configure(text=tr("home.require_game"))
+            return
+        if not item.allow("enable"):
+            self._report_archived(item)
+            return
+        enabled = not item.enabled
+        board = self._board
+        replaced = None
+        if enabled and board is not None:
+            replaced = next(
+                (
+                    other
+                    for other in board.games
+                    if other.enabled and other.game_id != item.game_id
+                ),
+                None,
+            )
+        try:
+            self._backend.set_game_enabled(item.game_id, enabled)
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
+        log_action("ui.home_enable", game_id=item.game_id, enabled=enabled)
+        self._refresh()
+        if not enabled:
+            self._summary_label.configure(text=tr("home.disabled", name=item.name))
+        elif replaced is None:
+            self._summary_label.configure(text=tr("home.enabled", name=item.name))
+        else:
+            self._summary_label.configure(
+                text=tr("home.enabled_replaced", name=item.name, other=replaced.name)
+            )
+
+    def _report_archived(self, item: HomeGameItem) -> None:
+        """归档游戏的动作被拦下时给出原因(不弹窗, 与其它提示一致)."""
+        self._summary_label.configure(
+            text=tr("home.archived_blocked", name=item.name),
+            text_color=self._palette.danger,
         )
 
     def _refresh(self) -> None:

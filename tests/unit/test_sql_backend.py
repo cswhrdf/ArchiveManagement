@@ -7,11 +7,18 @@ from pathlib import Path
 import pytest
 
 import archive_management.application.locations as locations_mod
-from archive_management.domain import Game, HomeFilter, HomeView, ScheduledJob
+from archive_management.domain import (
+    Game,
+    GameCandidate,
+    HomeFilter,
+    HomeView,
+    ScheduledJob,
+)
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
+    CandidateRepository,
     GameRepository,
     ScheduledJobRepository,
 )
@@ -405,6 +412,8 @@ def _service_with_scheduler(
         scheduler=BackupScheduler(backend=backend),
     )
     game_id = service.add_game("Demo").game_id
+    # 定时备份只对启用的游戏生效: 这些用例验证的是调度本身, 因此显式启用.
+    service.set_game_enabled(game_id, True)
     save = tmp_path / "save"
     save.mkdir()
     (save / "slot1.dat").write_text("progress", encoding="utf-8")
@@ -739,6 +748,123 @@ def test_pause_keeps_interval_configuration(tmp_path: Path) -> None:
     assert item.enabled is False
     assert item.state_label == "已暂停"
     assert item.next_run_label == "—"
+
+
+def test_schedule_for_a_disabled_game_is_created_paused(tmp_path: Path) -> None:
+    """停用中的游戏允许先配好周期, 但任务只能是暂停态."""
+    service, game_id, _save = _service_with_save(tmp_path)
+
+    status = service.set_schedule(game_id, "30m")
+
+    assert status.schedule_text == "30m"
+    assert status.schedule_enabled is False
+    item = next(i for i in service.list_schedules() if i.game_id == game_id)
+    assert item.state_label == "已暂停"
+    assert item.can_enable is False
+    assert item.can_toggle is False
+
+
+def test_resuming_a_schedule_of_a_disabled_game_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """停用中的游戏不允许把已有任务切到启用态."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.set_schedule(game_id, "30m")
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.set_schedule(game_id, "30m", enabled=True)
+
+    assert "停用" in str(excinfo.value)
+    assert service.task_status(game_id).schedule_enabled is False
+
+
+def test_disabling_a_game_pauses_its_schedule(tmp_path: Path) -> None:
+    """停用游戏时把它已启用的定时任务置为暂停."""
+    service, game_id, _backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m")
+    assert service.task_status(game_id).schedule_enabled is True
+
+    service.set_game_enabled(game_id, False)
+
+    status = service.task_status(game_id)
+    assert status.schedule_text == "30m"
+    assert status.schedule_enabled is False
+
+
+def test_scheduled_backup_skips_a_disabled_game(tmp_path: Path) -> None:
+    """停用期间不执行自动备份(任务配置保留)."""
+    service, game_id, backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m")
+    service.set_game_enabled(game_id, False)
+
+    backend.trigger(f"backup-{game_id}")
+
+    assert service.list_backups(game_id) == []
+    assert service.task_status(game_id).schedule_text == "30m"
+
+
+def test_archiving_disables_the_game_and_pauses_its_schedule(
+    tmp_path: Path,
+) -> None:
+    """归档只保留删除/导出/取消归档/打开详情: 同时停用游戏并暂停定时备份."""
+    service, game_id, _backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m")
+
+    board = service.set_game_archived(game_id, True)
+
+    assert board.stats.archived == 1
+    # 归档游戏不出现在默认视图里, 因此摘要直接按 id 取完整列表.
+    summary = next(game for game in service.list_games() if game.game_id == game_id)
+    assert summary.archived is True
+    assert summary.enabled is False
+    assert service.task_status(game_id).schedule_enabled is False
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.set_schedule(game_id, "30m", enabled=True)
+    assert "已归档" in str(excinfo.value)
+
+
+def test_delete_game_returns_its_candidate_to_pending(tmp_path: Path) -> None:
+    """后端删除游戏时也要把探测候选退回待处理(界面入口的兼底)."""
+    service = _service(tmp_path)
+    install = tmp_path / "steam" / "Demo"
+    install.mkdir(parents=True)
+    database = Database(tmp_path / "app.db")
+    candidate, _created = CandidateRepository(database).upsert(
+        GameCandidate(name="Demo", install_dir=str(install), source="steam")
+    )
+    assert candidate.id is not None
+    imported = service.import_candidate(str(candidate.id))
+
+    service.delete_game(imported.game_id)
+
+    released = CandidateRepository(database).get(candidate.id)
+    assert released is not None
+    assert released.status == "new"
+    assert released.game_id is None
+
+
+def test_enabling_a_game_disables_the_other_one(tmp_path: Path) -> None:
+    """全局只允许一款游戏启用: 启用它时自动停用另一款."""
+    service = _service(tmp_path)
+    first = service.add_game("第一位").game_id
+    second = service.add_game("第二位").game_id
+    service.set_game_enabled(first, True)
+
+    service.set_game_enabled(second, True)
+
+    games = {game.game_id: game for game in service.list_games()}
+    assert games[second].enabled is True
+    assert games[first].enabled is False
+
+
+def test_enabling_an_archived_game_is_rejected(tmp_path: Path) -> None:
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.set_game_archived(game_id, True)
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.set_game_enabled(game_id, True)
+
+    assert "已归档" in str(excinfo.value)
 
 
 # ------------------------------------------------- 恢复与删除原始位置

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import cast
 
 from archive_management.application import discovery as discovery_cases
+from archive_management.application import games as games_cases
 from archive_management.application import home as home_cases
 from archive_management.application.backup import BackupService
 from archive_management.application.locations import (
@@ -40,6 +41,7 @@ from archive_management.domain import (
     SaveLocation,
     ScheduledJob,
     candidate_sort_key,
+    is_active,
 )
 from archive_management.exceptions import (
     ArchiveManagementError,
@@ -205,11 +207,14 @@ class SqlArchiveService:
                     exc,
                 )
                 continue
+            game = self._games.get(job.game_id)
+            # 停用或归档的游戏保留任务配置, 但一律以暂停状态登记(不执行).
+            active = game is not None and is_active(game)
             self._scheduler.schedule(
                 job.game_id,
                 minutes,
                 self._scheduled_backup(job.game_id),
-                enabled=job.enabled,
+                enabled=job.enabled and active,
             )
             restored += 1
         if restored:
@@ -309,18 +314,19 @@ class SqlArchiveService:
         return self._summary(updated)
 
     def delete_game(self, game_id: str) -> None:
-        """删除游戏记录及其存档位置."""
-        game, gid = self._game_ref(game_id)
-        self._games.delete(gid)
-        log_action("game.delete", game_id=gid, name=game.name)
+        """删除游戏记录, 并把它带来的探测候选退回待处理."""
+        _game, gid = self._game_ref(game_id)
+        games_cases.delete_game(self._database, gid)
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
-        """启用或停用一个游戏."""
-        game = self._game(game_id)
-        updated = game.model_copy(update={"enabled": enabled})
-        self._games.update(updated)
-        log_action("game.set_enabled", game_id=game.id, enabled=enabled)
-        return self._summary(updated)
+        """启用或停用一个游戏(启用时会自动停用其它启用中的游戏)."""
+        _game, gid = self._game_ref(game_id)
+        result = games_cases.set_enabled(self._database, gid, enabled)
+        if not enabled:
+            # 停用后定时备份不允许启用: 先把它置为暂停, 界面才能如实展示状态.
+            self._pause_schedule(gid)
+        self._touch()
+        return self._summary(result.game)
 
     # -- 存档位置管理 ------------------------------------------------------
 
@@ -549,6 +555,8 @@ class SqlArchiveService:
             auto_count=self._auto_backup_count(game.id),
             last_error=(job.last_error if job is not None else "") or "",
             has_locations=self._games.count_locations(game.id) > 0,
+            game_enabled=game.enabled,
+            archived=game.archived,
             tone=_tone(game.name),
         )
 
@@ -712,8 +720,15 @@ class SqlArchiveService:
         return self._board(home_cases.filter_home(self._database, saved))
 
     def set_game_archived(self, game_id: str, archived: bool) -> HomeBoard:
-        """归档或取消归档一个游戏, 返回重算后的主页数据."""
+        """归档或取消归档一个游戏, 返回重算后的主页数据.
+
+        归档只保留"删除/导出/取消归档/打开详情": 因此先把游戏停用、把它的定时
+        备份置为暂停, 再写归档标记(取消归档不顺手启用, 由用户明确选择)。
+        """
         _game, gid = self._game_ref(game_id)
+        if archived:
+            games_cases.set_enabled(self._database, gid, False)
+            self._pause_schedule(gid)
         home_cases.set_archived(self._database, gid, archived)
         self._touch()
         return self.load_home()
@@ -908,6 +923,12 @@ class SqlArchiveService:
         """
         game, gid = self._game_ref(game_id)
         clean = interval_text.strip()
+        if clean and game.archived:
+            # 归档之后只保留"删除/导出/取消归档/打开详情": 定时备份也归入不可用.
+            log_action("schedule.rejected", game_id=gid, reason="archived")
+            raise ArchiveManagementError(
+                tr("error.archived_game_schedule", name=game.name)
+            )
         if clean and not self._locations.list_for_game(gid):
             # 没有存档位置就没有可备份的内容: 提前拒绝并告知原因.
             log_action("schedule.rejected", game_id=gid, reason="no_locations")
@@ -921,6 +942,17 @@ class SqlArchiveService:
                     self._jobs.delete(job.id)
             log_action("schedule.clear", game_id=gid)
             return self.task_status(game_id)
+        existing = self._scheduler.get(gid)
+        if enabled and not game.enabled:
+            # 停用中的游戏允许先把周期配好, 但任务只能处于暂停态; 已经有任务时说明
+            # 用户是在"继续"已有任务, 这种情况明确拒绝而不装作成功.
+            if existing is not None:
+                log_action("schedule.rejected", game_id=gid, reason="game_disabled")
+                raise ArchiveManagementError(
+                    tr("error.disabled_game_schedule", name=game.name)
+                )
+            enabled = False
+            log_action("schedule.paused_disabled", game_id=gid)
         minutes = parse_interval(clean)
         entry = self._scheduler.schedule(
             gid, minutes, self._scheduled_backup(gid), enabled=enabled
@@ -993,6 +1025,16 @@ class SqlArchiveService:
         self._touch()
         return node
 
+    def _pause_schedule(self, gid: int) -> None:
+        """把某游戏的定时备份置为暂停(停用或归档时调用; 没有任务就不做)."""
+        jobs = self._jobs.for_game(gid)
+        job = jobs[0] if jobs else None
+        if job is None or not job.schedule.strip() or not job.enabled:
+            return
+        self.set_schedule(
+            str(gid), job.schedule, enabled=False, keep_auto=job.keep_auto
+        )
+
     def _scheduled_backup(self, game_id: int) -> Callable[[], None]:
         """构造定时备份回调(在调度线程执行, 不得触碰 Tk).
 
@@ -1001,6 +1043,13 @@ class SqlArchiveService:
         """
 
         def run() -> None:
+            game = self._games.get(game_id)
+            if game is None or not is_active(game):
+                # 停用或归档期间不执行自动备份: 任务配置保留, 恢复启用后照常触发.
+                log_action(
+                    "schedule.skipped", basic=True, game_id=game_id, reason="inactive"
+                )
+                return
             try:
                 self._perform_backup(
                     game_id, kind="auto", title=tr("backup.title_auto")
@@ -1223,6 +1272,7 @@ class SqlArchiveService:
             backup_count=backup_count,
             tone=_tone(game.name),
             enabled=game.enabled,
+            archived=game.archived,
         )
 
     def _location_item(self, location: SaveLocation) -> LocationItem:

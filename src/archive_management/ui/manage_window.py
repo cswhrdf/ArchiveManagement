@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import customtkinter as ctk
 
-from archive_management.domain import PathKind
+from archive_management.domain import GameAction, PathKind, action_allowed
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.ui.backend import ArchiveService
@@ -55,6 +55,7 @@ class ManageGameWindow:
         enabled: bool,
         backup_location: str,
         on_change: _ChangeCallback,
+        archived: bool = False,
     ) -> None:
         """构造管理窗口并装载该游戏的存档位置."""
         self._parent = parent
@@ -63,6 +64,7 @@ class ManageGameWindow:
         self._game_id = game_id
         self._name = name
         self._enabled = enabled
+        self._archived = archived
         self._backup_location = backup_location
         self._on_change = on_change
         self._items: list[LocationItem] = []
@@ -176,6 +178,7 @@ class ManageGameWindow:
 
         action_bar = ctk.CTkFrame(container, fg_color="transparent")
         action_bar.grid(row=5, column=0, sticky="w")
+        self._location_buttons: list[ctk.CTkButton] = []
         for text, handler, width in (
             (tr("loc.add_dir"), self._on_add_directory, 96),
             (tr("loc.add_file"), self._on_add_file, 96),
@@ -186,6 +189,7 @@ class ManageGameWindow:
         ):
             button = self._make_button(action_bar, text, handler, width=width)
             button.pack(side="left", padx=(0, 6))
+            self._location_buttons.append(button)
 
         danger_bar = ctk.CTkFrame(container, fg_color="transparent")
         danger_bar.grid(row=6, column=0, sticky="w", pady=(8, 0))
@@ -203,6 +207,7 @@ class ManageGameWindow:
         )
         close.grid(row=7, column=0, sticky="e", pady=(10, 0))
 
+        self._apply_archived_rules()
         self._render_state()
         self._render_schedule_state()
         self.refresh()
@@ -234,10 +239,33 @@ class ManageGameWindow:
     # -- 状态与列表 ---------------------------------------------------------
 
     def _render_state(self) -> None:
+        if self._archived:
+            self._state_label.configure(text=tr("manage.archived_label"))
+            return
         state = (
             tr("manage.enabled_label") if self._enabled else tr("manage.disabled_label")
         )
         self._state_label.configure(text=state)
+
+    def _apply_archived_rules(self) -> None:
+        """归档游戏在管理窗口里只保留"删除游戏".
+
+        归档后允许的动作只有删除、导出、取消归档与打开详情: 导出在详情页、取消
+        归档在主页, 所以这里除了删除以外的按钮一律置灰。
+        """
+        if not self._archived:
+            return
+        for button in (*self._location_buttons, self._delete_origin_btn):
+            button.configure(state="disabled")
+        for button in (self._rename_btn, self._schedule_btn, self._toggle_btn):
+            button.configure(state="disabled")
+
+    def _blocked(self, action: GameAction) -> bool:
+        """归档游戏被禁用的动作: 按钮已置灰, 这里兜住直接调用."""
+        if action_allowed(action, archived=self._archived):
+            return False
+        self._state_label.configure(text=tr("manage.archived_label"))
+        return True
 
     def _render_schedule_state(self) -> None:
         """展示该游戏当前的定时备份配置(每个游戏独立配置)."""
@@ -349,17 +377,22 @@ class ManageGameWindow:
 
     def _on_schedule(self) -> None:
         """配置该游戏的定时备份(每个游戏独立配置)."""
+        if self._blocked("schedule"):
+            return
         if edit_schedule(
             self._window,
             self._palette,
             self._backend,
             game_id=self._game_id,
             game_name=self._name,
+            game_enabled=self._enabled,
         ):
             self._render_schedule_state()
             self._on_change()
 
     def _on_rename(self) -> None:
+        if self._blocked("rename"):
+            return
         name = ask_text(
             self._window,
             self._palette,
@@ -387,6 +420,8 @@ class ManageGameWindow:
         self._on_change()
 
     def _on_toggle_enabled(self) -> None:
+        if self._blocked("enable"):
+            return
         try:
             summary = self._backend.set_game_enabled(self._game_id, not self._enabled)
         except ArchiveManagementError as exc:
@@ -425,6 +460,8 @@ class ManageGameWindow:
         self._add_location("file")
 
     def _add_location(self, kind: PathKind) -> None:
+        if self._blocked("locations"):
+            return
         title = (
             tr("loc.add_dir_title") if kind == "directory" else tr("loc.add_file_title")
         )
@@ -459,6 +496,8 @@ class ManageGameWindow:
         return None
 
     def _on_set_primary(self) -> None:
+        if self._blocked("locations"):
+            return
         item = self._selected_item()
         if item is None:
             return
@@ -471,6 +510,8 @@ class ManageGameWindow:
         self._on_change()
 
     def _on_verify(self) -> None:
+        if self._blocked("locations"):
+            return
         item = self._selected_item()
         if item is None:
             return
@@ -482,6 +523,8 @@ class ManageGameWindow:
         self.refresh()
 
     def _on_edit_path(self) -> None:
+        if self._blocked("locations"):
+            return
         item = self._selected_item()
         if item is None:
             return
@@ -509,6 +552,8 @@ class ManageGameWindow:
         self._on_change()
 
     def _on_remove(self) -> None:
+        if self._blocked("locations"):
+            return
         item = self._selected_item()
         if item is None:
             return
@@ -537,6 +582,8 @@ class ManageGameWindow:
         这里只做"预检 -> 确认 -> 调用后端"三步; 路径边界与回收站失败等
         判断都在用例层完成, 界面只负责展示与收集确认文本。
         """
+        if self._blocked("locations"):
+            return
         item = self._selected_item()
         if item is None:
             return

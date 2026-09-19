@@ -44,7 +44,7 @@ Steam API 凭据应保存在系统凭据存储中，不写入导出配置文件�
 
 ### 3.2 网络、配置与数据
 
-- `httpx`：访问 Steam API，支持超时、重试前的错误分类和可测试的 HTTP 客户端注入。**已在依赖清单中**（阶段 G-4 获取封面/图标时开始使用，调用点必须保持可注入与可超时）。
+- `httpx`：访问 Steam API，支持超时、重试前的错误分类和可测试的 HTTP 客户端注入。**已在依赖清单中**，阶段 G-4 起真正调用（`services/artwork.py` 的封面下载），调用点保持可注入与可超时，并已从 `pyproject.toml` 的 DEP002 豁免里移除。
 - `pydantic`：校验导入导出的配置文件和应用配置，防止不完整或恶意字段直接进入文件操作流程。
 - `keyring`：保存 Steam API Key 等敏感凭据到操作系统凭据库。**仅在启用可选子步骤 G-6 时引入**（当前依赖清单里没有，避免声明未使用的依赖）。
 - SQLite（标准库）：保存游戏、存档位置、备份、分支关系、任务配置和操作历史；第一版不强制引入 ORM，以降低依赖和迁移复杂度。
@@ -251,9 +251,14 @@ SQLite 至少包含以下实体：
 | **G-4 资源获取与缓存**            | 本地优先（`librarycache`、`config\grid`）+ CDN 兜底（可注入 HTTP 客户端）+ 缓存（命名含平台/AppID/资源类型/版本；超时、大小上限、内容类型校验、离线复用、清理入口）             | M    | G-1      | 命中/未命中/超时/超限/内容类型不符/损坏/离线 七类场景都有用例；缓存不写入备份内容与导出包                 |
 | **G-5 界面接入与 Pillow**         | 探测结果页展示“待确认候选存档目录”（来源/可信度/文件数）与确认、忽略动作；海报卡片优先显示封面，缺图回落占位；引入 Pillow 并同步打包 spec                                       | M-L  | G-3、G-4 | GUI 集成用例（沿用现有对话自动应答与事件泵模式）；无图/解码失败仍可管理与备份；打包体积与启动时间记录归档 |
 | **G-6（可选）Steam Web API 增强** | keyring 存取密钥 + 用户显式启用的开关 + 仅用于补充展示信息                                                                                                                      | S    | G-4      | 无密钥/超时/限流/HTTP 错误全部降级；日志与导出不含密钥                                                    |
+| **G-6.5 游戏启停的自动切换（预留接口）** | **按“被监控的游戏是否启动”自动决定启用哪一款：全局只允许一款启用，切走时自动停用其它；用户中途手动调整优先，不被下一次轮询刷回；进程探测与运行中游戏的处理都留待实现。** 本次只落地 `ActivationPolicy`/`apply_activation` 接缝与手动启停链路 | M    | G-3      | 手动启用/停用与“全局唯一启用”由用例锁定；`ManualActivation` 不改变任何状态；主页与游戏设置的启停入口可用 |
 | **G-7 文档与门禁收尾**            | `docs/platforms.md` 平台矩阵与可信来源清单、`docs/library.md` 封面行为、i18n 两份同键、新测试模块声明严重等级、README 文档表                                                    | S    | 全部     | 质量门禁四钩子全绿；文档描述与实现一致                                                                    |
 
 进度（2026-09-18）：**G-1 与 G-2 已完成**。版本化模型与适配器边界在 `domain/platform_meta.py` 与 `services/platform_adapters.py`，Steam 云端清单解析与 `root` 映射在 `services/steam_cloud.py`（复用 `platform_scan` 新增的模块级 `steam_roots`/`steam_libraries`/`read_steam_installs`，不再写第二份 VDF 解析）；契约、降级与越界拒绝由 `tests/unit/test_platform_adapters.py`、`tests/unit/test_steam_cloud.py`、`tests/unit/test_platform_meta.py` 覆盖。`root` 编号映射已用本机真实清单核对：`1` = 游戏安装目录、`2` = 用户的“文档”、`3` = `%LOCALAPPDATA%`、`12` = `%LOCALAPPDATA%Low`，与 Steam SDK 的 `ERemoteStorageFileRoot` 枚举一致。
+
+进度（2026-09-19）：**G-3 与 G-4 已完成**。G-3 新增 schema v9 的 `save_path_candidates` 表、`SaveCandidateRepository` 与 `application/candidates.py`（建议/确认/忽略 + 审计），候选只有被用户确认才写进 `save_locations`，主目录/盘符根/游戏安装目录由 `pathcheck.dangerous_target_reason` 标记为危险并拒绝确认；G-4 新增 `services/artwork.py`（缓存 → 平台本地文件 → CDN 的可注入下载，超时/体积上限/内容类型与文件头双重校验、离线复用旧图、`prune` 清理入口），缓存落在 `cache_dir/artwork`，不参与备份与导出。两者由 `tests/unit/test_save_candidates.py`、`tests/unit/test_artwork.py` 覆盖（含未确认候选不进存档位置、危险候选被拒、七类下载场景）。
+
+进度（2026-09-19，第二轮）：**手动启停与三条状态规则已完成，自动启停只留接口**。① 删除游戏时把它带来的探测候选退回“待处理”（`application/games.py::delete_game`，必须赶在删除之前——外键 `ON DELETE SET NULL` 会让这批候选再也定位不到）；② 归档的游戏只保留“删除游戏、导出游戏、取消归档、打开详情”，规则集中在 `domain/game_rules.py`，主页、详情页、管理窗口与定时任务窗口共同遵守（管理窗口是删除的唯一入口，因此仍可打开，但内部只留删除）；③ 新建游戏默认**停用**，全局至多一款启用（启用其它游戏时会自动停用原来那款），停用或归档的游戏保留定时备份配置但任务只能暂停且不执行，全局快捷键也不触发；schema 升到 **v10**（旧库里的多个启用态统一收敛为全部停用，由用户自己启用一款）。G-6.5 的自动部分只落了 `ActivationPolicy` 与 `apply_activation` 接缝，默认策略 `ManualActivation` 永不改变状态。
 
 #### 与既有实现的对接点（复用而非重写）
 

@@ -266,6 +266,59 @@ _V8_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 9: 平台探测出的"存档路径候选".
+#
+# 平台清单(Steam 的 remotecache.vdf)只能给出"疑似存档"的路径, 不能直接当成
+# 存档位置入库: 探测结果可能指向主目录、盘符根或游戏安装目录, 静默写入就会把
+# 整盘内容卷进备份。因此候选单独放表, 只有用户确认后才写进 save_locations。
+#
+# risk_reason 非空表示该候选被判定为危险目标(见 services.pathcheck), 只展示
+# 不采用; status 是处理进度, decided_at 记录用户做出决定的时间。
+_V9_STATEMENTS: Sequence[str] = (
+    """
+    CREATE TABLE IF NOT EXISTS save_path_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        platform TEXT NOT NULL DEFAULT '',
+        platform_game_id TEXT NOT NULL DEFAULT '',
+        path TEXT NOT NULL,
+        path_kind TEXT NOT NULL DEFAULT 'directory'
+            CHECK (path_kind IN ('file', 'directory')),
+        reason_code TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT '',
+        relative_path TEXT NOT NULL DEFAULT '',
+        confidence TEXT NOT NULL DEFAULT 'high'
+            CHECK (confidence IN ('high', 'medium', 'low')),
+        health TEXT NOT NULL DEFAULT 'ok',
+        risk_reason TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'suggested'
+            CHECK (status IN ('suggested', 'confirmed', 'ignored')),
+        found_at TEXT NOT NULL,
+        decided_at TEXT,
+        UNIQUE (game_id, path)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_save_candidates_game
+        ON save_path_candidates (game_id, status)
+    """,
+)
+
+# 版本 10: 同一时刻只允许一个游戏处于启用状态.
+#
+# 启用态的语义从"这款游戏我还管着"变成"当前正在玩的就是这款" —— 快捷键与定时
+# 备份只对它生效。旧库里可能同时存在多个 enabled=1, 无法判断哪个才是用户当前在玩
+# 的, 因此迁移时全部停用, 由用户自己启用一个; 之后新建的游戏默认也是停用状态
+# (见 domain.entities.Game)。顺带给 enabled 建索引: "现在启用的是哪款"会被反复查询。
+_V10_STATEMENTS: Sequence[str] = (
+    """
+    UPDATE games SET enabled = 0
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_games_enabled ON games (enabled)
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
@@ -275,6 +328,8 @@ SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (6, _V6_STATEMENTS),
     (7, _V7_STATEMENTS),
     (8, _V8_STATEMENTS),
+    (9, _V9_STATEMENTS),
+    (10, _V10_STATEMENTS),
 )
 
 

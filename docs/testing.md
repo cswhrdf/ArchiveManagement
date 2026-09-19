@@ -139,6 +139,8 @@ allure-summary (合并全部 allure-results-* → 写入环境信息与质量/�
 
 质量门禁本身也由脚本执行：`scripts/create_allure_quality.py --group <组>` 依次跑该组的检查，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。它分两组：`core`（ruff check / ruff format --check / mypy，公共检查：与平台无关，只在 Ubuntu 跑一遍；mypy 另外跑 `--platform win32` 与 `--platform darwin` 两次，覆盖平台专属分支）与 `analysis`（deptry / bandit / pip-audit / radon / xenon，同样与平台无关，只跑 Ubuntu 一遍）。两组都只在 Ubuntu 执行，所以汇总报告里每个门禁只出现一条；质量结论项带 `env=common`，归入 `allurerc.mjs` 里**显式声明**的 `Common` 环境（不是某个平台的环境，也不是隐式的 `default`）；性能之外的第二类"脚本生成项"就长这样（详见第 5 节）。
 
+除此之外，汇总作业还会跑一次 **Allure 原生质量门**：`allure quality-gate --config allurerc.mjs allure-results`。规则写在 `allurerc.mjs` 的 `qualityGate.rules` 里，管的是整次运行（失败数 / 用例数 / 通过率 / 三个平台是否都合并进来了），与逐项检查互补；它的退出码直接决定作业成败，输出写进 `allure-quality-gate.txt` 并由运行总账收进报告首页「全局附件」。**CLI 版本必须 ≥ 3.18.0**：3.13~3.17 在配了 `historyPath` 时会静默放行（退出 0 且不输出任何内容 —— 根因是本地历史流的句柄悬空，`AllureReport.done()` 永不返回，Node 在校验前就退出了，见 issue [#895](https://github.com/allure-framework/allure3/issues/895)，修于 3.18.0 的 PR #962），所以 CI 把 CLI 钉在 3.18.0。本地复现：`npx allure@3.18.0 quality-gate --config allurerc.mjs allure-results`（单平台跑会因 `environmentsTested` 失败，属预期）。
+
 ### GUI 用例必须真的跑起来（skip 是有代价的）
 
 `tests/integration/test_gui_*.py` 会把"Tk 起不来"当作环境问题处理：文件级守卫与每个用例的 `except TclError: pytest.skip(f"tk 环境不可用: ...")`。这样没有显示环境的机器不会一片红，但**代价是真正的 Tcl 故障会伪装成一堆 skip**，而 GUI 用例占覆盖率的很大一块——本机实测（把 `TCL_LIBRARY` 指向不存在的目录来模拟）：全量 `769 passed / 68 skipped`，覆盖率 **67.88% < 85%**，作业会以覆盖率门槛失败，且失败信息里看不出 CLI 之外的原因。
@@ -176,7 +178,7 @@ uv run python scripts/verify_allure_report.py allure-report --zip    # 自检并
 
 ## 7. 本地生成与查看报告
 
-前置：Allure 3 CLI，与 CI 同一条安装命令（`npm install --global allure@3`；本地与 CI 的报告目录结构一致，本地报告包可以直接用上一节的自检脚本核对）。`allure-results/`、`allure-report*/`、`.allure/` 都在 `.gitignore` 里，不会进版本库。
+前置：Allure 3 CLI，与 CI 同一条安装命令（`npm install --global allure@3.18.0` —— 钉住版本，3.13~3.17 的质量门会静默放行，见本节末；本地与 CI 的报告目录结构一致，本地报告包可以直接用上一节的自检脚本核对）。`allure-results/`、`allure-report*/`、`.allure/` 都在 `.gitignore` 里，不会进版本库。
 
 ```shell
 # 1) 跑本地测试并产出 Allure 结果(目录名与 CI 一致, 后续命令可直接复用)

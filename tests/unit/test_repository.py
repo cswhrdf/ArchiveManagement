@@ -54,7 +54,8 @@ def test_game_add_assigns_id_and_created_at(tmp_path: Path) -> None:
     fetched = repo.get(game.id)
     assert fetched is not None
     assert fetched.name == "星际拓荒"
-    assert fetched.enabled is True
+    # 未显式指定时按领域默认值落库: 新建游戏是停用状态.
+    assert fetched.enabled is False
     assert fetched.platform == "windows"
 
 

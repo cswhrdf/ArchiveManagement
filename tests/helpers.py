@@ -71,10 +71,15 @@ def add_game(
     *,
     path: Path | None = None,
     location_kind: PathKind = "directory",
+    enabled: bool = True,
 ) -> int:
-    """插入一个游戏并返回 id; 传入 ``path`` 时同时登记一个主存档位置."""
+    """插入一个游戏并返回 id; 传入 ``path`` 时同时登记一个主存档位置.
+
+    默认建**启用**状态的游戏: "新建即停用"是给用户的默认值, 而多数用例在验证
+    备份/调度/主页逻辑, 不该被启用开关拦住; 需要停用状态的用例显式传 False。
+    """
     repository = GameRepository(database)
-    game = repository.add(Game(name=name, original_name=name))
+    game = repository.add(Game(name=name, original_name=name, enabled=enabled))
     assert game.id is not None
     if path is not None:
         path.mkdir(parents=True, exist_ok=True)

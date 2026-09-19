@@ -24,6 +24,8 @@ from archive_management.domain import (
     HomeView,
     MonitoredDirectory,
     PathHealth,
+    SaveCandidate,
+    SaveCandidateStatus,
     SaveLocation,
     ScheduledJob,
 )
@@ -296,6 +298,42 @@ class GameRepository:
                 "UPDATE games SET archived = ?, last_activity_at = ? WHERE id = ?",
                 (int(archived), iso_utc_now(), game_id),
             )
+
+    def set_enabled(self, game_id: int, enabled: bool) -> tuple[int, ...]:
+        """启用/停用一款游戏, 返回被自动停用的其它游戏 id.
+
+        同一时刻只允许一款游戏启用, 因此"启用"必须在**同一个事务**里先停用其它
+        游戏再启用目标 —— 分两次写会在中途失败时留下两个启用态。
+        返回元组而不是列表: 类里已有名为 ``list`` 的方法, 注解里的 ``list[...]``
+        会被 mypy 当成那个方法(method 遮蔽内置名)。
+        """
+        replaced: tuple[int, ...] = ()
+        with self._database.session() as connection:
+            if enabled:
+                rows = connection.execute(
+                    "SELECT id FROM games WHERE enabled = 1 AND id != ?", (game_id,)
+                ).fetchall()
+                replaced = tuple(int(row["id"]) for row in rows)
+                connection.execute(
+                    "UPDATE games SET enabled = 0 WHERE enabled = 1 AND id != ?",
+                    (game_id,),
+                )
+            connection.execute(
+                "UPDATE games SET enabled = ? WHERE id = ?", (int(enabled), game_id)
+            )
+        return replaced
+
+    def enabled_game_id(self) -> int | None:
+        """返回当前启用的游戏 id; 没有启用任何游戏时返回 None.
+
+        按定义至多一个, 这里仍然加 ``ORDER BY`` + ``LIMIT``: 旧库或手工改库可能
+        留下多个启用态, 界面需要一个确定的答案。
+        """
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM games WHERE enabled = 1 ORDER BY created_at, id LIMIT 1"
+            ).fetchone()
+        return None if row is None else int(row["id"])
 
     def set_tags(self, game_id: int, tags: Sequence[str]) -> None:
         """覆盖写入游戏的自定义标签(调用方负责清理与限额)."""
@@ -796,6 +834,26 @@ def _row_to_candidate(row: sqlite3.Row) -> GameCandidate:
     )
 
 
+def _row_to_save_candidate(row: sqlite3.Row) -> SaveCandidate:
+    return SaveCandidate(
+        id=int(row["id"]),
+        game_id=int(row["game_id"]),
+        platform=str(row["platform"] or ""),
+        platform_game_id=str(row["platform_game_id"] or ""),
+        path=str(row["path"]),
+        path_kind=str(row["path_kind"]),  # type: ignore[arg-type]
+        reason_code=str(row["reason_code"] or ""),
+        detail=str(row["detail"] or ""),
+        relative_path=str(row["relative_path"] or ""),
+        confidence=str(row["confidence"]),  # type: ignore[arg-type]
+        health=str(row["health"]),  # type: ignore[arg-type]
+        risk_reason=str(row["risk_reason"] or ""),
+        status=str(row["status"]),  # type: ignore[arg-type]
+        found_at=_parse_dt(row["found_at"]),
+        decided_at=_parse_dt(row["decided_at"]),
+    )
+
+
 class MonitoredDirectoryRepository:
     """monitored_directories 表的行级访问."""
 
@@ -1074,12 +1132,181 @@ class CandidateRepository:
                 "DELETE FROM game_candidates WHERE id = ?", (candidate_id,)
             )
 
+    def release_imported(self, game_id: int) -> int:
+        """把挂在该游戏上的"已导入"候选退回待处理, 返回改动条数.
+
+        删除游戏之前必须先调用它: ``game_candidates.game_id`` 是
+        ``ON DELETE SET NULL``, 游戏一旦删掉就再也找不到这批候选, 它们会永远停在
+        "已导入"却指向任何游戏(界面上既不在待处理里, 也导不进来)。
+        """
+        with self._database.session() as connection:
+            cursor = connection.execute(
+                "UPDATE game_candidates SET status = 'new', game_id = NULL"
+                " WHERE game_id = ? AND status = 'imported'",
+                (game_id,),
+            )
+        return int(cursor.rowcount)
+
     def count_by_status(self) -> dict[str, int]:
         """返回各处理进度下的候选数量(未出现的进度计 0)."""
         counts = {"new": 0, "imported": 0, "ignored": 0}
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) FROM game_candidates GROUP BY status"
+            ).fetchall()
+        for row in rows:
+            counts[str(row[0])] = int(row[1])
+        return counts
+
+
+class SaveCandidateRepository:
+    """save_path_candidates 表的行级访问.
+
+    候选在用户确认前只存在于这张表: 探测结果可能指向主目录或游戏安装目录,
+    静默写进 ``save_locations`` 会把整盘内容卷进备份, 所以确认这一步必须由
+    用户触发(见 :mod:`archive_management.application.candidates`)。
+    """
+
+    def __init__(self, database: Database) -> None:
+        """绑定数据库连接工厂."""
+        self._database = database
+
+    def list_for_game(
+        self, game_id: int, *, status: SaveCandidateStatus | None = None
+    ) -> list[SaveCandidate]:
+        """返回某个游戏的候选, 待确认的排在前面(按路径)."""
+        order = (
+            " FROM save_path_candidates WHERE game_id = ?"
+            " ORDER BY CASE status WHEN 'suggested' THEN 0 ELSE 1 END, path"
+        )
+        if status is None:
+            sql = "SELECT *" + order
+            params: tuple[object, ...] = (game_id,)
+        else:
+            sql = (
+                "SELECT * FROM save_path_candidates WHERE game_id = ?"
+                " AND status = ?"
+                " ORDER BY CASE status WHEN 'suggested' THEN 0 ELSE 1 END, path"
+            )
+            params = (game_id, status)
+        with self._database.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [_row_to_save_candidate(row) for row in rows]
+
+    def get(self, candidate_id: int) -> SaveCandidate | None:
+        """按 id 读取一条候选, 不存在返回 None."""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM save_path_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return None if row is None else _row_to_save_candidate(row)
+
+    def upsert(self, candidate: SaveCandidate) -> tuple[SaveCandidate, bool]:
+        """写入一条候选, 返回 ``(实体, 是否新建)``.
+
+        用户已经确认或忽略过的候选不会被下一次探测覆盖, 否则界面上的决定会
+        被扫描结果抹掉; 待确认的候选则刷新探测字段(路径健康、危险标记等)。
+        """
+        with self._database.session() as connection:
+            row = connection.execute(
+                "SELECT id, status FROM save_path_candidates"
+                " WHERE game_id = ? AND path = ?",
+                (candidate.game_id, candidate.path),
+            ).fetchone()
+            if row is not None and str(row["status"]) != "suggested":
+                candidate_id = int(row["id"])
+                created = False
+            else:
+                candidate_id, created = self._write(connection, candidate, row)
+        stored = self.get(candidate_id)
+        if stored is None:  # pragma: no cover - 刚写入的行必然可读
+            raise DatabaseError(f"写入存档候选失败: {candidate.path}")
+        return (stored, created)
+
+    def _write(
+        self,
+        connection: sqlite3.Connection,
+        candidate: SaveCandidate,
+        row: sqlite3.Row | None,
+    ) -> tuple[int, bool]:
+        """在事务内插入新候选或刷新已有候选的探测字段."""
+        found_at = _dt_text(candidate.found_at) or iso_utc_now()
+        if row is None:
+            cursor = connection.execute(
+                "INSERT INTO save_path_candidates (game_id, platform,"
+                " platform_game_id, path, path_kind, reason_code, detail,"
+                " relative_path, confidence, health, risk_reason, status,"
+                " found_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    candidate.game_id,
+                    candidate.platform,
+                    candidate.platform_game_id,
+                    candidate.path,
+                    candidate.path_kind,
+                    candidate.reason_code,
+                    candidate.detail,
+                    candidate.relative_path,
+                    candidate.confidence,
+                    candidate.health,
+                    candidate.risk_reason,
+                    candidate.status,
+                    found_at,
+                ),
+            )
+            if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回 id
+                raise DatabaseError("插入存档候选失败: 未返回行 id")
+            return (int(cursor.lastrowid), True)
+        candidate_id = int(row["id"])
+        connection.execute(
+            "UPDATE save_path_candidates SET platform = ?, platform_game_id = ?,"
+            " path_kind = ?, reason_code = ?, detail = ?, relative_path = ?,"
+            " confidence = ?, health = ?, risk_reason = ?, status = ?, found_at = ?"
+            " WHERE id = ?",
+            (
+                candidate.platform,
+                candidate.platform_game_id,
+                candidate.path_kind,
+                candidate.reason_code,
+                candidate.detail,
+                candidate.relative_path,
+                candidate.confidence,
+                candidate.health,
+                candidate.risk_reason,
+                candidate.status,
+                found_at,
+                candidate_id,
+            ),
+        )
+        return (candidate_id, False)
+
+    def set_status(
+        self,
+        candidate_id: int,
+        status: SaveCandidateStatus,
+        *,
+        decided_at: datetime | None = None,
+    ) -> SaveCandidate:
+        """更新候选的处理进度; 回到 ``suggested`` 会清掉决定时间."""
+        decided = None
+        if status != "suggested":
+            decided = _dt_text(decided_at) or iso_utc_now()
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE save_path_candidates SET status = ?, decided_at = ?"
+                " WHERE id = ?",
+                (status, decided, candidate_id),
+            )
+        candidate = self.get(candidate_id)
+        if candidate is None:
+            raise DatabaseError(f"未知存档候选: {candidate_id}")
+        return candidate
+
+    def count_by_status(self) -> dict[str, int]:
+        """返回各处理进度下的候选数量(未出现的进度计 0)."""
+        counts = {"suggested": 0, "confirmed": 0, "ignored": 0}
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) FROM save_path_candidates GROUP BY status"
             ).fetchall()
         for row in rows:
             counts[str(row[0])] = int(row[1])

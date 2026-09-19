@@ -181,8 +181,7 @@ exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-result
 DEP004 = ["pytest", "allure", "allure_pytest"]
 # `allure` 这个模块由 allure-pytest 带进来, 测试里直接用它记附件属正常用法。
 DEP003 = ["allure"]
-# httpx 是给"后续接入平台封面/图标接口"预置的依赖(目前还没有调用点, 见 docs/development.md)。
-DEP002 = ["httpx"]
+
 
 [tool.pytest.ini_options]
 # 默认只跑单元与集成测试: 性能与安全测试只在 CI 执行,

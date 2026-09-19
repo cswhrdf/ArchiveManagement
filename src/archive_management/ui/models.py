@@ -13,6 +13,7 @@ from enum import StrEnum
 
 from archive_management.application.home import HomeReport
 from archive_management.domain import (
+    GameAction,
     GameFacts,
     HomeFilter,
     HomeStats,
@@ -20,6 +21,7 @@ from archive_management.domain import (
     PathKind,
     SaveSource,
     TreeInput,
+    action_allowed,
     branch_lineage,
     keep_surviving,
     tree_depths,
@@ -104,7 +106,10 @@ class GameSummary:
     location_count: int
     backup_count: int
     tone: str = "blue"  # 头像色块基调,由窗口映射到调色板
+    # 展示模型的默认值不承担业务语义(后端总是显式传入): "新建游戏默认停用"
+    # 由 ``domain.entities.Game`` 的默认值决定.
     enabled: bool = True
+    archived: bool = False
 
     @property
     def list_detail(self) -> str:
@@ -118,6 +123,10 @@ class GameSummary:
             count=self.location_count,
             backups=self.backup_count,
         )
+
+    def allow(self, action: GameAction) -> bool:
+        """该动作在当前状态下是否可用(归档游戏只保留四项)."""
+        return action_allowed(action, archived=self.archived)
 
 
 @dataclass(frozen=True)
@@ -246,6 +255,9 @@ class ScheduleItem:
     last_error: str = ""
     tone: str = "blue"
     has_locations: bool = True  # 未配置存档位置的游戏无法创建定时备份
+    # 游戏本身的状态: 停用或归档时保留任务配置, 但不允许启用与执行.
+    game_enabled: bool = True
+    archived: bool = False
 
     @property
     def game_label(self) -> str:
@@ -266,14 +278,33 @@ class ScheduleItem:
     @property
     def state_label(self) -> str:
         """启用状态文案."""
+        if self.archived:
+            return tr("schedule.state_archived")
         if not self.interval_text:
             return tr("schedule.state_off")
         return tr("schedule.state_on") if self.enabled else tr("schedule.state_paused")
 
     @property
     def can_schedule(self) -> bool:
-        """是否满足创建定时备份的前置条件(必须有存档位置)."""
-        return self.has_locations
+        """是否满足创建定时备份的前置条件(必须有存档位置且未归档)."""
+        return self.has_locations and not self.archived
+
+    @property
+    def can_enable(self) -> bool:
+        """是否允许把任务切到启用态(停用或归档的游戏不允许)."""
+        return self.game_enabled and not self.archived
+
+    @property
+    def can_toggle(self) -> bool:
+        """是否允许暂停/继续: 归档后整体不可用; 停用中的游戏只能暂停, 不能继续."""
+        if not self.interval_text or self.archived:
+            return False
+        return self.enabled or self.game_enabled
+
+    @property
+    def editable(self) -> bool:
+        """是否可以编辑/删除该任务(归档游戏只保留删除、导出、取消归档与打开详情)."""
+        return not self.archived
 
     @property
     def auto_count_label(self) -> str:
@@ -653,8 +684,10 @@ class HomeGameItem:
 
     @property
     def state_label(self) -> str:
-        """归档状态文案(未归档时为空串)."""
-        return tr("home.chip_archived") if self.archived else ""
+        """状态文案: 归档优先, 其次是停用(都没有时为空串)."""
+        if self.archived:
+            return tr("home.chip_archived")
+        return "" if self.enabled else tr("home.chip_disabled")
 
     @property
     def meta(self) -> str:
@@ -678,7 +711,7 @@ class HomeGameItem:
 
     @property
     def chips(self) -> tuple[str, ...]:
-        """列表行的分类标签: 平台、备份、监控、风险、归档与自定义标签."""
+        """列表行的分类标签: 平台、备份、监控、风险、归档/停用与自定义标签."""
         parts = [
             self.platform_label,
             self.backup_label,
@@ -688,13 +721,21 @@ class HomeGameItem:
             parts.append(tr("home.chip_risk"))
         if self.archived:
             parts.append(tr("home.chip_archived"))
+        elif not self.enabled:
+            parts.append(tr("home.chip_disabled"))
         parts.extend(self.tags)
         return tuple(parts)
 
     @property
     def backup_enabled(self) -> bool:
-        """没有存档位置时不允许"立即备份"(与主窗口的规则一致)."""
-        return self.location_count > 0
+        """没有存档位置或已归档时不允许"立即备份"(与详情页的规则一致)."""
+        return self.location_count > 0 and action_allowed(
+            "backup", archived=self.archived
+        )
+
+    def allow(self, action: GameAction) -> bool:
+        """该动作在当前状态下是否可用(归档游戏只保留四项)."""
+        return action_allowed(action, archived=self.archived)
 
 
 @dataclass(frozen=True)

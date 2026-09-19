@@ -71,25 +71,38 @@ export default {
   // 让报告 zip 变大一倍, 所以刻意不加。要加就把文件名追加到这个数组。
   globalAttachments: ["allure-run-ledger.md"],
   /**
-   * 为什么这里**没有** `qualityGate`(Allure 原生质量门) —— 实证结论, 以后升级 Allure
-   * 可以照这两个现象重测:
+   * 质量门(Allure 原生): 规则写在这里, CI 在汇总作业里用
+   * `allure quality-gate --config allurerc.mjs allure-results` 跑一遍, 用它的退出码当门禁。
+   * 它管的是**整次运行**的结论 —— 有没有失败用例、用例数够不够、通过率、三个平台的结果
+   * 是否都合并进来了; 逐项检查(ruff/mypy/静态分析)仍由
+   * ``scripts/create_allure_quality.py`` 负责, 两者互补。
    *
-   * 1. 首页「质量门」页签靠 `allure run` 实时回传的校验结果填充 —— 只有 `allure run` 与
-   *    `allure quality-gate` 会**执行**校验, `allure generate` 只读结果、不校验, 所以
-   *    generate 出来的报告里 `widgets/quality-gate.json` 恒为 `{}`, 页签永远是空的
-   *    (allure 3.16.1 与 3.17.0 实测相同)。
-   * 2. 配上 `historyPath` 后 `allure quality-gate` 会**谎报通过**: 即使规则是不可能满足的
-   *    阈值(实测 `minTestsCount: 99999` + `maxFailures: 0` 对两份结果), 命令也退出 0
-   *    且不输出任何内容; 同一个配置去掉 `historyPath` 才正常报错退 1。而本仓库必须有
-   *    `historyPath`(报告要跨运行的趋势), 所以这个门禁在本仓库会静默放行 —— 一个永远
-   *    不失败的门禁比没有门禁更坑。
+   * **版本要求 ≥ 3.18.0**: 3.13~3.17 在配了 `historyPath` 时会**静默放行**(退 0 且不输出
+   * 任何内容) —— 根因是本地历史流的句柄从不销毁, `AllureReport.done()` 永不返回, Node 在
+   * 校验前就把进程退掉了(issue #895; 修在 3.18.0 的 PR #962, 另一个 PR #924 至今未合)。
+   * CI 因此把 CLI 钉在 3.18.0; 升版本前先重跑一遍下面的两行确认失败用例能让它退 1。
    *
-   * 于是结论改由 `scripts/create_allure_summary.py` 自己算, 汇总成一份"运行总账"
-   * (`allure-run-ledger.md`, 用 .md 是为了让报告直接渲染表格与标题): 质量门逐项结论
-   * + 覆盖率(各平台, 数字取自原始 XML) + 性能一行 + 安全各平台一行 + 产物清单
-   * (只列脚本生成的汇总项, 逐项核对原始文件在不在)。它由上面的
-   * `globalAttachments` 收进报告首页「全局附件」—— 结论在首页一眼可见, 而且可信。
+   * 注意两点:
+   * - `allure generate` **不执行**校验, 所以首页「质量门」页签仍只有 `allure run` 会填;
+   *   CI 把这里的输出写成 `allure-quality-gate.txt`, 由运行总账(`allure-run-ledger.md`,
+   *   见 `scripts/create_allure_summary.py`)收进报告首页「全局附件」;
+   * - `environmentsTested` 只在**汇总报告**里成立(本地单平台跑必然不通过, 这是预期)。
+   *
+   * 本地复现(在仓库根, 需要子目录里有 allure-results):
+   *   npx allure@3.18.0 quality-gate --config allurerc.mjs allure-results
    */
+  qualityGate: {
+    rules: [
+      // 有一条用例失败就不算通过(与 CI 整体绿灯一致)。
+      { maxFailures: 0 },
+      // 汇总报告实测约 2900+ 条结果; 明显低于这个量说明结果被静默漏收。
+      { minTestsCount: 1500 },
+      // 注意是**小数比率**(内部比的是 passed/total), 不是百分数。
+      { successRate: 0.98 },
+      // 三个平台的结果都得合并进来(某个平台的产物没上传/没合并完就是这里失败)。
+      { environmentsTested: ["Windows", "macOS", "Linux"] },
+    ],
+  },
   environments: {
     windows: {
       name: "Windows",

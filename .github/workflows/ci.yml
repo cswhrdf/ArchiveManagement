@@ -134,7 +134,9 @@ jobs:
           node-version: 22
 
       - name: Install Allure 3 CLI
-        run: npm install --global allure@3
+        # 钉住 3.18.0: 3.13~3.17 在配了 historyPath 时会让质量门静默放行(issue #895,
+        # 3.18.0 的 PR #962 修复)。升级前请照 allurerc.mjs 里的说明重跑一次门禁。
+        run: npm install --global allure@3.18.0
 
       - name: Check Allure version
         run: allure --version
@@ -406,7 +408,8 @@ jobs:
           node-version: 22
 
       - name: Install Allure 3 CLI
-        run: npm install --global allure@3
+        # 与 pytest 作业同一个钉住的版本(质量门在这里跑, 版本不对会静默放行)。
+        run: npm install --global allure@3.18.0
 
       - name: Download Allure resources
         if: always()
@@ -542,6 +545,26 @@ jobs:
           mkdir -p allure-results
           uv run python scripts/create_allure_summary.py
 
+      - name: Validate the quality gate
+        # 规则在仓库根的 allurerc.mjs 里(唯一来源, 这里不重复传参)。先跑、先留日志:
+        # 首页「全局附件」里的运行总账会把它收进去(见 scripts/create_allure_summary.py)。
+        # 校验不通过时先不中断作业(报告还要生成、上传), 由最后一步用退出码判定。
+        id: quality-gate
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ -n "$(ls -A allure-results)" ]; then
+            set +e
+            allure quality-gate --config allurerc.mjs allure-results 2>&1 \
+              | tee allure-quality-gate.txt
+            code=${PIPESTATUS[0]}
+            # 把退出码也写进日志: 运行总账据此给出"通过/未通过", 不用去猜文本。
+            echo "退出码: ${code}" >> allure-quality-gate.txt
+            exit "${code}"
+          fi
+          echo "没有可用的 allure-results, 跳过质量门校验" | tee allure-quality-gate.txt
+
       - name: Generate final Allure report
         # 同 pytest 作业: 历史与环境设置都在仓库根的 allurerc.mjs 里。
         if: always()
@@ -579,3 +602,13 @@ jobs:
           name: allure-report-final
           path: allure-report.zip
           if-no-files-found: ignore
+
+      - name: Report quality gate verdict
+        # 质量门是"结论"而不是"步骤": 报告已生成、两份 artifact 都上传完了, 现在再用它的
+        # 退出码决定作业成败 —— 否则门禁不通过时连报告都拿不到(结论与输出都在首页
+        # 「全局附件」的运行总账里)。放在最末尾也免得后面的 `if: success()` 步骤被跳过。
+        if: always() && steps.quality-gate.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::质量门未通过 —— 详见报告首页「全局附件」的运行总账"
+          exit 1

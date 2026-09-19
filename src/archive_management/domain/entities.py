@@ -31,7 +31,9 @@ class Game(_RowModel):
     name: str = Field(min_length=1)
     steam_app_id: int | None = None
     platform: str = "windows"
-    enabled: bool = True
+    # 默认停用: 同一时刻只允许一款游戏处于启用态(快捷键与定时备份只对它生效),
+    # 因此新建的游戏都需要用户明确启用, 不做默认选中。
+    enabled: bool = False
     created_at: datetime | None = None
     # 录入时识别到的原始名称(重命名不会改写), 供界面作为额外信息展示.
     original_name: str = ""

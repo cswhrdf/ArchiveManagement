@@ -36,7 +36,8 @@ def test_game_rejects_unknown_fields() -> None:
 def test_game_defaults() -> None:
     game = Game(name="Demo Game")
     assert game.platform == "windows"
-    assert game.enabled is True
+    # 新建游戏默认停用: 同一时刻只允许一款启用, 由用户明确选择当前在玩的那一款.
+    assert game.enabled is False
     assert game.steam_app_id is None
 
 

@@ -1219,6 +1219,85 @@ def test_home_page_follows_theme_switch(
     assert len(app.backend.list_games()) == 3
 
 
+def test_archived_game_keeps_only_the_documented_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """归档后主页只留打开详情/取消归档/删除入口, 管理窗口里只留删除游戏."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.manage_window import ManageGameWindow
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    page._select("shanhai")
+    page._on_archive()
+    _pump(app)
+    page._on_view(HomeView.ARCHIVED)
+    _pump(app)
+    page._select("shanhai")
+
+    def state(button: Any) -> str:
+        """读取按钮的启用状态."""
+        return str(button.cget("state"))
+
+    assert state(page._detail_btn) == "normal"
+    assert state(page._archive_btn) == "normal"
+    # 管理窗口是归档游戏删除自己的唯一入口, 因此仍然可用, 但按钮改名为"删除游戏".
+    assert state(page._manage_btn) == "normal"
+    assert page._manage_btn.cget("text") == tr("home.action_delete")
+    assert state(page._backup_btn) == "disabled"
+    assert state(page._location_btn) == "disabled"
+    assert state(page._tags_btn) == "disabled"
+    assert state(page._enable_btn) == "disabled"
+
+    # 绕过按钮直接调用同样要被拦下并给出原因.
+    page._on_backup()
+    assert page._summary_label.cget("text") == tr(
+        "home.archived_blocked", name="山海旅人"
+    )
+
+    window = ManageGameWindow(
+        app,
+        backend=app.backend,
+        palette=app.p,
+        game_id="shanhai",
+        name="山海",
+        enabled=False,
+        backup_location="—",
+        on_change=lambda: None,
+        archived=True,
+    )
+    assert state(window._delete_btn) == "normal"
+    assert state(window._rename_btn) == "disabled"
+    assert state(window._toggle_btn) == "disabled"
+    assert state(window._schedule_btn) == "disabled"
+    assert {state(button) for button in window._location_buttons} == {"disabled"}
+    assert state(window._delete_origin_btn) == "disabled"
+    window.close()
+
+
+def test_hotkey_is_ignored_while_the_game_is_disabled(
+    monkeypatch: pytest.MonkeyPatch, audit_log: list[str]
+) -> None:
+    """停用游戏的快捷键不触发备份, 只给出反馈(只有启用的那一款响应快捷键)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app.backend.set_game_enabled("shanhai", False)
+    app._select_game("shanhai")
+    before = len(app.backend.list_backups("shanhai"))
+
+    # "save_now" 即 services.hotkeys.ACTION_SAVE_NOW, 这里按主窗口收到的消息投递.
+    app._messages.put(("hotkey", "save_now"))
+    app._poll_messages()
+
+    assert len(app.backend.list_backups("shanhai")) == before
+    assert "hotkey.skipped" in " ".join(audit_log)
+
+
 def test_home_page_filters_games_and_runs_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
