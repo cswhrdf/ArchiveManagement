@@ -13,22 +13,41 @@ CDN 只作为兜底。下载统一走可注入的 :class:`ArtworkFetcher`(默认
 
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
 import httpx
+from PIL import Image
 
-from archive_management.domain import ArtworkKind, ArtworkRef, PlatformGame
+from archive_management.domain import (
+    ArtworkKind,
+    ArtworkRef,
+    PlatformGame,
+    PlatformId,
+)
 from archive_management.exceptions import ArtworkError
 from archive_management.infrastructure.paths import ApplicationPaths
+
+logger = logging.getLogger(__name__)
 
 # 缓存目录名(位于 cache_dir 之下)与下载默认参数.
 ARTWORK_DIR_NAME = "artwork"
 DEFAULT_TIMEOUT = 5.0
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
+# Steam 公开 CDN 的地址规则与海报用的竖版封面资源名(无凭据, 缺失即占位).
+STEAM_CDN_ROOT = "https://cdn.cloudflare.steamstatic.com/steam/apps"
+STEAM_COVER_ASSET = "library_600x900.jpg"
+# 图标不是单独下载的资源: 它由封面裁成方形生成(见 :func:`square_icon`).
+# 版本号同时是缓存文件名的一部分, 换裁剪规则就会重新生成。
+ICON_VERSION = "cover-square-256"
+ICON_SIZE = 256
 
 # 允许的图片类型与其扩展名; 类型以文件头为准, 声明值只用于校验.
 _EXTENSIONS: dict[str, str] = {
@@ -159,6 +178,22 @@ class ArtworkCache:
                 outdated.unlink(missing_ok=True)
         return target
 
+    def forget(self, platform: str, game_id: str) -> list[Path]:
+        """删除一款游戏的全部缓存图片, 返回被删掉的文件.
+
+        游戏被删除时调用: 缓存是可再生的派生数据, 留着只会占地方, 而且下次遇到
+        同名/同 AppID 的游戏会误用旧图。目录空了就顺手删掉, 不堆空文件夹。
+        """
+        directory = self.directory(platform, game_id)
+        if not directory.is_dir():
+            return []
+        removed = sorted(path for path in directory.iterdir() if path.is_file())
+        for path in removed:
+            path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+        return removed
+
     def prune(self, *, max_age_days: int) -> list[Path]:
         """删除超过 ``max_age_days`` 天的缓存文件, 返回被删掉的文件."""
         if not self._root.is_dir():
@@ -185,9 +220,14 @@ class ArtworkCache:
         return sorted(directory.glob(f"{_slug(kind)}-*"))
 
 
+def artwork_cache_at(cache_dir: Path) -> ArtworkCache:
+    """返回给定缓存目录下的封面缓存(便于只持有 ``cache_dir`` 的调用方)."""
+    return ArtworkCache(cache_dir / ARTWORK_DIR_NAME)
+
+
 def artwork_cache(paths: ApplicationPaths) -> ArtworkCache:
     """返回应用缓存目录下的封面缓存."""
-    return ArtworkCache(paths.cache_dir / ARTWORK_DIR_NAME)
+    return artwork_cache_at(paths.cache_dir)
 
 
 def local_artwork(game: PlatformGame, kind: ArtworkKind) -> Path | None:
@@ -199,6 +239,91 @@ def local_artwork(game: PlatformGame, kind: ArtworkKind) -> Path | None:
         if path.is_file():
             return path
     return None
+
+
+def cached_artwork(
+    game: PlatformGame, kind: ArtworkKind, cache: ArtworkCache
+) -> Path | None:
+    """界面渲染用: 只查平台本地文件与缓存, 不发起网络请求.
+
+    详情页与海报卡片是同步渲染的, 一次网络请求会把界面卡住; 下载统一交给
+    :func:`resolve_artwork`(可由后台线程调用)。
+    """
+    local = local_artwork(game, kind)
+    if local is not None:
+        return local
+    cached = cache.lookup_any(game.platform, game.game_id, kind)
+    return cached if cached is not None and _usable(cached) else None
+
+
+def platform_game(
+    *,
+    store: PlatformId,
+    game_id: str,
+    name: str,
+    artwork: Sequence[ArtworkRef] = (),
+    install_dir: str = "",
+) -> PlatformGame:
+    """把“库里的游戏”包装成平台数据模型(封面相关接口只认 ``PlatformGame``)."""
+    return PlatformGame(
+        platform=store,
+        game_id=game_id,
+        name=name,
+        install_dir=install_dir,
+        artwork=list(artwork),
+    )
+
+
+def steam_cover(app_id: str) -> ArtworkRef:
+    """按公开 CDN 规则构造 Steam 封面引用(无凭据).
+
+    资源名同时充当缓存版本: 以后换封面规则只要改 :data:`STEAM_COVER_ASSET`,
+    缓存文件名就会跟着变, 不会拿旧图当新图。
+    """
+    return ArtworkRef(
+        kind="cover",
+        url=f"{STEAM_CDN_ROOT}/{app_id}/{STEAM_COVER_ASSET}",
+        version=STEAM_COVER_ASSET,
+    )
+
+
+def steam_icon(app_id: str) -> ArtworkRef:
+    """兼容入口: 图标不再从 CDN 取, 这里返回一个"由封面派生"的空地址引用.
+
+    保留函数是为了让调用方仍能用同一套 ``ArtworkRef`` 描述两类资源; 真实生成在
+    :func:`square_icon`(由后端在封面到位后调用)。
+    """
+    return ArtworkRef(kind="icon", url="", version=ICON_VERSION)
+
+
+def steam_artwork(app_id: str) -> tuple[ArtworkRef, ...]:
+    """返回一款 Steam 游戏需要下载的图片引用(只有封面需要联网)."""
+    return (steam_cover(app_id), steam_icon(app_id))
+
+
+def square_icon(source: Path, *, size: int = ICON_SIZE) -> bytes | None:
+    """把一张封面裁成方形并编码成 PNG, 供界面当图标使用.
+
+    为什么不直接下载平台的图标资源: Steam 的 ``logo.png`` 是**游戏标题图**
+    (艺术字 + 透明背景), 缩成头像后既看不清也认不出游戏; 从封面正中偏上裁一块
+    正方形得到的是画面主体, 且不额外产生网络请求。裁不开(文件损坏/格式不支持)
+    时返回 ``None``, 由调用方回落占位。
+    """
+    try:
+        with Image.open(source) as image:
+            picture = image.convert("RGB")
+            side = min(picture.size)
+            left = (picture.width - side) // 2
+            # 略向上偏移: 竖版封面的主体(角色/场景)通常在上半部分.
+            top = max((picture.height - side) // 2 - side // 8, 0)
+            square = picture.crop((left, top, left + side, top + side))
+            resized = square.resize((size, size), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            resized.save(buffer, format="PNG")
+    except (OSError, ValueError) as exc:
+        logger.warning("封面无法裁成图标(%s): %s", source, exc)
+        return None
+    return buffer.getvalue()
 
 
 def sniff_media_type(data: bytes) -> str | None:

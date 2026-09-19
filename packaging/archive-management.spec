@@ -15,6 +15,7 @@ a = Analysis(
     pathex=[str(source_root)],
     binaries=[],
     datas=datas,
+    # Pillow 由 PyInstaller 自带的 hook 收集(``CTkImage`` 需要 ``PIL.ImageTk``), 无需手工列举条目.
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

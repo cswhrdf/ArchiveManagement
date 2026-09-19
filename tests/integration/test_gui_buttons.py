@@ -75,6 +75,7 @@ def _patch_dialogs(
     edit_result: tuple[str, str] | None = ("新名字", "新描述"),
     schedule_result: tuple[str, str] | None = ("", "3"),
     restore_result: bool | None = True,
+    import_result: tuple[str, tuple[str, ...]] | None = ("导入名", ()),
 ) -> None:
     """把模态对话框替换为自动应答, 避免 wait_window 阻塞测试线程.
 
@@ -109,6 +110,8 @@ def _patch_dialogs(
     monkeypatch.setattr(disc_mod, "ask_text", next_text)
     monkeypatch.setattr(disc_mod, "confirm_dialog", lambda *_a, **_k: confirm)
     monkeypatch.setattr(disc_mod, "info_dialog", lambda *_a, **_k: None)
+    # 导入对话框返回 (名称, 存档路径): 用它可以检查"确认的路径才会写库".
+    monkeypatch.setattr(disc_mod, "import_game_dialog", lambda *_a, **_k: import_result)
     # 游戏主页窗口需要文本输入(存档位置/标签)与错误提示的自动应答.
     monkeypatch.setattr(home_page_mod, "ask_text", next_text)
     monkeypatch.setattr(home_page_mod, "info_dialog", lambda *_a, **_k: None)
@@ -773,7 +776,7 @@ def test_discovery_panel_scans_filters_and_imports_candidate(
             palette=Palette.for_theme(app._theme),
         )
         assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
-        assert len(panel._candidates) == 5
+        assert len(panel._candidates) == 6
         # 未选中有效候选时"导入"不可用(候选 4 的路径已失效).
         panel._select_candidate("cand-4")
         assert str(panel._import_btn.cget("state")) == "disabled"
@@ -1061,7 +1064,7 @@ def test_home_page_switches_between_library_and_discovery(
     _pump(app)
     page = app._home_page
     panel = page._discovery
-    assert len(panel._candidates) == 5
+    assert len(panel._candidates) == 6
     assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
 
     page._show_section(HomeSection.DISCOVERY)
@@ -1088,7 +1091,7 @@ def test_home_page_imports_candidate_and_refreshes_library(
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.models import HomeSection
 
-    _patch_dialogs(monkeypatch, ask_text="空洞骑士")
+    _patch_dialogs(monkeypatch, import_result=("空洞骑士", ()))
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(app)
     page = app._home_page
@@ -1102,6 +1105,12 @@ def test_home_page_imports_candidate_and_refreshes_library(
     _pump(app)
 
     assert len(app.backend.list_games()) == before + 1
+    # 监控目录来源不支持自动探测: 对话框里没有路径可确认, 就不写存档位置.
+    imported = next(
+        game for game in app.backend.list_games() if game.name == "空洞骑士"
+    )
+    assert imported.saved_paths == 0
+    assert app.backend.list_locations(imported.game_id) == []
     # 导入后游戏库已经包含新游戏(回到游戏库分区即可看到).
     page._show_section(HomeSection.LIBRARY)
     _pump(app)
@@ -1296,6 +1305,317 @@ def test_hotkey_is_ignored_while_the_game_is_disabled(
 
     assert len(app.backend.list_backups("shanhai")) == before
     assert "hotkey.skipped" in " ".join(audit_log)
+
+
+def test_discovery_import_confirms_paths_and_probes_artwork(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """导入时确认存档路径并触发封面探测: 行内已带推断结果, 状态栏给出提示."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.palette import Palette
+
+    notices: list[str] = []
+    _patch_dialogs(monkeypatch, import_result=("星露谷", ("C:\\Saves", "D:\\Other")))
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    panel = DiscoveryPanel(
+        ctk.CTkFrame(app),
+        backend=app.backend,
+        palette=Palette.for_theme(app._theme),
+        on_notice=notices.append,
+    )
+
+    # 探测结果行里直接带着推断出来的存档路径与"平台不支持"的说明.
+    steam_row = next(
+        item for item in panel._candidates if item.candidate_id == "cand-6"
+    )
+    assert steam_row.save_supported is True
+    assert next(path.path for path in steam_row.save_paths).endswith("Saves")
+    assert panel._save_lines(steam_row).count("\n") == len(steam_row.save_paths)
+    monitored_row = next(
+        item for item in panel._candidates if item.candidate_id == "cand-2"
+    )
+    assert monitored_row.save_supported is False
+    assert monitored_row.save_label == tr(
+        "discovery.save_unsupported", platform=monitored_row.source_label
+    )
+
+    panel._select_candidate("cand-6")
+    panel._on_import()
+    _pump(app)
+
+    imported = next(game for game in app.backend.list_games() if game.name == "星露谷")
+    assert imported.saved_paths == 2
+    assert [item.path for item in app.backend.list_locations(imported.game_id)] == [
+        "C:\\Saves",
+        "D:\\Other",
+    ]
+    # 页面提示写清登记了几条存档位置.
+    assert panel._summary_label.cget("text") == tr(
+        "result.game_added_with_paths", name="星露谷", count=2
+    )
+    # 导入成功后才开始探测封面, 并把这件事写到左下角状态栏(页面不弹窗).
+    assert notices == [tr("discovery.artwork_started", name="星露谷")]
+
+
+def test_artwork_landing_refreshes_the_home_page(tmp_path: Path) -> None:
+    """封面/图标是导入后由后台补的: 数据版本一变, 主页要重读才能把图标显示出来."""
+    from PIL import Image
+
+    from archive_management.domain import ArtworkKind
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    icon = tmp_path / "icon.png"
+    Image.new("RGB", (10, 10), (0, 0, 0)).save(icon)
+
+    class _LateIconService(DemoArchiveService):
+        """图标一开始没有, 后台探测完成后才出现."""
+
+        ready = False
+
+        def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+            """探测完成后才给出图标路径."""
+            if kind == "icon" and self.ready and game_id == "outer-wilds":
+                return str(icon)
+            return ""
+
+    service = _LateIconService(delay=0)
+    app = gui_app(_new_app, service)
+    _pump(app)
+    page = app._home_page
+    assert "icon:outer-wilds" not in page._artwork_images
+
+    # 后台探测完成 → 数据版本变化 → 主窗口重载: 主页必须跟着重读.
+    service.ready = True
+    app._reload_data()
+    _pump(app)
+
+    assert "icon:outer-wilds" in page._artwork_images
+
+
+def test_settings_window_language_switch_closes_the_window() -> None:
+    """设置窗口里换语言: 交给主窗口处理后关掉自己(主窗口会整体重建)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+    switched: list[str] = []
+
+    def apply(locale: str) -> str | None:
+        switched.append(locale)
+        return None
+
+    window._on_apply_language = apply
+    window._on_language_selected("English")
+    _pump(app)
+
+    assert switched == ["en"]
+    assert window._window.winfo_exists() == 0
+
+
+def test_discovery_rows_show_the_localized_name() -> None:
+    """探测结果行直接显示当前语言的译名, 并把探测到的原名放在括号里."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.palette import Palette
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    panel = DiscoveryPanel(
+        ctk.CTkFrame(app), backend=app.backend, palette=Palette.for_theme(app._theme)
+    )
+    row = next(item for item in panel._candidates if item.candidate_id == "cand-6")
+
+    assert row.localized_name == "星露谷物语"
+    assert panel._candidate_title(row) == "星露谷物语  (Stardew Valley)"
+
+
+def test_startup_fills_localized_names_once() -> None:
+    """启动时补一次译名探测, 且不是强制刷新(走缓存, 只对缺条目的游戏联网)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    class _RecordingNames(DemoArchiveService):
+        """记录译名预取调用(演示后端自身不联网)."""
+
+        def __init__(self) -> None:
+            super().__init__(delay=0)
+            self.calls: list[bool] = []
+
+        def prefetch_names(self, *, refresh: bool = False) -> None:
+            """记下每次调用是否要求强制刷新."""
+            self.calls.append(refresh)
+
+    service = _RecordingNames()
+    app = gui_app(_new_app, service)
+    _pump(app)
+
+    assert service.calls == [False]
+
+
+def test_switching_language_rebuilds_the_ui_and_reprobes_names(
+    tmp_path: Path,
+) -> None:
+    """切换语言: 界面按新语言整体重建, 译名重新探测, 选择写回配置文件."""
+    from archive_management.config import load_config
+    from archive_management.i18n import current_locale
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    app = gui_app(_new_app, DemoArchiveService(delay=0), paths=paths)
+    _pump(app)
+    old_page = app._home_page
+    assert app._language == "zh-CN"
+
+    error = app._on_language_change("en")
+    _pump(app)
+
+    assert error is None
+    assert current_locale() == "en"
+    assert app._language == "en"
+    # 文案是构建时取的: 换语言必须整体重建, 主页对象会换成新的.
+    assert app._home_page is not old_page
+    assert tr("settings.language") == "Language"
+    assert app._feedback_label.cget("text") == tr(
+        "settings.language_switched", language="English"
+    )
+    # 选择写回配置文件: 重启后仍是英文.
+    assert load_config(paths.config_path).language == "en"
+
+
+def test_icon_slot_survives_switching_and_deleting_games(tmp_path: Path) -> None:
+    """回归: 换游戏/删游戏时图标位要能回落色块, 不能留着指向已销毁图片的标签.
+
+    症状: 打开过一次带图标的游戏再返回主页, 之后点任何游戏都抛
+    ``image "pyimageN" doesn't exist``(旧 CTkImage 被回收, 标签的 image 选项还指着它),
+    删除带图标的游戏后则该位置直接空白。
+    """
+    from PIL import Image
+
+    from archive_management.domain import ArtworkKind
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    icon = tmp_path / "icon.png"
+    Image.new("RGB", (10, 10), (0, 0, 0)).save(icon)
+
+    class _IconService(DemoArchiveService):
+        """只有"星际拓荒"有图标, 其余游戏回落色块."""
+
+        def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+            """按游戏 id 决定有没有图标."""
+            if kind == "icon" and game_id == "outer-wilds":
+                return str(icon)
+            return ""
+
+    app = gui_app(_new_app, _IconService(delay=0))
+    _pump(app)
+
+    app._open_game_detail("outer-wilds")
+    _pump(app)
+    assert app._hero_icon is not None
+
+    app._on_back_home()
+    _pump(app)
+    # 换到没有图标的游戏: 不抛异常, 图标位回落成首字色块.
+    app._open_game_detail("shanhai")
+    _pump(app)
+    assert app._hero_icon is None
+    assert app._hero_tile.cget("text") == "山"
+    # 图标位必须真的被清空(用 image=None 时 Tk 侧的图片选项不会变, 旧图会留在色块位置).
+    assert app._hero_tile.cget("image") == ""
+
+    # 删除带图标的游戏: 图标位同样不能残留图片.
+    app._open_game_detail("outer-wilds")
+    _pump(app)
+    assert app._hero_icon is not None
+    app.backend.delete_game("outer-wilds")
+    app._refresh_after_manage()
+    _pump(app)
+    assert app._hero_icon is None
+    assert app._hero_tile.cget("image") == ""
+
+
+def test_poster_card_uses_the_cached_cover_when_available(tmp_path: Path) -> None:
+    """海报卡片有缓存封面就加载图片, 解码失败时回落文字占位."""
+    from PIL import Image
+
+    from archive_management.domain import ArtworkKind, HomeLayout
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    good = tmp_path / "cover.png"
+    Image.new("RGB", (10, 10), (0, 0, 0)).save(good)
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"not an image")
+
+    class _CoverService(DemoArchiveService):
+        """演示后端 + 固定图片路径(省去真实下载)."""
+
+        def __init__(self, cover: str) -> None:
+            super().__init__(delay=0)
+            self.cover = cover
+
+        def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+            """封面与图标都用同一个预设文件."""
+            return self.cover
+
+    app = gui_app(_new_app, _CoverService(str(good)))
+    _pump(app)
+    page = app._home_page
+    # 列表行头像也会用上图标(没有图标才回落色块圆点).
+    assert "icon:outer-wilds" in page._artwork_images
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _pump(app)
+    assert "cover:outer-wilds" in page._artwork_images
+
+    # 换成损坏的文件后不再进图片缓存(界面回落名称占位), 且不影响列表渲染.
+    app.backend.cover = str(broken)
+    page._artwork_images.clear()
+    page._on_layout_change(HomeLayout.LIST.label)
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _pump(app)
+    assert page._artwork_images == {}
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+
+
+def test_home_enable_button_keeps_a_single_active_game(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主页启用按钮: 启用一款会自动停用另一款, 再点一次则停用."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    # 先把演示数据的启用态清干净, 否则“点一次”到底是启用还是停用取决于种子数据.
+    for game in app.backend.list_games():
+        app.backend.set_game_enabled(game.game_id, False)
+    page.reload()
+    _pump(app)
+
+    page._select("outer-wilds")
+    page._on_toggle_enabled()
+    _pump(app)
+    assert [game.game_id for game in app.backend.list_games() if game.enabled] == [
+        "outer-wilds"
+    ]
+    assert page._summary_label.cget("text") == tr("home.enabled", name="星际拓荒")
+
+    page._select("shanhai")
+    page._on_toggle_enabled()
+    _pump(app)
+    assert [game.game_id for game in app.backend.list_games() if game.enabled] == [
+        "shanhai"
+    ]
+    assert page._summary_label.cget("text") == tr(
+        "home.enabled_replaced", name="山海旅人", other="星际拓荒"
+    )
+
+    page._on_toggle_enabled()
+    _pump(app)
+    assert [game.game_id for game in app.backend.list_games() if game.enabled] == []
+    assert page._summary_label.cget("text") == tr("home.disabled", name="山海旅人")
 
 
 def test_home_page_filters_games_and_runs_actions(
@@ -1506,8 +1826,10 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         app,
         palette=app.p,
         theme=app._theme,
+        language=app._language,
         shortcuts=app._shortcuts,
         on_toggle_theme=app._on_toggle_theme,
+        on_apply_language=app._on_language_change,
         on_apply_shortcut=apply,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,

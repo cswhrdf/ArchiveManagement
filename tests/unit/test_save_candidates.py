@@ -12,8 +12,6 @@ import pytest
 
 from archive_management.application.candidates import (
     confirm_candidate,
-    ignore_candidate,
-    pending_candidates,
     suggest_candidates,
 )
 from archive_management.domain import (
@@ -74,6 +72,11 @@ def _identifier(candidate: SaveCandidate) -> int:
     """取出候选的 id(经过落库的候选必然有 id)."""
     assert candidate.id is not None
     return candidate.id
+
+
+def pending_candidates(database: Database, game_id: int) -> list[SaveCandidate]:
+    """本文件用的便利函数: 直接查仓库里待确认的候选(应用层同名函数已删除)."""
+    return SaveCandidateRepository(database).list_for_game(game_id, status="suggested")
 
 
 def test_migration_creates_the_candidate_table(tmp_path: Path) -> None:
@@ -179,23 +182,29 @@ def test_confirming_a_dangerous_candidate_is_rejected(
     assert "candidates.confirm" in " ".join(audit_log)
 
 
-def test_ignored_candidates_are_not_overwritten_by_a_new_scan(tmp_path: Path) -> None:
+def test_save_folders_inside_the_install_dir_are_allowed(tmp_path: Path) -> None:
+    """存档目录就在游戏安装目录里是常见做法, 不能算危险(真正危险的是整个安装目录)."""
     database = migrated_database(tmp_path)
+    install_dir = tmp_path / "steam" / "Demo"
+    saves = install_dir / "saves"
+    saves.mkdir(parents=True)
     game_id = _game(database)
-    save_dir = tmp_path / "saves"
-    source = _FakeSource(str(save_dir))
-    suggest_candidates(database, game_id, source)
-    candidate_id = _identifier(pending_candidates(database, game_id)[0])
 
-    ignored = ignore_candidate(database, candidate_id)
-    report = suggest_candidates(database, game_id, source)
+    inside = suggest_candidates(
+        database, game_id, _FakeSource(str(saves)), install_dir=install_dir
+    )
 
-    assert ignored.status == "ignored"
-    assert report.created == 0
-    assert report.updated == 1
-    stored = SaveCandidateRepository(database).get(candidate_id)
-    assert stored is not None
-    assert stored.status == "ignored"
+    assert inside.dangerous == 0
+    assert inside.candidates[0].risk_reason == ""
+    assert inside.candidates[0].status == "suggested"
+
+    # 而"整个安装目录"仍然被拦下(那种情况恢复/删除会动到游戏本体).
+    whole = suggest_candidates(
+        database, game_id, _FakeSource(str(install_dir)), install_dir=install_dir
+    )
+
+    assert whole.dangerous == 1
+    assert whole.candidates[0].risk_reason == "protected"
 
 
 def test_repeated_scan_updates_a_single_candidate(tmp_path: Path) -> None:
@@ -215,8 +224,6 @@ def test_unknown_candidate_is_rejected(tmp_path: Path) -> None:
     database = migrated_database(tmp_path)
     with pytest.raises(ArchiveManagementError):
         confirm_candidate(database, 999)
-    with pytest.raises(ArchiveManagementError):
-        ignore_candidate(database, 999)
 
 
 def test_games_without_a_platform_identifier_are_rejected(tmp_path: Path) -> None:

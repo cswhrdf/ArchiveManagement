@@ -99,6 +99,10 @@ class _FakeCheckBox(_FakeWidget):
         super().__init__(master=master, **kwargs)
         self.variable = kwargs.get("variable")
 
+    def get(self) -> Any:
+        """真实 CTkCheckBox 的取值接口: 返回勾选状态."""
+        return False if self.variable is None else self.variable.get()
+
     def select(self) -> None:
         """模拟勾选."""
         if self.variable is not None:
@@ -265,6 +269,11 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
     monkeypatch.setattr(ctk, "CTkEntry", make_entry)
     monkeypatch.setattr(ctk, "CTkTextbox", make_textbox)
     monkeypatch.setattr(ctk, "CTkCheckBox", make_checkbox)
+    monkeypatch.setattr(
+        ctk,
+        "CTkScrollableFrame",
+        lambda master=None, **kwargs: _FakeWidget(master=master, **kwargs),
+    )
     monkeypatch.setattr(ctk, "BooleanVar", lambda **kwargs: _FakeVar(**kwargs))
     monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
     return parent
@@ -313,6 +322,111 @@ def test_info_dialog_is_non_modal(harness: _FakeParent) -> None:
     assert harness.wait_called is False
     assert len(harness.windows) == 1
     assert {button.text for button in harness.buttons} == {tr("dialog.ok")}
+
+
+def test_import_game_dialog_returns_name_and_checked_paths(
+    harness: _FakeParent,
+) -> None:
+    """导入对话框: 预填名称与推断出的存档路径, 确认后原样返回(可改可勾选)."""
+    harness.click_text = tr("dialog.import_confirm")
+    result = dialogs.import_game_dialog(
+        harness,
+        DARK,
+        title="导入为游戏",
+        name_label="确认游戏名称:",
+        initial_name="星露谷",
+        paths_label="存档路径:",
+        paths_hint="提示",
+        initial_paths=("C:/one", "C:/two"),
+        add_text=tr("dialog.import_add_path"),
+        confirm_text=tr("dialog.import_confirm"),
+    )
+
+    assert result == ("星露谷", ("C:/one", "C:/two"))
+    assert {button.text for button in harness.buttons} >= {
+        tr("dialog.import_add_path"),
+        tr("dialog.cancel"),
+        tr("dialog.import_confirm"),
+    }
+
+
+def test_import_game_dialog_without_a_name_is_cancelled(
+    harness: _FakeParent,
+) -> None:
+    """名称留空时不提交, 与其它输入对话框一致(返回 None)."""
+    harness.click_text = tr("dialog.import_confirm")
+    result = dialogs.import_game_dialog(
+        harness,
+        DARK,
+        title="导入为游戏",
+        name_label="名称:",
+        initial_name="   ",
+        paths_label="路径:",
+        paths_hint="提示",
+        confirm_text=tr("dialog.import_confirm"),
+    )
+
+    assert result is None
+
+
+def test_import_game_dialog_browse_fills_each_path_row(harness: _FakeParent) -> None:
+    """每条路径都有"浏览…"按钮: 挑到的目录直接填进那一行, 并随确认一起返回."""
+    picked = ["C:/picked-one", "C:/picked-two"]
+    calls: list[str] = []
+
+    def browse() -> str:
+        value = picked[len(calls)]
+        calls.append(value)
+        return value
+
+    def browse_all_then_confirm() -> None:
+        for button in harness.buttons:
+            if button.text == tr("dialog.browse"):
+                button.click()
+        confirm = next(
+            button
+            for button in harness.buttons
+            if button.text == tr("dialog.import_confirm")
+        )
+        confirm.click()
+
+    harness.on_wait = browse_all_then_confirm
+    result = dialogs.import_game_dialog(
+        harness,
+        DARK,
+        title="导入为游戏",
+        name_label="确认游戏名称:",
+        initial_name="星露谷",
+        paths_label="存档路径:",
+        paths_hint="提示",
+        initial_paths=("C:/old-one", "C:/old-two"),
+        add_text=tr("dialog.import_add_path"),
+        confirm_text=tr("dialog.import_confirm"),
+        browse=browse,
+    )
+
+    assert calls == picked
+    assert result == ("星露谷", ("C:/picked-one", "C:/picked-two"))
+
+
+def test_import_game_dialog_without_browse_has_no_browse_button(
+    harness: _FakeParent,
+) -> None:
+    """没传 browse 时不出现"浏览…"按钮(无头环境或未接线时不显示死按钮)."""
+    harness.click_text = tr("dialog.import_confirm")
+    dialogs.import_game_dialog(
+        harness,
+        DARK,
+        title="导入为游戏",
+        name_label="名称:",
+        initial_name="星露谷",
+        paths_label="路径:",
+        paths_hint="提示",
+        initial_paths=("C:/one",),
+        confirm_text=tr("dialog.import_confirm"),
+    )
+
+    assert tr("dialog.browse") not in {button.text for button in harness.buttons}
 
 
 def test_ask_branch_name_returns_stripped(harness: _FakeParent) -> None:

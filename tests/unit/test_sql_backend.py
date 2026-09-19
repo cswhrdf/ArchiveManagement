@@ -8,10 +8,14 @@ import pytest
 
 import archive_management.application.locations as locations_mod
 from archive_management.domain import (
+    ArtworkRef,
     Game,
     GameCandidate,
     HomeFilter,
     HomeView,
+    PlatformGame,
+    PlatformId,
+    SavePathCandidate,
     ScheduledJob,
 )
 from archive_management.exceptions import ArchiveManagementError
@@ -22,9 +26,21 @@ from archive_management.infrastructure.repository import (
     GameRepository,
     ScheduledJobRepository,
 )
+from archive_management.services.artwork import (
+    ICON_SIZE,
+    ICON_VERSION,
+    STEAM_COVER_ASSET,
+    artwork_cache_at,
+    steam_cover,
+)
+from archive_management.services.game_names import NameFetcher, name_cache_at
+from archive_management.services.platform_adapters import SaveCandidateSource
 from archive_management.services.scheduler import BackupScheduler, ManualBackend
 from archive_management.ui.models import visible_in_branch_view
 from archive_management.ui.sql_backend import SqlArchiveService
+
+# 一张最小的 PNG 文件头(封面缓存只认文件头就能判定可用).
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
 
 pytestmark = [
     pytest.mark.backend,
@@ -867,6 +883,341 @@ def test_enabling_an_archived_game_is_rejected(tmp_path: Path) -> None:
     assert "已归档" in str(excinfo.value)
 
 
+class _FakeSaveSource:
+    """固定的存档候选来源(避免用例去读真实 Steam 目录)."""
+
+    def __init__(self, *paths: str) -> None:
+        self._paths = paths
+
+    def candidates(
+        self, app_id: str, *, install_dir: Path | None = None
+    ) -> list[SavePathCandidate]:
+        """返回构造时给定的候选路径."""
+        return [
+            SavePathCandidate(
+                path=path, reason_code="steam_remotecache", detail="remotecache.vdf"
+            )
+            for path in self._paths
+        ]
+
+
+class _FakeAdapter:
+    """测试替身适配器: 存档候选来自固定来源, 取图仍按公开 CDN 规则."""
+
+    platform: PlatformId = "steam"
+    supported: bool = True
+    unsupported_reason: str = ""
+    supports_save_paths: bool = True
+    supports_artwork: bool = True
+
+    def __init__(self, cloud: SaveCandidateSource) -> None:
+        self._cloud = cloud
+
+    def list_games(self) -> list[PlatformGame]:
+        """替身不提供游戏列表(用例自己造游戏记录)."""
+        return []
+
+    def save_candidates(self, game: PlatformGame) -> list[SavePathCandidate]:
+        """存档候选来自注入的固定来源."""
+        return self._cloud.candidates(game.game_id, install_dir=None)
+
+    def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
+        """封面按公开 CDN 规则构造(与真实适配器一致)."""
+        return () if not game.game_id else (steam_cover(game.game_id),)
+
+
+class _StubNames:
+    """按 AppID 返回固定译名的替身(不联网)."""
+
+    def __init__(self, names: dict[str, str]) -> None:
+        """绑定 AppID 到译名的映射."""
+        self._names = names
+
+    def fetch(
+        self, app_id: str, *, language: str, timeout: float, max_bytes: int
+    ) -> str | None:
+        """返回预设译名(没有映射时返回 None, 走原名回落)."""
+        del language, timeout, max_bytes
+        return self._names.get(app_id)
+
+
+def _steam_service(
+    tmp_path: Path,
+    *paths: str,
+    cache_dir: Path | None = None,
+    name_fetcher: NameFetcher | None = None,
+) -> tuple[SqlArchiveService, str, Database]:
+    """一个带 Steam AppID 的游戏 + 固定候选来源与替身适配器的服务实例."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    source = _FakeSaveSource(*paths)
+    service = SqlArchiveService(
+        database,
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+        cache_dir=cache_dir,
+        save_source=source,
+        adapters={"steam": _FakeAdapter(source)},
+        name_fetcher=name_fetcher,
+    )
+    game_id = service.add_game("Demo").game_id
+    game = GameRepository(database).get(int(game_id))
+    assert game is not None
+    GameRepository(database).update(game.model_copy(update={"steam_app_id": 730}))
+    # ``update`` 只写名称/Steam/平台/启用态, 来源要单独设(set_origin).
+    GameRepository(database).set_origin(int(game_id), "steam")
+    return service, game_id, database
+
+
+def test_discovery_rows_carry_probed_save_paths(tmp_path: Path) -> None:
+    """探测结果行里就带着该游戏的存档路径建议(只探测, 不写库)."""
+    save = tmp_path / "saves"
+    save.mkdir()
+    (save / "slot.dat").write_text("x", encoding="utf-8")
+    service, _game_id, database = _steam_service(tmp_path, str(save))
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    CandidateRepository(database).upsert(
+        GameCandidate(
+            name="哈迪斯",
+            install_dir=str(install),
+            source="steam",
+            reason_code="steam_manifest",
+            detail="appmanifest_1145360.acf",
+        )
+    )
+
+    item = next(row for row in service.list_candidates() if row.name == "哈迪斯")
+
+    assert item.save_supported is True
+    assert [path.path for path in item.save_paths] == [str(save)]
+    assert item.save_label == tr("discovery.save_found", count=1)
+    # 只是建议: 存档位置仍然要等用户在导入对话框里确认.
+    assert service.list_locations("1") == []
+
+
+def test_discovery_rows_say_when_the_platform_is_unsupported(tmp_path: Path) -> None:
+    """监控目录这类非平台来源不猜测存档路径, 行里明说需要手动添加."""
+    service, _game_id, database = _steam_service(tmp_path)
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    CandidateRepository(database).upsert(
+        GameCandidate(name="哈迪斯", install_dir=str(install), source="monitored")
+    )
+
+    item = next(row for row in service.list_candidates() if row.name == "哈迪斯")
+
+    assert item.save_supported is False
+    assert item.save_paths == ()
+    assert item.save_label == tr(
+        "discovery.save_unsupported", platform=item.source_label
+    )
+
+
+def test_artwork_path_reads_only_the_cache(tmp_path: Path) -> None:
+    """封面/图标接口只查缓存: 预置缓存图能拿到路径, 未配置缓存目录时返回空."""
+    cache = artwork_cache_at(tmp_path / "cache")
+    cover = cache.store(
+        "steam", "730", "cover", STEAM_COVER_ASSET, content=_PNG, extension="png"
+    )
+    icon = cache.store(
+        "steam", "730", "icon", ICON_VERSION, content=_PNG, extension="png"
+    )
+    service, game_id, _database = _steam_service(tmp_path, cache_dir=tmp_path / "cache")
+    plain, plain_id, _other = _steam_service(tmp_path / "plain")
+
+    assert service.artwork_path(game_id, "cover") == str(cover)
+    assert service.artwork_path(game_id, "icon") == str(icon)
+    assert plain.artwork_path(plain_id, "cover") == ""
+
+
+def test_prefetch_names_localizes_only_unrenamed_games(tmp_path: Path) -> None:
+    """译名只写到"没改过名"的游戏上: 用户改过的名字优先, 取不到就保留原名."""
+    fetcher = _StubNames({"730": "无尽塔防 2", "1": "无名游戏"})
+    service, game_id, database = _steam_service(tmp_path, name_fetcher=fetcher)
+    service._localize_names(refresh=False)
+
+    game = GameRepository(database).get(int(game_id))
+    assert game is not None
+    assert game.name == "无尽塔防 2"
+
+    # 用户改过名(与首次录入的名称不同)的游戏不会再被译名覆盖.
+    renamed = game.model_copy(update={"name": "我给它起的名字"})
+    GameRepository(database).update(renamed)
+    service._localize_names(refresh=False)
+
+    stored = GameRepository(database).get(int(game_id))
+    assert stored is not None
+    assert stored.name == "我给它起的名字"
+
+
+def test_prefetch_names_keeps_the_detected_name_without_a_translation(
+    tmp_path: Path,
+) -> None:
+    """该语言没有译文(或取不到)时保留探测到的原名, 不猜也不翻."""
+    service, game_id, database = _steam_service(
+        tmp_path, name_fetcher=_StubNames({"999": "别的游戏"})
+    )
+
+    service._localize_names(refresh=False)
+
+    game = GameRepository(database).get(int(game_id))
+    assert game is not None
+    assert game.name == "Demo"
+
+
+def test_discovery_rows_read_the_localized_name_from_the_cache(
+    tmp_path: Path,
+) -> None:
+    """探测结果行显示缓存里的当前语言译名(扫描时已补好), 没缓存就回落原名."""
+    cache_dir = tmp_path / "cache"
+    name_cache_at(cache_dir).put("1145360", "zh-CN", "哈迪斯")
+    service, _game_id, database = _steam_service(tmp_path, cache_dir=cache_dir)
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    CandidateRepository(database).upsert(
+        GameCandidate(
+            name="Hades",
+            install_dir=str(install),
+            source="steam",
+            reason_code="steam_manifest",
+            detail="appmanifest_1145360.acf",
+        )
+    )
+
+    item = next(row for row in service.list_candidates() if row.name == "Hades")
+
+    assert item.localized_name == "哈迪斯"
+    assert item.display_name == "哈迪斯"
+
+
+def test_discovery_rows_keep_the_detected_name_without_a_translation(
+    tmp_path: Path,
+) -> None:
+    """没有译名(或不是平台清单来源)的候选直接显示探测到的名称."""
+    service, _game_id, database = _steam_service(tmp_path)
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    CandidateRepository(database).upsert(
+        GameCandidate(name="Hades", install_dir=str(install), source="monitored")
+    )
+
+    item = next(row for row in service.list_candidates() if row.name == "Hades")
+
+    assert item.localized_name == ""
+    assert item.display_name == "Hades"
+
+
+def test_prefetch_names_fills_candidate_names_without_touching_games(
+    tmp_path: Path,
+) -> None:
+    """探测结果还不是游戏: 译名只写进缓存, 不会凭空多出一条游戏记录."""
+    cache_dir = tmp_path / "cache"
+    service, _game_id, database = _steam_service(
+        tmp_path,
+        cache_dir=cache_dir,
+        name_fetcher=_StubNames({"1145360": "哈迪斯"}),
+    )
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    CandidateRepository(database).upsert(
+        GameCandidate(
+            name="Hades",
+            install_dir=str(install),
+            source="steam",
+            reason_code="steam_manifest",
+            detail="appmanifest_1145360.acf",
+        )
+    )
+
+    service._localize_names(refresh=False)
+
+    assert name_cache_at(cache_dir).get("1145360", "zh-CN") == "哈迪斯"
+    assert [game.name for game in service.list_games()] == ["Demo"]
+
+
+def test_delete_game_removes_its_artwork_cache(tmp_path: Path) -> None:
+    """删游戏时把它探测到的封面/图标缓存一起删掉(缓存是可再生的派生数据)."""
+    cache_dir = tmp_path / "cache"
+    cache = artwork_cache_at(cache_dir)
+    cache.store(
+        "steam", "730", "cover", STEAM_COVER_ASSET, content=_PNG, extension="png"
+    )
+    cache.store("steam", "730", "icon", ICON_VERSION, content=_PNG, extension="png")
+    service, game_id, _database = _steam_service(tmp_path, cache_dir=cache_dir)
+
+    service.delete_game(game_id)
+
+    assert cache.lookup_any("steam", "730", "cover") is None
+    assert cache.lookup_any("steam", "730", "icon") is None
+
+
+def test_icon_is_derived_from_the_cover(tmp_path: Path) -> None:
+    """封面到位后从它裁出方形图标(Steam 的 logo.png 是标题图, 不用)."""
+    from PIL import Image
+
+    cache_dir = tmp_path / "cache"
+    cache = artwork_cache_at(cache_dir)
+    cover = tmp_path / "cover.png"
+    Image.new("RGB", (300, 450), (10, 20, 30)).save(cover)
+    cache.store(
+        "steam",
+        "730",
+        "cover",
+        STEAM_COVER_ASSET,
+        content=cover.read_bytes(),
+        extension="png",
+    )
+    service, _game_id, database = _steam_service(tmp_path, cache_dir=cache_dir)
+    game = GameRepository(database).get(1)
+    assert game is not None
+    referenced = service._artwork_game(game)
+    assert referenced is not None
+
+    # 封面已有(不计入), 这一份是刚裁出来的图标.
+    assert service._fetch_artwork(cache, referenced) == 1
+
+    icon = service.artwork_path("1", "icon")
+    assert icon != ""
+    with Image.open(icon) as made:
+        assert made.size == (ICON_SIZE, ICON_SIZE)
+
+
+def test_import_candidate_writes_the_confirmed_save_paths(tmp_path: Path) -> None:
+    """导入时把用户确认的路径写成存档位置: 平台候选保留来源, 新增的记手动."""
+    save = tmp_path / "saves"
+    save.mkdir()
+    (save / "slot.dat").write_text("x", encoding="utf-8")
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    service, _game_id, database = _steam_service(tmp_path, str(save))
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    candidate, _created = CandidateRepository(database).upsert(
+        GameCandidate(
+            name="哈迪斯",
+            install_dir=str(install),
+            source="steam",
+            reason_code="steam_manifest",
+            detail="appmanifest_1145360.acf",
+        )
+    )
+    assert candidate.id is not None
+
+    summary = service.import_candidate(
+        str(candidate.id), save_paths=(str(save), str(extra))
+    )
+
+    assert summary.saved_paths == 2
+    game = GameRepository(database).get(int(summary.game_id))
+    assert game is not None
+    assert game.steam_app_id == 1145360
+    sources = {
+        item.path: item.source for item in service.list_locations(summary.game_id)
+    }
+    assert sources == {str(save): "steam", str(extra): "manual"}
+
+
 # ------------------------------------------------- 恢复与删除原始位置
 
 
@@ -1044,9 +1395,12 @@ def test_candidate_ignore_restore_and_relocate(tmp_path: Path) -> None:
 
     ignored = service.set_candidate_ignored(candidate.candidate_id, True)
     assert ignored.status == "ignored"
-    assert service.list_candidates(status="ignored")[0].candidate_id == (
-        candidate.candidate_id
-    )
+    # 用集合判断而不是取第一条: 扫描本机时也可能会带出别的已忽略候选
+    # (例如平台官方工具被默认隐藏).
+    ignored_ids = {
+        item.candidate_id for item in service.list_candidates(status="ignored")
+    }
+    assert candidate.candidate_id in ignored_ids
 
     restored = service.set_candidate_ignored(candidate.candidate_id, False)
     assert restored.status == "new"

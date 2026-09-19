@@ -17,6 +17,7 @@ from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan, RestoreTarget
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
+    ArtworkKind,
     BackupNode,
     DeletionMode,
     DeletionPlan,
@@ -26,7 +27,7 @@ from archive_management.domain import (
     plan_deletion,
 )
 from archive_management.exceptions import ArchiveManagementError
-from archive_management.i18n import tr
+from archive_management.i18n import current_locale, tr
 from archive_management.services.naming import game_folder
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.processes import ProcessProbe
@@ -38,6 +39,7 @@ from archive_management.ui.models import (
     HomeBoard,
     LocationItem,
     MonitoredDirItem,
+    SavePathSuggestion,
     ScanSummary,
     ScheduleItem,
     TaskStatus,
@@ -55,6 +57,18 @@ def _dt(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
 def _stamp(moment: datetime) -> str:
     """把时间格式化为本地时区的展示文本(与真实后端一致)."""
     return moment.astimezone().strftime("%Y/%m/%d %H:%M")
+
+
+# 演示用的译名(真实后端按 AppID 向平台问一次; 这里写死两种语言, 便于演示与用例).
+_DEMO_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "cand-1": {"zh-CN": "星际拓荒", "en": "Outer Wilds"},
+    "cand-6": {"zh-CN": "星露谷物语", "en": "Stardew Valley"},
+}
+
+
+def _demo_localized(candidate_id: str) -> str:
+    """探测结果在当前界面语言下的译名(没有译名的候选返回空串, 界面回落原名)."""
+    return _DEMO_TRANSLATIONS.get(candidate_id, {}).get(current_locale(), "")
 
 
 def _now_label() -> str:
@@ -250,6 +264,12 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
         health="ok",
         detail="appmanifest_753640.acf",
         game_id="outer-wilds",
+        save_paths=(
+            SavePathSuggestion(
+                path="C:\\Users\\demo\\Documents\\Outer Wilds",
+                path_kind="directory",
+            ),
+        ),
     ),
     CandidateItem(
         candidate_id="cand-2",
@@ -260,6 +280,7 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
         status="new",
         health="ok",
         detail="D:\\Games",
+        save_supported=False,
     ),
     CandidateItem(
         candidate_id="cand-3",
@@ -270,6 +291,7 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
         status="new",
         health="ok",
         detail="terraria.item",
+        save_supported=False,
     ),
     CandidateItem(
         candidate_id="cand-4",
@@ -280,6 +302,7 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
         status="new",
         health="missing",
         detail="1207664623",
+        save_supported=False,
     ),
     CandidateItem(
         candidate_id="cand-5",
@@ -290,6 +313,28 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
         status="ignored",
         health="ok",
         detail="D:\\Games",
+        save_supported=False,
+    ),
+    CandidateItem(
+        candidate_id="cand-6",
+        name="Stardew Valley",
+        install_dir="D:\\Steam\\steamapps\\common\\StardewValley",
+        source="steam",
+        confidence="high",
+        status="new",
+        health="ok",
+        detail="appmanifest_413150.acf",
+        save_paths=(
+            SavePathSuggestion(
+                path="C:\\Users\\demo\\AppData\\Roaming\\StardewValley\\Saves",
+                path_kind="directory",
+            ),
+            SavePathSuggestion(
+                path="C:\\Users\\demo",
+                path_kind="directory",
+                dangerous=True,
+            ),
+        ),
     ),
 )
 
@@ -1049,16 +1094,23 @@ class DemoArchiveService:
         )
 
     def list_candidates(self, *, status: str | None = None) -> list[CandidateItem]:
-        """返回演示探测结果(可按处理进度筛选)."""
-        items = list(self._candidates.values())
+        """返回演示探测结果(可按处理进度筛选), 并带上当前语言的译名."""
+        items = [
+            replace(item, localized_name=_demo_localized(item.candidate_id))
+            for item in self._candidates.values()
+        ]
         if status not in (None, "", "all"):
             items = [item for item in items if item.status == status]
         return items
 
     def import_candidate(
-        self, candidate_id: str, *, name: str | None = None
+        self,
+        candidate_id: str,
+        *,
+        name: str | None = None,
+        save_paths: Sequence[str] = (),
     ) -> GameSummary:
-        """把演示候选导入为游戏."""
+        """把演示候选导入为游戏, 并写入用户确认的存档路径."""
         item = self._require_candidate(candidate_id)
         if item.status == "imported" and item.game_id is not None:
             raise ArchiveManagementError(tr("error.candidate_imported"))
@@ -1066,8 +1118,13 @@ class DemoArchiveService:
         self._candidates[candidate_id] = replace(
             item, status="imported", game_id=summary.game_id
         )
+        wanted = [path for path in save_paths if path.strip()]
+        for path in wanted:
+            self.add_location(summary.game_id, path=path, kind="directory")
         self._revision += 1
-        return summary
+        imported = replace(summary, saved_paths=len(wanted))
+        self._meta[summary.game_id] = imported
+        return imported
 
     def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
         """把演示候选标记为"已忽略"或恢复为"待处理"."""
@@ -1109,6 +1166,18 @@ class DemoArchiveService:
                 tr("error.unknown_candidate", candidate_id=candidate_id)
             )
         return item
+
+    # -- 图片 ---------------------------------------------------------------
+
+    def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+        """演示后端不提供图片(界面回落名称/色块占位)."""
+        return ""
+
+    def prefetch_artwork(self) -> None:
+        """演示后端不下载图片."""
+
+    def prefetch_names(self, *, refresh: bool = False) -> None:
+        """演示后端不联网探测译名(真实后端会按当前语言问一次商店)."""
 
     # -- 统一游戏主页 ------------------------------------------------------
 
@@ -1238,6 +1307,7 @@ class DemoArchiveService:
             tone=meta.tone,
             enabled=meta.enabled,
             archived=self._archived.get(game_id, False),
+            saved_paths=meta.saved_paths,
         )
 
     def _find_location(self, location_id: str) -> LocationItem:

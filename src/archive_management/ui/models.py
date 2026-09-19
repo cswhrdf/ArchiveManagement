@@ -19,6 +19,7 @@ from archive_management.domain import (
     HomeStats,
     HomeView,
     PathKind,
+    SavePathCandidate,
     SaveSource,
     TreeInput,
     action_allowed,
@@ -27,6 +28,7 @@ from archive_management.domain import (
     tree_depths,
 )
 from archive_management.i18n import tr
+from archive_management.services.pathcheck import dangerous_target_reason
 
 
 class ViewKind(StrEnum):
@@ -110,6 +112,9 @@ class GameSummary:
     # 由 ``domain.entities.Game`` 的默认值决定.
     enabled: bool = True
     archived: bool = False
+    # 导入时写进存档位置的路径数(0 表示这次导入没有带存档位置);
+    # 只用于现场反馈, 路径本身由用户在导入对话框里确认或修改.
+    saved_paths: int = 0
 
     @property
     def list_detail(self) -> str:
@@ -487,6 +492,8 @@ class ScanSummary:
     updated: int
     linked: int
     unusable: int
+    # 命中平台工具排除清单、被默认隐藏(已忽略)的候选数量.
+    excluded: int = 0
     errors: tuple[str, ...] = ()
 
     @property
@@ -496,11 +503,13 @@ class ScanSummary:
 
     @property
     def detail(self) -> str:
-        """副提示文案: 监控目录数、路径不可用数与自动识别数量."""
+        """副提示文案: 监控目录数、路径不可用数、自动隐藏数与自动识别数量."""
         parts = [
             tr("discovery.scan_monitored", count=self.monitored, active=self.active),
             tr("discovery.scan_unusable", count=self.unusable),
         ]
+        if self.excluded:
+            parts.append(tr("discovery.scan_excluded", count=self.excluded))
         if self.linked:
             parts.append(tr("discovery.scan_linked", count=self.linked))
         if self.errors:
@@ -567,6 +576,41 @@ class CandidateFilter(StrEnum):
 
 
 @dataclass(frozen=True)
+class SavePathSuggestion:
+    """探测游戏时顺带推断出的一条存档路径(还没写进存档位置).
+
+    只在界面展示与导入对话框里回填: 用户确认后才变成存档位置, 推断不出来也不
+    影响游戏本身导入成功。路径都来自平台清单这类可信渠道, 所以不再标注可信度;
+    需要提醒的只剩下"危险目标"(用户主目录、盘符根、游戏安装目录内部)。
+    """
+
+    path: str
+    path_kind: str  # file/directory
+    dangerous: bool = False
+
+    @classmethod
+    def from_candidate(cls, item: SavePathCandidate) -> SavePathSuggestion:
+        """把平台给出的候选收敛成展示模型(危险路径当场标记)."""
+        return cls(
+            path=item.path,
+            path_kind=item.path_kind,
+            dangerous=dangerous_target_reason(item.path) is not None,
+        )
+
+    @property
+    def risk_label(self) -> str:
+        """危险路径的提示文案(安全时为空串)."""
+        return tr("discovery.save_risk") if self.dangerous else ""
+
+    @property
+    def text(self) -> str:
+        """列表行里的一句话: 路径 (危险时补一句提醒)."""
+        if not self.dangerous:
+            return self.path
+        return f"{self.path} · {self.risk_label}"
+
+
+@dataclass(frozen=True)
 class CandidateItem:
     """探测结果列表中的单条数据."""
 
@@ -579,6 +623,11 @@ class CandidateItem:
     health: str  # ok/missing/not_directory/unreadable/unsafe
     detail: str = ""
     game_id: str | None = None
+    # 当前语言下的译名(空表示没有译名, 界面回落到探测到的名称).
+    localized_name: str = ""
+    # 探测这款游戏时顺带推断出的存档路径(不落库); 平台不支持时为空.
+    save_paths: tuple[SavePathSuggestion, ...] = ()
+    save_supported: bool = True
 
     @property
     def source_label(self) -> str:
@@ -604,6 +653,20 @@ class CandidateItem:
     def importable(self) -> bool:
         """是否可以直接导入为游戏(路径可用且尚未处理)."""
         return self.status == "new" and self.health == "ok"
+
+    @property
+    def display_name(self) -> str:
+        """界面上显示的名称: 有当前语言的译名就用译名, 没有就用探测到的名称."""
+        return self.localized_name or self.name
+
+    @property
+    def save_label(self) -> str:
+        """存档路径推断结果的提示文案(三态: 不支持 / 没推出来 / 推出来 N 条)."""
+        if not self.save_supported:
+            return tr("discovery.save_unsupported", platform=self.source_label)
+        if not self.save_paths:
+            return tr("discovery.save_none")
+        return tr("discovery.save_found", count=len(self.save_paths))
 
     @property
     def summary(self) -> str:

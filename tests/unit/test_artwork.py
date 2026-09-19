@@ -6,23 +6,36 @@
 
 from __future__ import annotations
 
+import io
 import os
 from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 import pytest
+from PIL import Image
 
 from archive_management.domain import ArtworkRef, PlatformGame
 from archive_management.exceptions import ArtworkError
 from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.services.artwork import (
+    ICON_SIZE,
+    ICON_VERSION,
+    STEAM_CDN_ROOT,
+    STEAM_COVER_ASSET,
     ArtworkCache,
     FetchedArtwork,
     HttpArtworkFetcher,
     artwork_cache,
+    artwork_cache_at,
+    cached_artwork,
+    platform_game,
     resolve_artwork,
     sniff_media_type,
+    square_icon,
+    steam_artwork,
+    steam_cover,
+    steam_icon,
 )
 
 pytestmark = [
@@ -282,6 +295,89 @@ def test_resolution_survives_an_error_response(tmp_path: Path) -> None:
 
     assert result.source == "stale"
     assert result.path == older
+
+
+def test_steam_cover_uses_the_public_cdn_rule(tmp_path: Path) -> None:
+    """封面按公开 CDN 规则构造, 资源名同时是缓存版本."""
+    reference = steam_cover("730")
+    assert reference.kind == "cover"
+    assert reference.url == (f"{STEAM_CDN_ROOT}/730/{STEAM_COVER_ASSET}")
+    assert reference.version == STEAM_COVER_ASSET
+
+
+def test_steam_icon_is_derived_from_the_cover() -> None:
+    """图标不再是下载资源: 引用不带地址, 由封面裁出来."""
+    icon = steam_icon("730")
+    assert icon.kind == "icon"
+    assert icon.url == ""
+    assert icon.version == ICON_VERSION
+
+    pair = steam_artwork("730")
+    assert [reference.kind for reference in pair] == ["cover", "icon"]
+    assert pair[0].url.endswith(STEAM_COVER_ASSET)
+
+
+def test_forget_removes_every_cached_image_of_a_game(tmp_path: Path) -> None:
+    """删游戏时清缓存: 该游戏的封面与图标都要删掉, 空目录也不留."""
+    cache = artwork_cache_at(tmp_path / "cache")
+    cache.store(
+        "steam", "730", "cover", STEAM_COVER_ASSET, content=_PNG, extension="png"
+    )
+    cache.store("steam", "730", "icon", ICON_VERSION, content=_PNG, extension="png")
+    cache.store(
+        "steam", "999", "cover", STEAM_COVER_ASSET, content=_PNG, extension="png"
+    )
+
+    removed = cache.forget("steam", "730")
+
+    assert len(removed) == 2
+    assert cache.lookup_any("steam", "730", "cover") is None
+    assert cache.directory("steam", "730").exists() is False
+    # 别的游戏不受影响; 再删一次是幂等的(不报错).
+    assert cache.lookup_any("steam", "999", "cover") is not None
+    assert cache.forget("steam", "730") == []
+
+
+def test_square_icon_crops_the_cover_into_a_square(tmp_path: Path) -> None:
+    """方形图标: 从竖版封面裁出正方形(Steam 的 logo.png 是标题图, 不适合当图标)."""
+    cover = tmp_path / "cover.png"
+    Image.new("RGB", (300, 450), (10, 20, 30)).save(cover)
+
+    content = square_icon(cover)
+
+    assert content is not None
+    with Image.open(io.BytesIO(content)) as made:
+        assert made.size == (ICON_SIZE, ICON_SIZE)
+
+
+def test_square_icon_returns_none_for_a_broken_file(tmp_path: Path) -> None:
+    """裁不开的文件不抛异常, 由调用方回落占位."""
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"not an image")
+
+    assert square_icon(broken) is None
+
+
+def test_cached_artwork_never_touches_the_network(tmp_path: Path) -> None:
+    """渲染用接口只查缓存: 没有缓存就是没有, 不会自己去下载."""
+    cache = _cache(tmp_path)
+    game = platform_game(
+        store="steam", game_id="730", name="Demo", artwork=(steam_cover("730"),)
+    )
+
+    assert cached_artwork(game, "cover", cache) is None
+
+    stored = cache.store("steam", "730", "cover", "v1", content=_PNG, extension="png")
+    assert cached_artwork(game, "cover", cache) == stored
+
+
+def test_cached_artwork_skips_a_corrupt_file(tmp_path: Path) -> None:
+    """缓存内容坏掉时渲染接口也当作没有图, 让界面走占位."""
+    cache = _cache(tmp_path)
+    cache.store("steam", "730", "cover", "v1", content=b"garbage", extension="png")
+    game = platform_game(store="steam", game_id="730", name="Demo")
+
+    assert cached_artwork(game, "cover", cache) is None
 
 
 def test_external_identifiers_cannot_escape_the_cache_root(tmp_path: Path) -> None:

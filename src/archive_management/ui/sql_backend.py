@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+from archive_management.application import candidates as candidate_cases
 from archive_management.application import discovery as discovery_cases
 from archive_management.application import games as games_cases
 from archive_management.application import home as home_cases
@@ -28,6 +29,8 @@ from archive_management.application.locations import (
 from archive_management.application.restore import RestorePlan, RestoreService
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
+    PLATFORM_IDS,
+    ArtworkKind,
     BackupNode,
     CandidateStatus,
     DeletionMode,
@@ -38,6 +41,8 @@ from archive_management.domain import (
     MonitoredDirectory,
     NodeKind,
     PathKind,
+    PlatformGame,
+    PlatformId,
     SaveLocation,
     ScheduledJob,
     candidate_sort_key,
@@ -48,7 +53,7 @@ from archive_management.exceptions import (
     ContentUnchangedError,
     OperationCancelledError,
 )
-from archive_management.i18n import tr
+from archive_management.i18n import current_locale, tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     BackupRepository,
@@ -58,13 +63,35 @@ from archive_management.infrastructure.repository import (
     SaveLocationRepository,
     ScheduledJobRepository,
 )
+from archive_management.services.artwork import (
+    ICON_VERSION,
+    ArtworkCache,
+    artwork_cache_at,
+    cached_artwork,
+    platform_game,
+    resolve_artwork,
+    square_icon,
+)
 from archive_management.services.audit import log_action, redacted_path
+from archive_management.services.exclusions import load_exclusions
+from archive_management.services.game_names import (
+    NameCache,
+    NameFetcher,
+    name_cache_at,
+    resolve_name,
+)
 from archive_management.services.pathcheck import (
     normalize_path,
     probe_path,
     summarize_path,
 )
-from archive_management.services.platform_scan import path_health
+from archive_management.services.platform_adapters import (
+    PlatformAdapter,
+    SaveCandidateSource,
+    adapter_for,
+    default_adapters,
+)
+from archive_management.services.platform_scan import default_roots, path_health
 from archive_management.services.scheduler import (
     BackupScheduler,
     ScheduledEntry,
@@ -72,6 +99,7 @@ from archive_management.services.scheduler import (
     parse_interval,
 )
 from archive_management.services.snapshot import verify_snapshot
+from archive_management.services.steam_cloud import SteamCloudSource
 from archive_management.ui.models import (
     BackupItem,
     CandidateItem,
@@ -80,6 +108,7 @@ from archive_management.ui.models import (
     HomeBoard,
     LocationItem,
     MonitoredDirItem,
+    SavePathSuggestion,
     ScanSummary,
     ScheduleItem,
     TaskStatus,
@@ -146,6 +175,32 @@ def _interval_label(minutes: int) -> str:
     return format_interval(minutes)
 
 
+def _platform_game(candidate: GameCandidate) -> PlatformGame | None:
+    """把探测结果包装成平台数据模型(解析不出平台游戏标识时返回 ``None``)."""
+    if candidate.source not in PLATFORM_IDS:
+        return None
+    app_id = discovery_cases.candidate_app_id(candidate)
+    if app_id is None:
+        return None
+    return PlatformGame(
+        platform=candidate.source,
+        game_id=str(app_id),
+        name=candidate.name,
+        install_dir=candidate.install_dir,
+    )
+
+
+def _library_game(game: Game) -> PlatformGame | None:
+    """把库里的游戏包装成平台数据模型(来源不是平台或没有标识时返回 ``None``)."""
+    if game.origin not in PLATFORM_IDS or game.steam_app_id is None:
+        return None
+    return platform_game(
+        store=game.origin,
+        game_id=str(game.steam_app_id),
+        name=game.name,
+    )
+
+
 @dataclass
 class _ActiveOperation:
     """一次正在进行中的备份(用于进度展示与取消请求)."""
@@ -165,8 +220,16 @@ class SqlArchiveService:
         *,
         backup_root: Path,
         scheduler: BackupScheduler | None = None,
+        cache_dir: Path | None = None,
+        save_source: SaveCandidateSource | None = None,
+        adapters: Mapping[PlatformId, PlatformAdapter] | None = None,
+        name_fetcher: NameFetcher | None = None,
     ) -> None:
-        """绑定数据库、备份根目录与调度器(默认惰性创建)."""
+        """绑定数据库、备份根目录、调度器与缓存目录(后两者默认惰性创建).
+
+        ``cache_dir`` 为空时封面接口一律返回空: 测试与未配置应用路径的场景直接走
+        占位图, 不去碰真实用户缓存目录。
+        """
         self._database = database
         self._backup_root = backup_root
         self._games = GameRepository(database)
@@ -185,6 +248,15 @@ class SqlArchiveService:
         self._operation_lock = threading.Lock()
         self._active: _ActiveOperation | None = None
         self._verify_cache: dict[str, bool] = {}
+        self._cache_dir = cache_dir
+        self._save_source = save_source
+        self._adapters = adapters
+        self._name_fetcher = name_fetcher
+        self._names_lock = threading.Lock()
+        self._names_running = False
+        self._artwork_lock = threading.Lock()
+        self._artwork_running = False
+        self._artwork_attempts: set[str] = set()
         self._restore_schedules()
 
     def _restore_schedules(self) -> None:
@@ -314,9 +386,33 @@ class SqlArchiveService:
         return self._summary(updated)
 
     def delete_game(self, game_id: str) -> None:
-        """删除游戏记录, 并把它带来的探测候选退回待处理."""
-        _game, gid = self._game_ref(game_id)
+        """删除游戏记录、它带来的探测候选, 以及它的封面/图标缓存.
+
+        缓存是可再生的派生数据, 留着既不体面也会让同名游戏误用旧图 —— 删游戏时一起
+        清掉。
+        """
+        game, gid = self._game_ref(game_id)
         games_cases.delete_game(self._database, gid)
+        self._forget_artwork(game)
+        self._forget_names(game)
+        # 这个游戏已经不存在了: 把它从"本次会话已尝试过"的集合里拿掉, 免得再建同名
+        # 游戏时被当成"试过了"而不再取图。
+        self._artwork_attempts.discard(str(gid))
+
+    def _forget_artwork(self, game: Game) -> None:
+        """把这款游戏探测到的封面与图标缓存一起删掉."""
+        cache = self._artwork_cache()
+        referenced = None if cache is None else _library_game(game)
+        if cache is None or referenced is None:
+            return
+        for path in cache.forget(referenced.platform, referenced.game_id):
+            logger.debug("已清理缓存图片: %s", path)
+
+    def _forget_names(self, game: Game) -> None:
+        """把这款游戏缓存的译名一起删掉(游戏不在了, 留着只会误用)."""
+        if self._cache_dir is None or game.steam_app_id is None:
+            return
+        name_cache_at(self._cache_dir).forget(str(game.steam_app_id))
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
         """启用或停用一个游戏(启用时会自动停用其它启用中的游戏)."""
@@ -621,9 +717,14 @@ class SqlArchiveService:
     def scan_candidates(self) -> ScanSummary:
         """扫描平台安装目录与监控目录, 返回结果摘要.
 
-        扫描会同时刷新监控目录的上次扫描时间与候选的路径健康状态。
+        扫描会同时刷新监控目录的上次扫描时间与候选的路径健康状态; 命中平台工具
+        排除清单(`resources/excluded-games.json`)的候选会被默认标记为"已忽略"。
         """
-        report = discovery_cases.scan_library(self._database)
+        report = discovery_cases.scan_library(
+            self._database, exclusions=load_exclusions()
+        )
+        # 扫描完就顺手补一次译名(后台线程 + 走缓存): 探测结果页要直接显示译名.
+        self.prefetch_names()
         return ScanSummary(
             monitored=report.monitored,
             active=report.active,
@@ -632,6 +733,7 @@ class SqlArchiveService:
             updated=report.updated,
             linked=report.linked,
             unusable=report.unusable,
+            excluded=report.excluded,
             errors=report.errors,
         )
 
@@ -644,14 +746,68 @@ class SqlArchiveService:
         ]
 
     def import_candidate(
-        self, candidate_id: str, *, name: str | None = None
+        self,
+        candidate_id: str,
+        *,
+        name: str | None = None,
+        save_paths: Sequence[str] = (),
     ) -> GameSummary:
-        """把一条探测结果导入为游戏, 返回新游戏的摘要."""
-        game = discovery_cases.import_candidate(
-            self._database, self._candidate_ref(candidate_id), name=name
-        )
+        """把一条探测结果导入为游戏, 并写入用户确认的存档路径.
+
+        路径来自导入对话框(预填值就是扫描阶段推出来的候选, 用户可以改也可以去掉):
+        与平台候选一致的走 ``confirm_candidate``(保留"来自哪份清单"的可追溯性),
+        用户改过或新增的走 ``add_location``(记成手动添加)。两者都会再走一遍危险
+        位置校验, 被拒的路径直接报错, 不写一半。
+        """
+        candidate = self._candidate_ref(candidate_id)
+        game = discovery_cases.import_candidate(self._database, candidate, name=name)
+        written = self._apply_save_paths(game, save_paths)
         self._touch()
-        return self._summary(game)
+        return replace(self._summary(game), saved_paths=written)
+
+    def _apply_save_paths(self, game: Game, paths: Sequence[str]) -> int:
+        """把导入对话框里确认的存档路径写进库, 返回写入条数."""
+        wanted = [normalize_path(path) for path in paths if path.strip()]
+        if game.id is None or not wanted:
+            return 0
+        known = self._suggest_for_game(game)
+        for path in wanted:
+            reference = known.get(path)
+            if reference is None:
+                self.add_location(
+                    str(game.id),
+                    path=path,
+                    kind="directory" if Path(path).is_dir() else "file",
+                )
+            else:
+                candidate_cases.confirm_candidate(self._database, reference)
+        return len(wanted)
+
+    def _suggest_for_game(self, game: Game) -> dict[str, int]:
+        """探测该游戏的存档候选并落库为待确认, 返回 ``{规范化路径: 候选 id}``.
+
+        落库是为了保留"这条路径来自哪个平台的哪份清单"的来源信息; 平台不支持
+        存档探测(或没有可信来源)时返回空字典, 导入照常进行。
+        """
+        if game.id is None:
+            return {}
+        adapter = self._adapter_for(game.origin)
+        if adapter is None or not adapter.supports_save_paths:
+            return {}
+        report = candidate_cases.suggest_candidates(
+            self._database, game.id, self._save_candidate_source(), platform=game.origin
+        )
+        stored: dict[str, int] = {}
+        for item in report.candidates:
+            if item.id is not None:
+                stored[normalize_path(item.path)] = item.id
+        return stored
+
+    def _save_candidate_source(self) -> SaveCandidateSource:
+        """存档候选来源: 未注入时读本机公开的 Steam 云同步清单."""
+        if self._save_source is not None:
+            return self._save_source
+        return SteamCloudSource(default_roots())
 
     def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
         """把候选标记为"已忽略"或恢复为"待处理"."""
@@ -693,9 +849,9 @@ class SqlArchiveService:
             ),
         )
 
-    @staticmethod
-    def _candidate_item(candidate: GameCandidate) -> CandidateItem:
-        """把候选实体映射为展示模型(路径状态实时判定)."""
+    def _candidate_item(self, candidate: GameCandidate) -> CandidateItem:
+        """把候选实体映射为展示模型(路径状态实时判定, 顺带带上存档路径建议)."""
+        suggestions = self._save_suggestions(candidate)
         return CandidateItem(
             candidate_id=str(candidate.id),
             name=candidate.name,
@@ -706,7 +862,225 @@ class SqlArchiveService:
             health=path_health(candidate.install_dir),
             detail=candidate.detail,
             game_id=None if candidate.game_id is None else str(candidate.game_id),
+            localized_name=self._cached_name(candidate),
+            save_paths=() if suggestions is None else suggestions,
+            save_supported=suggestions is not None,
         )
+
+    def _save_suggestions(
+        self, candidate: GameCandidate
+    ) -> tuple[SavePathSuggestion, ...] | None:
+        """探测这款游戏的存档路径(只探测不落库); 平台不支持时返回 ``None``.
+
+        这是"扫描发现游戏时就顺手推断存档目录"的入口: 结果直接展示在探测结果页,
+        真正写入要等用户在导入对话框里确认。拿不到平台标识(或平台没实现存档
+        探测)时返回 ``None``, 界面据此显示"需手动添加"而不是"探测过了但没有"。
+        """
+        game = _platform_game(candidate)
+        adapter = None if game is None else self._adapter_for(game.platform)
+        if game is None or adapter is None or not adapter.supports_save_paths:
+            return None
+        try:
+            found = adapter.save_candidates(game)
+        except Exception as exc:  # 适配器边界: 意外错误只降级, 不阻断扫描
+            logger.debug("推断存档路径失败(%s): %s", candidate.name, exc)
+            return ()
+        return tuple(SavePathSuggestion.from_candidate(item) for item in found)
+
+    def _adapter_for(self, platform: str) -> PlatformAdapter | None:
+        """按来源取平台适配器; 非平台来源(监控目录/手动添加)返回 ``None``.
+
+        适配器表在第一次真正需要时才构造(要读本机注册表与安装目录)。
+        """
+        if self._adapters is None:
+            self._adapters = default_adapters(default_roots())
+        return adapter_for(self._adapters, platform)
+
+    # -- 游戏译名 -----------------------------------------------------------
+
+    def prefetch_names(self, *, refresh: bool = False) -> None:
+        """后台按当前界面语言补齐译名(取不到就保留探测到的原名).
+
+        同一个实例同时只跑一个线程; 译名会直接改写到游戏记录里, 因此完成后抬高
+        数据版本, 界面重读就能看到新名字。
+        """
+        if self._cache_dir is None:
+            return
+        with self._names_lock:
+            if self._names_running:
+                return
+            self._names_running = True
+        threading.Thread(
+            target=self._localize_names, args=(refresh,), daemon=True
+        ).start()
+
+    def _localize_names(self, refresh: bool) -> None:
+        """在工作线程里补译名: 游戏改写记录, 探测结果只填缓存.
+
+        改过名的游戏跳过(用户起的名字优先), 没有平台标识的也跳过 —— 拿不到 AppID
+        就没有可信的译文来源。
+        """
+        try:
+            # 没有缓存目录时仍可以改写游戏译名(候选译名必须落缓存, 那种情况跳过).
+            cache = None if self._cache_dir is None else name_cache_at(self._cache_dir)
+            locale = current_locale()
+            changed = self._rename_games(cache, locale, refresh)
+            if cache is not None:
+                changed += self._name_candidates(cache, locale, refresh)
+            if changed:
+                self._touch()
+        finally:
+            with self._names_lock:
+                self._names_running = False
+
+    def _rename_games(self, cache: NameCache | None, locale: str, refresh: bool) -> int:
+        """把"没改过名"的游戏换成当前语言的名称, 返回改写条数."""
+        renamed = 0
+        for game in self._games.list():
+            if game.id is None or game.steam_app_id is None:
+                continue
+            if game.name != game.original_name:
+                continue
+            found = resolve_name(
+                str(game.steam_app_id),
+                locale,
+                cache,
+                fetcher=self._name_fetcher,
+                refresh=refresh,
+            )
+            if found is None or found == game.name:
+                continue
+            self._games.update(game.model_copy(update={"name": found}))
+            log_action("game.localize_name", game_id=game.id, locale=locale, name=found)
+            renamed += 1
+        return renamed
+
+    def _name_candidates(self, cache: NameCache, locale: str, refresh: bool) -> int:
+        """给"待处理"的探测结果补一次译名(只填缓存, 不写游戏库), 返回新取的条数.
+
+        探测结果页要直接看到译名, 但它还不是游戏, 无处可存 —— 因此只把结果写进译名
+        缓存, 界面从缓存里取。已经导入/已忽略的候选不再联网。
+        """
+        added = 0
+        for candidate in self._candidates.list_all(status="new"):
+            app_id = discovery_cases.candidate_app_id(candidate)
+            if app_id is None:
+                continue
+            if not refresh and cache.get(str(app_id), locale) is not None:
+                continue
+            found = resolve_name(
+                str(app_id), locale, cache, fetcher=self._name_fetcher, refresh=refresh
+            )
+            if found is not None:
+                added += 1
+        return added
+
+    def _cached_name(self, candidate: GameCandidate) -> str:
+        """探测结果在当前语言下的译名(只读缓存不联网); 没有就返回空串."""
+        if self._cache_dir is None:
+            return ""
+        app_id = discovery_cases.candidate_app_id(candidate)
+        if app_id is None:
+            return ""
+        found = name_cache_at(self._cache_dir).get(str(app_id), current_locale())
+        return "" if found is None else found
+
+    # -- 图片 ---------------------------------------------------------------
+
+    def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+        """返回封面/图标的本地路径(只查缓存与平台本地资源, 不联网)."""
+        cache = self._artwork_cache()
+        game, _gid = self._game_ref(game_id)
+        referenced = self._artwork_game(game)
+        if cache is None or referenced is None:
+            return ""
+        found = cached_artwork(referenced, kind, cache)
+        return "" if found is None else str(found)
+
+    def prefetch_artwork(self) -> None:
+        """后台补齐缺失的封面与图标(不阻塞界面, 完成后刷新数据版本让界面重读).
+
+        同一个实例同时只跑一个下载线程, 且每款游戏本次会话只尝试一次(失败不反复
+        轰炸 CDN); 下载失败不影响任何管理功能, 界面直接回落占位图。
+        """
+        if self._artwork_cache() is None:
+            return
+        with self._artwork_lock:
+            if self._artwork_running:
+                return
+            self._artwork_running = True
+        threading.Thread(target=self._download_artwork, daemon=True).start()
+
+    def _download_artwork(self) -> None:
+        """在工作线程里补齐缓存里还没有的封面与图标."""
+        try:
+            cache = self._artwork_cache()
+            if cache is None:  # pragma: no cover - 调用前已判过一次
+                return
+            downloaded = 0
+            for game in self._games.list():
+                referenced = self._artwork_game(game)
+                if referenced is None or str(game.id) in self._artwork_attempts:
+                    continue
+                self._artwork_attempts.add(str(game.id))
+                downloaded += self._fetch_artwork(cache, referenced)
+            if downloaded:
+                self._touch()
+        finally:
+            with self._artwork_lock:
+                self._artwork_running = False
+
+    def _fetch_artwork(self, cache: ArtworkCache, referenced: PlatformGame) -> int:
+        """补齐一款游戏的封面与图标, 返回本次成功的份数."""
+        fetched = 0
+        if cache.lookup_any(referenced.platform, referenced.game_id, "cover") is None:
+            fetched += int(resolve_artwork(referenced, "cover", cache).found)
+        return fetched + int(self._derive_icon(cache, referenced) is not None)
+
+    def _derive_icon(
+        self, cache: ArtworkCache, referenced: PlatformGame
+    ) -> Path | None:
+        """图标由封面裁成方形生成(平台给不出方形图标, 只能自己裁)."""
+        platform, game_id = referenced.platform, referenced.game_id
+        if cache.lookup_any(platform, game_id, "icon") is not None:
+            return None
+        cover = cache.lookup_any(platform, game_id, "cover")
+        if cover is None:
+            return None
+        content = square_icon(cover)
+        if content is None:
+            return None
+        try:
+            return cache.store(
+                platform,
+                game_id,
+                "icon",
+                ICON_VERSION,
+                content=content,
+                extension="png",
+            )
+        except OSError as exc:
+            logger.warning("写入图标缓存失败: %s", exc)
+            return None
+
+    def _artwork_cache(self) -> ArtworkCache | None:
+        """图片缓存; 未配置缓存目录时返回 None(界面走占位图)."""
+        return None if self._cache_dir is None else artwork_cache_at(self._cache_dir)
+
+    def _artwork_game(self, game: Game) -> PlatformGame | None:
+        """把库里的游戏包装成取图需要的平台数据(平台不支持取图时返回 ``None``).
+
+        能力由平台适配器声明: 拿不到适配器、适配器不支持图片、或它给不出资源引用
+        的游戏都不去下载, 界面直接显示占位。
+        """
+        base = _library_game(game)
+        adapter = None if base is None else self._adapter_for(base.platform)
+        if base is None or adapter is None or not adapter.supports_artwork:
+            return None
+        refs = adapter.artwork_refs(base)
+        if not refs:
+            return None
+        return base.model_copy(update={"artwork": list(refs)})
 
     # -- 统一游戏主页 ------------------------------------------------------
 
@@ -923,18 +1297,7 @@ class SqlArchiveService:
         """
         game, gid = self._game_ref(game_id)
         clean = interval_text.strip()
-        if clean and game.archived:
-            # 归档之后只保留"删除/导出/取消归档/打开详情": 定时备份也归入不可用.
-            log_action("schedule.rejected", game_id=gid, reason="archived")
-            raise ArchiveManagementError(
-                tr("error.archived_game_schedule", name=game.name)
-            )
-        if clean and not self._locations.list_for_game(gid):
-            # 没有存档位置就没有可备份的内容: 提前拒绝并告知原因.
-            log_action("schedule.rejected", game_id=gid, reason="no_locations")
-            raise ArchiveManagementError(
-                tr("error.no_locations_schedule", name=game.name)
-            )
+        self._reject_unusable_schedule(game, gid, clean)
         if not clean:
             self._scheduler.unschedule(gid)
             for job in self._jobs.for_game(gid):
@@ -942,25 +1305,15 @@ class SqlArchiveService:
                     self._jobs.delete(job.id)
             log_action("schedule.clear", game_id=gid)
             return self.task_status(game_id)
-        existing = self._scheduler.get(gid)
-        if enabled and not game.enabled:
-            # 停用中的游戏允许先把周期配好, 但任务只能处于暂停态; 已经有任务时说明
-            # 用户是在"继续"已有任务, 这种情况明确拒绝而不装作成功.
-            if existing is not None:
-                log_action("schedule.rejected", game_id=gid, reason="game_disabled")
-                raise ArchiveManagementError(
-                    tr("error.disabled_game_schedule", name=game.name)
-                )
-            enabled = False
-            log_action("schedule.paused_disabled", game_id=gid)
+        active = self._requested_state(game, gid, enabled)
         minutes = parse_interval(clean)
         entry = self._scheduler.schedule(
-            gid, minutes, self._scheduled_backup(gid), enabled=enabled
+            gid, minutes, self._scheduled_backup(gid), enabled=active
         )
         self._persist_job(
             gid,
             clean,
-            enabled=enabled,
+            enabled=active,
             next_run=entry.next_run_at,
             keep_auto=keep_auto,
         )
@@ -968,10 +1321,46 @@ class SqlArchiveService:
             "schedule.set",
             game_id=gid,
             interval=clean,
-            enabled=enabled,
+            enabled=active,
             keep_auto=keep_auto,
         )
         return self.task_status(game_id)
+
+    def _reject_unusable_schedule(self, game: Game, gid: int, interval: str) -> None:
+        """归档或没有存档位置时拒绝配置定时备份(并记下原因).
+
+        ``interval`` 为空表示"取消定时备份", 这条路径永远放行。
+        """
+        if not interval:
+            return
+        if game.archived:
+            # 归档之后只保留"删除/导出/取消归档/打开详情": 定时备份也归入不可用.
+            log_action("schedule.rejected", game_id=gid, reason="archived")
+            raise ArchiveManagementError(
+                tr("error.archived_game_schedule", name=game.name)
+            )
+        if not self._locations.list_for_game(gid):
+            # 没有存档位置就没有可备份的内容: 提前拒绝并告知原因.
+            log_action("schedule.rejected", game_id=gid, reason="no_locations")
+            raise ArchiveManagementError(
+                tr("error.no_locations_schedule", name=game.name)
+            )
+
+    def _requested_state(self, game: Game, gid: int, requested: bool) -> bool:
+        """把"想启用"折算成实际可用的启用态: 停用中的游戏只能暂停.
+
+        已经有任务时说明用户在"继续", 这种情况明确拒绝而不是静默改成暂停;
+        新建任务时则降级为暂停并记一条日志(界面会随之提示原因)。
+        """
+        if not requested or game.enabled:
+            return requested
+        if self._scheduler.get(gid) is not None:
+            log_action("schedule.rejected", game_id=gid, reason="game_disabled")
+            raise ArchiveManagementError(
+                tr("error.disabled_game_schedule", name=game.name)
+            )
+        log_action("schedule.paused_disabled", game_id=gid)
+        return False
 
     def cancel_active(self) -> bool:
         """请求取消当前备份; 没有进行中的备份时返回 False."""

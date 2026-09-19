@@ -94,7 +94,7 @@ def test_only_steam_is_supported_today(
 def test_all_adapters_share_one_contract(
     adapters: dict[PlatformId, PlatformAdapter],
 ) -> None:
-    """契约: 每个适配器都返回自己平台的游戏与候选, 未实现平台只返回空结果."""
+    """契约: 每个适配器都返回自己平台的游戏、候选与图片引用."""
     for platform, adapter in adapters.items():
         assert isinstance(adapter, PlatformAdapter)
         games = adapter.list_games()
@@ -104,9 +104,29 @@ def test_all_adapters_share_one_contract(
         candidates = adapter.save_candidates(probe)
         assert isinstance(candidates, list)
         assert all(item.path and item.reason_code for item in candidates)
+        refs = adapter.artwork_refs(probe)
+        assert isinstance(refs, tuple)
+        assert all(reference.kind and reference.version for reference in refs)
         if not adapter.supported:
             assert games == []
             assert candidates == []
+            assert refs == ()
+            assert adapter.supports_save_paths is False
+            assert adapter.supports_artwork is False
+
+
+def test_steam_declares_capabilities_and_artwork_refs(
+    adapters: dict[PlatformId, PlatformAdapter],
+) -> None:
+    """Steam 声明支持存档探测与取图, 并按公开 CDN 规则给出封面引用."""
+    steam = adapters["steam"]
+    game = steam.list_games()[0]
+
+    assert steam.supports_save_paths is True
+    assert steam.supports_artwork is True
+    refs = steam.artwork_refs(game)
+    assert [item.kind for item in refs] == ["cover"]
+    assert _APP_ID in refs[0].url
 
 
 def test_adapter_contract_is_verified_at_runtime(

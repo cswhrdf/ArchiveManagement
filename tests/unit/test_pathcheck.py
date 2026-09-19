@@ -26,6 +26,45 @@ pytestmark = [
 ]
 
 
+def test_is_within_ignores_case_for_drive_paths() -> None:
+    """盘符路径不分大小写: 安装目录与候选路径大小写不同也要认得出来.
+
+    Steam 清单里的安装目录常是小写(``d:\\steam\\...``), 候选路径可能保持原样;
+    不归一比较就会让"受保护位置"这条保护静默失效。
+    """
+    assert is_within(Path("D:/Steam/saves"), Path("d:/steam")) is True
+    assert is_within(Path("d:/steam"), Path("D:/Steam/saves")) is False
+    # POSIX 风格路径保持大小写敏感.
+    assert is_within(Path("/opt/Saves"), Path("/opt/saves")) is False
+
+
+def test_protected_subdirectories_can_be_unprotected(tmp_path: Path) -> None:
+    """``protect_subpaths=False``: 只拦受保护位置本身或包含它的目标."""
+    install = tmp_path / "Games" / "Demo"
+    saves = install / "saves"
+    saves.mkdir(parents=True)
+
+    assert dangerous_target_reason(str(saves), protected=(str(install),)) == "protected"
+    assert (
+        dangerous_target_reason(
+            str(saves), protected=(str(install),), protect_subpaths=False
+        )
+        is None
+    )
+    assert (
+        dangerous_target_reason(
+            str(install), protected=(str(install),), protect_subpaths=False
+        )
+        == "protected"
+    )
+    assert (
+        dangerous_target_reason(
+            str(tmp_path), protected=(str(install),), protect_subpaths=False
+        )
+        == "contains_protected"
+    )
+
+
 def test_normalize_path_returns_absolute(tmp_path: Path) -> None:
     target = str(tmp_path / "saves")
     assert normalize_path(target) == str(tmp_path / "saves")

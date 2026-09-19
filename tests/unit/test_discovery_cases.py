@@ -32,6 +32,7 @@ from archive_management.infrastructure.repository import (
     GameRepository,
     MonitoredDirectoryRepository,
 )
+from archive_management.services.exclusions import ExcludedProgram, Exclusions
 from archive_management.services.platform_scan import (
     LocalGameScanner,
     NullRegistry,
@@ -262,6 +263,71 @@ def test_scan_updates_existing_candidate_instead_of_duplicating(tmp_path: Path) 
     assert stored[0].source == "epic"
 
 
+def _steam_tools() -> Exclusions:
+    """一份只含 Steam 公共运行库的清单(真实条目见 resources/excluded-games.json)."""
+    return Exclusions(
+        [
+            ExcludedProgram(
+                platform="steam",
+                app_ids=frozenset({"228980"}),
+                names=frozenset({"steamworks common redistributables"}),
+                reason="redistributable",
+            )
+        ]
+    )
+
+
+def test_scan_hides_platform_tools_from_the_exclusions(tmp_path: Path) -> None:
+    """命中排除清单的候选默认隐藏(已忽略): 不算游戏, 也不进待处理列表."""
+    database = _database(tmp_path)
+    shared = tmp_path / "Steamworks Shared"
+    shared.mkdir()
+    hades = tmp_path / "Hades"
+    hades.mkdir()
+
+    report = scan_library(
+        database,
+        scanner=_stub_scanner(
+            [
+                _candidate(
+                    "Steamworks Common Redistributables",
+                    shared,
+                    detail="appmanifest_228980.acf",
+                ),
+                _candidate("Hades", hades),
+            ]
+        ),
+        exclusions=_steam_tools(),
+    )
+
+    assert report.added == 2
+    assert report.excluded == 1
+    stored = {item.name: item for item in CandidateRepository(database).list_all()}
+    assert stored["Steamworks Common Redistributables"].status == "ignored"
+    assert stored["Hades"].status == "new"
+
+
+def test_scan_hides_pending_tools_but_keeps_user_decisions(tmp_path: Path) -> None:
+    """排除清单是"默认"行为: 仍待处理的会隐藏, 用户已导入的不再改动."""
+    database = _database(tmp_path)
+    shared = tmp_path / "Steamworks Shared"
+    shared.mkdir()
+    tool = _candidate(
+        "Steamworks Common Redistributables", shared, detail="appmanifest_228980.acf"
+    )
+    scan_library(database, scanner=_stub_scanner([tool]))
+    candidate = CandidateRepository(database).list_all()[0]
+    assert candidate.id is not None
+    import_candidate(database, candidate.id, name="Steamworks")
+
+    report = scan_library(
+        database, scanner=_stub_scanner([tool]), exclusions=_steam_tools()
+    )
+
+    assert report.excluded == 0
+    assert CandidateRepository(database).list_all()[0].status == "imported"
+
+
 # ---------------------------------------------------------------- 候选处理
 
 
@@ -285,6 +351,39 @@ def test_import_candidate_creates_game_and_marks_imported(tmp_path: Path) -> Non
 
     with pytest.raises(ArchiveManagementError, match="已导入为游戏"):
         import_candidate(database, candidate.id)
+
+
+def test_import_candidate_carries_the_steam_app_id(tmp_path: Path) -> None:
+    """导入时从清单文件名推断 AppID 并写到游戏上(非 Steam 来源不猜)."""
+    database = _database(tmp_path)
+    steam_dir = tmp_path / "Steam" / "Hades"
+    steam_dir.mkdir(parents=True)
+    plain_dir = tmp_path / "Plain"
+    plain_dir.mkdir()
+    scan_library(
+        database,
+        scanner=_stub_scanner(
+            [
+                GameCandidate(
+                    name="Hades",
+                    install_dir=str(steam_dir),
+                    source="steam",
+                    reason_code="steam_manifest",
+                    detail="appmanifest_1145360.acf",
+                ),
+                GameCandidate(
+                    name="Plain", install_dir=str(plain_dir), source="manual"
+                ),
+            ]
+        ),
+    )
+    stored = {item.name: item for item in CandidateRepository(database).list_all()}
+
+    steam_game = import_candidate(database, int(stored["Hades"].id or 0))
+    plain_game = import_candidate(database, int(stored["Plain"].id or 0))
+
+    assert steam_game.steam_app_id == 1145360
+    assert plain_game.steam_app_id is None
 
 
 def test_import_candidate_requires_name(tmp_path: Path) -> None:

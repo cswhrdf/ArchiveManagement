@@ -63,6 +63,7 @@ from typing import Any
 import allure
 import pytest
 
+from archive_management.i18n import DEFAULT_LOCALE, set_locale
 from archive_management.services.audit import AUDIT_LOGGER_NAME
 from archive_management.services.platforms import current_platform, platform_label
 
@@ -354,6 +355,18 @@ def _allure_metadata(request: pytest.FixtureRequest) -> Iterator[None]:
     _configure_allure(request.node)
     yield
     _restore_description(request.node)
+
+
+@pytest.fixture(autouse=True)
+def _default_locale() -> Iterator[None]:
+    """每个用例都从默认语言开始.
+
+    界面语言是 i18n 模块里的全局状态, 而语言设置会真的调用 ``set_locale``; 用例之间
+    必须隔离, 否则先跑语言用例的随机顺序会把后续用例的文案全变成英文。
+    """
+    set_locale(DEFAULT_LOCALE)
+    yield
+    set_locale(DEFAULT_LOCALE)
 
 
 class _RecordingHandler(logging.Handler):

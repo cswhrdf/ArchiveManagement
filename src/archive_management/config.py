@@ -22,6 +22,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from archive_management.exceptions import ConfigurationError
+from archive_management.i18n import DEFAULT_LOCALE, available_locales
 from archive_management.services.hotkeys import (
     DEFAULT_BRANCH_ACCELERATOR,
     DEFAULT_SAVE_ACCELERATOR,
@@ -77,8 +78,18 @@ class AppConfig(BaseModel):
 
     version: int = Field(default=CONFIG_FORMAT_VERSION, ge=1)
     theme: ThemeName = "system"
+    # 界面语言(同时决定游戏译名向哪种语言探测); 只允许有文案资源的 locale.
+    language: str = DEFAULT_LOCALE
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     hotkeys: HotkeySettings = Field(default_factory=HotkeySettings)
+
+    @field_validator("language")
+    @classmethod
+    def _validate_language(cls, value: str) -> str:
+        """拒绝没有文案资源的语言: 否则界面会整屏显示 i18n 的 key."""
+        if value not in available_locales():
+            raise ValueError(f"不支持的语言: {value}")
+        return value
 
 
 def parse_config(raw: dict[str, Any]) -> AppConfig:

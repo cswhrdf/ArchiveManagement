@@ -5,7 +5,8 @@
 
 - **探测结果**: 从 Steam、Epic、GOG、Ubisoft 的安装清单与注册表, 以及监控
   目录中发现的候选游戏。可按"全部/待处理/已导入/已忽略"筛选, 并对选中项执行
-  "导入为游戏 / 忽略(恢复) / 修正路径";
+  "导入为游戏 / 忽略(恢复) / 修正路径"; 每行还会展示**探测这款游戏时顺带推断
+  出的存档路径**(平台模块支持才会推理), 导入时在对话框里可以改;
 - **监控目录**: 用户自行添加的目录, 用于覆盖平台客户端未安装、未登录或存档路径
   自定义的情况。每行显示实时路径状态(可用/不存在/不是文件夹/不可读/高风险)与
   上次扫描时间, 支持添加、编辑、启用/停用与删除。
@@ -27,17 +28,24 @@ from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.services.audit import log_action
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.dialogs import ask_text, confirm_dialog, info_dialog
+from archive_management.ui.dialogs import (
+    ask_text,
+    confirm_dialog,
+    import_game_dialog,
+    info_dialog,
+)
 from archive_management.ui.models import (
     CandidateFilter,
     CandidateItem,
     DiscoveryPage,
+    GameSummary,
     MonitoredDirItem,
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
 
 _ChangeCallback = Callable[[], None]
+_NoticeCallback = Callable[[str], None]
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +63,18 @@ class DiscoveryPanel:
         backend: ArchiveService,
         palette: Palette,
         on_change: _ChangeCallback | None = None,
+        on_notice: _NoticeCallback | None = None,
     ) -> None:
-        """在 ``parent`` 内构造页面并装载监控目录与探测结果(默认停在"探测结果")."""
+        """在 ``parent`` 内构造页面并装载监控目录与探测结果(默认停在"探测结果").
+
+        ``on_notice`` 用于把需要用户看到的一句话送进主窗口的底部状态栏(例如
+        "开始尝试探测封面"), 页面自身不弹窗。
+        """
         self._parent = parent
         self._backend = backend
         self._palette = palette
         self._on_change = on_change
+        self._on_notice = on_notice
         self._dirs: list[MonitoredDirItem] = []
         self._candidates: list[CandidateItem] = []
         self._dir_rows: dict[str, ctk.CTkFrame] = {}
@@ -116,7 +130,7 @@ class DiscoveryPanel:
         self._paint_tabs()
 
     def _build_pages(self, container: ctk.CTkFrame) -> None:
-        """构造两个子页(同格叠放), 由 :meth:`_show_page` 决定显示哪一个."""
+        """构造三个子页(同格叠放), 由 :meth:`_show_page` 决定显示哪一个."""
         pages = ctk.CTkFrame(container, fg_color="transparent")
         pages.grid(row=2, column=0, sticky="nsew")
         pages.grid_columnconfigure(0, weight=1)
@@ -160,7 +174,11 @@ class DiscoveryPanel:
         self._detail_label.grid(row=1, column=0, sticky="w")
 
     def _show_page(self, page: DiscoveryPage) -> None:
-        """切换到指定子页并重绘页签(默认页面是"探测结果")."""
+        """切换到指定子页并重绘页签(默认页面是"探测结果").
+
+        底栏计数也随页面切换: 两个子页的计数口径不同, 沿用上一个子页的数字会让人
+        误以为当前页在统计别的东西。
+        """
         self._page = page
         for kind, frame in self._page_frames.items():
             if kind is page:
@@ -168,6 +186,7 @@ class DiscoveryPanel:
             else:
                 frame.grid_remove()
         self._paint_tabs()
+        self._render_counts()
 
     def _paint_tabs(self) -> None:
         """选中页用强调淡底, 其余页面用普通按钮配色."""
@@ -525,7 +544,7 @@ class DiscoveryPanel:
         row.grid_columnconfigure(0, weight=1)
         name = ctk.CTkLabel(
             row,
-            text=item.name,
+            text=self._candidate_title(item),
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=self._palette.text_body,
@@ -546,13 +565,49 @@ class DiscoveryPanel:
             font=ctk.CTkFont(size=11),
             text_color=self._palette.text_muted,
         )
-        detail.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
-        for widget in (row, name, path, detail):
+        detail.grid(row=2, column=0, padx=12, pady=(0, 2), sticky="ew")
+        # 探测这款游戏时顺带推断出的存档路径: 导入时直接进对话框预填.
+        saves = ctk.CTkLabel(
+            row,
+            text=self._save_lines(item),
+            anchor="w",
+            justify="left",
+            wraplength=680,
+            font=ctk.CTkFont(size=11),
+            text_color=self._save_color(item),
+        )
+        saves.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
+        for widget in (row, name, path, detail, saves):
             widget.bind(
                 "<Button-1>",
                 lambda _event, key=item.candidate_id: self._select_candidate(key),
             )
         return row
+
+    @staticmethod
+    def _candidate_title(item: CandidateItem) -> str:
+        """行标题: 有当前语言译名就显示译名, 并把探测到的原名放进括号里."""
+        if item.localized_name and item.localized_name != item.name:
+            return f"{item.localized_name}  ({item.name})"
+        return item.name
+
+    @staticmethod
+    def _save_lines(item: CandidateItem) -> str:
+        """候选行里的存档路径区: 结论一行, 之后每条路径一行."""
+        if not item.save_paths:
+            return item.save_label
+        lines = [item.save_label]
+        lines.extend(f"· {path.text}" for path in item.save_paths)
+        return "\n".join(lines)
+
+    def _save_color(self, item: CandidateItem) -> str:
+        """存档路径区的颜色: 危险路径用警告色, 有结果用成功色, 其余弱化."""
+        palette = self._palette
+        if any(path.dangerous for path in item.save_paths):
+            return palette.danger
+        if item.save_paths:
+            return palette.success
+        return palette.text_muted
 
     def _paint_dirs(self) -> None:
         palette = self._palette
@@ -782,29 +837,71 @@ class DiscoveryPanel:
         self.reload()
 
     def _on_import(self) -> None:
-        """把选中的探测结果导入为游戏, 同步刷新左侧游戏列表."""
+        """导入选中的探测结果: 确认名称与存档路径, 再开始探测封面与图标."""
         candidate = self._candidate_item()
         if candidate is None or not candidate.importable:
             return
-        name = ask_text(
+        chosen = import_game_dialog(
             self.frame,
             self._palette,
             title=tr("dialog.candidate_import_title"),
-            text=tr("dialog.candidate_import_prompt"),
-            initial=candidate.name,
+            name_label=tr("dialog.candidate_import_prompt"),
+            initial_name=candidate.name,
+            paths_label=self._paths_label(candidate),
+            paths_hint=candidate.save_label,
+            initial_paths=tuple(item.path for item in candidate.save_paths),
+            add_text=tr("dialog.import_add_path"),
+            confirm_text=tr("dialog.import_confirm"),
+            browse=lambda: pick_directory(title=tr("dialog.import_browse_title")),
         )
-        if not name:
+        if chosen is None:
             log_action("discovery.import", basic=True, result="cancelled")
             return
+        name, paths = chosen
         try:
-            summary = self._backend.import_candidate(candidate.candidate_id, name=name)
+            summary = self._backend.import_candidate(
+                candidate.candidate_id, name=name, save_paths=paths
+            )
         except ArchiveManagementError as exc:
             self._show_error(exc)
             return
         self.reload()
-        self._summary_label.configure(text=tr("result.game_added", name=summary.name))
+        self._summary_label.configure(text=self._import_message(summary))
+        self._start_probes(summary)
         if self._on_change is not None:
             self._on_change()
+
+    @staticmethod
+    def _import_message(summary: GameSummary) -> str:
+        """导入后的页面提示: 写了几条存档位置就说几条."""
+        if summary.saved_paths:
+            return tr(
+                "result.game_added_with_paths",
+                name=summary.name,
+                count=summary.saved_paths,
+            )
+        return tr("result.game_added", name=summary.name)
+
+    def _paths_label(self, candidate: CandidateItem) -> str:
+        """导入对话框里路径区的小标题(平台不支持时说明原因)."""
+        if not candidate.save_supported:
+            return tr("dialog.import_paths_unsupported")
+        return tr("dialog.import_paths")
+
+    def _start_probes(self, summary: GameSummary) -> None:
+        """导入成功后开始后台探测封面/图标与译名, 并把封面这件事写到状态栏.
+
+        两者都要平台支持: 不支持的平台什么都不做, 也不该弹错误(导入本身已经成功)。
+        译名探测完成后会改写游戏名, 数据版本一变界面就会重绘。
+        """
+        try:
+            self._backend.prefetch_artwork()
+            self._backend.prefetch_names()
+        except ArchiveManagementError as exc:  # pragma: no cover - 探测失败不影响使用
+            logger.debug("请求后台探测失败: %s", exc)
+            return
+        if self._on_notice is not None:
+            self._on_notice(tr("discovery.artwork_started", name=summary.name))
 
     def _on_ignore(self) -> None:
         """把选中的探测结果标记为已忽略, 或把已忽略的恢复为待处理."""

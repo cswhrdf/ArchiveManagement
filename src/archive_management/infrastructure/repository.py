@@ -1171,6 +1171,28 @@ class SaveCandidateRepository:
         """绑定数据库连接工厂."""
         self._database = database
 
+    def list_all(
+        self, *, status: SaveCandidateStatus | None = None
+    ) -> list[SaveCandidate]:
+        """返回全部候选, 待确认的排在前面(与按游戏查询同一套排序)."""
+        if status is None:
+            sql = (
+                "SELECT * FROM save_path_candidates"
+                " ORDER BY CASE status WHEN 'suggested' THEN 0 ELSE 1 END,"
+                " game_id, path"
+            )
+            params: tuple[object, ...] = ()
+        else:
+            sql = (
+                "SELECT * FROM save_path_candidates WHERE status = ?"
+                " ORDER BY CASE status WHEN 'suggested' THEN 0 ELSE 1 END,"
+                " game_id, path"
+            )
+            params = (status,)
+        with self._database.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [_row_to_save_candidate(row) for row in rows]
+
     def list_for_game(
         self, game_id: int, *, status: SaveCandidateStatus | None = None
     ) -> list[SaveCandidate]:

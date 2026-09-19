@@ -31,9 +31,11 @@ from dataclasses import dataclass, replace
 from math import ceil
 
 import customtkinter as ctk
+from PIL import Image
 
 from archive_management.domain import (
     PAGE_SIZES,
+    ArtworkKind,
     HomeFilter,
     HomeLayout,
     HomeView,
@@ -57,6 +59,7 @@ from archive_management.ui.textfit import fit_text
 
 _ChangeCallback = Callable[[], None]
 _DetailCallback = Callable[[str], None]
+_NoticeCallback = Callable[[str], None]
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,10 @@ _POSTER_WIDTH = 190
 # 不下时最多折两行(仍在 336 之内, 因此卡片尺寸不变)。
 _POSTER_HEIGHT = 336
 _COVER_HEIGHT = 250
+# 封面宽度 = 卡片宽度去掉左右各 8px 内缩(与 :meth:`HomePage._build_poster` 一致).
+_COVER_WIDTH = _POSTER_WIDTH - 16
+# 列表行头像里的图标边长(与 :data:`_DOT_COLUMN` 留出内缩).
+_ICON_SIZE = 22
 # 海报卡片在网格里的占位宽度(卡片 + 左右各 4 的间距).
 _POSTER_SLOT_WIDTH = _POSTER_WIDTH + 8
 # 海报卡片里名称的可用宽度: 卡片宽减左右各 10 的内边距.
@@ -145,6 +152,7 @@ class HomePage:
         palette: Palette,
         on_change: _ChangeCallback | None = None,
         on_open_detail: _DetailCallback | None = None,
+        on_notice: _NoticeCallback | None = None,
     ) -> None:
         """在 ``parent`` 内构造主页(含游戏发现分区)."""
         self._parent = parent
@@ -152,8 +160,11 @@ class HomePage:
         self._palette = palette
         self._on_change = on_change
         self._on_open_detail = on_open_detail
+        self._on_notice = on_notice
         self._board: HomeBoard | None = None
         self._rows: dict[str, ctk.CTkFrame] = {}
+        # 封面/图标: CTkImage 必须被持有引用, 否则会被垃圾回收成空白.
+        self._artwork_images: dict[str, ctk.CTkImage] = {}
         self._selected: str | None = None
         # 每行的关键部件: 名称按真实宽度重裁、表头对齐都要用(键是游戏 id).
         self._row_parts: dict[str, _RowParts] = {}
@@ -202,6 +213,7 @@ class HomePage:
             backend=self._backend,
             palette=self._palette,
             on_change=self._after_discovery_change,
+            on_notice=self._on_notice,
         )
         # 与游戏库保持完全相同的页边距: 发现分区的卡片不能贴着窗口边缘.
         self._discovery.frame.grid(
@@ -629,6 +641,7 @@ class HomePage:
         for child in self.frame.winfo_children():
             child.destroy()
         self._rows = {}
+        self._artwork_images = {}
         self._build()
         self.reload()
         self._selected = selected
@@ -733,6 +746,20 @@ class HomePage:
             self._search_entry.insert(0, board.filter.search)
         self._page_size_box.set(str(board.filter.page_size))
         self._layout_switch.set(board.filter.layout.label)
+
+    def refresh_artwork(self) -> None:
+        """数据版本变化后重绘主页, 让后台补好的封面/图标与译名显示出来.
+
+        不重读筛选条件、页码与选中项, 也不碰底部提示条(它承载着刚做完的操作结果);
+        但游戏名可能刚被译名改写, 所以顺手重读一次主页数据。
+        """
+        self._artwork_images = {}
+        try:
+            self._board = self._backend.load_home()
+        except (ArchiveManagementError, sqlite3.Error) as exc:
+            logger.debug("重读主页数据失败: %s", exc)
+        if self._board is not None:
+            self._render_games()
 
     def _render_games(self) -> None:
         """重绘游戏列表(列表模式为表格行, 海报模式为卡片网格)."""
@@ -918,10 +945,12 @@ class HomePage:
         cover.grid_propagate(False)
         cover.grid_columnconfigure(0, weight=1)
         cover.grid_rowconfigure(0, weight=1)
-        # 封面暂时没有图片: 用游戏名前两个字占位.
+        # 有缓存封面就显示封面, 缺图/解码失败回落游戏名前两个字占位.
+        cover_image = self._artwork_image(item, "cover", (_COVER_WIDTH, _COVER_HEIGHT))
         placeholder = ctk.CTkLabel(
             cover,
-            text=item.name[:2],
+            text="" if cover_image is not None else item.name[:2],
+            image=cover_image,
             fg_color="transparent",
             text_color=palette.text_primary,
             font=ctk.CTkFont(size=34, weight="bold"),
@@ -972,6 +1001,35 @@ class HomePage:
             )
         return card
 
+    def _artwork_image(
+        self, item: HomeGameItem, kind: ArtworkKind, size: tuple[int, int]
+    ) -> ctk.CTkImage | None:
+        """加载封面/图标(只读本地缓存); 无图或解码失败时返回 None 走文字占位.
+
+        渲染是同步的, 因此这里**不联网**: 下载由后端在导入游戏后于后台完成, 补好后
+        刷新数据版本, 下一轮重绘自然就带上图片。
+        """
+        key = f"{kind}:{item.game_id}"
+        cached = self._artwork_images.get(key)
+        if cached is not None:
+            return cached
+        try:
+            path = self._backend.artwork_path(item.game_id, kind)
+        except ArchiveManagementError as exc:  # 缺图不影响管理功能
+            logger.debug("读取图片失败: %s", exc)
+            return None
+        if not path:
+            return None
+        try:
+            with Image.open(path) as image:
+                loaded = image.copy()
+        except (OSError, ValueError) as exc:
+            logger.warning("图片无法解码(%s): %s", path, exc)
+            return None
+        picture = ctk.CTkImage(light_image=loaded, size=size)
+        self._artwork_images[key] = picture
+        return picture
+
     def _render_empty(self, board: HomeBoard) -> None:
         """空状态: 说明"库里没有游戏"还是"当前筛选没有匹配", 并给出下一步建议."""
         palette = self._palette
@@ -1002,9 +1060,12 @@ class HomePage:
         self._configure_columns(columns)
         left = ctk.CTkFrame(row, fg_color="transparent")
         left.pack(side="left", fill="x", expand=True, padx=(_TABLE_SIDE_PAD, 0), pady=8)
+        # 头像优先显示商店图标, 没有图标就回落一个色块圆点(配色由名称推导).
+        icon_image = self._artwork_image(item, "icon", (_ICON_SIZE, _ICON_SIZE))
         dot = ctk.CTkLabel(
             left,
-            text="●",
+            text="" if icon_image is not None else "●",
+            image=icon_image,
             width=_DOT_COLUMN,
             anchor="center",
             font=ctk.CTkFont(size=14),
@@ -1124,11 +1185,22 @@ class HomePage:
         入口, 因此它仍然可用, 只是按钮改名为"删除游戏"。
         """
         item = self._item()
-        for button in self._action_buttons:
-            button.configure(state="normal" if item is not None else "disabled")
         if item is None:
+            for button in self._action_buttons:
+                button.configure(state="disabled")
             self._paint_buttons()
             return
+        for button in self._action_buttons:
+            button.configure(state="normal")
+        self._apply_item_states(item)
+        self._paint_buttons()
+
+    def _apply_item_states(self, item: HomeGameItem) -> None:
+        """按选中项的归档/启用状态落位按钮状态与文案.
+
+        归档时只有四个动作可用: 打开详情、取消归档、管理窗口(删除入口)与导出
+        (导出在详情页); 其余按钮由 ``item.allow`` 统一判掉。
+        """
         self._backup_btn.configure(
             state="normal" if item.backup_enabled else "disabled"
         )
@@ -1137,13 +1209,11 @@ class HomePage:
         )
         self._tags_btn.configure(state="normal" if item.allow("tags") else "disabled")
         self._enable_btn.configure(
-            state="normal" if item.allow("enable") else "disabled"
+            state="normal" if item.allow("enable") else "disabled",
+            text=tr("home.action_disable" if item.enabled else "home.action_enable"),
         )
         self._manage_btn.configure(
             text=tr("home.action_delete" if item.archived else "home.action_manage")
-        )
-        self._enable_btn.configure(
-            text=tr("home.action_disable" if item.enabled else "home.action_enable")
         )
         self._archive_btn.configure(
             text=tr("home.action_unarchive" if item.archived else "home.action_archive")
@@ -1374,17 +1444,7 @@ class HomePage:
             self._report_archived(item)
             return
         enabled = not item.enabled
-        board = self._board
-        replaced = None
-        if enabled and board is not None:
-            replaced = next(
-                (
-                    other
-                    for other in board.games
-                    if other.enabled and other.game_id != item.game_id
-                ),
-                None,
-            )
+        replaced = self._enabled_rival(item) if enabled else None
         try:
             self._backend.set_game_enabled(item.game_id, enabled)
         except ArchiveManagementError as exc:
@@ -1392,14 +1452,34 @@ class HomePage:
             return
         log_action("ui.home_enable", game_id=item.game_id, enabled=enabled)
         self._refresh()
+        self._summary_label.configure(
+            text=self._enable_message(item, enabled=enabled, replaced=replaced)
+        )
+
+    def _enabled_rival(self, item: HomeGameItem) -> HomeGameItem | None:
+        """返回当前处于启用态的另一款游戏(启用新的一款会把它自动停用)."""
+        board = self._board
+        if board is None:
+            return None
+        return next(
+            (
+                other
+                for other in board.games
+                if other.enabled and other.game_id != item.game_id
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _enable_message(
+        item: HomeGameItem, *, enabled: bool, replaced: HomeGameItem | None
+    ) -> str:
+        """根据"启用/停用 + 是否顶掉了另一款"给出反馈文案."""
         if not enabled:
-            self._summary_label.configure(text=tr("home.disabled", name=item.name))
-        elif replaced is None:
-            self._summary_label.configure(text=tr("home.enabled", name=item.name))
-        else:
-            self._summary_label.configure(
-                text=tr("home.enabled_replaced", name=item.name, other=replaced.name)
-            )
+            return tr("home.disabled", name=item.name)
+        if replaced is None:
+            return tr("home.enabled", name=item.name)
+        return tr("home.enabled_replaced", name=item.name, other=replaced.name)
 
     def _report_archived(self, item: HomeGameItem) -> None:
         """归档游戏的动作被拦下时给出原因(不弹窗, 与其它提示一致)."""

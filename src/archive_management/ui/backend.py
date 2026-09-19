@@ -13,6 +13,7 @@ from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
+    ArtworkKind,
     DeletionPlan,
     HomeFilter,
     PathKind,
@@ -221,9 +222,17 @@ class ArchiveService(Protocol):
         ...
 
     def import_candidate(
-        self, candidate_id: str, *, name: str | None = None
+        self,
+        candidate_id: str,
+        *,
+        name: str | None = None,
+        save_paths: Sequence[str] = (),
     ) -> GameSummary:
-        """把一条探测结果导入为游戏, 返回新游戏的摘要."""
+        """把一条探测结果导入为游戏, 并写入用户确认的存档路径.
+
+        ``save_paths`` 为空表示这次导入不带存档位置(用户把它们都去掉了); 路径里
+        的每一项都还会过一遍危险位置校验, 拒绝的会抛错。
+        """
         ...
 
     def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
@@ -236,6 +245,26 @@ class ArchiveService(Protocol):
 
     def add_candidate_as_monitored(self, candidate_id: str) -> MonitoredDirItem:
         """把候选所在的上一层目录加入监控列表."""
+        ...
+
+    # -- 图片 ---------------------------------------------------------------
+
+    def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+        """返回封面/图标的本地路径(只查缓存与平台本地资源, 不联网)."""
+        ...
+
+    def prefetch_artwork(self) -> None:
+        """后台补齐缺失的封面与图标; 不阻塞界面, 完成后由界面自行重读."""
+        ...
+
+    # -- 游戏译名(按当前界面语言) -----------------------------------------
+
+    def prefetch_names(self, *, refresh: bool = False) -> None:
+        """后台按当前界面语言补齐游戏译名; 取不到译名的游戏保留探测到的原名.
+
+        只改"没有改过名"的游戏(用户改过名的尊重用户); ``refresh`` 为 True 时忽略
+        缓存重新探测一次 —— 切换语言就是靠它。
+        """
         ...
 
     # -- 统一游戏主页与分类视图 ------------------------------------------

@@ -24,15 +24,18 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from archive_management.domain import (
     PLATFORM_IDS,
+    ArtworkRef,
     PlatformGame,
     PlatformId,
     SavePathCandidate,
 )
+from archive_management.services.artwork import steam_cover
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.platform_scan import (
     ScanRoots,
@@ -65,6 +68,16 @@ class PlatformAdapter(Protocol):
         """未实现时的原因说明; 已实现时为空字符串."""
         ...
 
+    @property
+    def supports_save_paths(self) -> bool:
+        """是否支持从平台数据推断存档路径(False 表示只能手动添加)."""
+        ...
+
+    @property
+    def supports_artwork(self) -> bool:
+        """是否支持提供封面/图标(False 表示界面只能显示占位图)."""
+        ...
+
     def list_games(self) -> list[PlatformGame]:
         """返回本平台已安装的游戏; 读取失败时返回空列表并记 DEBUG 日志."""
         ...
@@ -72,6 +85,9 @@ class PlatformAdapter(Protocol):
     def save_candidates(self, game: PlatformGame) -> list[SavePathCandidate]:
         """返回该游戏的存档路径候选; 拿不到可信来源时返回空列表."""
         ...
+
+    def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
+        """返回该游戏的图片资源引用(封面等); 不支持的平台返回空元组."""
 
 
 @runtime_checkable
@@ -120,6 +136,22 @@ class SteamAdapter:
     def unsupported_reason(self) -> str:
         """已实现, 因此没有原因说明."""
         return ""
+
+    @property
+    def supports_save_paths(self) -> bool:
+        """Steam 能读云端同步清单推断存档路径."""
+        return True
+
+    @property
+    def supports_artwork(self) -> bool:
+        """Steam 有公开无凭据的 CDN 地址规则, 可以取封面."""
+        return True
+
+    def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
+        """返回封面引用(按公开 CDN 规则); 没有 AppID 时没有可用资源."""
+        if game.platform != "steam" or not game.game_id:
+            return ()
+        return (steam_cover(game.game_id),)
 
     def list_games(self) -> list[PlatformGame]:
         """返回本机已安装的 Steam 游戏.
@@ -190,6 +222,23 @@ class UnsupportedPlatformAdapter:
         """降级原因(界面据此告诉用户为什么没有结果)."""
         return self._reason
 
+    @property
+    def supports_save_paths(self) -> bool:
+        """未实现, 不推断存档路径."""
+        return False
+
+    @property
+    def supports_artwork(self) -> bool:
+        """未实现, 不提供封面与图标."""
+        return False
+
+    def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
+        """始终返回空元组, 并记一条 DEBUG 日志."""
+        logger.debug(
+            "%s 适配器%s, 未产出图片资源(%s)", self._platform, self._reason, game.name
+        )
+        return ()
+
     def list_games(self) -> list[PlatformGame]:
         """始终返回空列表, 并记一条 DEBUG 日志."""
         logger.debug("%s 适配器%s, 未返回游戏列表", self._platform, self._reason)
@@ -209,3 +258,17 @@ def default_adapters(roots: ScanRoots) -> dict[PlatformId, PlatformAdapter]:
     for platform in PLATFORM_IDS:
         adapters.setdefault(platform, UnsupportedPlatformAdapter(platform))
     return adapters
+
+
+def adapter_for(
+    adapters: Mapping[PlatformId, PlatformAdapter], platform: str
+) -> PlatformAdapter | None:
+    """按来源标识取适配器; 非平台来源(监控目录/手动添加)返回 ``None``.
+
+    界面与后端都通过它判断"能不能自动探测": 拿不到适配器, 或适配器不支持某项
+    能力, 就一律走手动路径, 而不是拿别的平台的数据凑一个结果。
+    """
+    for name, adapter in adapters.items():
+        if name == platform:
+            return adapter
+    return None

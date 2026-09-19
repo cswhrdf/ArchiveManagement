@@ -180,12 +180,25 @@ def _lexical_parts(path: Path) -> tuple[str, ...]:
 
 
 def is_within(child: Path, parent: Path) -> bool:
-    """判断 ``child`` 是否位于 ``parent`` 之内(含相等)."""
+    r"""判断 ``child`` 是否位于 ``parent`` 之内(含相等).
+
+    盘符风格路径按**大小写不敏感**比较: Windows 上 ``D:\\Steam`` 与 ``d:\\steam``
+    是同一处, 而安装目录常由应用清单给出(小写)、候选路径可能来自别处(原样大小写),
+    不归一就会让"受保护位置"这条保护静默失效。POSIX 风格路径保持原样。
+    """
     child_parts = _lexical_parts(child)
     parent_parts = _lexical_parts(parent)
+    if _drive_style(child_parts) or _drive_style(parent_parts):
+        child_parts = tuple(part.casefold() for part in child_parts)
+        parent_parts = tuple(part.casefold() for part in parent_parts)
     if len(parent_parts) > len(child_parts):
         return False
     return child_parts[: len(parent_parts)] == parent_parts
+
+
+def _drive_style(parts: tuple[str, ...]) -> bool:
+    r"""是否像 Windows 盘符路径(``D:\`` / ``D:``)."""
+    return bool(parts) and len(parts[0]) >= 2 and parts[0][1] == ":"
 
 
 def is_writable_target(raw: str) -> bool:
@@ -197,11 +210,16 @@ def is_writable_target(raw: str) -> bool:
     return os.access(ancestor, os.W_OK)
 
 
-def dangerous_target_reason(raw: str, *, protected: tuple[str, ...] = ()) -> str | None:
-    """返回拒绝对该路径执行删除/覆盖的原因代码; 安全时返回 None.
+def dangerous_target_reason(
+    raw: str, *, protected: tuple[str, ...] = (), protect_subpaths: bool = True
+) -> str | None:
+    r"""返回拒绝对该路径执行删除/覆盖的原因代码; 安全时返回 None.
 
     ``protected`` 是绝对不能删除或作为覆盖目标的位置(如应用自己的备份根
     目录): 目标与这些位置重叠或包含它们时都会被拒绝。
+    ``protect_subpaths`` 为 False 时, "位于受保护位置**内部**"不再算危险 —— 存档
+    目录经常就落在游戏安装目录里(``<安装目录>\saves``), 真正危险的是把整个安装
+    目录当目标; 存档候选与存档位置因此按 False 调用。
     """
     path = Path(raw)
     if not path.is_absolute():
@@ -214,8 +232,8 @@ def dangerous_target_reason(raw: str, *, protected: tuple[str, ...] = ()) -> str
         guard = Path(item)
         if not str(guard).strip():
             continue
-        # 目标就是受保护位置、位于其内部, 或包含受保护位置: 三种都拒绝.
-        if path == guard or is_within(path, guard):
+        # 目标就是受保护位置, 或(默认)在它内部, 或包含它: 三种都拒绝.
+        if path == guard or (protect_subpaths and is_within(path, guard)):
             return _REASON_PROTECTED
         if is_within(guard, path):
             return _REASON_CONTAINS_PROTECTED

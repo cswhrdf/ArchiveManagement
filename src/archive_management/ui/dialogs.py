@@ -7,7 +7,7 @@ i18n 配置加载,弹窗一律居中显示在主窗口上。
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import customtkinter as ctk
 
@@ -186,6 +186,187 @@ def ask_branch_name(
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
     buttons.pack(padx=24, pady=(0, 18))
+    cancel = ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    )
+    cancel.pack(side="left", padx=(0, 10))
+    ok = ctk.CTkButton(
+        buttons,
+        text=ok_text,
+        width=96,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=submit,
+    )
+    ok.pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None
+
+
+def import_game_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    title: str,
+    name_label: str,
+    initial_name: str,
+    paths_label: str,
+    paths_hint: str,
+    initial_paths: Sequence[str] = (),
+    add_text: str = "",
+    confirm_text: str | None = None,
+    browse: Callable[[], str | None] | None = None,
+) -> tuple[str, tuple[str, ...]] | None:
+    """询问游戏名与要写进库的存档路径; 取消或名称为空时返回 ``None``.
+
+    路径区预填探测到的候选: 每条都能改, 取消勾选就不写库(用户可以只留其中几条),
+    也能自己再加一条。``browse`` 非 None 时每条路径后面多一个"浏览…"按钮(与游戏
+    详情里添加/修改存档位置同一个目录选择框), 点它就能可视化挑目录。返回
+    ``(名称, 勾选且非空的路径)``。
+    """
+    ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
+    window = ctk.CTkToplevel(parent)
+    window.title(title)
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    name_text = ctk.CTkLabel(
+        window,
+        text=name_label,
+        justify="left",
+        font=ctk.CTkFont(size=13),
+        text_color=palette.text_body,
+    )
+    name_text.pack(padx=24, pady=(22, 4), anchor="w")
+    name_entry = ctk.CTkEntry(
+        window,
+        width=440,
+        fg_color=palette.input_bg,
+        border_color=palette.border,
+        text_color=palette.text_body,
+    )
+    name_entry.insert(0, initial_name)
+    name_entry.pack(padx=24, pady=(0, 10))
+    name_entry.focus_set()
+    name_entry.select_range(0, "end")
+
+    paths_text = ctk.CTkLabel(
+        window,
+        text=paths_label,
+        justify="left",
+        font=ctk.CTkFont(size=13),
+        text_color=palette.text_body,
+    )
+    paths_text.pack(padx=24, pady=(4, 2), anchor="w")
+    hint = ctk.CTkLabel(
+        window,
+        text=paths_hint,
+        justify="left",
+        wraplength=440,
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_muted,
+    )
+    hint.pack(padx=24, anchor="w")
+
+    rows = ctk.CTkScrollableFrame(
+        window, width=440, height=150, fg_color=palette.well, corner_radius=8
+    )
+    rows.pack(padx=24, pady=(6, 4), fill="x")
+    entries: list[tuple[ctk.CTkCheckBox, ctk.CTkEntry]] = []
+
+    def fill_from_browse(field: ctk.CTkEntry) -> None:
+        """把系统目录选择框里挑到的路径填进这一行(用户取消时保持原样)."""
+        if browse is None:  # pragma: no cover - 按钮只在 browse 非空时创建
+            return
+        picked = browse()
+        if picked:
+            field.delete(0, "end")
+            field.insert(0, picked)
+
+    def add_row(value: str) -> None:
+        row = ctk.CTkFrame(rows, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+        box = ctk.CTkCheckBox(
+            row,
+            text="",
+            variable=ctk.BooleanVar(value=True),
+            width=20,
+            checkbox_width=18,
+            checkbox_height=18,
+            fg_color=palette.accent,
+            hover_color=palette.accent_soft_border,
+            border_color=palette.border,
+        )
+        box.pack(side="left", padx=(4, 6))
+        entry = ctk.CTkEntry(
+            row,
+            fg_color=palette.input_bg,
+            border_color=palette.border,
+            text_color=palette.text_body,
+        )
+        entry.insert(0, value)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        if browse is not None:
+            browse_btn = ctk.CTkButton(
+                row,
+                text=tr("dialog.browse"),
+                width=64,
+                height=28,
+                fg_color=palette.raised,
+                hover_color=palette.item_hover,
+                text_color=palette.text_body,
+                command=lambda field=entry: fill_from_browse(field),
+            )
+            browse_btn.pack(side="left", padx=(0, 4))
+        entries.append((box, entry))
+
+    for path in initial_paths:
+        add_row(path)
+    if not initial_paths:
+        add_row("")
+
+    result: list[tuple[str, tuple[str, ...]]] = []
+
+    def submit() -> None:
+        name = name_entry.get().strip()
+        if not name:
+            return
+        chosen = tuple(
+            entry.get().strip()
+            for box, entry in entries
+            if box.get() and entry.get().strip()
+        )
+        result.append((name, chosen))
+        window.destroy()
+
+    name_entry.bind("<Return>", lambda _event: submit())
+
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    buttons.pack(padx=24, pady=(6, 18))
+    add = ctk.CTkButton(
+        buttons,
+        text=add_text,
+        width=116,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=lambda: add_row(""),
+    )
+    add.pack(side="left", padx=(0, 10))
     cancel = ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),

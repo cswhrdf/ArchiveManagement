@@ -34,10 +34,12 @@ from archive_management.infrastructure.repository import (
     MonitoredDirectoryRepository,
 )
 from archive_management.services.audit import log_action, log_failure, redacted_path
+from archive_management.services.exclusions import Exclusions, load_exclusions
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.platform_scan import (
     LocalGameScanner,
     ScanRoots,
+    app_id_from_manifest,
     default_roots,
     path_health,
 )
@@ -58,6 +60,8 @@ class ScanReport:
     linked: int
     # 路径缺失/不可读/高风险, 暂不可直接导入的候选数量.
     unusable: int
+    # 命中平台工具排除清单、被默认隐藏(已忽略)的候选数量.
+    excluded: int = 0
     errors: tuple[str, ...] = ()
 
     @property
@@ -221,13 +225,16 @@ def scan_library(
     *,
     scanner: LocalGameScanner | None = None,
     roots: ScanRoots | None = None,
+    exclusions: Exclusions | None = None,
 ) -> ScanReport:
     """扫描平台安装目录与监控目录, 并刷新候选表.
 
     ``scanner``/``roots`` 用于注入替身(测试或演示); 缺省按当前环境构造真实
     探测器。游戏库中已存在同名游戏的候选会被标记为"已纳入库"; 上次扫描发现、
     这次没再出现的候选会重新判定路径健康状态(游戏被卸载后界面仍能给出明确
-    提示, 而不是永远停在"可用")。
+    提示, 而不是永远停在"可用")。``exclusions`` 是平台官方工具的排除清单,
+    命中且仍待处理的候选会被默认标记为"已忽略", 详见
+    :mod:`archive_management.services.exclusions`。
     """
     repository = MonitoredDirectoryRepository(database)
     directories = repository.list_all()
@@ -235,6 +242,7 @@ def scan_library(
     engine = (
         scanner if scanner is not None else LocalGameScanner(roots or default_roots())
     )
+    active_exclusions = exclusions if exclusions is not None else load_exclusions()
     _mark_scanned(repository, directories, when=datetime.now(UTC))
 
     errors: list[str] = []
@@ -242,7 +250,11 @@ def scan_library(
     candidates = CandidateRepository(database)
     seen: set[str] = set()
     counts = _store_candidates(
-        candidates, found, known=_known_games(database), seen=seen
+        candidates,
+        found,
+        known=_known_games(database),
+        seen=seen,
+        exclusions=active_exclusions,
     )
     _refresh_candidate_health(candidates, seen=seen)
 
@@ -256,6 +268,7 @@ def scan_library(
         updated=counts.updated,
         linked=counts.linked,
         unusable=counts.unusable,
+        excluded=counts.excluded,
     )
     return ScanReport(
         monitored=len(directories),
@@ -265,18 +278,20 @@ def scan_library(
         updated=counts.updated,
         linked=counts.linked,
         unusable=counts.unusable,
+        excluded=counts.excluded,
         errors=tuple(errors),
     )
 
 
 @dataclass
 class _ScanCounts:
-    """一次扫描的统计口径: 新增 / 更新 / 已在库 / 路径不可用."""
+    """一次扫描的统计口径: 新增 / 更新 / 已在库 / 路径不可用 / 自动隐藏."""
 
     added: int = 0
     updated: int = 0
     linked: int = 0
     unusable: int = 0
+    excluded: int = 0
 
 
 def _mark_scanned(
@@ -333,6 +348,7 @@ def _store_candidates(
     *,
     known: dict[str, Game],
     seen: set[str],
+    exclusions: Exclusions,
 ) -> _ScanCounts:
     """把扫描结果写入候选表, 顺带统计各类数量(同时记录这次见过的路径)."""
     counts = _ScanCounts()
@@ -345,9 +361,38 @@ def _store_candidates(
             counts.added += 1
         else:
             counts.updated += 1
+        if _hide_excluded(candidates, stored, exclusions=exclusions):
+            counts.excluded += 1
+            continue
         if _link_existing(candidates, stored, known=known):
             counts.linked += 1
     return counts
+
+
+def _hide_excluded(
+    candidates: CandidateRepository, stored: GameCandidate, *, exclusions: Exclusions
+) -> bool:
+    """命中排除清单且仍待处理的候选改判为"已忽略", 返回是否真的隐藏了它.
+
+    已导入/已忽略的记录一律不动: 排除清单是"默认"行为, 不能覆盖用户的决定。
+    """
+    if stored.status != "new" or stored.id is None:
+        return False
+    matched = exclusions.match(
+        platform=stored.source,
+        app_id=candidate_app_id(stored),
+        name=stored.name,
+    )
+    if matched is None:
+        return False
+    candidates.set_status(stored.id, "ignored", game_id=stored.game_id)
+    log_action(
+        "discovery.exclude",
+        candidate_id=stored.id,
+        name=stored.name,
+        reason=matched.reason,
+    )
+    return True
 
 
 def _refresh_candidate_health(
@@ -393,6 +438,10 @@ def import_candidate(
     )
     if game.id is None:  # pragma: no cover - add() 总是返回 id
         raise ArchiveManagementError("导入游戏失败: 未返回游戏 id")
+    app_id = candidate_app_id(candidate)
+    if app_id is not None:
+        # AppID 跟着游戏走: 之后才能用它读云端存档清单与缓存图片.
+        game = games.update(game.model_copy(update={"steam_app_id": app_id}))
     candidates.set_status(candidate_id, "imported", game_id=game.id)
     log_action(
         "discovery.import",
@@ -403,6 +452,18 @@ def import_candidate(
         path=redacted_path(candidate.install_dir),
     )
     return game
+
+
+def candidate_app_id(candidate: GameCandidate) -> int | None:
+    """从探测结果里推断平台游戏标识(Steam 的 AppID 在清单文件名里).
+
+    只有 Steam 清单来源的候选谈得上 AppID; 其它平台与监控目录返回 ``None``,
+    游戏保持"没有平台标识"的状态。
+    """
+    if candidate.source != "steam":
+        return None
+    app_id = app_id_from_manifest(candidate.detail)
+    return int(app_id) if app_id else None
 
 
 def ignore_candidate(database: Database, candidate_id: int) -> GameCandidate:

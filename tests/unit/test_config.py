@@ -47,6 +47,25 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
     assert load_config(path) == original
 
 
+def test_language_defaults_to_chinese_and_round_trips(tmp_path: Path) -> None:
+    """语言默认简体中文, 能写进配置再读回来."""
+    path = tmp_path / "config.json"
+    assert AppConfig().language == "zh-CN"
+
+    save_config(AppConfig(language="en"), path)
+
+    assert load_config(path).language == "en"
+
+
+def test_parse_rejects_an_unsupported_language(tmp_path: Path) -> None:
+    """没有文案资源的语言直接拒绝: 否则界面会整屏显示 i18n 的 key."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"version": 1, "language": "fr"}), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError):
+        load_config(path)
+
+
 def test_parse_rejects_unknown_field(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     path.write_text(

@@ -18,10 +18,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
 import customtkinter as ctk
+from PIL import Image
 
 from archive_management.application.backup import MAX_NOTE_LENGTH
 from archive_management.application.restore import RestorePlan
 from archive_management.config import (
+    AppConfig,
+    ConfigLoad,
     HotkeySettings,
     load_or_reset_config,
     save_config,
@@ -31,7 +34,7 @@ from archive_management.exceptions import (
     ArchiveManagementError,
     ContentUnchangedError,
 )
-from archive_management.i18n import tr
+from archive_management.i18n import DEFAULT_LOCALE, set_locale, tr
 from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.services.audit import log_action
 from archive_management.services.hotkeys import (
@@ -195,7 +198,11 @@ class ArchiveApp(ctk.CTk):
         self._usage_text = tr("status.usage", used="—")
         self._hotkeys = hotkeys if hotkeys is not None else GlobalHotkeyService()
         self._paths = paths
-        self._shortcuts = self._load_shortcuts()
+        # 只读一次配置: 语言、快捷键与"配置被还原过"的提示都从同一份结果出发。
+        loaded = self._load_config()
+        # 语言要在构造界面之前生效: 所有文案都是构建时取的.
+        self._language = self._apply_language(loaded.config.language)
+        self._shortcuts = self._shortcuts_from(loaded)
         self.title(title)
         self.minsize(*WINDOW_MIN_SIZE)
         self.geometry("1360x860")
@@ -209,6 +216,11 @@ class ArchiveApp(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll_messages)
+        if smoke_seconds is None:
+            # 启动时补一次译名探测: 后台线程、只对当前语言缺条目的游戏联网(有缓存就
+            # 直接复用), 探到新名字会抬高数据版本, 界面自动重绘。--smoke 不触发,
+            # 冻结包的冒烟自检保持不发网络请求。
+            self.backend.prefetch_names()
         if smoke_seconds is not None:
             # 冒烟自检也走正常关闭路径, 确保调度器/快捷键被释放.
             self.after(int(smoke_seconds * 1000), self._on_close)
@@ -231,22 +243,88 @@ class ArchiveApp(ctk.CTk):
                     tr("hotkey.failed", reason=state.error),
                 )
 
-    def _load_shortcuts(self) -> dict[str, str]:
-        """读取快捷键配置; 缺失或内容非法时使用默认组合.
+    def _load_config(self) -> ConfigLoad:
+        """读一次配置(没有配置路径时用默认值).
 
-        内容非法时 ``load_or_reset_config`` 已经把配置文件还原为默认值, 这里再把这件事
-        反馈到界面与审计日志, 避免用户以为自己改的快捷键"没生效"。
+        内容非法时 ``load_or_reset_config`` 已经把文件还原为默认值, 这里再把这件事反馈
+        到界面与审计日志, 避免用户以为自己改的语言/快捷键"没生效"。
         """
-        shortcuts = dict(DEFAULT_ACCELERATORS)
         if self._paths is None:
-            return shortcuts
+            return ConfigLoad(config=AppConfig())
         loaded = load_or_reset_config(self._paths.config_path)
         if loaded.reset:
             log_action("config.reset", basic=True, backup=str(loaded.backup or ""))
             self._last_feedback = (FeedbackKind.INFO, tr("config.reset"))
+        return loaded
+
+    @staticmethod
+    def _apply_language(language: str) -> str:
+        """让 :mod:`archive_management.i18n` 用上配置里的语言, 返回生效的语言名."""
+        try:
+            set_locale(language)
+        except ValueError:  # pragma: no cover - 配置校验已经拦过不支持的语言
+            set_locale(DEFAULT_LOCALE)
+            return DEFAULT_LOCALE
+        return language
+
+    @staticmethod
+    def _shortcuts_from(loaded: ConfigLoad) -> dict[str, str]:
+        """按配置拼出快捷键表(配置缺失或内容非法时是默认组合)."""
+        shortcuts = dict(DEFAULT_ACCELERATORS)
         shortcuts[ACTION_SAVE_NOW] = loaded.config.hotkeys.save
         shortcuts[ACTION_CREATE_BRANCH] = loaded.config.hotkeys.branch
         return shortcuts
+
+    def _save_language(self, locale: str) -> None:
+        """把界面语言写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        config = load_or_reset_config(self._paths.config_path).config
+        config.language = locale
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存语言失败: %s", exc)
+
+    def _on_language_change(self, locale: str) -> str | None:
+        """切换界面语言: 按新语言重探译名 + 整体重建界面; 返回 None 表示成功.
+
+        译名重新探测在后台线程里跑(``refresh=True`` 忽略缓存), 探测完抬高的数据
+        版本会触发重绘, 所以这里不必等网络。
+        """
+        try:
+            set_locale(locale)
+        except ValueError as exc:
+            return str(exc)
+        self._language = locale
+        self._save_language(locale)
+        log_action("ui.switch_language", basic=True, language=locale)
+        self.backend.prefetch_names(refresh=True)
+        self._rebuild_ui()
+        self._feedback(
+            FeedbackKind.INFO,
+            tr("settings.language_switched", language=tr(f"locale.{locale}")),
+        )
+        return None
+
+    def _rebuild_ui(self) -> None:
+        """按当前语言重建整个窗口(文案在构建时就已定稿, 只能重建).
+
+        重建会丢掉所有控件与它们登记的主题回调, 因此同时换一个干净的 ``UiKit``;
+        定时器、消息队列、快捷键与后台服务都不受影响。
+        """
+        self._active_window = None
+        self._active_nav = None
+        for child in self.winfo_children():
+            child.destroy()
+        self.kit = UiKit()
+        self._cards = {}
+        self._card_painters = {}
+        self._card_unregisters = []
+        self._revision = -1
+        self._build_layout()
+        self._load_first_game()
+        self._show_page(AppPage.HOME)
 
     def _save_shortcuts(self) -> None:
         """把当前快捷键写回配置文件(没有配置路径时只保存在内存里)."""
@@ -302,6 +380,7 @@ class ArchiveApp(ctk.CTk):
             palette=self.p,
             on_change=self._refresh_after_manage,
             on_open_detail=self._open_game_detail,
+            on_notice=self._notice,
         )
         self._home_page.frame.grid(row=0, column=0, sticky="nsew")
         self._home_page.frame.grid_remove()
@@ -488,6 +567,8 @@ class ArchiveApp(ctk.CTk):
             font=ctk.CTkFont(size=28, weight="bold"),
         )
         self._hero_tile.pack(side="left")
+        # 图标位: 有缓存图标就换成图片, 没有才回落名称首字(CTkImage 要持引用).
+        self._hero_icon: ctk.CTkImage | None = None
 
         info = ctk.CTkFrame(left, fg_color="transparent")
         # expand=True: 信息块占满色块右边的全部宽度, 名称因此能"撑满一行".
@@ -888,7 +969,10 @@ class ArchiveApp(ctk.CTk):
         self._list_sub.configure(text=tr("list.no_games"))
         self._title_label.configure(text=tr("hero.no_game"))
         self._subtitle_label.configure(text=tr("list.no_games"))
-        self._hero_tile.configure(text="", fg_color=self._tone_color(None))
+        # 清图标用空串而不是 None: 用 None 时 Tk 侧的 image 选项不会变, 会出现
+        # "图标位缺一块颜色"(旧图残留在标签上), 而且旧图一旦被回收标签就报错.
+        self._hero_tile.configure(image="", text="", fg_color=self._tone_color(None))
+        self._hero_icon = None
         self._hero_name_label.configure(text=tr("hero.no_game"))
         self._hero_location_label.configure(text="")
         self._hero_verified_label.configure(text="")
@@ -921,9 +1005,7 @@ class ArchiveApp(ctk.CTk):
         log_action("ui.select_game", basic=True, game_id=game_id, name=self._game.name)
         detail = self.backend.get_detail(game_id)
         self._backup_id = None
-        self._hero_tile.configure(
-            text=detail.name[:1], fg_color=self._tone_color(self._game.tone)
-        )
+        self._render_hero_tile(game_id, detail.name, self._game.tone)
         self._render_hero(detail)
         self._render_toolbar_header(detail)
         self._render_list()
@@ -961,6 +1043,46 @@ class ArchiveApp(ctk.CTk):
         self._stat_total_value.configure(text=detail.total_backups_label)
         self._stat_total_sub.configure(text=detail.total_backups_sub)
         self._stat_next_value.configure(text=detail.next_backup_label)
+
+    def _notice(self, text: str) -> None:
+        """把发现分区的提示(如"开始尝试探测封面")写到左下角状态栏."""
+        self._feedback(FeedbackKind.INFO, text)
+
+    def _render_hero_tile(self, game_id: str, name: str, tone: str | None) -> None:
+        """概要区的图标位: 有缓存图标就显示图标, 否则回落首字色块.
+
+        两个坑写在这里: ① 没有图标时要传 ``image=""`` 而不是 ``None`` —— ``CTkLabel``
+        在 image 为 None 时**不会**清掉 Tk 侧已有的 image 选项, 旧图会残留在色块位置;
+        ② 先 configure 再放掉旧的 ``CTkImage`` —— 一旦它在标签还指着图片名时被回收,
+        这个标签就彻底坏了(之后 configure 任何选项都报 image "pyimageN" doesn't exist,
+        表现为"打开过一次带图标的游戏后返回主页, 再点任何游戏都没反应")。
+        """
+        previous = self._hero_icon
+        picture = self._icon_image(game_id)
+        self._hero_icon = picture
+        self._hero_tile.configure(
+            image=picture if picture is not None else "",
+            text="" if picture is not None else name[:1],
+            fg_color="transparent" if picture is not None else self._tone_color(tone),
+        )
+        del previous  # 标签已经换上新图/清空, 现在才能安全地放掉旧图
+
+    def _icon_image(self, game_id: str) -> ctk.CTkImage | None:
+        """读取缓存里的方形图标; 没有图片或解码失败时返回 None(走首字回落)."""
+        try:
+            path = self.backend.artwork_path(game_id, "icon")
+        except ArchiveManagementError as exc:
+            logger.debug("读取图标失败: %s", exc)
+            return None
+        if not path:
+            return None
+        try:
+            with Image.open(path) as image:
+                loaded = image.copy()
+        except (OSError, ValueError) as exc:
+            logger.warning("图标无法解码(%s): %s", path, exc)
+            return None
+        return ctk.CTkImage(light_image=loaded, size=(84, 84))
 
     def _render_toolbar_header(self, detail: GameDetail) -> None:
         """写头部标题/副标题(按控件实际宽度裁剪, 见 _refit_detail_names)."""
@@ -1083,6 +1205,10 @@ class ArchiveApp(ctk.CTk):
             self._refresh_usage()
         self._revision = status.revision
         self._render_task(status)
+        if self._page is AppPage.HOME:
+            # 主页可见时重绘一次: 封面与图标是导入后由后台补的, 补好只会抬高数据
+            # 版本, 主页不重绘就还是旧的那一屏(图标一直不出现).
+            self._home_page.refresh_artwork()
         if self._game_id is None:
             return
         games = self.backend.list_games()
@@ -1091,7 +1217,11 @@ class ArchiveApp(ctk.CTk):
             self._show_empty_list()
             return
         self._render_list()
-        self._render_hero(self.backend.get_detail(self._game_id))
+        detail = self.backend.get_detail(self._game_id)
+        self._render_hero(detail)
+        # 封面探测在后台跑完会抬高数据版本, 这里顺手把图标位也重读一次.
+        tone = None if self._game is None else self._game.tone
+        self._render_hero_tile(self._game_id, detail.name, tone)
         self._restore_selection()
 
     def _report_read_failure(self, exc: Exception) -> None:
@@ -1891,8 +2021,10 @@ class ArchiveApp(ctk.CTk):
             self,
             palette=self.p,
             theme=self._theme,
+            language=self._language,
             shortcuts=self._shortcuts,
             on_toggle_theme=self._on_toggle_theme,
+            on_apply_language=self._on_language_change,
             on_apply_shortcut=self._apply_shortcut,
             on_capture_start=self._hotkeys.suspend,
             on_capture_end=self._hotkeys.resume,
@@ -2092,7 +2224,9 @@ def run_gui(
     logger.info("界面启动(verbose=%s)", verbose)
     database = Database(paths.database_path)
     database.migrate()
-    backend: ArchiveService = SqlArchiveService(database, backup_root=paths.backup_root)
+    backend: ArchiveService = SqlArchiveService(
+        database, backup_root=paths.backup_root, cache_dir=paths.cache_dir
+    )
     app = ArchiveApp(
         backend,
         title=display_name,

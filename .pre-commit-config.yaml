@@ -15,6 +15,18 @@ repos:
         language: system
         types: [python]
 
+      - id: compact-json
+        # 固定数据清单(平台工具排除清单等“只给程序读”的 JSON)必须保持单行紧凑格式;
+        # 编辑器一格式化就会展开成多行, 手工转回去容易漏, 所以由钩子就地压回。
+        # 脚本改写完会自己 `git add` 暂存: 工作区与索引一起变单行后就不算“弄脏文件”,
+        # 本次提交直接带上转换好的内容, 不需要重新 add。
+        name: compact JSON (清单转单行)
+        entry: uv run python scripts/compact_json.py
+        language: system
+        # 只管 resources 顶层的固定数据清单; resources/i18n/*.json 是给人看/审校的
+        # 文案资源, 继续保持多行。
+        files: ^src/archive_management/resources/[^/]+\.json$
+
       - id: mypy
         name: mypy
         entry: uv run mypy

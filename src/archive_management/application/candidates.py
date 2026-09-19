@@ -40,7 +40,6 @@ from archive_management.services.platform_scan import path_health
 
 SUGGEST_ACTION = "candidates.suggest"
 CONFIRM_ACTION = "candidates.confirm"
-IGNORE_ACTION = "candidates.ignore"
 
 
 @dataclass(frozen=True)
@@ -156,15 +155,6 @@ def confirm_candidate(database: Database, candidate_id: int) -> SaveLocation:
     return location
 
 
-def ignore_candidate(database: Database, candidate_id: int) -> SaveCandidate:
-    """忽略一条候选: 记录保留, 后续探测不会覆盖用户的决定."""
-    candidates = SaveCandidateRepository(database)
-    _require_candidate(candidates, candidate_id)
-    updated = candidates.set_status(candidate_id, "ignored")
-    log_action(IGNORE_ACTION, candidate_id=candidate_id)
-    return updated
-
-
 def _save_source(platform: str) -> SaveSource:
     """把平台标识映射成存档位置允许的来源取值.
 
@@ -201,7 +191,10 @@ def _build_candidate(
         relative_path=item.relative_path,
         confidence=item.confidence,
         health=path_health(path),
-        risk_reason=dangerous_target_reason(path, protected=protected) or "",
+        risk_reason=dangerous_target_reason(
+            path, protected=protected, protect_subpaths=False
+        )
+        or "",
         status=status,
         found_at=datetime.now(UTC),
     )

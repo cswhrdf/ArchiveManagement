@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping
 
 import customtkinter as ctk
 
-from archive_management.i18n import tr
+from archive_management.i18n import available_locales, tr
 from archive_management.services.hotkeys import (
     ACTION_CREATE_BRANCH,
     ACTION_SAVE_NOW,
@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 _ToggleTheme = Callable[[], str]
 # 应用一个新组合键; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyShortcut = Callable[[str, str], "str | None"]
+# 切换界面语言; 返回 None 表示成功, 否则返回可直接展示的失败说明.
+_ApplyLanguage = Callable[[str], "str | None"]
 # 录制开始/结束的钩子(主窗口据此暂停与恢复全局快捷键).
 _CaptureHook = Callable[[], None]
 
@@ -63,21 +65,30 @@ class SettingsWindow:
         *,
         palette: Palette,
         theme: str,
+        language: str,
         shortcuts: Mapping[str, str],
         on_toggle_theme: _ToggleTheme,
+        on_apply_language: _ApplyLanguage,
         on_apply_shortcut: _ApplyShortcut,
         on_capture_start: _CaptureHook,
         on_capture_end: _CaptureHook,
     ) -> None:
-        """构造设置窗口并绑定主题切换与快捷键回调."""
+        """构造设置窗口并绑定主题、语言与快捷键回调."""
         self._parent = parent
         self._palette = palette
         self._theme = theme
+        self._language = language
         self._shortcuts: dict[str, str] = dict(shortcuts)
         self._on_toggle_theme = on_toggle_theme
+        self._on_apply_language = on_apply_language
         self._on_apply_shortcut = on_apply_shortcut
         self._on_capture_start = on_capture_start
         self._on_capture_end = on_capture_end
+        # 下拉框里显示的是语言自己的名字(中文写中文、英文写 English), 因此需要文案到
+        # locale 的映射; 值来自资源目录, 新增语言不用改这里。
+        self._locales: dict[str, str] = {
+            self._locale_label(locale): locale for locale in available_locales()
+        }
         self._capturing: str | None = None
         self._held: set[str] = set()
         self._captured: list[str] = []
@@ -162,6 +173,67 @@ class SettingsWindow:
             row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
         )
 
+        self._language_panel = ctk.CTkFrame(
+            self._container,
+            fg_color=palette.panel,
+            corner_radius=10,
+            border_width=1,
+            border_color=palette.border,
+        )
+        self._language_panel.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self._language_panel.grid_columnconfigure(0, weight=1)
+        self._language_title = ctk.CTkLabel(
+            self._language_panel,
+            text=tr("settings.language"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        self._language_title.grid(row=0, column=0, padx=16, pady=(14, 2), sticky="w")
+        self._language_hint = ctk.CTkLabel(
+            self._language_panel,
+            text=tr("settings.language_hint"),
+            anchor="w",
+            justify="left",
+            wraplength=280,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._language_hint.grid(row=1, column=0, padx=16, sticky="w")
+        self._language_box = ctk.CTkComboBox(
+            self._language_panel,
+            values=list(self._locales),
+            width=140,
+            command=self._on_language_selected,
+            state="readonly",
+            fg_color=palette.input_bg,
+            button_color=palette.raised,
+            button_hover_color=palette.item_hover,
+            border_color=palette.border,
+            text_color=palette.text_body,
+            dropdown_fg_color=palette.panel,
+            dropdown_text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+            dropdown_font=ctk.CTkFont(size=12),
+        )
+        self._language_box.set(self._locale_label(self._language))
+        self._language_box.grid(row=0, column=1, rowspan=2, padx=16, pady=14)
+        self._language_label = ctk.CTkLabel(
+            self._language_panel,
+            text=tr(
+                "settings.current_language",
+                language=self._locale_label(self._language),
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=400,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._language_label.grid(
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
+        )
+
         self._shortcut_panel = ctk.CTkFrame(
             self._container,
             fg_color=palette.panel,
@@ -169,7 +241,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._shortcut_panel.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self._shortcut_panel.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         self._shortcut_panel.grid_columnconfigure(0, weight=1)
         self._shortcut_title = ctk.CTkLabel(
             self._shortcut_panel,
@@ -246,7 +318,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        self._note_label.grid(row=3, column=0, sticky="w", pady=(12, 0))
+        self._note_label.grid(row=4, column=0, sticky="w", pady=(12, 0))
 
         self._close_btn = ctk.CTkButton(
             self._container,
@@ -262,11 +334,33 @@ class SettingsWindow:
             border_color=palette.border,
             font=ctk.CTkFont(size=12),
         )
-        self._close_btn.grid(row=4, column=0, sticky="e", pady=(14, 0))
+        self._close_btn.grid(row=5, column=0, sticky="e", pady=(14, 0))
 
     def _toggle_text(self) -> str:
         """按钮文案: 点击后会切到的主题."""
         return tr("theme.to_dark") if self._theme == "light" else tr("theme.to_light")
+
+    @staticmethod
+    def _locale_label(locale: str) -> str:
+        """语言在列表里显示的名字(每种语言用自己那套写法)."""
+        return tr(f"locale.{locale}")
+
+    def _on_language_selected(self, value: str) -> None:
+        """切换语言: 交给主窗口处理, 成功后本窗口关闭(主窗口会整体重建).
+
+        文案是构建时取的, 换语言必须重建界面 —— 重建后本窗口也会用新语言重开,
+        因此这里直接关掉, 让用户看到一份彻底一致的新界面。
+        """
+        locale = self._locales.get(value)
+        if locale is None or locale == self._language:
+            return
+        error = self._on_apply_language(locale)
+        if error is None:
+            self._window.destroy()
+            return
+        self._language_label.configure(
+            text=tr("settings.language_failed", reason=error)
+        )
 
     # -- 交互 ---------------------------------------------------------------
 
@@ -280,13 +374,20 @@ class SettingsWindow:
         self._palette = palette
         self._window.configure(fg_color=palette.background)
         self._container.configure(fg_color=palette.background)
-        for panel in (self._appearance_panel, self._shortcut_panel):
+        for panel in (
+            self._appearance_panel,
+            self._language_panel,
+            self._shortcut_panel,
+        ):
             panel.configure(fg_color=palette.panel, border_color=palette.border)
         for label, color in (
             (self._title_label, palette.text_primary),
             (self._appearance_title, palette.text_primary),
+            (self._language_title, palette.text_primary),
             (self._shortcut_title, palette.text_primary),
             (self._appearance_hint, palette.text_muted),
+            (self._language_hint, palette.text_muted),
+            (self._language_label, palette.text_muted),
             (self._shortcut_hint, palette.text_muted),
             (self._shortcut_error, palette.danger),
             (self._note_label, palette.text_muted),

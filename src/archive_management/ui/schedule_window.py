@@ -42,6 +42,28 @@ def _has_locations(backend: ArchiveService, game_id: str) -> bool:
         return False
 
 
+def _error_dialog(parent: ctk.CTk, palette: Palette, message: str) -> None:
+    """弹出一个统一的错误提示框."""
+    info_dialog(parent, palette, title=tr("dialog.error_title"), message=message)
+
+
+def _parse_keep_auto(
+    parent: ctk.CTk, palette: Palette, raw: str, *, fallback: int
+) -> int | None:
+    """解析自动备份保留份数; 留空取原值, 非法时弹窗提示并返回 None."""
+    if not raw:
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        _error_dialog(parent, palette, tr("error.keep_auto_invalid"))
+        return None
+    if not 1 <= value <= MAX_KEEP_AUTO:
+        _error_dialog(parent, palette, tr("error.keep_auto_range", max=MAX_KEEP_AUTO))
+        return None
+    return value
+
+
 def edit_schedule(
     parent: ctk.CTk,
     palette: Palette,
@@ -59,11 +81,8 @@ def edit_schedule(
     暂停态, 保存后明确告知原因。
     """
     if not _has_locations(backend, game_id):
-        info_dialog(
-            parent,
-            palette,
-            title=tr("dialog.error_title"),
-            message=tr("error.no_locations_schedule", name=game_name),
+        _error_dialog(
+            parent, palette, tr("error.no_locations_schedule", name=game_name)
         )
         return False
     task = backend.task_status(game_id)
@@ -84,35 +103,13 @@ def edit_schedule(
     if edited is None:
         return False
     text, keep_text = edited
-    keep_auto = task.keep_auto
-    if keep_text:
-        try:
-            keep_auto = int(keep_text)
-        except ValueError:
-            info_dialog(
-                parent,
-                palette,
-                title=tr("dialog.error_title"),
-                message=tr("error.keep_auto_invalid"),
-            )
-            return False
-        if not 1 <= keep_auto <= MAX_KEEP_AUTO:
-            info_dialog(
-                parent,
-                palette,
-                title=tr("dialog.error_title"),
-                message=tr("error.keep_auto_range", max=MAX_KEEP_AUTO),
-            )
-            return False
+    keep_auto = _parse_keep_auto(parent, palette, keep_text, fallback=task.keep_auto)
+    if keep_auto is None:
+        return False
     try:
         backend.set_schedule(game_id, text, keep_auto=keep_auto)
     except ArchiveManagementError as exc:
-        info_dialog(
-            parent,
-            palette,
-            title=tr("dialog.error_title"),
-            message=str(exc),
-        )
+        _error_dialog(parent, palette, str(exc))
         return False
     log_action(
         "schedule.edit",

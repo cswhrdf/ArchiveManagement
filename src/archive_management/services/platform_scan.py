@@ -329,6 +329,16 @@ def vdf_first(pairs: Iterable[tuple[str, str]], key: str) -> str | None:
     return None
 
 
+def app_id_from_manifest(name: str) -> str:
+    """从 Steam 应用清单文件名解析 AppID(``appmanifest_<appid>.acf``).
+
+    解析不出时返回空字符串: 调用方据此判断"这条记录谈不谈得上 AppID", 而不是
+    拿一个猜出来的值去查云端清单。
+    """
+    matched = _STEAM_MANIFEST.fullmatch(name)
+    return "" if matched is None else matched.group(1)
+
+
 def path_health(raw: str) -> PathHealth:
     """判定路径的健康状态: 高风险位置优先于"存在性"判断.
 
@@ -472,10 +482,9 @@ def read_steam_installs(roots: ScanRoots) -> list[SteamInstall]:
                 installdir = vdf_first(pairs, "installdir")
                 if not name or not installdir:
                     continue
-                matched = _STEAM_MANIFEST.fullmatch(manifest.name)
                 installs.append(
                     SteamInstall(
-                        app_id=matched.group(1) if matched else "",
+                        app_id=app_id_from_manifest(manifest.name),
                         name=name,
                         installdir=installdir,
                         install_dir=steamapps / "common" / installdir,

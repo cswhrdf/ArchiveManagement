@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,7 @@ from archive_management.domain import (
     HomeFilter,
     HomeLayout,
     HomeView,
+    SavePathCandidate,
 )
 from archive_management.i18n import tr
 from archive_management.ui.models import (
@@ -30,6 +32,7 @@ from archive_management.ui.models import (
     HomeSection,
     LocationItem,
     MonitoredDirItem,
+    SavePathSuggestion,
     ScanSummary,
     SourceFilter,
     ViewKind,
@@ -311,6 +314,78 @@ def test_every_discovery_filter_and_page_label_is_translated() -> None:
         assert not page.label.startswith("discovery.")
 
 
+def test_save_path_suggestion_keeps_the_path_and_the_danger_note() -> None:
+    """存档路径建议: 路径都来自可信渠道, 因此不再标可信度, 只标危险目标."""
+    safe = SavePathSuggestion.from_candidate(
+        SavePathCandidate(
+            path="C:/Saves",
+            path_kind="directory",
+            confidence="high",
+            reason_code="steam_remotecache",
+        )
+    )
+    assert safe.risk_label == ""
+    assert safe.text == "C:/Saves"
+
+    risky = SavePathSuggestion.from_candidate(
+        SavePathCandidate(
+            path=str(Path.home()),
+            path_kind="directory",
+            confidence="low",
+            reason_code="steam_remotecache",
+        )
+    )
+    assert risky.dangerous is True
+    assert risky.text == f"{Path.home()} · {tr('discovery.save_risk')}"
+
+
+def test_candidate_item_display_name_falls_back_to_the_detected_name() -> None:
+    """有当前语言译名就用译名, 没有就回落探测到的名称."""
+    item = CandidateItem(
+        candidate_id="1",
+        name="Stardew Valley",
+        install_dir="D:/Steam/Stardew Valley",
+        source="steam",
+        confidence="high",
+        status="new",
+        health="ok",
+    )
+
+    assert item.display_name == "Stardew Valley"
+    assert replace(item, localized_name="星露谷物语").display_name == "星露谷物语"
+
+
+def test_candidate_item_save_label_has_three_states() -> None:
+    """探测结果行的存档区三态: 平台不支持 / 没推出来 / 推出来 N 条."""
+    unsupported = CandidateItem(
+        candidate_id="1",
+        name="Demo",
+        install_dir="D:/Demo",
+        source="steam",
+        confidence="high",
+        status="new",
+        health="ok",
+        save_supported=False,
+    )
+    assert unsupported.save_label == tr(
+        "discovery.save_unsupported", platform=unsupported.source_label
+    )
+
+    supported = replace(unsupported, save_supported=True)
+    assert supported.save_label == tr("discovery.save_none")
+
+    found = replace(
+        supported,
+        save_paths=(
+            SavePathSuggestion(
+                path="C:/Saves",
+                path_kind="directory",
+            ),
+        ),
+    )
+    assert found.save_label == tr("discovery.save_found", count=1)
+
+
 def test_discovery_page_order_defaults_to_candidates() -> None:
     """页签顺序就是枚举成员顺序: 第一个(探测结果)是默认页面."""
     assert [page.value for page in DiscoveryPage] == ["candidates", "monitored"]
@@ -460,11 +535,13 @@ def test_scan_summary_label_and_detail() -> None:
         updated=3,
         linked=1,
         unusable=2,
+        excluded=4,
     )
 
     assert tr("discovery.scan_done", added=5, total=8) == summary.label
     assert tr("discovery.scan_monitored", count=3, active=2) in summary.detail
     assert tr("discovery.scan_unusable", count=2) in summary.detail
+    assert tr("discovery.scan_excluded", count=4) in summary.detail
     assert tr("discovery.scan_linked", count=1) in summary.detail
 
 
@@ -472,6 +549,7 @@ def test_scan_summary_detail_omits_empty_parts_and_reports_errors() -> None:
     clean = ScanSummary(
         monitored=0, active=0, total=0, added=0, updated=0, linked=0, unusable=0
     )
+    assert tr("discovery.scan_excluded", count=1) not in clean.detail
     assert tr("discovery.scan_linked", count=1) not in clean.detail
     assert tr("discovery.scan_errors", count=1) not in clean.detail
 
