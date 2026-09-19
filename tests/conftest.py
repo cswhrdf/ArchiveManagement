@@ -332,6 +332,23 @@ def _configure_allure(item: pytest.Item) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _close_gui_apps() -> Iterator[None]:
+    """用例结束后销毁它创建的 GUI 窗口(``tests/gui_support.gui_app`` 建的).
+
+    放在根 conftest 而不是 ``tests/integration/conftest.py``: 两个同名 conftest 会让
+    mypy 报 `Duplicate module named "conftest"`(两个目录都不是包)。因此这个夹具对所有
+    用例都生效, 但单元测试不建窗口, 登记表始终是空的, 收尾是一次空循环。
+
+    时机与原来的 ``try/finally: app.destroy()`` 完全一致(通过/失败/报错都会走到),
+    于是三个 GUI 模块里 69 处收尾样板可以删掉, 销毁也变成报告里的夹具步骤。
+    """
+    yield
+    from gui_support import close_gui_apps
+
+    close_gui_apps()
+
+
+@pytest.fixture(autouse=True)
 def _allure_metadata(request: pytest.FixtureRequest) -> Iterator[None]:
     """在每个测试开始后写入 Allure 元数据, 结束时补回被 allure-pytest 清掉的描述。"""
     _configure_allure(request.node)

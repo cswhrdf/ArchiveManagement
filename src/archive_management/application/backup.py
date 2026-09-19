@@ -203,16 +203,8 @@ class BackupService:
         最近的若干份, 更早的自动备份连同其快照一起清理. ``safety=True`` 表示
         这是恢复前自动创建的安全点: 只在时间线视图展示, 不进入分支树。
         """
-        if self._games.get(game_id) is None:
-            raise ArchiveManagementError(f"未知游戏: {game_id}")
-        locations = self._locations.list_for_game(game_id)
-        if not locations:
-            raise ArchiveManagementError("该游戏未配置存档位置, 无法备份")
+        sources = self._sources_for_backup(game_id)
         parent = self._resolve_parent(game_id, parent_id)
-        sources = [
-            SnapshotSource(path=location.path, kind=location.path_kind, index=index)
-            for index, location in enumerate(locations)
-        ]
         folder = self.storage_folder(game_id)
         relpath = backup_relpath(folder, self._stamp(), uuid4().hex[:8])
         destination = self._root / relpath
@@ -229,16 +221,14 @@ class BackupService:
             branch=branch_name,
             parent_id=None if parent is None else parent.id,
         )
-        try:
-            result = self._snapshotter(
-                sources, destination, progress=progress, cancelled=cancelled
-            )
-        except OperationCancelledError as exc:
-            log_action(action, game_id=game_id, result="cancelled", reason=str(exc))
-            raise
-        except Exception as exc:
-            log_failure(action, game_id=game_id, error=str(exc))
-            raise
+        result = self._run_snapshot(
+            sources,
+            destination,
+            action=action,
+            game_id=game_id,
+            progress=progress,
+            cancelled=cancelled,
+        )
         if parent is not None and parent.content_hash:
             self._reject_unchanged(
                 action=action,
@@ -247,36 +237,28 @@ class BackupService:
                 destination=destination,
                 content_hash=result.content_hash,
             )
-        try:
-            node = self._backups.add_with_files(
-                BackupNode(
-                    game_id=game_id,
-                    parent_id=None if parent is None else parent.id,
-                    node_kind=kind,
-                    branch_name=branch_name,
-                    title=title,
-                    note=note,
-                    content_hash=result.content_hash,
-                    storage_relpath=relpath,
-                    created_at=datetime.now(UTC),
-                    is_safety=safety,
-                ),
-                _file_entries(result),
-            )
-        except Exception as exc:
-            # 数据库写入失败时回收快照目录, 避免留下"孤儿"备份.
-            remove_snapshot(destination)
-            log_failure(action, game_id=game_id, error=str(exc))
-            raise
-        pruned: list[int] = []
-        if node.id is not None:
-            # 新备份成为"当前节点": 后续的向下保存都会接在它后面.
-            self._games.set_current_backup(game_id, node.id)
-            pruned = (
-                self._prune_auto(game_id, keep_auto, protect=node.id)
-                if kind == "auto"
-                else []
-            )
+        node = BackupNode(
+            game_id=game_id,
+            parent_id=None if parent is None else parent.id,
+            node_kind=kind,
+            branch_name=branch_name,
+            title=title,
+            note=note,
+            content_hash=result.content_hash,
+            storage_relpath=relpath,
+            created_at=datetime.now(UTC),
+            is_safety=safety,
+        )
+        node = self._insert_node(
+            node,
+            destination=destination,
+            result=result,
+            action=action,
+            game_id=game_id,
+        )
+        pruned = self._activate_node(
+            node, game_id=game_id, keep_auto=keep_auto, kind=kind
+        )
         log_action(
             action,
             game_id=game_id,
@@ -288,6 +270,70 @@ class BackupService:
             pruned_auto=len(pruned) or None,
         )
         return node
+
+    def _sources_for_backup(self, game_id: int) -> list[SnapshotSource]:
+        """校验游戏与存档位置, 并按位置顺序列出快照来源."""
+        if self._games.get(game_id) is None:
+            raise ArchiveManagementError(f"未知游戏: {game_id}")
+        locations = self._locations.list_for_game(game_id)
+        if not locations:
+            raise ArchiveManagementError("该游戏未配置存档位置, 无法备份")
+        return [
+            SnapshotSource(path=location.path, kind=location.path_kind, index=index)
+            for index, location in enumerate(locations)
+        ]
+
+    def _run_snapshot(
+        self,
+        sources: list[SnapshotSource],
+        destination: Path,
+        *,
+        action: str,
+        game_id: int,
+        progress: ProgressCallback | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> SnapshotResult:
+        """执行一次快照; 取消与失败先记审计日志再原样抛出."""
+        try:
+            return self._snapshotter(
+                sources, destination, progress=progress, cancelled=cancelled
+            )
+        except OperationCancelledError as exc:
+            log_action(action, game_id=game_id, result="cancelled", reason=str(exc))
+            raise
+        except Exception as exc:
+            log_failure(action, game_id=game_id, error=str(exc))
+            raise
+
+    def _insert_node(
+        self,
+        node: BackupNode,
+        *,
+        destination: Path,
+        result: SnapshotResult,
+        action: str,
+        game_id: int,
+    ) -> BackupNode:
+        """写入备份节点并返回落库后的节点; 写库失败时回收已落盘的快照目录."""
+        try:
+            return self._backups.add_with_files(node, _file_entries(result))
+        except Exception as exc:
+            # 数据库写入失败时回收快照目录, 避免留下"孤儿"备份.
+            remove_snapshot(destination)
+            log_failure(action, game_id=game_id, error=str(exc))
+            raise
+
+    def _activate_node(
+        self, node: BackupNode, *, game_id: int, keep_auto: int, kind: NodeKind
+    ) -> list[int]:
+        """把新节点设为"当前节点", 自动备份再按保留份数清理更早的节点."""
+        if node.id is None:
+            return []
+        # 新备份成为"当前节点": 后续的向下保存都会接在它后面.
+        self._games.set_current_backup(game_id, node.id)
+        if kind != "auto":
+            return []
+        return self._prune_auto(game_id, keep_auto, protect=node.id)
 
     def create_branch(
         self,
@@ -421,20 +467,11 @@ class BackupService:
         if not targets:
             return []
         by_id = {node.id: node for node in nodes if node.id is not None}
-        children: dict[int, list[int]] = {}
-        for node in nodes:
-            if node.id is not None and node.parent_id is not None:
-                children.setdefault(node.parent_id, []).append(node.id)
+        children = _children_by_parent(nodes)
         for backup_id in targets:
             target = by_id.get(backup_id)
-            if target is None:
-                continue
-            # 被清理节点的子节点上移, 保持线路连续.
-            for child_id in children.get(backup_id, []):
-                self._backups.reparent(child_id, target.parent_id)
-            self._backups.delete(backup_id)
-            if target.storage_relpath:
-                remove_snapshot(self._root / target.storage_relpath)
+            if target is not None:
+                self._prune_node(backup_id, target, children=children)
         log_action(
             "backup.prune_auto",
             game_id=game_id,
@@ -442,6 +479,20 @@ class BackupService:
             pruned=len(targets),
         )
         return targets
+
+    def _prune_node(
+        self,
+        backup_id: int,
+        target: BackupNode,
+        *,
+        children: dict[int, list[int]],
+    ) -> None:
+        """删除一个被剪除的节点: 子节点上移保持线路连续, 再删库与快照目录."""
+        for child_id in children.get(backup_id, []):
+            self._backups.reparent(child_id, target.parent_id)
+        self._backups.delete(backup_id)
+        if target.storage_relpath:
+            remove_snapshot(self._root / target.storage_relpath)
 
     def _fix_current_after_delete(self, game_id: int, plan: DeletionPlan) -> None:
         """删除后修正"当前节点"指针, 避免指向已删除的节点."""
@@ -530,6 +581,15 @@ class BackupService:
         if parent is None or parent.game_id != game_id:
             raise ArchiveManagementError(f"未知的父备份节点: {parent_id}")
         return parent
+
+
+def _children_by_parent(nodes: list[BackupNode]) -> dict[int, list[int]]:
+    """父节点 id -> 子节点 id 列表(只统计已落库、且确实有父节点的节点)."""
+    children: dict[int, list[int]] = {}
+    for node in nodes:
+        if node.id is not None and node.parent_id is not None:
+            children.setdefault(node.parent_id, []).append(node.id)
+    return children
 
 
 def _file_entries(result: SnapshotResult) -> list[BackupFileEntry]:

@@ -262,31 +262,23 @@ class RestoreService:
         skipped: list[str] = []
         safety_id: int | None = None
         try:
-            if safety_point and plan.safety_point_available:
-                safety_id = self._try_safety_point(
-                    game_id,
-                    title=safety_title,
-                    note=safety_note,
-                    progress=progress,
-                    cancelled=cancelled,
-                )
+            safety_id = self._maybe_safety_point(
+                plan,
+                game_id,
+                enabled=safety_point,
+                title=safety_title,
+                note=safety_note,
+                progress=progress,
+                cancelled=cancelled,
+            )
             total = max(len(manifest.sources), 1)
             for position, source in enumerate(manifest.sources, start=1):
-                if cancelled is not None and cancelled():
-                    raise OperationCancelledError("恢复已取消")
-                target = _target_for(plan, source.index)
-                destination = target.path if target is not None else source.path
-                kind = target.kind if target is not None else source.kind
-                _report(
-                    progress,
-                    0.3 + 0.7 * (position - 1) / total,
-                    f"恢复 {destination}",
-                )
-                outcome = self._restore_source(
-                    source=source,
-                    entries=_entries_for(manifest.entries, source.index),
-                    target_path=destination,
-                    kind=kind,
+                outcome = self._restore_one(
+                    plan,
+                    manifest,
+                    source,
+                    position=position,
+                    total=total,
                     snapshot_root=snapshot_root,
                     progress=progress,
                     cancelled=cancelled,
@@ -392,6 +384,60 @@ class RestoreService:
         if len(locations) > len(manifest.sources):
             warnings.append(WARN_MORE_LOCATIONS)
         return targets, warnings
+
+    def _maybe_safety_point(
+        self,
+        plan: RestorePlan,
+        game_id: int,
+        *,
+        enabled: bool,
+        title: str,
+        note: str,
+        progress: ProgressCallback | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> int | None:
+        """按需先建一份恢复前安全点; 不要求或当前状态不需要时返回 None.
+
+        安全点必须在覆盖任何文件**之前**落盘 —— 它承担"回到恢复前状态"的责任。
+        """
+        if not (enabled and plan.safety_point_available):
+            return None
+        return self._try_safety_point(
+            game_id,
+            title=title,
+            note=note,
+            progress=progress,
+            cancelled=cancelled,
+        )
+
+    def _restore_one(
+        self,
+        plan: RestorePlan,
+        manifest: SnapshotManifest,
+        source: SnapshotSource,
+        *,
+        position: int,
+        total: int,
+        snapshot_root: Path,
+        progress: ProgressCallback | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> _Outcome:
+        """恢复清单里的一个来源: 定位写回目标、报进度, 然后交给逐来源写回."""
+        if cancelled is not None and cancelled():
+            raise OperationCancelledError("恢复已取消")
+        target = _target_for(plan, source.index)
+        destination = source.path if target is None else target.path
+        kind = source.kind if target is None else target.kind
+        _report(progress, 0.3 + 0.7 * (position - 1) / total, f"恢复 {destination}")
+        return self._restore_source(
+            source=source,
+            entries=_entries_for(manifest.entries, source.index),
+            target_path=destination,
+            kind=kind,
+            snapshot_root=snapshot_root,
+            progress=progress,
+            cancelled=cancelled,
+        )
 
     def _restore_source(
         self,

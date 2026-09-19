@@ -25,6 +25,8 @@ from typing import Any
 
 import pytest
 
+from gui_support import gui_app
+
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
     from tkinter import TclError
@@ -60,6 +62,7 @@ from archive_management.ui.models import (
     HomeSection,
     poster_columns,
 )
+from archive_management.ui.textfit import fit_text
 
 pytestmark = [
     pytest.mark.integration,
@@ -231,25 +234,19 @@ def test_home_widgets_fit_the_supported_minimum_window() -> None:
     宽度", 它在小屏上就一定会越界(并盖住描边)。macOS CI 的虚拟屏比 1360 窄, 正好
     暴露了筛选工具条堆得太宽——在那里报错太晚, 这里提前拦住。
     """
-    try:
-        app = _new_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        _settle_layout(app)
-        budget = _supported_content_width(app, page._list_box.winfo_width())
-        too_wide = [
-            f"{frame} req={frame.winfo_reqwidth()}"
-            for frame in _bordered_frames(page.frame)
-            if frame.winfo_reqwidth() > budget
-        ]
-        detail = "; ".join(too_wide)
-        hint = f"下列容器的最小宽度超过支持的最小窗口下的可用宽度 {budget}px: {detail}"
-        assert not too_wide, hint
-    finally:
-        app.destroy()
+    app = gui_app(_new_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    budget = _supported_content_width(app, page._list_box.winfo_width())
+    too_wide = [
+        f"{frame} req={frame.winfo_reqwidth()}"
+        for frame in _bordered_frames(page.frame)
+        if frame.winfo_reqwidth() > budget
+    ]
+    detail = "; ".join(too_wide)
+    hint = f"下列容器的最小宽度超过支持的最小窗口下的可用宽度 {budget}px: {detail}"
+    assert not too_wide, hint
 
 
 def test_filter_controls_are_right_aligned_in_the_toolbar() -> None:
@@ -258,71 +255,58 @@ def test_filter_controls_are_right_aligned_in_the_toolbar() -> None:
     页签保持左对齐, 多余宽度由"页签与筛选控件之间的空白列"吸收。把多余宽度给筛选
     控件所在的列(早先的写法)会让平台下拉在很宽的单元格里居中, 看着像没对齐。
     """
-    try:
-        app = _new_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        _settle_layout(app)
-        bar = page._origin_box.master
-        origin = page._origin_box
-        category = page._category_box
-        search = page._search_entry.master
-        clear = page._clear_btn
+    app = gui_app(_new_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    bar = page._origin_box.master
+    origin = page._origin_box
+    category = page._category_box
+    search = page._search_entry.master
+    clear = page._clear_btn
 
-        def gap(left: Any, right: Any) -> int:
-            """两个控件之间的横向空隙(屏幕绝对坐标)."""
-            return int(right.winfo_rootx()) - (
-                int(left.winfo_rootx()) + int(left.winfo_width())
-            )
-
-        # 平台/类型/搜索紧挨着: 空隙就是各自的 padx(8 / 8 / 12), 不该被空白撑开.
-        assert abs(gap(origin, category) - 8) <= 2
-        assert abs(gap(category, search) - 8) <= 2
-        # 最右侧控件贴住工具条右边(只有 12px 内边距), 证明整行是右对齐收尾. 窗口被
-        # 环境挤到比工具条最小宽度还窄时(CI 虚拟屏), 内容整体右溢, 此时右边缘不再有
-        # 意义——"最小值放不放得下"由 test_home_widgets_fit_the_supported_minimum_window
-        # 在任意窗口尺寸下把关.
-        if bar.winfo_width() >= bar.winfo_reqwidth():
-            bar_right = int(bar.winfo_rootx()) + int(bar.winfo_width())
-            clear_right = int(clear.winfo_rootx()) + int(clear.winfo_width())
-            assert abs(bar_right - clear_right - 12) <= 3
-        # 页签仍在左侧, 与筛选控件之间留出被吸收的空白.
-        tabs_right = max(
-            int(tab.winfo_rootx()) + int(tab.winfo_width())
-            for tab in page._tabs.values()
+    def gap(left: Any, right: Any) -> int:
+        """两个控件之间的横向空隙(屏幕绝对坐标)."""
+        return int(right.winfo_rootx()) - (
+            int(left.winfo_rootx()) + int(left.winfo_width())
         )
-        assert tabs_right < int(origin.winfo_rootx())
-    finally:
-        app.destroy()
+
+    # 平台/类型/搜索紧挨着: 空隙就是各自的 padx(8 / 8 / 12), 不该被空白撑开.
+    assert abs(gap(origin, category) - 8) <= 2
+    assert abs(gap(category, search) - 8) <= 2
+    # 最右侧控件贴住工具条右边(只有 12px 内边距), 证明整行是右对齐收尾. 窗口被
+    # 环境挤到比工具条最小宽度还窄时(CI 虚拟屏), 内容整体右溢, 此时右边缘不再有
+    # 意义——"最小值放不放得下"由 test_home_widgets_fit_the_supported_minimum_window
+    # 在任意窗口尺寸下把关.
+    if bar.winfo_width() >= bar.winfo_reqwidth():
+        bar_right = int(bar.winfo_rootx()) + int(bar.winfo_width())
+        clear_right = int(clear.winfo_rootx()) + int(clear.winfo_width())
+        assert abs(bar_right - clear_right - 12) <= 3
+    # 页签仍在左侧, 与筛选控件之间留出被吸收的空白.
+    tabs_right = max(
+        int(tab.winfo_rootx()) + int(tab.winfo_width()) for tab in page._tabs.values()
+    )
+    assert tabs_right < int(origin.winfo_rootx())
 
 
 def test_library_and_discovery_borders_are_visible() -> None:
     """主页(列表/海报)与游戏发现区的卡片四边框都必须可见."""
-    try:
-        app = _new_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        page = app._home_page
-        _pump(app)
-        assert _offenders(app) == []
+    app = gui_app(_new_app)
+    page = app._home_page
+    _pump(app)
+    assert _offenders(app) == []
 
-        page._on_layout_change("海报")
-        _pump(app)
-        assert _offenders(page._list_box) == []
+    page._on_layout_change("海报")
+    _pump(app)
+    assert _offenders(page._list_box) == []
 
-        page._show_section(HomeSection.DISCOVERY)
-        _pump(app)
-        assert _offenders(page.frame) == []
+    page._show_section(HomeSection.DISCOVERY)
+    _pump(app)
+    assert _offenders(page.frame) == []
 
-        page._discovery._show_page(DiscoveryPage.MONITORED)
-        _pump(app)
-        assert _offenders(page.frame) == []
-    finally:
-        app.destroy()
+    page._discovery._show_page(DiscoveryPage.MONITORED)
+    _pump(app)
+    assert _offenders(page.frame) == []
 
 
 def test_workspace_window_borders_are_visible() -> None:
@@ -407,26 +391,20 @@ def test_detail_page_and_manage_window_borders_are_visible() -> None:
 
 def test_discovery_uses_same_page_margin_as_library() -> None:
     """回归: "游戏发现"的内容内缩不能比"游戏库"更宽(卡片不能往里挤)."""
-    try:
-        app = _new_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        _settle_layout(app)
-        library_insets = _insets(page, page._list_box)
+    app = gui_app(_new_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    library_insets = _insets(page, page._list_box)
 
-        page._show_section(HomeSection.DISCOVERY)
-        _settle_layout(app)
-        assert _insets(page, page._discovery._cand_box) == library_insets
+    page._show_section(HomeSection.DISCOVERY)
+    _settle_layout(app)
+    assert _insets(page, page._discovery._cand_box) == library_insets
 
-        # 监控目录页未显示时其滚动区没有布局, 必须先切过去再量.
-        page._discovery._show_page(DiscoveryPage.MONITORED)
-        _settle_layout(app)
-        assert _insets(page, page._discovery._dirs_box) == library_insets
-    finally:
-        app.destroy()
+    # 监控目录页未显示时其滚动区没有布局, 必须先切过去再量.
+    page._discovery._show_page(DiscoveryPage.MONITORED)
+    _settle_layout(app)
+    assert _insets(page, page._discovery._dirs_box) == library_insets
 
 
 # ------------------------------------------------------------ 长名称不挤坏布局
@@ -436,8 +414,10 @@ _LONG_NAME = (
     "Kaiju Princess 2: Poochi Q ASMR - A Magic Ticket That Grants Any Desire - "
     "超长的游戏名称示例"
 )
-# 再长一倍: 详情页的标题在两行(约 900px)里肯定放不下, 用来验证"截断 + 省略号".
-_HUGE_NAME = _LONG_NAME * 2
+# 再长 20 倍: 在任何字体度量下, 两行标题与单行列表都**不可能**放得下 —— 用来验证
+# "截断 + 省略号"与"变宽就多显示"。不能用 2 份: CI 的 Linux 镜像往往没有中文字体,
+# 汉字量出来很窄, 2 份名称会被完整显示(本地 Windows 有中文字体所以看不出来)。
+_HUGE_NAME = _LONG_NAME * 20
 
 
 class _LongNameService(DemoArchiveService):
@@ -499,6 +479,65 @@ def _visible_text(widget: Any) -> str:
     return str(getattr(widget, "_text", ""))
 
 
+def _pumped(app: Any, seconds: float = 0.4) -> None:
+    """尺寸稳定后再多跑一会儿事件循环: 名称重裁是延后 60ms 的任务."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.update_idletasks()
+        app.update()
+        time.sleep(0.02)
+
+
+def _resize(app: ArchiveApp, width: int) -> int:
+    """把窗口调到 ``width``, 返回**实际**宽度(窗口管理器可能把它压回屏幕内)."""
+    app.geometry(f"{width}x820")
+    _settle_layout(app)
+    _pumped(app)
+    return int(app.winfo_width())
+
+
+def _assert_lines(label: Any, limit: int) -> None:
+    """名称的显示行数不能超过 ``limit``, 且请求宽度不能超过它分到的那一格."""
+    text = _visible_text(label)
+    lines = text.count("\n") + 1
+    assert lines <= limit, f"名称折了 {lines} 行(上限 {limit}): {text[:40]!r}"
+    assert label.winfo_reqwidth() <= label.winfo_width(), "名称比可用宽度还宽"
+
+
+def _assert_name_fills(label: Any, full: str, font: Any) -> None:
+    """被截断的名称必须按**当前宽度**裁到"再加一个字符就放不下".
+
+    两道检查, 缺一不可:
+
+    1. 显示文本必须**等于**同一宽度下 :func:`fit_text` 的结果 —— 布局若停在上一次的
+       窄宽度上(真正要防的回归: 窗口变宽了, 名称还是旧的短文本), 这里就不一样。
+       这条比对的是**文本**而不是像素, 因此与字体是否缺字形无关。
+    2. 剩下的像素缝隙有上限 —— 省略号要占自己的宽度, 切点落在空格上时还会被
+       ``rstrip`` 掉, 所以上界是"两个字符宽"而不是"一个字符宽"。
+
+    第二道原来写的是 ``slack <= font.measure("测")``, CI 上因此误报(不是布局出错):
+    Windows runner 上缝隙 14px > 13px; Linux 镜像没有中文字体, ``measure("测")``
+    直接是 0 —— 容忍度退化成 0, 缝隙 3px 也算失败。
+    """
+    shown = _visible_text(label)
+    if len(shown) >= len(full) or not shown.endswith("…"):
+        return
+    width = label.winfo_width()
+    expected = fit_text(full, font, width)
+    stale = (
+        f"名称不是按当前宽度 {width}px 裁的: 显示 {len(shown)} 字, "
+        f"应为 {len(expected)} 字(布局可能停在上一次的宽度上)"
+    )
+    assert shown == expected, stale
+    # 缺中文字体时 measure("测") 是 0, 用 "W" 兜底; 连字体库都没有时所有字形都量成 0,
+    # 像素上限就没意义了(真正的判定交给上面那条文本比对), 给个 8px 地板免得退化成 0。
+    unit = max(font.measure("测"), font.measure("W"), 8)
+    slack = width - font.measure(shown)
+    budget = unit * 2 + 1
+    hint = f"名称没有吃满 {width}px: 还空着 {slack}px(上限 {budget}px)"
+    assert slack <= budget, hint
+
+
 def _fixed_cells(block: Any) -> list[Any]:
     """取"固定列块"里的单元格(表头与数据行结构相同, 只有它带 len(_COLUMNS) 个格子)."""
     for child in block.winfo_children():
@@ -519,160 +558,161 @@ def test_long_game_name_does_not_widen_the_list_rows() -> None:
     预算用 ``_supported_content_width`` 折算到"支持的最小窗口", 因此这条断言与
     当前窗口大小无关(小屏上窗口被窗口管理器压小时同样成立)。
     """
-    try:
-        app = _long_name_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        _settle_layout(app)
+    app = gui_app(_long_name_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
 
-        budget = _supported_content_width(app, page._list_box.winfo_width())
-        rows = list(page._rows.values())
-        assert rows, "演示数据应当有游戏"
-        # 固定列块本身必须放得进"最小窗口"的内容区, 否则名称在最小窗口下没有位置.
-        block = next(iter(page._row_parts.values())).columns.winfo_width()
-        too_wide = f"固定列块 {block}px 放不进最小窗口的内容区({budget}px)"
-        assert block <= budget, too_wide
+    budget = _supported_content_width(app, page._list_box.winfo_width())
+    rows = list(page._rows.values())
+    assert rows, "演示数据应当有游戏"
+    # 固定列块本身必须放得进"最小窗口"的内容区, 否则名称在最小窗口下没有位置.
+    block = next(iter(page._row_parts.values())).columns.winfo_width()
+    too_wide = f"固定列块 {block}px 放不进最小窗口的内容区({budget}px)"
+    assert block <= budget, too_wide
 
-        parts = next(iter(page._row_parts.values()))
-        shown = _visible_text(parts.label)
-        assert shown.endswith("…"), f"名称应当截断显示: {shown!r}"
-        assert len(shown) < len(parts.full_name), "截断后的名称必须比原名短"
+    parts = next(iter(page._row_parts.values()))
+    shown = _visible_text(parts.label)
+    assert shown.endswith("…"), f"名称应当截断显示: {shown!r}"
+    assert len(shown) < len(parts.full_name), "截断后的名称必须比原名短"
 
-        # 各行的固定列必须落在同一个 (屏幕) x 上: 名称长的行不能把后面的列右推.
-        places = [[_place(cell) for cell in _fixed_cells(row)] for row in rows]
-        misaligned = f"各行列位置不一致: {places}"
-        assert all(place == places[0] for place in places), misaligned
+    # 各行的固定列必须落在同一个 (屏幕) x 上: 名称长的行不能把后面的列右推.
+    places = [[_place(cell) for cell in _fixed_cells(row)] for row in rows]
+    misaligned = f"各行列位置不一致: {places}"
+    assert all(place == places[0] for place in places), misaligned
 
-        # 表头与数据行的固定列也在同一条竖线上(表头在卡片里, 宽度原本不同).
-        header = [_place(cell) for cell in _fixed_cells(page._head)]
-        assert header == places[0], f"表头与数据行没有对齐: {header} != {places[0]}"
-        # 名称列头与名称文本也落在同一个 x 上.
-        assert page._head_name.winfo_rootx() == parts.name_block.winfo_rootx()
+    # 表头与数据行的固定列也在同一条竖线上(表头在卡片里, 宽度原本不同).
+    header = [_place(cell) for cell in _fixed_cells(page._head)]
+    assert header == places[0], f"表头与数据行没有对齐: {header} != {places[0]}"
+    # 名称列头与名称文本也落在同一个 x 上.
+    assert page._head_name.winfo_rootx() == parts.name_block.winfo_rootx()
 
-        # 固定列块**贴靠右侧**: 最后一列的右边界离行的右边界只差一个内边距.
-        row = rows[0]
-        row_right = row.winfo_rootx() + row.winfo_width()
-        last = _fixed_cells(row)[-1]
-        gap = row_right - (last.winfo_rootx() + last.winfo_width())
-        assert 0 <= gap <= 20, f"固定列块没有贴右: 右侧还空着 {gap}px"
-    finally:
-        app.destroy()
+    # 固定列块**贴靠右侧**: 最后一列的右边界离行的右边界只差一个内边距.
+    row = rows[0]
+    row_right = row.winfo_rootx() + row.winfo_width()
+    last = _fixed_cells(row)[-1]
+    gap = row_right - (last.winfo_rootx() + last.winfo_width())
+    assert 0 <= gap <= 20, f"固定列块没有贴右: 右侧还空着 {gap}px"
 
 
 def test_long_game_name_wraps_inside_the_poster_card() -> None:
     """海报卡片里的名称最多折两行并截断, 且卡片尺寸不变、内容不越出卡片."""
-    try:
-        app = _long_name_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        page._on_layout_change(HomeLayout.POSTER.label)
-        _settle_layout(app)
-        assert page._rows, "演示数据应当有游戏"
+    app = gui_app(_long_name_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _settle_layout(app)
+    assert page._rows, "演示数据应当有游戏"
 
-        for card in page._rows.values():
-            assert (card.winfo_reqwidth(), card.winfo_reqheight()) == (
-                _POSTER_WIDTH,
-                _POSTER_HEIGHT,
-            ), "卡片尺寸由常量固定, 长名称不应该把它撑大"
-            label = next(
-                child
-                for child in card.winfo_children()
-                if _visible_text(child).startswith(_LONG_NAME[:5])
-            )
-            text = _visible_text(label)
-            assert text.count("\n") + 1 <= _POSTER_NAME_LINES, f"名称超过两行: {text!r}"
-            assert "…" in text, f"两行放不下时应当截断: {text!r}"
-            assert label.winfo_reqwidth() <= _POSTER_TEXT_WIDTH
-            # 名称必须落在卡片内: 越界就会盖住卡片下边框(或直接看不到).
-            bottom = label.winfo_y() + label.winfo_height()
-            overflow = f"名称溢出卡片: {bottom} > {_POSTER_HEIGHT}"
-            assert bottom <= _POSTER_HEIGHT, overflow
-    finally:
-        app.destroy()
+    for card in page._rows.values():
+        assert (card.winfo_reqwidth(), card.winfo_reqheight()) == (
+            _POSTER_WIDTH,
+            _POSTER_HEIGHT,
+        ), "卡片尺寸由常量固定, 长名称不应该把它撑大"
+        label = next(
+            child
+            for child in card.winfo_children()
+            if _visible_text(child).startswith(_LONG_NAME[:5])
+        )
+        text = _visible_text(label)
+        assert text.count("\n") + 1 <= _POSTER_NAME_LINES, f"名称超过两行: {text!r}"
+        assert "…" in text, f"两行放不下时应当截断: {text!r}"
+        assert label.winfo_reqwidth() <= _POSTER_TEXT_WIDTH
+        # 名称必须落在卡片内: 越界就会盖住卡片下边框(或直接看不到).
+        bottom = label.winfo_y() + label.winfo_height()
+        overflow = f"名称溢出卡片: {bottom} > {_POSTER_HEIGHT}"
+        assert bottom <= _POSTER_HEIGHT, overflow
 
 
 def test_long_game_name_is_capped_in_the_detail_header() -> None:
     """详情页的名称最多两行(超出补省略号), 不能无限折行把下面的内容推下去."""
-    try:
-        app = _long_name_app(_HUGE_NAME)
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        page._open(next(iter(page._rows)))
-        _settle_layout(app)
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    page._open(next(iter(page._rows)))
+    _settle_layout(app)
 
-        title = app._title_label
-        text = _visible_text(title)
-        assert text.startswith(_LONG_NAME[:5]), "至少要能看出是哪款游戏"
-        assert text.endswith("…"), f"放不下就该补省略号: {text!r}"
-        assert text != _HUGE_NAME, "超长名称不应原样显示"
-        lines = text.count("\n") + 1
-        too_many = f"标题折了 {lines} 行(上限 {_HEADER_NAME_LINES})"
-        assert lines <= _HEADER_NAME_LINES, too_many
-        # 名称按控件当前宽度裁剪: 请求宽度不会超过它自己分到的那一格.
-        width = title.winfo_reqwidth()
-        too_wide = f"标题请求 {width}px, 超过可用 {title.winfo_width()}px"
-        assert width <= title.winfo_width(), too_wide
-        # 右侧按钮不能被名称挤出表头.
-        export = app._export_btn
-        export_edge = export.winfo_rootx() + export.winfo_width()
-        header_edge = title.master.winfo_rootx() + title.master.winfo_width()
-        assert export_edge <= header_edge + 1, "名称把右侧按钮挤出了表头"
+    title = app._title_label
+    text = _visible_text(title)
+    assert text.startswith(_LONG_NAME[:5]), "至少要能看出是哪款游戏"
+    assert text != _HUGE_NAME, "超长名称不应原样显示"
+    assert text.endswith("…"), f"放不下就该补省略号: {text!r}"
+    _assert_lines(title, _HEADER_NAME_LINES)
+    # 右侧按钮不能被名称挤出表头.
+    export = app._export_btn
+    export_edge = export.winfo_rootx() + export.winfo_width()
+    header_edge = title.master.winfo_rootx() + title.master.winfo_width()
+    assert export_edge <= header_edge + 1, "名称把右侧按钮挤出了表头"
 
-        hero_name = app._hero_name_label
-        hero_text = _visible_text(hero_name)
-        hero_lines = hero_text.count("\n") + 1
-        hero_limit = f"概要卡名称折了 {hero_lines} 行(上限 {_HERO_NAME_LINES})"
-        assert hero_lines <= _HERO_NAME_LINES, hero_limit
-        assert hero_text.endswith("…"), f"概要卡名称应当截断: {hero_text!r}"
-        assert hero_name.winfo_reqwidth() <= hero_name.winfo_width()
-    finally:
-        app.destroy()
+    hero_name = app._hero_name_label
+    assert _visible_text(hero_name).endswith("…"), "概要卡名称也应当截断"
+    _assert_lines(hero_name, _HERO_NAME_LINES)
 
 
-def test_list_and_detail_names_grow_with_the_window() -> None:
-    """名称按可用宽度动态裁剪: 窗口变宽就多显示几个字(列表与详情页都算)."""
-    try:
-        app = _long_name_app(_HUGE_NAME)
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        _settle_layout(app)
-        game_id = next(iter(page._row_parts))
-        label = page._row_parts[game_id].label
-        narrow = len(_visible_text(label))
+def test_names_follow_the_window_width() -> None:
+    """名称按可用宽度动态裁剪: 窗口变宽就多显示几个字(列表与详情页都算).
 
-        # 先在主页上把窗口拉宽: 名称块分到的宽度变大, 显示的字就应当变多.
-        app.geometry("1900x820")
-        _settle_layout(app)
-        wide = len(_visible_text(label))
-        list_hint = f"列表名称没有随窗口变宽: {narrow} -> {wide}"
-        assert wide > narrow, list_hint
+    CI 的虚拟显示器常常只有 1024px 左右, 窗口根本拉不宽(或被窗口管理器压回去);
+    那种环境下只验证"名称吃满了当前可用宽度"这条不变量, 严格变宽的断言会 skip
+    并说明原因 —— 两种环境都能跑, 也不会把环境限制当成代码缺陷。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    _pumped(app)
+    game_id = next(iter(page._row_parts))
+    _assert_name_fills(page._row_parts[game_id].label, _HUGE_NAME, page._name_font)
 
-        # 详情页同理: 在详情页上收窄窗口, 标题显示的字应当变少.
-        page._open(game_id)
-        _settle_layout(app)
-        title_wide = len(_visible_text(app._title_label))
-        app.geometry("1200x820")
-        _settle_layout(app)
-        title_narrow = len(_visible_text(app._title_label))
-        detail_hint = f"详情标题没有随窗口变宽: {title_narrow} -> {title_wide}"
-        assert title_wide > title_narrow, detail_hint
-        # 详情标题仍然受行数上限约束.
-        lines = _visible_text(app._title_label).count("\n") + 1
-        assert lines <= _HEADER_NAME_LINES, f"标题折了 {lines} 行"
-    finally:
-        app.destroy()
+    narrow_window = int(app.winfo_width())
+    narrow_chars = len(_visible_text(page._row_parts[game_id].label))
+    # 先直接要求一个明显更宽的窗口: 无窗口管理器的环境(Xvfb)会照做, 带窗口管理器
+    # 的平台则可能把它压回屏幕内 —— 那就只能退化到不变量断言(见下面的 skip).
+    wide_window = _resize(app, 1900)
+    wide_chars = len(_visible_text(page._row_parts[game_id].label))
+    _assert_name_fills(page._row_parts[game_id].label, _HUGE_NAME, page._name_font)
+
+    if wide_window <= narrow_window + 100:
+        pytest.skip(
+            f"窗口宽度无法改变({narrow_window} -> {wide_window}, "
+            f"屏幕宽 {app.winfo_screenwidth()}px), 跳过变宽断言"
+        )
+
+    list_hint = f"列表名称没有随窗口变宽: {narrow_chars} -> {wide_chars}"
+    assert wide_chars > narrow_chars, list_hint
+
+    # 详情页同理: 量宽/窄两档下标题显示的字数.
+    page._open(game_id)
+    _settle_layout(app)
+    _pumped(app)
+    title_wide = len(_visible_text(app._title_label))
+    _resize(app, narrow_window)
+    title_narrow = len(_visible_text(app._title_label))
+    detail_hint = f"详情标题没有随窗口变宽: {title_narrow} -> {title_wide}"
+    assert title_wide > title_narrow, detail_hint
+    _assert_lines(app._title_label, _HEADER_NAME_LINES)
+
+
+def test_the_fill_invariant_catches_a_stale_fit() -> None:
+    """自检: 名称若按"更窄 60px"的宽度裁过(窗口变宽但没重裁), 不变量必须报错.
+
+    看门狗自己也会失灵: 上一版的容忍度写成"一个字符宽", 在 CI 的字体度量下恒不成立,
+    天天误报; 改完之后又得确认它**没有**变成永远通过 —— 这条用例伪造一次真实的回归
+    形态(布局停在上一次的窄宽度上), 要求 :func:`_assert_name_fills` 抛错。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    _pumped(app)
+
+    parts = next(iter(page._row_parts.values()))
+    width = parts.label.winfo_width()
+    parts.label.configure(text=fit_text(parts.full_name, page._name_font, width - 60))
+    _pumped(app, seconds=0.1)  # 让 Tk 处理完这次 configure
+
+    with pytest.raises(AssertionError, match="不是按当前宽度"):
+        _assert_name_fills(parts.label, parts.full_name, page._name_font)
 
 
 class _PosterStartService(DemoArchiveService):
@@ -706,21 +746,15 @@ def test_poster_layout_is_reflowed_after_the_first_render() -> None:
     首屏渲染发生在控件尺寸测量出来之前(此时 ``winfo_width()`` 只有 1), 列数会被
     算得很小 —— 4 款游戏于是排成两行; 首帧完成后必须按真实宽度重排一次。
     """
-    try:
-        app = _poster_start_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert _wait_mapped(app)
-        page = app._home_page
-        _settle_layout(app)
-        assert page._rows, "演示数据应当有游戏"
+    app = gui_app(_poster_start_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    assert page._rows, "演示数据应当有游戏"
 
-        columns = poster_columns(page._list_box.winfo_width())
-        stale = f"列数没有按真实宽度重算: {page._poster_columns} != {columns}"
-        assert page._poster_columns == columns, stale
-        placed = sorted({int(card.grid_info()["row"]) for card in page._rows.values()})
-        expected = list(range(ceil(len(page._rows) / columns)))
-        assert placed == expected, f"卡片行列不对: {placed} != {expected}"
-    finally:
-        app.destroy()
+    columns = poster_columns(page._list_box.winfo_width())
+    stale = f"列数没有按真实宽度重算: {page._poster_columns} != {columns}"
+    assert page._poster_columns == columns, stale
+    placed = sorted({int(card.grid_info()["row"]) for card in page._rows.values()})
+    expected = list(range(ceil(len(page._rows) / columns)))
+    assert placed == expected, f"卡片行列不对: {placed} != {expected}"

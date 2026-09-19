@@ -65,6 +65,7 @@ from archive_management.services.pathcheck import (
 from archive_management.services.platform_scan import path_health
 from archive_management.services.scheduler import (
     BackupScheduler,
+    ScheduledEntry,
     format_interval,
     parse_interval,
 )
@@ -99,6 +100,34 @@ def _tone(name: str) -> str:
 def _stamp(moment: datetime) -> str:
     """把时间格式化为本地时区的展示文本."""
     return moment.astimezone().strftime("%Y/%m/%d %H:%M")
+
+
+def _stamp_or_dash(moment: datetime | None) -> str:
+    """时间戳文案: 没有时间就用破折号."""
+    return _stamp(moment) if moment is not None else "—"
+
+
+def _schedule_next_run(
+    entry: ScheduledEntry | None, job: ScheduledJob | None
+) -> datetime | None:
+    """下次运行时间: 启用的调度器优先, 否则回退到最近一次登记的任务."""
+    if entry is not None and entry.enabled:
+        return entry.next_run_at
+    if job is None:
+        return None
+    return job.next_run_at
+
+
+def _schedule_fields(
+    entry: ScheduledEntry | None, job: ScheduledJob | None
+) -> tuple[str, bool, int]:
+    """周期文案 / 是否启用 / 保留份数: 调度器里有就以它为准, 否则看登记的任务."""
+    if entry is not None:
+        keep = job.keep_auto if job is not None else DEFAULT_KEEP_AUTO
+        return _interval_label(entry.interval_minutes), entry.enabled, keep
+    if job is not None:
+        return job.schedule, True, job.keep_auto
+    return "", True, DEFAULT_KEEP_AUTO
 
 
 def _default_title(node: BackupNode) -> str:
@@ -205,42 +234,9 @@ class SqlArchiveService:
     def get_detail(self, game_id: str) -> GameDetail:
         """返回单个游戏的概要数据."""
         game, gid = self._game_ref(game_id)
-        locations = self._locations.list_for_game(gid)
-        primary = next(
-            (location for location in locations if location.is_primary),
-            locations[0] if locations else None,
-        )
-        if primary is not None:
-            probe = probe_path(primary.path, primary.path_kind)
-            main = primary.path
-            verified = probe.ok
-            note = (
-                tr("game.primary_location")
-                if primary.is_primary
-                else tr("game.location_managed")
-            )
-        else:
-            main = ""
-            verified = False
-            note = tr("game.no_locations_short")
+        main, verified, note = self._primary_location_view(gid)
         backups = self._nodes.count(gid)
-        latest = self._backups.latest(gid)
-        if latest is not None:
-            facts = self._backups.facts(latest)
-            created = latest.created_at or datetime.now(UTC)
-            last_label = _stamp(created)
-            last_sub = tr(
-                "detail.last_backup_sub",
-                kind=(
-                    tr("backup.kind_auto")
-                    if latest.node_kind == "auto"
-                    else tr("backup.kind_manual")
-                ),
-                size=size_label(facts.total_size),
-            )
-        else:
-            last_label = "—"
-            last_sub = ""
+        last_label, last_sub = self._last_backup_labels(self._backups.latest(gid))
         next_run = self._next_run(gid)
         return GameDetail(
             name=game.name,
@@ -256,9 +252,43 @@ class SqlArchiveService:
                 else tr("detail.backups_count", count=backups)
             ),
             total_backups_sub="",
-            next_backup_label=_stamp(next_run) if next_run is not None else "—",
+            next_backup_label=_stamp_or_dash(next_run),
             original_name=game.original_name or game.name,
             storage_folder=game.storage_key,
+        )
+
+    def _primary_location_view(self, gid: int) -> tuple[str, bool, str]:
+        """主位置的路径、校验结果与说明文案(没有位置时是空串/False/"未配置")."""
+        locations = self._locations.list_for_game(gid)
+        primary = next(
+            (location for location in locations if location.is_primary),
+            locations[0] if locations else None,
+        )
+        if primary is None:
+            return "", False, tr("game.no_locations_short")
+        probe = probe_path(primary.path, primary.path_kind)
+        note = (
+            tr("game.primary_location")
+            if primary.is_primary
+            else tr("game.location_managed")
+        )
+        return primary.path, probe.ok, note
+
+    def _last_backup_labels(self, latest: BackupNode | None) -> tuple[str, str]:
+        """最近一次备份的时间文案与副标题(没有备份时是破折号与空串)."""
+        if latest is None:
+            return "—", ""
+        facts = self._backups.facts(latest)
+        created = latest.created_at or datetime.now(UTC)
+        kind = (
+            tr("backup.kind_auto")
+            if latest.node_kind == "auto"
+            else tr("backup.kind_manual")
+        )
+        return _stamp(created), tr(
+            "detail.last_backup_sub",
+            kind=kind,
+            size=size_label(facts.total_size),
         )
 
     def add_game(self, name: str) -> GameSummary:
@@ -454,34 +484,38 @@ class SqlArchiveService:
         entry = self._scheduler.get(gid) if gid is not None else None
         next_run = self._next_run(gid) if gid is not None else None
         error = self._scheduler.last_error(gid) if gid is not None else None
-        # 暂停不算"未配置": 周期仍然保留, 只是不触发。
-        configured = entry is not None
+        task_name, schedule_text, schedule_enabled = self._schedule_summary(gid, entry)
         return TaskStatus(
             running=active is not None,
-            task_name=(
-                tr(
-                    "task.every",
-                    interval=_interval_label(entry.interval_minutes),
-                    keep=self._keep_auto(gid),
-                )
-                if configured and entry is not None
-                else tr("task.unscheduled")
-            ),
+            task_name=task_name,
             progress=active.fraction if active is not None else 0.0,
-            next_run_label=_stamp(next_run) if next_run is not None else "—",
+            next_run_label=_stamp_or_dash(next_run),
             target_label=str(self._backup_root),
             theme_name=self._theme,
             backend_ok=True,
-            schedule_text=(
-                _interval_label(entry.interval_minutes)
-                if configured and entry is not None
-                else ""
-            ),
-            schedule_enabled=(entry.enabled if entry is not None else True),
+            schedule_text=schedule_text,
+            schedule_enabled=schedule_enabled,
             cancellable=active is not None,
             progress_label=(active.message if active is not None else (error or "")),
             keep_auto=self._keep_auto(gid),
             revision=self._data_revision,
+        )
+
+    def _schedule_summary(
+        self, gid: int | None, entry: ScheduledEntry | None
+    ) -> tuple[str, str, bool]:
+        """定时任务的三段文案: 任务名、周期、是否启用(未配置时是"未定时"/空/启用态)."""
+        if entry is None:
+            return tr("task.unscheduled"), "", True
+        # 暂停不算"未配置": 周期仍然保留, 只是不触发。
+        return (
+            tr(
+                "task.every",
+                interval=_interval_label(entry.interval_minutes),
+                keep=self._keep_auto(gid),
+            ),
+            _interval_label(entry.interval_minutes),
+            entry.enabled,
         )
 
     def list_schedules(self) -> list[ScheduleItem]:
@@ -492,35 +526,31 @@ class SqlArchiveService:
         """
         items: list[ScheduleItem] = []
         for game in self._games.list():
-            if game.id is None:
-                continue
-            entry = self._scheduler.get(game.id)
-            jobs = self._jobs.for_game(game.id)
-            job = jobs[0] if jobs else None
-            next_run = (
-                entry.next_run_at
-                if entry is not None and entry.enabled
-                else (job.next_run_at if job is not None else None)
-            )
-            items.append(
-                ScheduleItem(
-                    game_id=str(game.id),
-                    game_name=game.name,
-                    interval_text=(
-                        _interval_label(entry.interval_minutes)
-                        if entry is not None
-                        else (job.schedule if job is not None else "")
-                    ),
-                    enabled=entry.enabled if entry is not None else True,
-                    keep_auto=job.keep_auto if job is not None else DEFAULT_KEEP_AUTO,
-                    next_run_label=_stamp(next_run) if next_run is not None else "—",
-                    auto_count=self._auto_backup_count(game.id),
-                    last_error=(job.last_error if job is not None else "") or "",
-                    has_locations=self._games.count_locations(game.id) > 0,
-                    tone=_tone(game.name),
-                )
-            )
+            item = self._schedule_item(game)
+            if item is not None:
+                items.append(item)
         return items
+
+    def _schedule_item(self, game: Game) -> ScheduleItem | None:
+        """把一款游戏组装成任务条目(还没有落到库里的游戏返回 None)."""
+        if game.id is None:
+            return None
+        entry = self._scheduler.get(game.id)
+        jobs = self._jobs.for_game(game.id)
+        job = jobs[0] if jobs else None
+        interval_text, enabled, keep_auto = _schedule_fields(entry, job)
+        return ScheduleItem(
+            game_id=str(game.id),
+            game_name=game.name,
+            interval_text=interval_text,
+            enabled=enabled,
+            keep_auto=keep_auto,
+            next_run_label=_stamp_or_dash(_schedule_next_run(entry, job)),
+            auto_count=self._auto_backup_count(game.id),
+            last_error=(job.last_error if job is not None else "") or "",
+            has_locations=self._games.count_locations(game.id) > 0,
+            tone=_tone(game.name),
+        )
 
     def _auto_backup_count(self, game_id: int) -> int:
         """统计某游戏当前保留的自动备份(含恢复前安全点之外的自动备份)份数."""

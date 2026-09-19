@@ -21,6 +21,15 @@ repos:
         language: system
         types: [python]
 
+      - id: deptry
+        # 依赖卫生(未声明 / 多余 / 传递依赖): 全项目检查, 因此不跟着变动的文件逐个跑;
+        # 依赖清单变了、或代码的导入变了都要重查一次。
+        name: deptry (依赖检查)
+        entry: uv run deptry .
+        language: system
+        pass_filenames: false
+        files: ^(src/|tests/|scripts/|pyproject\.toml$|uv\.lock$)
+
       - id: pytest
         # 只跑 blocker+critical(= 数据安全 + 核心逻辑): 等级按"失败影响面"划分,
         # 详见 docs/testing.md 的严重等级表。其余等级交给 CI 全量执行 —— 本地钩子要快,

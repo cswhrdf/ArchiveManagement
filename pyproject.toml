@@ -34,6 +34,11 @@ dev = [
     "allure-pytest>=2.16",
     "ruff>=0.16",
     "pytest-timeout>=2.4.0",
+    "bandit[toml]>=1.9.4",
+    "pip-audit>=2.10.1",
+    "radon>=6.0.1",
+    "xenon>=0.9.3",
+    "deptry>=0.25.1",
 ]
 
 [project.urls]
@@ -148,6 +153,36 @@ mypy_path = "$MYPY_CONFIG_FILE_DIR/src:$MYPY_CONFIG_FILE_DIR/tests"
 # CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制
 module = ["archive_management.ui.main_window"]
 disallow_subclassing_any = false
+
+[tool.bandit]
+# Bandit 只看源码里的**危险模式**(exec/eval、弱随机、subprocess、临时文件、硬编码口令等);
+# 用例里满是 assert 与故意构造的脏数据, 扫它们只会制造噪音, 因此只扫 src。
+exclude_dirs = ["tests", "scripts", "packaging", "build", "dist", ".venv", "dev-data"]
+# 说明: 运行期行为由 tests/security(见 docs/testing.md)覆盖, 两者互补 ——
+# Bandit 拦"写法危险", 安全用例拦"行为可被利用"。
+
+[tool.deptry]
+# 本项目**不作为包安装**(见 [tool.uv] package = false), 依赖是按"仓库源码"而不是
+# "已安装的发行版"来解析的; 不声明下面这行, deptry 会把 archive_management 判成
+# "传递依赖"(DEP003), 一报就是 197 条。tests 下的共享辅助模块(pythonpath = tests)
+# 同样属于"自己家的代码"。
+known_first_party = [
+  "archive_management",
+  "helpers",
+  "reporting",
+  "conftest",
+  "gui_support",
+]
+exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
+
+[tool.deptry.per_rule_ignores]
+# 测试用例按设计导入开发依赖 —— pytest 与 allure-pytest 就是开发工具本身,
+# 出现在 tests/ 里是正常的(DEP004 默认只在"运行时代码"里才该报警)。
+DEP004 = ["pytest", "allure", "allure_pytest"]
+# `allure` 这个模块由 allure-pytest 带进来, 测试里直接用它记附件属正常用法。
+DEP003 = ["allure"]
+# httpx 是给"后续接入平台封面/图标接口"预置的依赖(目前还没有调用点, 见 docs/development.md)。
+DEP002 = ["httpx"]
 
 [tool.pytest.ini_options]
 # 默认只跑单元与集成测试: 性能与安全测试只在 CI 执行,

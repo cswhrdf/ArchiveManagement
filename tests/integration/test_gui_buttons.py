@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 
+from gui_support import gui_app
+
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
     from tkinter import TclError
@@ -264,24 +266,18 @@ def test_switch_game_view_and_filter_do_not_crash() -> None:
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.models import ViewKind
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    for _index in range(3):
+        app._select_game("outer-wilds")
+        app._select_game("shanhai")
+        app._switch_view(ViewKind.BRANCH)
+        app._switch_view(ViewKind.TIMELINE)
+        app._on_filter_change("x")
+        app._on_toggle_theme()
         _pump(app)
-        for _index in range(3):
-            app._select_game("outer-wilds")
-            app._select_game("shanhai")
-            app._switch_view(ViewKind.BRANCH)
-            app._switch_view(ViewKind.TIMELINE)
-            app._on_filter_change("x")
-            app._on_toggle_theme()
-            _pump(app)
-        assert app._game_id == "shanhai"
-        assert app._view == ViewKind.TIMELINE
-    finally:
-        app.destroy()
+    assert app._game_id == "shanhai"
+    assert app._view == ViewKind.TIMELINE
 
 
 def test_empty_database_polling_does_not_crash(
@@ -399,24 +395,18 @@ def test_default_view_is_branch_tree_and_hides_old_auto_backups() -> None:
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.models import ViewKind
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("outer-wilds")
-        assert app._view == ViewKind.BRANCH
-        branch_cards = len(app._cards)
-        total_items = len(app._items)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("outer-wilds")
+    assert app._view == ViewKind.BRANCH
+    branch_cards = len(app._cards)
+    total_items = len(app._items)
 
-        app._switch_view(ViewKind.TIMELINE)
-        _pump(app)
+    app._switch_view(ViewKind.TIMELINE)
+    _pump(app)
 
-        assert len(app._cards) == total_items
-        assert branch_cards < total_items
-    finally:
-        app.destroy()
+    assert len(app._cards) == total_items
+    assert branch_cards < total_items
 
 
 def test_delete_and_rename_buttons_update_backups(
@@ -427,31 +417,25 @@ def test_delete_and_rename_buttons_update_backups(
     from archive_management.ui.models import FeedbackKind
 
     _patch_dialogs(monkeypatch, edit_result=("新名字", "新描述"))
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("outer-wilds")
-        leaf = next(item for item in app._items if item.backup_id == "b5")
-        app._select_backup(leaf)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("outer-wilds")
+    leaf = next(item for item in app._items if item.backup_id == "b5")
+    app._select_backup(leaf)
 
-        app._on_rename_backup()
-        _drain(app)
-        assert app._last_feedback[0] == FeedbackKind.SUCCESS
-        renamed = next(item for item in app._items if item.backup_id == "b5")
-        assert renamed.title == "新名字"
-        assert renamed.sub == "新描述"
+    app._on_rename_backup()
+    _drain(app)
+    assert app._last_feedback[0] == FeedbackKind.SUCCESS
+    renamed = next(item for item in app._items if item.backup_id == "b5")
+    assert renamed.title == "新名字"
+    assert renamed.sub == "新描述"
 
-        app._select_backup(renamed)
-        app._on_delete_backup()
-        _drain(app)
-        assert app._last_feedback[0] == FeedbackKind.SUCCESS
-        assert "b5" not in {item.backup_id for item in app._items}
-        assert not app._busy
-    finally:
-        app.destroy()
+    app._select_backup(renamed)
+    app._on_delete_backup()
+    _drain(app)
+    assert app._last_feedback[0] == FeedbackKind.SUCCESS
+    assert "b5" not in {item.backup_id for item in app._items}
+    assert not app._busy
 
 
 def test_delete_branch_root_asks_for_confirmation(
@@ -539,26 +523,20 @@ def test_schedule_window_cancel_keeps_configuration(
     from archive_management.ui.schedule_window import ScheduleWindow
 
     _patch_dialogs(monkeypatch, schedule_result=None)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        window = ScheduleWindow(
-            app, backend=app.backend, palette=Palette.for_theme(app._theme)
-        )
-        before = app.backend.task_status("outer-wilds")
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = ScheduleWindow(
+        app, backend=app.backend, palette=Palette.for_theme(app._theme)
+    )
+    before = app.backend.task_status("outer-wilds")
 
-        window._select("outer-wilds")
-        window._on_edit()
-        _pump(app)
+    window._select("outer-wilds")
+    window._on_edit()
+    _pump(app)
 
-        after = app.backend.task_status("outer-wilds")
-        assert after.schedule_text == before.schedule_text
-        assert after.keep_auto == before.keep_auto
-    finally:
-        app.destroy()
+    after = app.backend.task_status("outer-wilds")
+    assert after.schedule_text == before.schedule_text
+    assert after.keep_auto == before.keep_auto
 
 
 def test_rename_dialog_cancel_keeps_backup(
@@ -568,24 +546,18 @@ def test_rename_dialog_cancel_keeps_backup(
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch, edit_result=None)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("outer-wilds")
-        item = next(item for item in app._items if item.backup_id == "b5")
-        app._select_backup(item)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("outer-wilds")
+    item = next(item for item in app._items if item.backup_id == "b5")
+    app._select_backup(item)
 
-        app._on_rename_backup()
-        _drain(app)
+    app._on_rename_backup()
+    _drain(app)
 
-        after = next(x for x in app._items if x.backup_id == "b5")
-        assert after.title == item.title
-        assert after.sub == item.sub
-    finally:
-        app.destroy()
+    after = next(x for x in app._items if x.backup_id == "b5")
+    assert after.title == item.title
+    assert after.sub == item.sub
 
 
 def test_schedule_window_rejects_invalid_keep_count(
@@ -633,36 +605,30 @@ def test_schedule_window_removes_and_toggles_task(
     from archive_management.ui.schedule_window import ScheduleWindow
 
     _patch_dialogs(monkeypatch, confirm=True)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        window = ScheduleWindow(
-            app, backend=app.backend, palette=Palette.for_theme(app._theme)
-        )
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = ScheduleWindow(
+        app, backend=app.backend, palette=Palette.for_theme(app._theme)
+    )
 
-        window._select("outer-wilds")
-        window._on_remove()
-        _pump(app)
-        assert app.backend.task_status("outer-wilds").schedule_text == ""
+    window._select("outer-wilds")
+    window._on_remove()
+    _pump(app)
+    assert app.backend.task_status("outer-wilds").schedule_text == ""
 
-        # 删掉任务后它就从列表里消失(列表只展示已配置的任务).
-        assert "outer-wilds" not in {item.game_id for item in window._items}
-        assert "outer-wilds" not in window._rows
-        assert window._toggle_btn.cget("state") == "disabled"
+    # 删掉任务后它就从列表里消失(列表只展示已配置的任务).
+    assert "outer-wilds" not in {item.game_id for item in window._items}
+    assert "outer-wilds" not in window._rows
+    assert window._toggle_btn.cget("state") == "disabled"
 
-        # 重新配置后可以暂停, 暂停只是不启用定时器而周期仍保留.
-        assert app.backend.set_schedule("outer-wilds", "2h", enabled=False)
-        window.reload()
-        window._select("outer-wilds")
-        paused = next(i for i in window._items if i.game_id == "outer-wilds")
-        assert paused.interval_text == "2h"
-        assert paused.enabled is False
-        assert paused.state_label == "已暂停"
-    finally:
-        app.destroy()
+    # 重新配置后可以暂停, 暂停只是不启用定时器而周期仍保留.
+    assert app.backend.set_schedule("outer-wilds", "2h", enabled=False)
+    window.reload()
+    window._select("outer-wilds")
+    paused = next(i for i in window._items if i.game_id == "outer-wilds")
+    assert paused.interval_text == "2h"
+    assert paused.enabled is False
+    assert paused.state_label == "已暂停"
 
 
 def test_schedule_window_add_picks_game_from_filterable_dialog(
@@ -776,19 +742,13 @@ def test_topbar_opens_schedule_window(
         "ScheduleWindow",
         lambda _parent, **kwargs: opened.append(kwargs),
     )
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        assert app._schedule_btn.cget("text") == tr("topbar.nav_scheduled")
-        app._on_open_schedules()
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    assert app._schedule_btn.cget("text") == tr("topbar.nav_scheduled")
+    app._on_open_schedules()
 
-        assert len(opened) == 1
-        assert opened[0]["backend"] is app.backend
-    finally:
-        app.destroy()
+    assert len(opened) == 1
+    assert opened[0]["backend"] is app.backend
 
 
 def test_discovery_panel_scans_filters_and_imports_candidate(
@@ -860,37 +820,31 @@ def test_discovery_panel_manages_monitored_directories(
 
     # 依次回答: 先给一个空路径(应被拒绝), 再给一个真实目录.
     _patch_dialogs(monkeypatch, ask_text_queue=["   ", str(tmp_path)])
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        panel = DiscoveryPanel(
-            ctk.CTkFrame(app),
-            backend=app.backend,
-            palette=Palette.for_theme(app._theme),
-        )
-        before = len(panel._dirs)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    panel = DiscoveryPanel(
+        ctk.CTkFrame(app),
+        backend=app.backend,
+        palette=Palette.for_theme(app._theme),
+    )
+    before = len(panel._dirs)
 
-        panel._on_add_dir()
-        _pump(app)
-        assert len(panel._dirs) == before
-        assert "不能为空" in panel._summary_label.cget("text")
+    panel._on_add_dir()
+    _pump(app)
+    assert len(panel._dirs) == before
+    assert "不能为空" in panel._summary_label.cget("text")
 
-        panel._on_add_dir()
-        _pump(app)
-        assert len(panel._dirs) == before + 1
-        assert str(tmp_path) in {item.path for item in panel._dirs}
+    panel._on_add_dir()
+    _pump(app)
+    assert len(panel._dirs) == before + 1
+    assert str(tmp_path) in {item.path for item in panel._dirs}
 
-        # 停用后不再参与扫描, 但记录仍保留.
-        panel._select_dir(panel._dirs[-1].directory_id)
-        panel._on_toggle_dir()
-        _pump(app)
-        assert panel._dir_item() is not None
-        assert panel._dir_item().enabled is False  # type: ignore[union-attr]
-    finally:
-        app.destroy()
+    # 停用后不再参与扫描, 但记录仍保留.
+    panel._select_dir(panel._dirs[-1].directory_id)
+    panel._on_toggle_dir()
+    _pump(app)
+    assert panel._dir_item() is not None
+    assert panel._dir_item().enabled is False  # type: ignore[union-attr]
 
 
 def test_discovery_panel_defaults_to_candidates_and_switches_pages(
@@ -1043,62 +997,56 @@ def test_default_page_is_home_and_detail_round_trips(
     from archive_management.ui.models import AppPage, HomeSection
 
     _patch_dialogs(monkeypatch)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        page = app._home_page
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
 
-        # 软件打开后默认停在游戏主页(游戏库分区): 主页可见, 详情页收起.
-        assert _current_page(app) is AppPage.HOME
-        assert page.frame.grid_info() != {}
-        assert app._content.grid_info() == {}
-        assert page._section is HomeSection.LIBRARY
-        assert page._library.grid_info() != {}
-        assert page._discovery.frame.grid_info() == {}
-        # 侧边栏已移除: 工作区入口都在顶栏右上角.
-        assert not hasattr(app, "_games_container")
-        assert not hasattr(app, "_status_card")
-        assert app._add_game_btn.cget("text") == tr("topbar.add_game")
+    # 软件打开后默认停在游戏主页(游戏库分区): 主页可见, 详情页收起.
+    assert _current_page(app) is AppPage.HOME
+    assert page.frame.grid_info() != {}
+    assert app._content.grid_info() == {}
+    assert page._section is HomeSection.LIBRARY
+    assert page._library.grid_info() != {}
+    assert page._discovery.frame.grid_info() == {}
+    # 侧边栏已移除: 工作区入口都在顶栏右上角.
+    assert not hasattr(app, "_games_container")
+    assert not hasattr(app, "_status_card")
+    assert app._add_game_btn.cget("text") == tr("topbar.add_game")
 
-        # 主页是整页布局: 分区页签、表头列与数据行齐全, 没有弹窗式的"关闭"按钮.
-        section_tabs = _button_texts(page.frame)
-        assert HomeSection.LIBRARY.label in section_tabs
-        assert HomeSection.DISCOVERY.label in section_tabs
-        headers = _label_texts(page.frame)
-        for key in (
-            "home.col_name",
-            "home.col_platform",
-            "home.col_locations",
-            "home.col_backups",
-            "home.col_last_backup",
-            "home.col_state",
-        ):
-            assert tr(key) in headers
-        assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
-        assert not hasattr(page, "_close_btn")
+    # 主页是整页布局: 分区页签、表头列与数据行齐全, 没有弹窗式的"关闭"按钮.
+    section_tabs = _button_texts(page.frame)
+    assert HomeSection.LIBRARY.label in section_tabs
+    assert HomeSection.DISCOVERY.label in section_tabs
+    headers = _label_texts(page.frame)
+    for key in (
+        "home.col_name",
+        "home.col_platform",
+        "home.col_locations",
+        "home.col_backups",
+        "home.col_last_backup",
+        "home.col_state",
+    ):
+        assert tr(key) in headers
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+    assert not hasattr(page, "_close_btn")
 
-        # 打开详情: 切到详情页, 主页收起, 顶栏出现"← 游戏主页".
-        assert app._back_btn.grid_info() == {}
-        app._open_game_detail("outer-wilds")
-        _pump(app)
-        assert _current_page(app) is AppPage.DETAIL
-        assert app._content.grid_info() != {}
-        assert page.frame.grid_info() == {}
-        assert app._title_label.cget("text") == "星际拓荒"
-        assert app._back_btn.grid_info() != {}
+    # 打开详情: 切到详情页, 主页收起, 顶栏出现"← 游戏主页".
+    assert app._back_btn.grid_info() == {}
+    app._open_game_detail("outer-wilds")
+    _pump(app)
+    assert _current_page(app) is AppPage.DETAIL
+    assert app._content.grid_info() != {}
+    assert page.frame.grid_info() == {}
+    assert app._title_label.cget("text") == "星际拓荒"
+    assert app._back_btn.grid_info() != {}
 
-        # 顶栏左侧的"← 游戏主页"返回主页(按钮随即隐藏).
-        assert app._back_btn.cget("text") == tr("page.back_home")
-        app._on_back_home()
-        _pump(app)
-        assert _current_page(app) is AppPage.HOME
-        assert page.frame.grid_info() != {}
-        assert app._back_btn.grid_info() == {}
-    finally:
-        app.destroy()
+    # 顶栏左侧的"← 游戏主页"返回主页(按钮随即隐藏).
+    assert app._back_btn.cget("text") == tr("page.back_home")
+    app._on_back_home()
+    _pump(app)
+    assert _current_page(app) is AppPage.HOME
+    assert page.frame.grid_info() != {}
+    assert app._back_btn.grid_info() == {}
 
 
 def test_home_page_switches_between_library_and_discovery(
@@ -1109,34 +1057,28 @@ def test_home_page_switches_between_library_and_discovery(
     from archive_management.ui.models import DiscoveryPage, HomeSection
 
     _patch_dialogs(monkeypatch)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        page = app._home_page
-        panel = page._discovery
-        assert len(panel._candidates) == 5
-        assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    panel = page._discovery
+    assert len(panel._candidates) == 5
+    assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
 
-        page._show_section(HomeSection.DISCOVERY)
-        _pump(app)
-        assert page._section is HomeSection.DISCOVERY
-        assert panel.frame.grid_info() != {}
-        assert page._library.grid_info() == {}
-        # 发现分区内部仍是"探测结果 / 监控目录"两页, 默认停在探测结果.
-        assert panel._page is DiscoveryPage.CANDIDATES
-        assert panel._tabs[DiscoveryPage.CANDIDATES].cget("text") == (
-            tr("discovery.page_candidates")
-        )
+    page._show_section(HomeSection.DISCOVERY)
+    _pump(app)
+    assert page._section is HomeSection.DISCOVERY
+    assert panel.frame.grid_info() != {}
+    assert page._library.grid_info() == {}
+    # 发现分区内部仍是"探测结果 / 监控目录"两页, 默认停在探测结果.
+    assert panel._page is DiscoveryPage.CANDIDATES
+    assert panel._tabs[DiscoveryPage.CANDIDATES].cget("text") == (
+        tr("discovery.page_candidates")
+    )
 
-        page._show_section(HomeSection.LIBRARY)
-        _pump(app)
-        assert page._library.grid_info() != {}
-        assert panel.frame.grid_info() == {}
-    finally:
-        app.destroy()
+    page._show_section(HomeSection.LIBRARY)
+    _pump(app)
+    assert page._library.grid_info() != {}
+    assert panel.frame.grid_info() == {}
 
 
 def test_home_page_imports_candidate_and_refreshes_library(
@@ -1147,29 +1089,23 @@ def test_home_page_imports_candidate_and_refreshes_library(
     from archive_management.ui.models import HomeSection
 
     _patch_dialogs(monkeypatch, ask_text="空洞骑士")
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        page = app._home_page
-        before = len(app.backend.list_games())
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    before = len(app.backend.list_games())
 
-        page._show_section(HomeSection.DISCOVERY)
-        _pump(app)
-        panel = page._discovery
-        panel._select_candidate("cand-2")
-        panel._on_import()
-        _pump(app)
+    page._show_section(HomeSection.DISCOVERY)
+    _pump(app)
+    panel = page._discovery
+    panel._select_candidate("cand-2")
+    panel._on_import()
+    _pump(app)
 
-        assert len(app.backend.list_games()) == before + 1
-        # 导入后游戏库已经包含新游戏(回到游戏库分区即可看到).
-        page._show_section(HomeSection.LIBRARY)
-        _pump(app)
-        assert "空洞骑士" in {item.name for item in page._board.games}  # type: ignore[union-attr]
-    finally:
-        app.destroy()
+    assert len(app.backend.list_games()) == before + 1
+    # 导入后游戏库已经包含新游戏(回到游戏库分区即可看到).
+    page._show_section(HomeSection.LIBRARY)
+    _pump(app)
+    assert "空洞骑士" in {item.name for item in page._board.games}
 
 
 def test_home_page_supports_poster_mode_and_paging(
@@ -1180,85 +1116,73 @@ def test_home_page_supports_poster_mode_and_paging(
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        page = app._home_page
-        # 造 35 款游戏: 默认每页 30 条 -> 2 页.
-        for index in range(32):
-            app.backend.add_game(f"批量游戏{index:02d}")
-        page.reload()
-        _pump(app)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    # 造 35 款游戏: 默认每页 30 条 -> 2 页.
+    for index in range(32):
+        app.backend.add_game(f"批量游戏{index:02d}")
+    page.reload()
+    _pump(app)
 
-        # 每页选择在右下角翻页控件的左边.
-        assert page._page_size_label.cget("text") == tr("home.page_size")
-        assert page._page_size_box.winfo_manager() != ""
-        pack_order = page._pager.pack_slaves()
-        assert pack_order.index(page._page_size_box) < pack_order.index(page._prev_btn)
+    # 每页选择在右下角翻页控件的左边.
+    assert page._page_size_label.cget("text") == tr("home.page_size")
+    assert page._page_size_box.winfo_manager() != ""
+    pack_order = page._pager.pack_slaves()
+    assert pack_order.index(page._page_size_box) < pack_order.index(page._prev_btn)
 
-        assert len(page._board.games) == 35  # type: ignore[union-attr]
-        assert page._page_label.cget("text") == tr(
-            "home.page_indicator", page=1, pages=2
-        )
-        assert len(page._rows) == 30
-        assert str(page._prev_btn.cget("state")) == "disabled"
-        assert str(page._next_btn.cget("state")) == "normal"
+    assert len(page._board.games) == 35
+    assert page._page_label.cget("text") == tr("home.page_indicator", page=1, pages=2)
+    assert len(page._rows) == 30
+    assert str(page._prev_btn.cget("state")) == "disabled"
+    assert str(page._next_btn.cget("state")) == "normal"
 
-        page._on_next_page()
-        _pump(app)
-        assert page._page_label.cget("text") == tr(
-            "home.page_indicator", page=2, pages=2
-        )
-        assert len(page._rows) == 5
-        assert str(page._next_btn.cget("state")) == "disabled"
+    page._on_next_page()
+    _pump(app)
+    assert page._page_label.cget("text") == tr("home.page_indicator", page=2, pages=2)
+    assert len(page._rows) == 5
+    assert str(page._next_btn.cget("state")) == "disabled"
 
-        # 每页 60 条: 一页装得下全部游戏.
-        page._on_page_size_change("60")
-        _pump(app)
-        assert page._filter.page_size == 60
-        assert page._page_label.cget("text") == tr(
-            "home.page_indicator", page=1, pages=1
-        )
-        assert len(page._rows) == 35
+    # 每页 60 条: 一页装得下全部游戏.
+    page._on_page_size_change("60")
+    _pump(app)
+    assert page._filter.page_size == 60
+    assert page._page_label.cget("text") == tr("home.page_indicator", page=1, pages=1)
+    assert len(page._rows) == 35
 
-        # 海报模式: 竖屏封面(文字占位) + 右下角备份数角标 + 名称 + 最近活动.
-        page._on_layout_change(HomeLayout.POSTER.label)
-        _pump(app)
-        assert page._filter.layout is HomeLayout.POSTER
-        assert page._head.grid_info() == {}
-        card_texts = _label_texts(page._rows["outer-wilds"])
-        assert "星际" in card_texts
-        assert "星际拓荒" in card_texts
-        assert any(text.startswith("最近活动") for text in card_texts)
-        assert tr("home.poster_backups", count=5) in card_texts
+    # 海报模式: 竖屏封面(文字占位) + 右下角备份数角标 + 名称 + 最近活动.
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _pump(app)
+    assert page._filter.layout is HomeLayout.POSTER
+    assert page._head.grid_info() == {}
+    card_texts = _label_texts(page._rows["outer-wilds"])
+    assert "星际" in card_texts
+    assert "星际拓荒" in card_texts
+    assert any(text.startswith("最近活动") for text in card_texts)
+    assert tr("home.poster_backups", count=5) in card_texts
 
-        # 封面是竖屏(高度明显大于宽度), 角标贴在封面的右下角.
-        card = page._rows["outer-wilds"]
-        cover = card.winfo_children()[0]
-        assert cover.winfo_reqheight() > 140
-        # 海报网格左对齐: 网格从滚动区左上角开始铺(列不分配权重, 卡片不会被
-        # 挤到行中间), 因此所有卡片里最靠左/最靠上的那张偏移就是内边距 4.
-        cards = list(page._rows.values())
-        assert min(item.winfo_x() for item in cards) == 4
-        assert min(item.winfo_y() for item in cards) == 4
-        badge = next(
-            child
-            for child in cover.winfo_children()
-            if child.cget("text") == tr("home.poster_backups", count=5)
-        )
-        sticky = str(badge.grid_info()["sticky"])
-        assert "s" in sticky
-        assert "e" in sticky
+    # 封面是竖屏(高度明显大于宽度), 角标贴在封面的右下角.
+    card = page._rows["outer-wilds"]
+    cover = card.winfo_children()[0]
+    assert cover.winfo_reqheight() > 140
+    # 海报网格左对齐: 网格从滚动区左上角开始铺(列不分配权重, 卡片不会被
+    # 挤到行中间), 因此所有卡片里最靠左/最靠上的那张偏移就是内边距 4.
+    cards = list(page._rows.values())
+    assert min(item.winfo_x() for item in cards) == 4
+    assert min(item.winfo_y() for item in cards) == 4
+    badge = next(
+        child
+        for child in cover.winfo_children()
+        if child.cget("text") == tr("home.poster_backups", count=5)
+    )
+    sticky = str(badge.grid_info()["sticky"])
+    assert "s" in sticky
+    assert "e" in sticky
 
-        # 展示偏好会持久化: 重新读取主页仍是海报 + 每页 60 条.
-        reloaded = app.backend.load_home()
-        assert reloaded.filter.layout is HomeLayout.POSTER
-        assert reloaded.filter.page_size == 60
-    finally:
-        app.destroy()
+    # 展示偏好会持久化: 重新读取主页仍是海报 + 每页 60 条.
+    reloaded = app.backend.load_home()
+    assert reloaded.filter.layout is HomeLayout.POSTER
+    assert reloaded.filter.page_size == 60
 
 
 def test_home_page_follows_theme_switch(
@@ -1270,35 +1194,29 @@ def test_home_page_follows_theme_switch(
     from archive_management.ui.palette import Palette
 
     _patch_dialogs(monkeypatch)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        page = app._home_page
-        assert page._palette is app.p
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    assert page._palette is app.p
 
-        app._on_toggle_theme()
-        _pump(app)
-        light = Palette.for_theme("light")
-        assert app._theme == "light"
-        assert page._palette is app.p
-        assert page.frame.cget("fg_color") == light.background
-        assert page._discovery.frame.cget("fg_color") == light.background
-        # 重建后数据仍在: 列表有内容, 分区与筛选条件保持不变.
-        assert page._rows
-        assert page._section is HomeSection.LIBRARY
-        assert page._filter.view is HomeView.ALL
+    app._on_toggle_theme()
+    _pump(app)
+    light = Palette.for_theme("light")
+    assert app._theme == "light"
+    assert page._palette is app.p
+    assert page.frame.cget("fg_color") == light.background
+    assert page._discovery.frame.cget("fg_color") == light.background
+    # 重建后数据仍在: 列表有内容, 分区与筛选条件保持不变.
+    assert page._rows
+    assert page._section is HomeSection.LIBRARY
+    assert page._filter.view is HomeView.ALL
 
-        app._on_toggle_theme()
-        _pump(app)
-        dark = Palette.for_theme("dark")
-        assert page.frame.cget("fg_color") == dark.background
-        # 主题切换不影响后端数据.
-        assert len(app.backend.list_games()) == 3
-    finally:
-        app.destroy()
+    app._on_toggle_theme()
+    _pump(app)
+    dark = Palette.for_theme("dark")
+    assert page.frame.cget("fg_color") == dark.background
+    # 主题切换不影响后端数据.
+    assert len(app.backend.list_games()) == 3
 
 
 def test_home_page_filters_games_and_runs_actions(
@@ -1310,82 +1228,76 @@ def test_home_page_filters_games_and_runs_actions(
 
     # 标签输入含重复项与空格: 由用例层清理后落库.
     _patch_dialogs(monkeypatch, ask_text="解谜, 解谜")
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        page = app._home_page
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
 
-        # 默认视图是"全部游戏", 页签带数量, 动作按钮齐全.
-        assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
-        assert page._tabs[HomeView.ALL].cget("text") == f"{tr('home.view_all')} (3)"
-        assert page._detail_btn.cget("text") == tr("home.action_detail")
-        assert page._archive_btn.cget("text") == tr("home.action_archive")
+    # 默认视图是"全部游戏", 页签带数量, 动作按钮齐全.
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+    assert page._tabs[HomeView.ALL].cget("text") == f"{tr('home.view_all')} (3)"
+    assert page._detail_btn.cget("text") == tr("home.action_detail")
+    assert page._archive_btn.cget("text") == tr("home.action_archive")
 
-        # 待处理视图: 只留下没有存档位置的无尽太空, 且不能直接备份.
-        page._on_view(HomeView.PENDING)
-        _pump(app)
-        assert set(page._rows) == {"endless-space"}
-        assert str(page._backup_btn.cget("state")) == "disabled"
+    # 待处理视图: 只留下没有存档位置的无尽太空, 且不能直接备份.
+    page._on_view(HomeView.PENDING)
+    _pump(app)
+    assert set(page._rows) == {"endless-space"}
+    assert str(page._backup_btn.cget("state")) == "disabled"
 
-        # 搜索: 只匹配名称包含关键字的游戏; 清除后回到全部.
-        page._on_view(HomeView.ALL)
-        page._search_entry.insert(0, "山海")
-        page._submit_search()
-        _pump(app)
-        assert set(page._rows) == {"shanhai"}
-        assert page._filter.search == "山海"
-        page._clear_search()
-        _pump(app)
-        assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
-        assert page._filter.view is HomeView.ALL
+    # 搜索: 只匹配名称包含关键字的游戏; 清除后回到全部.
+    page._on_view(HomeView.ALL)
+    page._search_entry.insert(0, "山海")
+    page._submit_search()
+    _pump(app)
+    assert set(page._rows) == {"shanhai"}
+    assert page._filter.search == "山海"
+    page._clear_search()
+    _pump(app)
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+    assert page._filter.view is HomeView.ALL
 
-        # 归档: 从默认视图消失, 只在"已归档"里出现; 页面不跳转, 数据也不删除.
-        page._select("endless-space")
-        page._on_archive()
-        _pump(app)
-        assert set(page._rows) == {"outer-wilds", "shanhai"}
-        assert page._summary_label.cget("text") == tr("home.archived", name="无尽太空")
-        assert _current_page(app) is AppPage.HOME
-        # 归档只是"从主页收起来": 游戏记录仍在库里, 详情页照旧可以打开.
-        assert "无尽太空" in {item.name for item in app.backend.list_games()}
+    # 归档: 从默认视图消失, 只在"已归档"里出现; 页面不跳转, 数据也不删除.
+    page._select("endless-space")
+    page._on_archive()
+    _pump(app)
+    assert set(page._rows) == {"outer-wilds", "shanhai"}
+    assert page._summary_label.cget("text") == tr("home.archived", name="无尽太空")
+    assert _current_page(app) is AppPage.HOME
+    # 归档只是"从主页收起来": 游戏记录仍在库里, 详情页照旧可以打开.
+    assert "无尽太空" in {item.name for item in app.backend.list_games()}
 
-        page._on_view(HomeView.ARCHIVED)
-        _pump(app)
-        assert set(page._rows) == {"endless-space"}
-        assert page._archive_btn.cget("text") == tr("home.action_unarchive")
-        page._select("endless-space")
-        page._on_archive()
-        _pump(app)
-        assert page._rows == {}
+    page._on_view(HomeView.ARCHIVED)
+    _pump(app)
+    assert set(page._rows) == {"endless-space"}
+    assert page._archive_btn.cget("text") == tr("home.action_unarchive")
+    page._select("endless-space")
+    page._on_archive()
+    _pump(app)
+    assert page._rows == {}
 
-        # 标签: 清理后的标签出现在列表行的分类标签上.
-        page._on_view(HomeView.ALL)
-        page._select("shanhai")
-        page._on_edit_tags()
-        _pump(app)
-        tagged = _home_item(page, "shanhai")
-        assert tagged.tags == ("解谜",)
-        assert any("解谜" in text for text in _label_texts(page._list_box))
+    # 标签: 清理后的标签出现在列表行的分类标签上.
+    page._on_view(HomeView.ALL)
+    page._select("shanhai")
+    page._on_edit_tags()
+    _pump(app)
+    tagged = _home_item(page, "shanhai")
+    assert tagged.tags == ("解谜",)
+    assert any("解谜" in text for text in _label_texts(page._list_box))
 
-        # 立即备份: 有存档位置的游戏备份数增加, 主页计数随之刷新.
-        page._on_backup()
-        _pump(app)
-        backed_up = _home_item(page, "shanhai")
-        assert backed_up.backup_count == tagged.backup_count + 1
-        assert page._summary_label.cget("text") == tr("home.backed_up", name="山海旅人")
+    # 立即备份: 有存档位置的游戏备份数增加, 主页计数随之刷新.
+    page._on_backup()
+    _pump(app)
+    backed_up = _home_item(page, "shanhai")
+    assert backed_up.backup_count == tagged.backup_count + 1
+    assert page._summary_label.cget("text") == tr("home.backed_up", name="山海旅人")
 
-        # 打开详情: 切到详情页并选中该游戏.
-        page._select("outer-wilds")
-        page._on_detail()
-        _pump(app)
-        assert _current_page(app) is AppPage.DETAIL
-        assert app._game_id == "outer-wilds"
-        assert app._title_label.cget("text") == "星际拓荒"
-    finally:
-        app.destroy()
+    # 打开详情: 切到详情页并选中该游戏.
+    page._select("outer-wilds")
+    page._on_detail()
+    _pump(app)
+    assert _current_page(app) is AppPage.DETAIL
+    assert app._game_id == "outer-wilds"
+    assert app._title_label.cget("text") == "星际拓荒"
 
 
 def test_workspace_nav_keeps_a_single_window_open(
@@ -1458,61 +1370,49 @@ def test_game_settings_can_configure_schedule_per_game(
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch, schedule_result=("30m", "2"))
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("shanhai")
-        manager = _open_manager(
-            app,
-            game_id="shanhai",
-            name="山海旅人",
-            backup_location="本地备份目录",
-        )
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("shanhai")
+    manager = _open_manager(
+        app,
+        game_id="shanhai",
+        name="山海旅人",
+        backup_location="本地备份目录",
+    )
 
-        manager._on_schedule()
-        _pump(app)
+    manager._on_schedule()
+    _pump(app)
 
-        assert app.backend.task_status("shanhai").schedule_text == "30m"
-        assert app.backend.task_status("shanhai").keep_auto == 2
-        assert app.backend.task_status("outer-wilds").schedule_text == "1d"
-        assert "30m" in manager._schedule_state.cget("text")
-    finally:
-        app.destroy()
+    assert app.backend.task_status("shanhai").schedule_text == "30m"
+    assert app.backend.task_status("shanhai").keep_auto == 2
+    assert app.backend.task_status("outer-wilds").schedule_text == "1d"
+    assert "30m" in manager._schedule_state.cget("text")
 
 
 def test_topbar_carries_global_entries_and_no_sidebar() -> None:
     """顶栏右侧是全局入口(添加游戏/定时任务/设置); 侧边栏与其内容已移除."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
 
-        assert not hasattr(app, "_sync_label")
-        assert not hasattr(app, "theme_btn")
-        assert not hasattr(app, "_sync_labels")
-        # 全局入口都在顶栏: 添加游戏 + 定时任务 + 设置.
-        assert app._add_game_btn.cget("text") == tr("topbar.add_game")
-        assert app._schedule_btn.cget("text") == tr("topbar.nav_scheduled")
-        assert app._settings_btn.cget("text") == tr("topbar.nav_settings")
-        topbar_texts = _button_texts(app._add_game_btn.master)
-        assert tr("topbar.nav_settings") in topbar_texts
-        # 侧边栏的"我的游戏"列表、工作区标题与"全部备份"入口都不在了.
-        assert not hasattr(app, "_games_container")
-        assert not hasattr(app, "_status_card")
-        assert not hasattr(app, "_add_game_label")
-        assert tr("sidebar.my_games") not in _label_texts(app)
-        assert "全部备份" not in _label_texts(app)
-        # 备份服务状态挪到右下角的状态条里.
-        assert tr("status.service_ok") in app._service_label.cget("text")
-    finally:
-        app.destroy()
+    assert not hasattr(app, "_sync_label")
+    assert not hasattr(app, "theme_btn")
+    assert not hasattr(app, "_sync_labels")
+    # 全局入口都在顶栏: 添加游戏 + 定时任务 + 设置.
+    assert app._add_game_btn.cget("text") == tr("topbar.add_game")
+    assert app._schedule_btn.cget("text") == tr("topbar.nav_scheduled")
+    assert app._settings_btn.cget("text") == tr("topbar.nav_settings")
+    topbar_texts = _button_texts(app._add_game_btn.master)
+    assert tr("topbar.nav_settings") in topbar_texts
+    # 侧边栏的"我的游戏"列表、工作区标题与"全部备份"入口都不在了.
+    assert not hasattr(app, "_games_container")
+    assert not hasattr(app, "_status_card")
+    assert not hasattr(app, "_add_game_label")
+    assert tr("sidebar.my_games") not in _label_texts(app)
+    assert "全部备份" not in _label_texts(app)
+    # 备份服务状态挪到右下角的状态条里.
+    assert tr("status.service_ok") in app._service_label.cget("text")
 
 
 def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
@@ -1563,39 +1463,33 @@ def test_settings_window_holds_theme_and_hotkey_shortcuts(
 
     _patch_dialogs(monkeypatch)
     applied: list[tuple[str, str]] = []
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        before = app._theme
-        window = _settings_window(app, applied)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    before = app._theme
+    window = _settings_window(app, applied)
 
-        # 定时任务相关的信息不在设置里.
-        labels = _label_texts(window._container)
-        assert all("定时" not in text for text in labels)
-        assert any("外观" in text for text in labels)
-        # 两个快捷键按钮显示当前组合(可读写法), 而不是 pynput 的原始语法.
-        assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
-            DEFAULT_SAVE_ACCELERATOR
-        )
-        assert window.shortcut_text(ACTION_CREATE_BRANCH) == format_accelerator(
-            DEFAULT_BRANCH_ACCELERATOR
-        )
+    # 定时任务相关的信息不在设置里.
+    labels = _label_texts(window._container)
+    assert all("定时" not in text for text in labels)
+    assert any("外观" in text for text in labels)
+    # 两个快捷键按钮显示当前组合(可读写法), 而不是 pynput 的原始语法.
+    assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
+        DEFAULT_SAVE_ACCELERATOR
+    )
+    assert window.shortcut_text(ACTION_CREATE_BRANCH) == format_accelerator(
+        DEFAULT_BRANCH_ACCELERATOR
+    )
 
-        # 点按钮即切换主题, 按钮文案与当前主题标签同步更新.
-        window._toggle_btn.invoke()
-        _pump(app)
-        assert app._theme != before
-        assert app.backend.current_theme() == app._theme
-        assert window._toggle_text() in {
-            tr("theme.to_light"),
-            tr("theme.to_dark"),
-        }
-        assert tr(f"theme.name_{app._theme}") in window._theme_label.cget("text")
-    finally:
-        app.destroy()
+    # 点按钮即切换主题, 按钮文案与当前主题标签同步更新.
+    window._toggle_btn.invoke()
+    _pump(app)
+    assert app._theme != before
+    assert app.backend.current_theme() == app._theme
+    assert window._toggle_text() in {
+        tr("theme.to_light"),
+        tr("theme.to_dark"),
+    }
+    assert tr(f"theme.name_{app._theme}") in window._theme_label.cget("text")
 
 
 def test_settings_window_records_a_pressed_combination(
@@ -1606,29 +1500,23 @@ def test_settings_window_records_a_pressed_combination(
 
     _patch_dialogs(monkeypatch)
     applied: list[tuple[str, str]] = []
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        window = _settings_window(app, applied)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, applied)
 
-        window._toggle_capture(ACTION_CREATE_BRANCH)
-        assert window.shortcut_text(ACTION_CREATE_BRANCH) == tr("settings.recording")
+    window._toggle_capture(ACTION_CREATE_BRANCH)
+    assert window.shortcut_text(ACTION_CREATE_BRANCH) == tr("settings.recording")
 
-        _press(window, "Control_L", 17)
-        _press(window, "Win_L", 91)
-        _press(window, "Z", 90)
+    _press(window, "Control_L", 17)
+    _press(window, "Win_L", 91)
+    _press(window, "Z", 90)
 
-        assert _wait_for(app, lambda: bool(applied))
-        assert applied == [(ACTION_CREATE_BRANCH, "<win>+<ctrl>+z")]
-        assert window.shortcut_text(ACTION_CREATE_BRANCH) == format_accelerator(
-            "<win>+<ctrl>+z"
-        )
-        assert window._shortcut_error.cget("text") == ""
-    finally:
-        app.destroy()
+    assert _wait_for(app, lambda: bool(applied))
+    assert applied == [(ACTION_CREATE_BRANCH, "<win>+<ctrl>+z")]
+    assert window.shortcut_text(ACTION_CREATE_BRANCH) == format_accelerator(
+        "<win>+<ctrl>+z"
+    )
+    assert window._shortcut_error.cget("text") == ""
 
 
 def test_settings_window_rejects_a_single_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1637,42 +1525,36 @@ def test_settings_window_rejects_a_single_key(monkeypatch: pytest.MonkeyPatch) -
 
     _patch_dialogs(monkeypatch)
     applied: list[tuple[str, str]] = []
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        window = _settings_window(app, applied)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, applied)
 
-        window._toggle_capture(ACTION_SAVE_NOW)
-        _press(window, "Win_L", 91)
+    window._toggle_capture(ACTION_SAVE_NOW)
+    _press(window, "Win_L", 91)
 
-        assert _wait_for(app, lambda: bool(window._shortcut_error.cget("text")))
-        assert applied == []
-        assert window._shortcut_error.cget("text") == tr("hotkey.err_no_letter")
-        assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
-            DEFAULT_SAVE_ACCELERATOR
-        )
+    assert _wait_for(app, lambda: bool(window._shortcut_error.cget("text")))
+    assert applied == []
+    assert window._shortcut_error.cget("text") == tr("hotkey.err_no_letter")
+    assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
+        DEFAULT_SAVE_ACCELERATOR
+    )
 
-        # 只按字母缺少修饰键, 同样不生效.
-        window._toggle_capture(ACTION_SAVE_NOW)
-        _press(window, "s", 83)
+    # 只按字母缺少修饰键, 同样不生效.
+    window._toggle_capture(ACTION_SAVE_NOW)
+    _press(window, "s", 83)
 
-        assert _wait_for(app, lambda: bool(window._shortcut_error.cget("text")))
-        assert applied == []
-        assert window._shortcut_error.cget("text") == tr("hotkey.err_no_modifier")
+    assert _wait_for(app, lambda: bool(window._shortcut_error.cget("text")))
+    assert applied == []
+    assert window._shortcut_error.cget("text") == tr("hotkey.err_no_modifier")
 
-        # 数字键不在白名单里: 直接提示"不支持的按键".
-        window._toggle_capture(ACTION_SAVE_NOW)
-        _press(window, "1", 49)
+    # 数字键不在白名单里: 直接提示"不支持的按键".
+    window._toggle_capture(ACTION_SAVE_NOW)
+    _press(window, "1", 49)
 
-        assert _wait_for(
-            app,
-            lambda: window._shortcut_error.cget("text") == tr("hotkey.err_unknown_key"),
-        )
-    finally:
-        app.destroy()
+    assert _wait_for(
+        app,
+        lambda: window._shortcut_error.cget("text") == tr("hotkey.err_unknown_key"),
+    )
 
 
 def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
@@ -1682,10 +1564,7 @@ def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
 
     paths = ApplicationPaths.default(override_root=tmp_path).ensure()
     hotkeys = GlobalHotkeyService(backend=_RecordingBackend())
-    try:
-        app = _new_app(DemoArchiveService(delay=0), hotkeys=hotkeys, paths=paths)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = gui_app(_new_app, DemoArchiveService(delay=0), hotkeys=hotkeys, paths=paths)
     try:
         _pump(app)
         assert app._apply_shortcut(ACTION_CREATE_BRANCH, "<win>+<ctrl>+z") is None
@@ -1699,11 +1578,8 @@ def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
         hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
         paths=paths,
     )
-    try:
-        assert reloaded._shortcuts[ACTION_CREATE_BRANCH] == "<win>+<ctrl>+z"
-        assert reloaded._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
-    finally:
-        reloaded.destroy()
+    assert reloaded._shortcuts[ACTION_CREATE_BRANCH] == "<win>+<ctrl>+z"
+    assert reloaded._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
 
 
 def test_invalid_config_is_reset_to_defaults_on_startup(tmp_path: Path) -> None:
@@ -1713,22 +1589,17 @@ def test_invalid_config_is_reset_to_defaults_on_startup(tmp_path: Path) -> None:
 
     paths = ApplicationPaths.default(override_root=tmp_path).ensure()
     paths.config_path.write_text('{"version": 1, "theme": "neon"}', encoding="utf-8")
-    try:
-        app = _new_app(
-            DemoArchiveService(delay=0),
-            hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
-            paths=paths,
-        )
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        assert app._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
-        assert app._shortcuts[ACTION_CREATE_BRANCH] == DEFAULT_BRANCH_ACCELERATOR
-        assert app._last_feedback[1] == tr("config.reset")
-        assert (paths.config_dir / "config.json.invalid").is_file()
-        assert load_config(paths.config_path).hotkeys.save == DEFAULT_SAVE_ACCELERATOR
-    finally:
-        app.destroy()
+    app = gui_app(
+        _new_app,
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        paths=paths,
+    )
+    assert app._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
+    assert app._shortcuts[ACTION_CREATE_BRANCH] == DEFAULT_BRANCH_ACCELERATOR
+    assert app._last_feedback[1] == tr("config.reset")
+    assert (paths.config_dir / "config.json.invalid").is_file()
+    assert load_config(paths.config_path).hotkeys.save == DEFAULT_SAVE_ACCELERATOR
 
 
 def test_failed_hotkey_registration_keeps_the_previous_combination(
@@ -1738,39 +1609,27 @@ def test_failed_hotkey_registration_keeps_the_previous_combination(
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        failure = app._apply_shortcut(ACTION_SAVE_NOW, "<win>+<ctrl>+q")
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    failure = app._apply_shortcut(ACTION_SAVE_NOW, "<win>+<ctrl>+q")
 
-        assert failure is not None
-        assert app._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
-    finally:
-        app.destroy()
+    assert failure is not None
+    assert app._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
 
 
 def test_task_card_no_longer_shows_the_hotkey() -> None:
     """任务状态卡不再展示快捷键(它属于全局设置, 统一在设置窗口里维护)."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("outer-wilds")
-        _pump(app)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("outer-wilds")
+    _pump(app)
 
-        assert not hasattr(app, "_task_shortcut")
-        assert not hasattr(app, "_shortcut_text")
-        labels = _label_texts(app._task_hint.master)
-        assert all(tr("task.shortcut") not in text for text in labels)
-    finally:
-        app.destroy()
+    assert not hasattr(app, "_task_shortcut")
+    assert not hasattr(app, "_shortcut_text")
+    labels = _label_texts(app._task_hint.master)
+    assert all(tr("task.shortcut") not in text for text in labels)
 
 
 def test_branch_hotkey_creates_a_branch_without_dialog(
@@ -1785,29 +1644,24 @@ def test_branch_hotkey_creates_a_branch_without_dialog(
         raise AssertionError("全局快捷键不应弹出分支名对话框")
 
     monkeypatch.setattr(main_mod, "ask_branch_name", forbidden)
-    try:
-        app = _new_app(
-            DemoArchiveService(delay=0),
-            hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
-        )
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("shanhai")
-        app._select_backup(app._items[0])
+    app = gui_app(
+        _new_app,
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+    )
+    _pump(app)
+    app._select_game("shanhai")
+    app._select_backup(app._items[0])
 
-        # 快捷键回调只投递消息, 由主线程轮询后执行.
-        app._request_hotkey_branch()
-        _drain(app)
+    # 快捷键回调只投递消息, 由主线程轮询后执行.
+    app._request_hotkey_branch()
+    _drain(app)
 
-        created = app._items[-1]
-        assert created.branch_name == tr("dialog.branch_default")
-        assert app._hotkeys.accelerators()[ACTION_CREATE_BRANCH] == (
-            DEFAULT_BRANCH_ACCELERATOR
-        )
-    finally:
-        app.destroy()
+    created = app._items[-1]
+    assert created.branch_name == tr("dialog.branch_default")
+    assert app._hotkeys.accelerators()[ACTION_CREATE_BRANCH] == (
+        DEFAULT_BRANCH_ACCELERATOR
+    )
 
 
 def test_branch_default_name_is_localized(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1816,81 +1670,63 @@ def test_branch_default_name_is_localized(monkeypatch: pytest.MonkeyPatch) -> No
 
     _patch_dialogs(monkeypatch, branch_name=tr("dialog.branch_default"))
     assert tr("dialog.branch_default") == "分支"
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("shanhai")
-        app._select_backup(app._items[0])
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("shanhai")
+    app._select_backup(app._items[0])
 
-        app._on_branch()
-        _drain(app)
+    app._on_branch()
+    _drain(app)
 
-        created = app._items[-1]
-        assert created.title == "分支"
-        assert created.branch_name == "分支"
-    finally:
-        app.destroy()
+    created = app._items[-1]
+    assert created.title == "分支"
+    assert created.branch_name == "分支"
 
 
 def test_task_card_wraps_long_paths() -> None:
     """任务卡里的长文案(备份目标/期间)自动换行而不是被裁掉."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("outer-wilds")
-        _pump(app)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("outer-wilds")
+    _pump(app)
 
-        for label in (app._task_name_label, app._task_next, app._task_target):
-            assert int(label.cget("wraplength")) > 0
-            assert label.cget("justify") == "left"
-        assert app._task_target.cget("text")
-        assert len(app._task_name_label.cget("text")) < 40
-    finally:
-        app.destroy()
+    for label in (app._task_name_label, app._task_next, app._task_target):
+        assert int(label.cget("wraplength")) > 0
+        assert label.cget("justify") == "left"
+    assert app._task_target.cget("text")
+    assert len(app._task_name_label.cget("text")) < 40
 
 
 def test_task_card_state_follows_schedule_state() -> None:
     """任务卡的状态文案反映定时备份的启用/暂停/未配置, 而不是当前有无操作."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        # 已配置且启用.
-        app._select_game("outer-wilds")
-        _pump(app)
-        assert app._task_state_label.cget("text") == tr("schedule.state_on")
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    # 已配置且启用.
+    app._select_game("outer-wilds")
+    _pump(app)
+    assert app._task_state_label.cget("text") == tr("schedule.state_on")
 
-        # 暂停后立刻显示已暂停.
-        app.backend.set_schedule("outer-wilds", "1d", enabled=False)
-        app._after_schedule_change()
-        _pump(app)
-        assert app._task_state_label.cget("text") == tr("schedule.state_paused")
+    # 暂停后立刻显示已暂停.
+    app.backend.set_schedule("outer-wilds", "1d", enabled=False)
+    app._after_schedule_change()
+    _pump(app)
+    assert app._task_state_label.cget("text") == tr("schedule.state_paused")
 
-        # 恢复后回到已启用.
-        app.backend.set_schedule("outer-wilds", "1d")
-        app._after_schedule_change()
-        _pump(app)
-        assert app._task_state_label.cget("text") == tr("schedule.state_on")
+    # 恢复后回到已启用.
+    app.backend.set_schedule("outer-wilds", "1d")
+    app._after_schedule_change()
+    _pump(app)
+    assert app._task_state_label.cget("text") == tr("schedule.state_on")
 
-        # 未配置定时备份的游戏显示未配置.
-        app._select_game("shanhai")
-        _pump(app)
-        assert app._task_state_label.cget("text") == tr("schedule.state_off")
-        assert app._task_next.cget("text") == "—"
-    finally:
-        app.destroy()
+    # 未配置定时备份的游戏显示未配置.
+    app._select_game("shanhai")
+    _pump(app)
+    assert app._task_state_label.cget("text") == tr("schedule.state_off")
+    assert app._task_next.cget("text") == "—"
 
 
 def test_backup_restore_branch_export_report_success(
@@ -1901,35 +1737,29 @@ def test_backup_restore_branch_export_report_success(
     from archive_management.ui.models import FeedbackKind
 
     _patch_dialogs(monkeypatch)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        app._select_game("outer-wilds")
-        backup_count = len(app._items)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("outer-wilds")
+    backup_count = len(app._items)
 
-        app._on_backup()
-        _drain(app)
-        assert app._last_feedback[0] == FeedbackKind.SUCCESS
-        assert not app._busy
-        assert len(app._items) == backup_count + 1
+    app._on_backup()
+    _drain(app)
+    assert app._last_feedback[0] == FeedbackKind.SUCCESS
+    assert not app._busy
+    assert len(app._items) == backup_count + 1
 
-        app._select_backup(app._items[0])
-        app._on_restore()
-        _drain(app)
-        assert app._last_feedback[0] == FeedbackKind.SUCCESS
+    app._select_backup(app._items[0])
+    app._on_restore()
+    _drain(app)
+    assert app._last_feedback[0] == FeedbackKind.SUCCESS
 
-        app._on_branch()
-        _drain(app)
-        assert app._last_feedback[0] == FeedbackKind.SUCCESS
+    app._on_branch()
+    _drain(app)
+    assert app._last_feedback[0] == FeedbackKind.SUCCESS
 
-        app._on_export()
-        _drain(app)
-        assert app._last_feedback[0] == FeedbackKind.SUCCESS
-    finally:
-        app.destroy()
+    app._on_export()
+    _drain(app)
+    assert app._last_feedback[0] == FeedbackKind.SUCCESS
 
 
 def test_add_game_flow_selects_new_game(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1938,24 +1768,18 @@ def test_add_game_flow_selects_new_game(monkeypatch: pytest.MonkeyPatch) -> None
     from archive_management.ui.models import FeedbackKind
 
     _patch_dialogs(monkeypatch, ask_text="新按钮游戏")
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        before = {game.name for game in app.backend.list_games()}
-        app._on_add_game()
-        _pump(app)
-        names = {game.name for game in app.backend.list_games()}
-        assert "新按钮游戏" in names - before
-        selected = app._game
-        assert selected is not None
-        assert selected.name == "新按钮游戏"
-        # 新游戏无位置时状态栏为 info 提示, 但绝不应是错误
-        assert app._last_feedback[0] != FeedbackKind.ERROR
-    finally:
-        app.destroy()
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    before = {game.name for game in app.backend.list_games()}
+    app._on_add_game()
+    _pump(app)
+    names = {game.name for game in app.backend.list_games()}
+    assert "新按钮游戏" in names - before
+    selected = app._game
+    assert selected is not None
+    assert selected.name == "新按钮游戏"
+    # 新游戏无位置时状态栏为 info 提示, 但绝不应是错误
+    assert app._last_feedback[0] != FeedbackKind.ERROR
 
 
 # ---------------------------------------------------------------- 管理窗口
@@ -1997,33 +1821,27 @@ def test_manage_window_game_actions(
     from archive_management.ui.manage_window import ManageGameWindow
 
     _patch_dialogs(monkeypatch, ask_text="改名成功")
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        manager = _open_manager(
-            app,
-            game_id="shanhai",
-            name="山海旅人",
-            backup_location=str(tmp_path / "backups"),
-        )
-        assert isinstance(manager, ManageGameWindow)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    manager = _open_manager(
+        app,
+        game_id="shanhai",
+        name="山海旅人",
+        backup_location=str(tmp_path / "backups"),
+    )
+    assert isinstance(manager, ManageGameWindow)
 
-        manager._on_rename()
-        assert manager._name == "改名成功"
-        assert manager._backend.get_detail("shanhai").name == "改名成功"
+    manager._on_rename()
+    assert manager._name == "改名成功"
+    assert manager._backend.get_detail("shanhai").name == "改名成功"
 
-        manager._on_toggle_enabled()
-        assert manager._enabled is False
-        assert manager._backend.get_detail("shanhai").name == "改名成功"
-        manager._on_toggle_enabled()
-        assert manager._enabled is True
+    manager._on_toggle_enabled()
+    assert manager._enabled is False
+    assert manager._backend.get_detail("shanhai").name == "改名成功"
+    manager._on_toggle_enabled()
+    assert manager._enabled is True
 
-        manager.close()
-    finally:
-        app.destroy()
+    manager.close()
 
 
 def test_manage_window_location_actions(
@@ -2104,24 +1922,18 @@ def test_manage_window_delete_game_removes_and_closes(
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch, confirm=True)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        game_id = app.backend.add_game("待删除").game_id
-        manager = _open_manager(
-            app,
-            game_id=game_id,
-            name="待删除",
-            backup_location=str(tmp_path / "backups"),
-        )
-        manager._on_delete_game()
-        ids = {game.game_id for game in app.backend.list_games()}
-        assert game_id not in ids
-    finally:
-        app.destroy()
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    game_id = app.backend.add_game("待删除").game_id
+    manager = _open_manager(
+        app,
+        game_id=game_id,
+        name="待删除",
+        backup_location=str(tmp_path / "backups"),
+    )
+    manager._on_delete_game()
+    ids = {game.game_id for game in app.backend.list_games()}
+    assert game_id not in ids
 
 
 def test_deleting_last_game_clears_hero_panel(
@@ -2132,66 +1944,54 @@ def test_deleting_last_game_clears_hero_panel(
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch, confirm=True)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        # 只留一个游戏, 并把它选中(概要区处于"有内容"状态).
-        for game in list(app.backend.list_games()):
-            if game.game_id != "shanhai":
-                app.backend.delete_game(game.game_id)
-        app._refresh_after_manage(select="shanhai")
-        _pump(app)
-        assert app._hero_name_label.cget("text") == "山海旅人"
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    # 只留一个游戏, 并把它选中(概要区处于"有内容"状态).
+    for game in list(app.backend.list_games()):
+        if game.game_id != "shanhai":
+            app.backend.delete_game(game.game_id)
+    app._refresh_after_manage(select="shanhai")
+    _pump(app)
+    assert app._hero_name_label.cget("text") == "山海旅人"
 
-        manager = _open_manager(
-            app,
-            game_id="shanhai",
-            name="山海旅人",
-            backup_location=str(tmp_path / "backups"),
-            on_change=app._refresh_after_manage,
-        )
-        manager._on_delete_game()
-        _pump(app)
+    manager = _open_manager(
+        app,
+        game_id="shanhai",
+        name="山海旅人",
+        backup_location=str(tmp_path / "backups"),
+        on_change=app._refresh_after_manage,
+    )
+    manager._on_delete_game()
+    _pump(app)
 
-        assert app.backend.list_games() == []
-        assert app._game_id is None
-        assert app._game is None
-        assert app._items == []
-        assert app._cards == {}
-        # 概要区与标题行回到空状态, 不再残留被删游戏的名字.
-        assert app._hero_name_label.cget("text") == "未选择游戏"
-        assert app._hero_location_label.cget("text") == ""
-        assert "山海旅人" not in app._title_label.cget("text")
-        assert app._selected_name.cget("text") == "未选择节点"
-        assert app._hero_origin_label.winfo_manager() == ""
-    finally:
-        app.destroy()
+    assert app.backend.list_games() == []
+    assert app._game_id is None
+    assert app._game is None
+    assert app._items == []
+    assert app._cards == {}
+    # 概要区与标题行回到空状态, 不再残留被删游戏的名字.
+    assert app._hero_name_label.cget("text") == "未选择游戏"
+    assert app._hero_location_label.cget("text") == ""
+    assert "山海旅人" not in app._title_label.cget("text")
+    assert app._selected_name.cget("text") == "未选择节点"
+    assert app._hero_origin_label.winfo_manager() == ""
 
 
 def test_reload_after_external_delete_clears_panels() -> None:
     """回归: 游戏在别处被删掉后, 轮询触发的重载也要把界面清空."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        for game in list(app.backend.list_games()):
-            app.backend.delete_game(game.game_id)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    for game in list(app.backend.list_games()):
+        app.backend.delete_game(game.game_id)
 
-        app._reload_data()
-        _pump(app)
+    app._reload_data()
+    _pump(app)
 
-        assert app._game_id is None
-        assert app._hero_name_label.cget("text") == "未选择游戏"
-        assert app._items == []
-    finally:
-        app.destroy()
+    assert app._game_id is None
+    assert app._hero_name_label.cget("text") == "未选择游戏"
+    assert app._items == []
 
 
 def test_service_status_shows_storage_usage_without_hotkey(
@@ -2239,16 +2039,10 @@ def test_task_panel_is_renamed_and_has_no_schedule_editor() -> None:
     """任务卡显示的是任务状态, 定时配置已移到游戏设置/定时任务窗口."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        assert app._task_hint.cget("text") == tr("task.hint")
-        assert not hasattr(app, "_task_edit_btn")
-    finally:
-        app.destroy()
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    assert app._task_hint.cget("text") == tr("task.hint")
+    assert not hasattr(app, "_task_edit_btn")
 
 
 # ---------------------------------------------------------------- SQLite 后端
@@ -2558,31 +2352,25 @@ def test_manage_window_delete_original_location_flow(
     from archive_management.ui.manage_window import ManageGameWindow
 
     _patch_dialogs(monkeypatch, ask_text="山海旅人")
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        manager = _open_manager(
-            app,
-            game_id="shanhai",
-            name="山海旅人",
-            backup_location=str(tmp_path / "backups"),
-        )
-        assert isinstance(manager, ManageGameWindow)
-        manager._select(manager._items[0].location_id)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    manager = _open_manager(
+        app,
+        game_id="shanhai",
+        name="山海旅人",
+        backup_location=str(tmp_path / "backups"),
+    )
+    assert isinstance(manager, ManageGameWindow)
+    manager._select(manager._items[0].location_id)
 
-        manager._on_delete_origin()
+    manager._on_delete_origin()
 
-        assert manager._items == []
-        summary = next(
-            game for game in manager._backend.list_games() if game.game_id == "shanhai"
-        )
-        assert summary.has_locations is False
-        manager.close()
-    finally:
-        app.destroy()
+    assert manager._items == []
+    summary = next(
+        game for game in manager._backend.list_games() if game.game_id == "shanhai"
+    )
+    assert summary.has_locations is False
+    manager.close()
 
 
 def test_manage_window_delete_original_rejects_wrong_name(
@@ -2594,27 +2382,21 @@ def test_manage_window_delete_original_rejects_wrong_name(
     from archive_management.ui.manage_window import ManageGameWindow
 
     _patch_dialogs(monkeypatch, ask_text="随便打个名字")
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
-    try:
-        _pump(app)
-        manager = _open_manager(
-            app,
-            game_id="shanhai",
-            name="山海旅人",
-            backup_location=str(tmp_path / "backups"),
-        )
-        assert isinstance(manager, ManageGameWindow)
-        manager._select(manager._items[0].location_id)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    manager = _open_manager(
+        app,
+        game_id="shanhai",
+        name="山海旅人",
+        backup_location=str(tmp_path / "backups"),
+    )
+    assert isinstance(manager, ManageGameWindow)
+    manager._select(manager._items[0].location_id)
 
-        manager._on_delete_origin()
+    manager._on_delete_origin()
 
-        assert len(manager._items) == 1
-        manager.close()
-    finally:
-        app.destroy()
+    assert len(manager._items) == 1
+    manager.close()
 
 
 def test_manage_window_delete_original_blocks_backup_root(

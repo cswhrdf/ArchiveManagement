@@ -17,12 +17,11 @@ env:
 
 jobs:
   quality:
-    name: 代码质量检查 (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+    name: 代码质量检查 (ubuntu-latest)
+    # 公共检查: ruff / ruff format / mypy 与平台无关(不涉及路径分隔符、显示或字体),
+    # 只在 Ubuntu 跑一遍 —— 跑三遍只会得到三份同样的结论, 还让报告里出现"某个平台的
+    # 质量检查"这种误导性归属(结论项因此不带平台标签, 落在报告的 default 环境)。
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
@@ -43,15 +42,49 @@ jobs:
       - name: Run quality gates (ruff / format / mypy)
         # 三项检查在脚本里依次执行: 未通过时脚本以非 0 退出(作业照常红), 但结论与完整输出
         # 已经写进 allure-results-quality, 汇总报告里能看到"哪一项没过 + 原始输出"。
-        run: uv run python scripts/create_allure_quality.py --results-dir allure-results-quality
+        run: uv run python scripts/create_allure_quality.py --group core --results-dir allure-results-quality
 
-      - name: Upload quality Allure results (Linux)
-        # 质量结论与平台无关, 只上传 Ubuntu 这一份: 汇总报告里只出现一条(Linux 环境)。
-        if: always() && runner.os == 'Linux'
+      - name: Upload quality Allure results
+        # 这份结论与平台无关, 不再需要按平台挑选: 质量作业只在 Ubuntu 跑。
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: allure-results-quality
           path: allure-results-quality/
+          if-no-files-found: ignore
+
+  analysis:
+    name: 静态分析与依赖检查 (ubuntu-latest)
+    runs-on: ubuntu-latest
+    # 这五项与平台无关(不涉及路径分隔符、显示或字体), 只跑一个平台;
+    # 结论同样写进 Allure, 与 quality job 汇总成同一份报告。
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 只读复用依赖缓存(写入交给 pytest job).
+          enable-cache: true
+          save-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run static analysis (deptry / bandit / pip-audit / radon / xenon)
+        # 依赖卫生与漏洞、安全扫描、复杂度: 逐项跑并写进 allure-results-analysis。
+        run: uv run python scripts/create_allure_quality.py --group analysis --results-dir allure-results-analysis
+
+      - name: Upload analysis Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-analysis
+          path: allure-results-analysis/
           if-no-files-found: ignore
 
   pytest:
@@ -418,6 +451,15 @@ jobs:
         continue-on-error: true
         with:
           name: allure-results-quality
+          path: allure-results
+
+      - name: Download analysis Allure results
+        # 静态分析与依赖检查同样只上传 Ubuntu 一份。
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          name: allure-results-analysis
           path: allure-results
 
       - name: Download performance baseline

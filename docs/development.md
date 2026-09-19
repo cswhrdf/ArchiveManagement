@@ -50,12 +50,32 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 ## 质量门禁
 
+本地提交钩子 + CI 里跑的检查（`pytest --cov` 与平台相关，Windows/Ubuntu/macOS 三平台都跑；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
+
 ```shell
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy
+uv run mypy                     # 宿主平台(本地钩子里跑的也是这一条)
+uv run mypy --platform win32    # Windows 专属分支(宿主那次只收窄自己那一支)
+uv run mypy --platform darwin   # macOS 专属分支
 uv run pytest --cov
+uv run deptry .                 # 依赖卫生: 未声明 / 多余 / 传递依赖(本地钩子也会跑)
 ```
+
+与平台无关的静态分析与依赖检查（CI 的 `analysis` job 跑一次，本地想复现就手动执行）：
+
+```shell
+uv run bandit -r src   # 源码里的危险模式(exec/eval、弱随机、subprocess、硬编码口令等)
+uv run pip-audit       # 已安装依赖的已知漏洞
+uv run radon cc -s --min B src                                   # 复杂度报告
+uv run xenon --max-absolute B --max-modules F --max-average F src # 复杂度门槛
+```
+
+**复杂度的两把尺子同分**：门槛取 `10`，与 Ruff 的 `[tool.ruff.lint.mccabe] max-complexity`完全相同；Radon 的等级对应 1-5 / 6-10 / 11-20 / …，所以“不超过 10”就是“最差只能到 B 级”，`xenon` 的模块级与平均复杂度不设限（Ruff 并不检查这两项）。但两者的**刻度不同**：Radon 会把 `with`、`assert`、布尔运算也算作分支，同一段代码通常比 Ruff 的 C901 高 2~5 分，因此写新函数时以 Radon 为准（`radon cc --min C src` 当前为空，说明全部函数都在 B 级以内）。`tests/unit/test_report_verification.py` 里有守卫，保证两处数值不会各自漂移。
+
+`deptry` 的两处说明：本项目不作为包安装，所以 `known_first_party` 里同时列了 `archive_management` 与 `tests` 下的共享辅助模块；`httpx` 目前在依赖清单里但还没有调用点（留给后续接入平台封面/图标接口），它的 DEP002 报告在 `pyproject.toml` 里显式豁免。
+
+`bandit` 只扫 `src`：用例里满是 `assert` 与故意构造的脏数据，扫它们只会制造噪音；运行期行为由 `tests/security` 负责（两者互补：Bandit 拦“写法危险”，安全用例拦“行为可被利用”）。
 
 格式化用 `ruff format`，其配置项**刻意锁定为 Black 稳定版的默认风格**（`preview = false`、双引号、空格缩进、尊重魔法尾随逗号），所以换成 ruff 不会把存量代码重排。两处已知差异没有用配置去弥合，而是写成了编码约定：
 
@@ -70,7 +90,7 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 
 输出应为 **0 个文件需要改动**，且与 `ruff format --check .` 同时成立。
 
-本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表）；CI 会在 Windows、Ubuntu、macOS 上运行全量测试，并单独执行性能基准与安全测试，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`）；CI 会在 Windows、Ubuntu、macOS 上运行全量测试，并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
 
 ### 想在本地看 Allure 报告：
 

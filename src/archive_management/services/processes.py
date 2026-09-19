@@ -40,6 +40,27 @@ def probe_game_process(
     return probe_processes([name], provider=provider)
 
 
+def _process_needles(names: Sequence[str]) -> list[str]:
+    """归一化候选名称, 丢掉过短的(少于 3 个字符容易误报)."""
+    return [
+        needle for needle in (_normalize(name) for name in names) if len(needle) >= 3
+    ]
+
+
+def _read_process_names(read: ProcessNameProvider) -> list[str] | None:
+    """枚举当前进程名; 提供者异常时返回 None(调用方按"没检查到"处理)."""
+    try:
+        return [raw for raw in read() if raw]
+    except Exception:
+        return None
+
+
+def _matches_any(raw: str, needles: Sequence[str]) -> bool:
+    """进程名与任一候选匹配(归一化后互相包含)."""
+    normalized = _normalize(raw)
+    return any(_matches(needle, normalized) for needle in needles)
+
+
 def probe_processes(
     names: Sequence[str], *, provider: ProcessNameProvider | None = None
 ) -> ProcessProbe:
@@ -48,23 +69,15 @@ def probe_processes(
     匹配规则是"归一化后互相包含": 候选 ``Outer Wilds`` 能匹配到
     ``OuterWilds.exe``; 名称过短或为空时直接跳过, 避免误报。
     """
-    needles = [
-        needle for needle in (_normalize(name) for name in names) if len(needle) >= 3
-    ]
+    needles = _process_needles(names)
     if not needles:
         return ProcessProbe(checked=False, running=False)
-    read = provider if provider is not None else psutil_process_names
-    try:
-        raw_names = [raw for raw in read() if raw]
-    except Exception:
-        return ProcessProbe(checked=False, running=False)
-    matches = sorted(
-        {
-            raw
-            for raw in raw_names
-            if any(_matches(needle, _normalize(raw)) for needle in needles)
-        }
+    raw_names = _read_process_names(
+        provider if provider is not None else psutil_process_names
     )
+    if raw_names is None:
+        return ProcessProbe(checked=False, running=False)
+    matches = sorted({raw for raw in raw_names if _matches_any(raw, needles)})
     return ProcessProbe(checked=True, running=bool(matches), matches=tuple(matches))
 
 

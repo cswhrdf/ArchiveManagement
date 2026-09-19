@@ -122,6 +122,21 @@ def descendant_ids(nodes: Iterable[BackupNode], node_id: int) -> list[int]:
     return descendants(_index(list(nodes)), node_id)
 
 
+def _auto_nodes(nodes: Sequence[BackupNode]) -> list[BackupNode]:
+    """自动备份节点, 按创建时间从旧到新排序(还没落库的节点不参与)."""
+    autos = [node for node in nodes if node.id is not None and node.node_kind == "auto"]
+    autos.sort(key=lambda node: (node.created_at, node.id or 0))
+    return autos
+
+
+def _retained_ids(autos: list[BackupNode], keep: int, protected: set[int]) -> set[int]:
+    """一定要保留的自动备份 id: ``protected`` 里的节点 + 最新的 ``keep`` 份."""
+    retained = set(protected)
+    if keep > 0:
+        retained.update(node.id for node in autos[-keep:] if node.id is not None)
+    return retained
+
+
 def auto_prune_ids(
     nodes: Sequence[BackupNode],
     keep: int,
@@ -133,12 +148,8 @@ def auto_prune_ids(
     保留规则: 最新的 ``keep`` 份(含 ``protected`` 中的节点)一定保留;
     ``protected``(例如刚创建的节点)永不被剪除, 且计入保留份数.
     """
-    protected_ids = set(protected)
-    autos = [node for node in nodes if node.id is not None and node.node_kind == "auto"]
-    autos.sort(key=lambda node: (node.created_at, node.id or 0))
-    retained: set[int] = set(protected_ids)
-    if keep > 0:
-        retained.update(node.id for node in autos[-keep:] if node.id is not None)
+    autos = _auto_nodes(nodes)
+    retained = _retained_ids(autos, keep, set(protected))
     return [
         node.id for node in autos if node.id is not None and node.id not in retained
     ]

@@ -235,43 +235,15 @@ def scan_library(
     engine = (
         scanner if scanner is not None else LocalGameScanner(roots or default_roots())
     )
-    now = datetime.now(UTC)
-    for directory in directories:
-        if directory.id is not None:
-            repository.mark_scan(
-                directory.id, status=path_health(directory.path), when=now
-            )
+    _mark_scanned(repository, directories, when=datetime.now(UTC))
 
     errors: list[str] = []
-    try:
-        found = engine.scan(monitored=active)
-    except Exception as exc:
-        log_failure("discovery.scan", error=str(exc))
-        errors.append(str(exc))
-        found = []
-
+    found = _scan_found(engine, active, errors)
     candidates = CandidateRepository(database)
-    known = {
-        game.name.casefold(): game
-        for game in GameRepository(database).list()
-        if game.id
-    }
-    added = updated = linked = unusable = 0
     seen: set[str] = set()
-    for candidate in found:
-        seen.add(_directory_key(candidate.install_dir))
-        if candidate.health != "ok":
-            unusable += 1
-        stored, created = candidates.upsert(candidate)
-        if created:
-            added += 1
-        else:
-            updated += 1
-        if stored.status == "new" and stored.id is not None:
-            match = known.get(stored.name.casefold())
-            if match is not None and match.id is not None:
-                candidates.set_status(stored.id, "imported", game_id=match.id)
-                linked += 1
+    counts = _store_candidates(
+        candidates, found, known=_known_games(database), seen=seen
+    )
     _refresh_candidate_health(candidates, seen=seen)
 
     log_action(
@@ -280,21 +252,102 @@ def scan_library(
         monitored=len(directories),
         active=len(active),
         total=len(found),
-        added=added,
-        updated=updated,
-        linked=linked,
-        unusable=unusable,
+        added=counts.added,
+        updated=counts.updated,
+        linked=counts.linked,
+        unusable=counts.unusable,
     )
     return ScanReport(
         monitored=len(directories),
         active=len(active),
         total=len(found),
-        added=added,
-        updated=updated,
-        linked=linked,
-        unusable=unusable,
+        added=counts.added,
+        updated=counts.updated,
+        linked=counts.linked,
+        unusable=counts.unusable,
         errors=tuple(errors),
     )
+
+
+@dataclass
+class _ScanCounts:
+    """一次扫描的统计口径: 新增 / 更新 / 已在库 / 路径不可用."""
+
+    added: int = 0
+    updated: int = 0
+    linked: int = 0
+    unusable: int = 0
+
+
+def _mark_scanned(
+    repository: MonitoredDirectoryRepository,
+    directories: list[MonitoredDirectory],
+    *,
+    when: datetime,
+) -> None:
+    """把每个监控目录的最近扫描时间与路径健康状态写回(路径失效也要留痕)."""
+    for directory in directories:
+        if directory.id is not None:
+            repository.mark_scan(
+                directory.id, status=path_health(directory.path), when=when
+            )
+
+
+def _scan_found(
+    engine: LocalGameScanner, active: list[str], errors: list[str]
+) -> list[GameCandidate]:
+    """执行一次扫描; 失败时记审计日志并把原因收进 ``errors``(不向上抛)."""
+    try:
+        return engine.scan(monitored=active)
+    except Exception as exc:
+        log_failure("discovery.scan", error=str(exc))
+        errors.append(str(exc))
+        return []
+
+
+def _known_games(database: Database) -> dict[str, Game]:
+    """已入库游戏按名称(小写)索引, 用来判断候选是否已经在库里."""
+    return {
+        game.name.casefold(): game
+        for game in GameRepository(database).list()
+        if game.id
+    }
+
+
+def _link_existing(
+    candidates: CandidateRepository, stored: GameCandidate, *, known: dict[str, Game]
+) -> bool:
+    """候选项与库里同名游戏对上时标记为"已纳入库", 返回是否真的标了."""
+    if stored.status != "new" or stored.id is None:
+        return False
+    match = known.get(stored.name.casefold())
+    if match is None or match.id is None:
+        return False
+    candidates.set_status(stored.id, "imported", game_id=match.id)
+    return True
+
+
+def _store_candidates(
+    candidates: CandidateRepository,
+    found: list[GameCandidate],
+    *,
+    known: dict[str, Game],
+    seen: set[str],
+) -> _ScanCounts:
+    """把扫描结果写入候选表, 顺带统计各类数量(同时记录这次见过的路径)."""
+    counts = _ScanCounts()
+    for candidate in found:
+        seen.add(_directory_key(candidate.install_dir))
+        if candidate.health != "ok":
+            counts.unusable += 1
+        stored, created = candidates.upsert(candidate)
+        if created:
+            counts.added += 1
+        else:
+            counts.updated += 1
+        if _link_existing(candidates, stored, known=known):
+            counts.linked += 1
+    return counts
 
 
 def _refresh_candidate_health(

@@ -90,3 +90,27 @@ def test_invalid_budgets_return_the_text_unchanged(width: int, max_lines: int) -
 
 def test_empty_text_stays_empty() -> None:
     assert fit_text("", _FakeFont(), 10) == ""
+
+
+def test_truncated_text_leaves_at_most_two_character_widths_unused() -> None:
+    """截断后剩下的缝隙不超过"两个字符宽(取整 + 省略号 + 断字处裁掉的一个空格)".
+
+    GUI 的不变量断言(``test_gui_layout._assert_name_fills``)靠的就是这条性质:
+    省略号要占自己的宽度, 二分取整又会剩不到一个字符, 切点正好落在空格上时还会被
+    ``rstrip`` 掉 —— 于是缝隙必然大过"一个字符", 拿它当上界就会在 CI 上误报。
+    这里把真实上界钉下来, 并拿连续宽度扫一遍(只挑几个样本的话, 取整那一档就漏了)。
+    """
+    font = _FakeFont()
+    text = "Kaiju Princess 2 ASMR 超长的游戏名称示例"
+    budget = 2 * font.measure("超") + 1
+    checked = 0
+    for width in range(font.measure("a") * 2, 400):
+        fitted = fit_text(text, font, width)
+        if len(fitted) >= len(text):
+            continue
+        assert fitted.endswith(ELLIPSIS)
+        slack = width - font.measure(fitted)
+        hint = f"宽度 {width}px 下缝隙 {slack}px 超过上界 {budget}px: {fitted!r}"
+        assert slack <= budget, hint
+        checked += 1
+    assert checked > 20, "扫过的宽度太少, 这条断言没实际比对到什么"

@@ -299,16 +299,27 @@ class HomeStats:
 
 
 def home_stats(games: Sequence[GameFacts], *, now: datetime) -> HomeStats:
-    """统计各视图与关键分类的数量(已归档的游戏不进入"全部"计数)."""
+    """统计各视图与关键分类的数量(已归档的游戏不进入"全部"计数).
+
+    一次遍历里把所有标记累加起来: 分类项都是"是否"判定, 多遍扫描只是重复读同一
+    列数据。已归档的游戏单独计数(它们不算"全部", 但仍占归档视图的数字)。
+    """
     active = [game for game in games if not game.archived]
+    recent = pending = risky = backed_up = monitored = 0
+    for game in active:
+        recent += int(game.is_recent(now))
+        pending += int(game.pending)
+        risky += int(game.risk)
+        backed_up += int(game.backup_count > 0)
+        monitored += int(game.monitored)
     return HomeStats(
         total=len(active),
-        recent=sum(1 for game in active if game.is_recent(now)),
-        pending=sum(1 for game in active if game.pending),
+        recent=recent,
+        pending=pending,
         archived=sum(1 for game in games if game.archived),
-        risky=sum(1 for game in active if game.risk),
-        backed_up=sum(1 for game in active if game.backup_count > 0),
-        monitored=sum(1 for game in active if game.monitored),
+        risky=risky,
+        backed_up=backed_up,
+        monitored=monitored,
     )
 
 

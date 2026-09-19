@@ -56,7 +56,10 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest --cov
+uv run deptry .       # 依赖卫生(未声明 / 多余 / 传递依赖)
 ```
+
+上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中 `pytest --cov` 在 Windows、Ubuntu、macOS 三平台各跑一遍，`ruff` / `mypy`（宿主平台各一次，另加 `--platform win32` / `darwin` 覆盖平台专属分支）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（结论项带 `env=common`，归入报告的 `Common` 环境）。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
 
 提交钩子只运行本次变动的静态检查与最高严重等级的单元测试（快速反馈）；CI 在 Windows、
 Ubuntu、macOS 上运行全量测试，并单独执行性能基准与安全测试，最后合并成一份 Allure 报告。

@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import shutil
 import sys
 import zipfile
@@ -37,6 +38,9 @@ pytestmark = [
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_PYPROJECT = _REPO_ROOT / "pyproject.toml"
+_PRE_COMMIT = _REPO_ROOT / ".pre-commit-config.yaml"
+_ALLURE_CONFIG = _REPO_ROOT / "allurerc.mjs"
 _RESULT_IDS = ("aaa111", "bbb222")
 
 
@@ -467,27 +471,65 @@ def test_quality_items_record_pass_and_fail(
 
     for payload in items.values():
         labels = {label["name"]: label["value"] for label in payload["labels"]}
-        assert labels["env"] == platform
         assert labels["severity"] == "trivial"
-        assert payload["parameters"] == [{"name": "Platform", "value": platform}]
-        assert platform not in payload["fullName"]
-        assert platform not in payload["historyId"]
         assert payload["attachments"], "原始输出要作为附件带进报告"
         assert (results / payload["attachments"][0]["source"]).is_file()
+        # 公共检查归入显式声明的环境, 不带 os 标签与平台参数, 见
+        # test_quality_items_use_the_declared_common_environment; 执行主机只写进描述。
+        assert labels["env"] == module.QUALITY_ENVIRONMENT
+        assert "os" not in labels
+        assert payload.get("parameters", []) == []
+        assert f"本次执行于 {platform}" in payload["description"]
 
 
 def test_quality_items_cover_every_ci_gate() -> None:
-    """三项门禁都在脚本里: CI 不再分三条命令跑, 否则报告会缺项。"""
+    """两组门禁都在脚本里, 且 CI 分两处调用它们: 漏一项报告就缺项."""
     module = _load_script("create_allure_quality")
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
-    keys = [check.key for check in module.CHECKS]
-    assert keys == ["ruff-check", "ruff-format", "mypy"]
-    assert "scripts/create_allure_quality.py" in workflow
+    core = [check.key for check in module.CHECKS if check.group == "core"]
+    analysis = [check.key for check in module.CHECKS if check.group == "analysis"]
+    assert core == ["ruff-check", "ruff-format", "mypy", "mypy-win32", "mypy-darwin"]
+    assert analysis == ["deptry", "bandit", "pip-audit", "radon", "xenon"]
+    # 平台专属分支: 这两项必须带着 --platform, 否则等于把宿主平台又跑了一遍。
+    for check in (item for item in module.CHECKS if item.key.startswith("mypy-")):
+        assert "--platform" in check.command
+    assert "scripts/create_allure_quality.py --group core" in workflow
+    assert "scripts/create_allure_quality.py --group analysis" in workflow
     assert "allure-results-quality" in workflow
+    assert "allure-results-analysis" in workflow
     # 旧的散装命令不应再单独出现(否则同一批检查会跑两遍).
     assert "run: uv run ruff check ." not in workflow
     assert "run: uv run mypy" not in workflow
+
+
+def test_complexity_gate_matches_ruffs_mccabe_limit() -> None:
+    """复杂度门槛与 pyproject 里 Ruff 的 mccabe 上限必须是同一个数值.
+
+    Radon 比 Ruff 的 C901 多数 ``with``/``assert``/布尔运算, 所以门槛放宽就会与
+    Ruff 分叉, 收紧则会违背"两把尺子同分"的约定 —— 这条守卫把两者钉在一起。
+    """
+    import tomllib
+
+    module = _load_script("create_allure_quality")
+    pyproject = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    limit = pyproject["tool"]["ruff"]["lint"]["mccabe"]["max-complexity"]
+    assert limit == module.MAX_COMPLEXITY
+    # 10 分对应 Radon 的 B 级(11 分起是 C 级).
+    rank = module.COMPLEXITY_RANK
+    assert rank == "B"
+    xenon = next(check for check in module.CHECKS if check.key == "xenon")
+    assert "--max-absolute" in xenon.command
+    assert rank in xenon.command
+
+
+def test_pre_commit_covers_the_dependency_check() -> None:
+    """deptry 是唯一同时进本地钩子与 CI 的新工具(用户要求), 配置不能掉."""
+    config = _PRE_COMMIT.read_text(encoding="utf-8")
+    assert "uv run deptry" in config
+    # 依赖清单变了也要重查, 所以钩子的触发范围不止 .py。
+    assert "pyproject\\.toml" in config
+    assert "uv\\.lock" in config
 
 
 def test_main_survives_a_cp1252_console(
@@ -509,3 +551,244 @@ def test_main_survives_a_cp1252_console(
 
     assert exit_code == 0
     assert "报告资源完整" in printed
+
+
+def _write_result(
+    results: Path, slug: str, name: str, status: str, category: str
+) -> None:
+    """写一条极简 Allure 结果(两条断言用得到: 名称、状态与类别标签)."""
+    payload = {
+        "uuid": slug,
+        "name": name,
+        "status": status,
+        "labels": [{"name": "testCategory", "value": category}],
+    }
+    (results / f"{slug}-result.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_quality_gate_report_aggregates_only_quality_checks(tmp_path: Path) -> None:
+    """总评只算质量检查项: 性能/安全汇总项不能被当成门禁条目."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_result(results, "ruff", "ruff check", "passed", "quality")
+    _write_result(results, "mypy", "mypy", "failed", "quality")
+    _write_result(results, "perf", "Performance baseline", "passed", "performance")
+
+    assert module.quality_checks(results) == [
+        ("mypy", "failed"),
+        ("ruff check", "passed"),
+    ]
+    report = module.quality_gate_report(module.quality_checks(results))
+    assert "未通过(1/2 项)" in report
+    assert "- 未通过: mypy" in report
+    assert "Performance" not in report
+
+
+def test_quality_gate_report_without_checks() -> None:
+    """没跑质量作业的运行(例如本地只跑单元测试)不能说成"通过"."""
+    module = _load_script("create_allure_summary")
+    report = module.quality_gate_report([])
+    assert "不适用" in report
+    assert "通过" not in report.replace("不适用", "")
+
+
+def test_global_attachment_matches_what_the_summary_writes() -> None:
+    """首页「全局附件」靠配置里的 glob 匹配 —— 文件名与脚本写的必须一致."""
+    module = _load_script("create_allure_summary")
+    config = _ALLURE_CONFIG.read_text(encoding="utf-8")
+    assert f'globalAttachments: ["{module.QUALITY_GATE_REPORT.name}"]' in config
+
+
+def test_native_quality_gate_stays_out_of_the_config() -> None:
+    """刻意不配 Allure 原生 ``qualityGate``, 并把实证原因留在注释里(两处都别删).
+
+    实测(3.16.1 与 3.17.0): `allure generate` 不执行校验 —— 首页「质量门」页签靠
+    `allure run` 实时回传的数据填充, 所以 generate 出来的报告里它恒为空; 更麻疃的是配上
+    `historyPath` 后 `allure quality-gate` 会谎报通过(连 `minTestsCount: 99999` 这种
+    不可能满足的阀值都退 0 且无输出), 而本仓库必须有 `historyPath`。结论因此改由
+    `scripts/create_allure_summary.py` 汇总成全局附件。这条守卫防止把坑重新埋回去。
+    """
+    config = _ALLURE_CONFIG.read_text(encoding="utf-8")
+    assert re.search(r"^\s*qualityGate\s*:", config, re.MULTILINE) is None
+    assert "谎报通过" in config
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    assert "allure quality-gate" not in workflow
+
+
+def test_run_ledger_has_every_section_and_flags_missing_artifacts(
+    tmp_path: Path,
+) -> None:
+    """运行总账要覆盖四类结论与产物清单, 而且看得出原始文件缺失.
+
+    总账是报告首页唯一能回答"这次运行产出了什么、原始数据在哪"的地方, 也是全局附件
+    不在 ``verify_allure_report.py`` 校验范围内时补上的那道核对。
+    """
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_result(results, "ruff", "Ruff check", "passed", "quality")
+    (results / "cov-attachment.xml").write_text(
+        '<coverage line-rate="0.9182" branch-rate="0.75" version="7.5.0">\n</coverage>\n',
+        encoding="utf-8",
+    )
+    (results / "cov-result.json").write_text(
+        json.dumps(
+            {
+                "uuid": "cov",
+                "name": "Coverage report",
+                "fullName": "archive-management.coverage",
+                "status": "passed",
+                "labels": [{"name": "env", "value": "Windows"}],
+                "attachments": [
+                    {"name": "coverage.xml", "source": "cov-attachment.xml"},
+                    {"name": "coverage.json", "source": "missing.json"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    performance = {
+        "environment": {"os_family": "Linux"},
+        "measurements": [{"name": "backup", "passed": True}],
+    }
+    security = [
+        {"environment": {"os_family": "Linux"}, "findings": [{"blocked": True}]}
+    ]
+
+    payloads = module.result_payloads(results)
+    ledger = module.run_ledger(results, payloads, performance, security)
+
+    assert ledger.startswith("# 运行总账")
+    for section in (
+        "## 质量门",
+        "## 覆盖率",
+        "## 性能基准",
+        "## 安全测试",
+        "## 产物清单",
+    ):
+        assert section in ledger
+    assert "91.82%" in ledger, "覆盖率数字要取自原始 XML"
+    assert "75.00%" in ledger, "分支覆盖率也要写出来"
+    assert "| Windows |" in ledger, "覆盖率按平台各一行"
+    assert "全部达标(1 项)" in ledger, "性能基准给一行结论"
+    assert "| Linux | 1 | 0 |" in ledger, "安全那一行要给出结论数与未拦截数"
+    assert "**缺失**" in ledger, "声明了却找不到的原始文件必须被标出来"
+
+
+def test_quality_items_use_the_declared_common_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """质量检查是公共内容: 结论项带 env=common, 且配置里确实声明了匹配它的环境.
+
+    写成 ``env=Linux`` 会让它变成"某个平台的质量检查"(误导); 完全不写则落进隐式的
+    ``default``, 与环境选择器里的名字对不上。这里跑真实写入路径, 并把脚本里的标签值
+    与 ``allurerc.mjs`` 的 matcher 钉在一起 —— 两边写岔了报告里会静默退回 default。
+    """
+    module = _load_script("create_allure_quality")
+    probe = module.Check(
+        "probe", "Probe check", (sys.executable, "-c", "print('ok')"), "core"
+    )
+    monkeypatch.setattr(module, "CHECKS", (probe,))
+    results = tmp_path / "allure-results"
+
+    assert module.main(["--group", "core", "--results-dir", str(results)]) == 0
+
+    payload = json.loads(
+        next(results.glob("*-result.json")).read_text(encoding="utf-8")
+    )
+    labels = {label["name"]: label["value"] for label in payload["labels"]}
+    assert labels["testCategory"] == "quality"
+    assert labels["env"] == module.QUALITY_ENVIRONMENT, "公共检查要归入显式声明的环境"
+    assert "os" not in labels, "os 标签会把公共检查说成某个平台的结果"
+    assert payload.get("parameters", []) == [], "不要再带平台参数"
+    assert "env=common" in payload["description"], "描述里要说明它归入哪个环境"
+
+    config = _ALLURE_CONFIG.read_text(encoding="utf-8")
+    assert 'name: "Common"' in config, "配置里要声明这个环境"
+    matcher = f'value === "{module.QUALITY_ENVIRONMENT}"'
+    assert matcher in config, f"配置里缺少匹配 {matcher} 的 matcher"
+
+
+def test_quality_job_runs_on_one_platform() -> None:
+    """公共检查只在 Ubuntu 跑一遍(跑三平台只会得到三份一样的结论)."""
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    block = re.search(r"\n  quality:\n(.*?)\n  \w", workflow, re.DOTALL)
+    assert block is not None, "ci.yml 里找不到 quality job"
+    job = block.group(1)
+    assert "runs-on: ubuntu-latest" in job
+    assert "matrix" not in job, "质量作业不应再按平台展开"
+
+
+def test_quality_output_reaches_the_report_without_control_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """报告里的原始输出不能带终端控制码(实测 deptry 会带 ANSI 颜色 → 显示成乱码).
+
+    探针检查会真的打印 ANSI 颜色与 ``\\r`` 进度行, 走的是与真实检查完全相同的
+    写入路径: 附件与描述里都不该剩下控制码, 进度行只保留最后一段。
+    """
+    module = _load_script("create_allure_quality")
+    script = "print('\\x1b[1m\\x1b[32mok\\x1b[m'); print('half\\rfinal')"
+    probe = module.Check("probe", "Probe check", (sys.executable, "-c", script), "core")
+    monkeypatch.setattr(module, "CHECKS", (probe,))
+    results = tmp_path / "allure-results"
+
+    assert module.main(["--group", "core", "--results-dir", str(results)]) == 0
+
+    payload = json.loads(
+        next(results.glob("*-result.json")).read_text(encoding="utf-8")
+    )
+    attached = (results / payload["attachments"][0]["source"]).read_text(
+        encoding="utf-8"
+    )
+    assert "\x1b" not in attached, f"附件里还有终端控制码: {attached!r}"
+    assert "\x1b" not in payload["description"], "描述里也不该有控制码"
+    assert "ok" in attached
+    assert "final" in attached
+    # subprocess 读文本时走 universal newlines, ``\r`` 已被翻成 ``\n``; 助手自身仍要能
+    # 收敛残留的 ``\r``(工具直接写字节 / 用了别的新行模式时会出现), 以及剥掉颜色码。
+    assert module.sanitize_output("half\rfinal") == "final"
+    assert module.sanitize_output("\x1b[32mok\x1b[m") == "ok"
+
+
+def test_run_ledger_artifact_list_covers_summary_items_only(tmp_path: Path) -> None:
+    """产物清单只列脚本生成的汇总结论项: 用例自带的附件上千个, 列进来就是噪声."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    (results / "cov.xml").write_text(
+        '<coverage line-rate="1" branch-rate="1"/>', encoding="utf-8"
+    )
+    (results / "cov-result.json").write_text(
+        json.dumps(
+            {
+                "uuid": "cov",
+                "name": "Coverage report",
+                "fullName": "archive-management.coverage",
+                "status": "passed",
+                "labels": [{"name": "env", "value": "Linux"}],
+                "attachments": [{"name": "coverage.xml", "source": "cov.xml"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (results / "t1-result.json").write_text(
+        json.dumps(
+            {
+                "uuid": "t1",
+                "name": "某个用例",
+                "fullName": "tests.unit.test_demo#test_something",
+                "status": "passed",
+                "attachments": [{"name": "screenshot.png", "source": "shot.png"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = module.artifact_rows(results, module.result_payloads(results))
+
+    assert [row[1] for row in rows] == ["coverage.xml"], "只该列汇总结论项的原始产物"
+    assert rows[0][0].startswith("Coverage report")

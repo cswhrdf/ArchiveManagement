@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from archive_management.domain import FileKind, PathKind
@@ -97,33 +98,61 @@ class SnapshotEntry:
     @classmethod
     def from_dict(cls, raw: dict[str, object]) -> SnapshotEntry:
         """从 manifest 字典还原清单项, 字段非法时抛出异常."""
-        relative_path = raw.get("relative_path")
-        raw_size = raw.get("size", 0)
-        sha256 = raw.get("sha256")
-        raw_kind = raw.get("file_kind")
-        raw_target = raw.get("link_target")
-        if not isinstance(relative_path, str) or not relative_path:
-            raise SnapshotError(f"快照清单项缺少相对路径: {raw!r}")
-        if not isinstance(raw_size, int) or isinstance(raw_size, bool):
-            raise SnapshotError(f"快照清单项 size 非法: {raw!r}")
-        if not isinstance(sha256, str):
-            raise SnapshotError(f"快照清单项 sha256 非法: {raw!r}")
-        if raw_target is not None and not isinstance(raw_target, str):
-            raise SnapshotError(f"快照清单项 link_target 非法: {raw!r}")
-        kind: FileKind = "file"
-        if raw_kind == "symlink":
-            kind = "symlink"
-        elif raw_kind == "directory":
-            kind = "directory"
-        elif raw_kind != "file":
-            raise SnapshotError(f"未知的清单文件类型: {raw_kind!r}")
         return cls(
-            relative_path=relative_path,
-            size=raw_size,
-            sha256=sha256,
-            file_kind=kind,
-            link_target=raw_target,
+            relative_path=_manifest_path(raw),
+            size=_manifest_size(raw),
+            sha256=_manifest_text(raw, "sha256"),
+            link_target=_manifest_optional_text(raw, "link_target"),
+            file_kind=_manifest_file_kind(raw),
         )
+
+
+# 清单项的 file_kind 取值: 未知取值一律拒绝(而不是静默当成 file)。
+_FILE_KINDS: dict[object, FileKind] = {
+    "file": "file",
+    "symlink": "symlink",
+    "directory": "directory",
+}
+
+
+def _manifest_path(raw: dict[str, object]) -> str:
+    """取清单项的 relative_path: 必须是非空字符串."""
+    value = raw.get("relative_path")
+    if not isinstance(value, str) or not value:
+        raise SnapshotError(f"快照清单项缺少相对路径: {raw!r}")
+    return value
+
+
+def _manifest_size(raw: dict[str, object]) -> int:
+    """取清单项的 size(缺省为 0); 布尔值不算整数."""
+    value = raw.get("size", 0)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SnapshotError(f"快照清单项 size 非法: {raw!r}")
+    return value
+
+
+def _manifest_text(raw: dict[str, object], key: str) -> str:
+    """取一个必填的字符串字段(允许空串, 但类型必须对)."""
+    value = raw.get(key)
+    if not isinstance(value, str):
+        raise SnapshotError(f"快照清单项 {key} 非法: {raw!r}")
+    return value
+
+
+def _manifest_optional_text(raw: dict[str, object], key: str) -> str | None:
+    """取一个可选的字符串字段(缺省为 None)."""
+    value = raw.get(key)
+    if value is not None and not isinstance(value, str):
+        raise SnapshotError(f"快照清单项 {key} 非法: {raw!r}")
+    return value
+
+
+def _manifest_file_kind(raw: dict[str, object]) -> FileKind:
+    """取清单项的 file_kind, 未知取值直接拒绝."""
+    kind = _FILE_KINDS.get(raw.get("file_kind"))
+    if kind is None:
+        raise SnapshotError(f"未知的清单文件类型: {raw.get('file_kind')!r}")
+    return kind
 
 
 @dataclass(frozen=True)
@@ -237,6 +266,26 @@ def _commit_failure_message(error: OSError, attempts: int) -> str:
     return f"提交快照失败(已重试 {attempts - 1} 次): {error}"
 
 
+def _inspect_entry(
+    root: Path, entry: SnapshotEntry, *, deep: bool
+) -> tuple[Literal["missing", "mismatched"] | None, bool]:
+    """检查单条清单项: 返回 (问题, 是否计入"已检查"数量).
+
+    目录与符号链接只要类型对就算检查过 —— 符号链接只记录目标字符串, 不比对内容;
+    文件必须真实存在才算检查过, 于是"已检查 N 项"始终是真实看了一眼的数量。
+    """
+    target = root / entry.relative_path
+    if entry.file_kind == "directory":
+        return (None if target.is_dir() else "missing"), True
+    if entry.file_kind == "symlink":
+        return None, True
+    if not target.exists():
+        return "missing", False
+    if deep and sha256_of_file(target) != entry.sha256:
+        return "mismatched", True
+    return None, True
+
+
 def verify_snapshot(root: Path, *, deep: bool = True) -> SnapshotVerification:
     """按 manifest 校验快照: 检查缺失项与哈希不一致项.
 
@@ -255,21 +304,11 @@ def verify_snapshot(root: Path, *, deep: bool = True) -> SnapshotVerification:
     mismatched: list[str] = []
     checked = 0
     for entry in entries:
-        target = root / entry.relative_path
-        if entry.file_kind == "directory":
-            if not target.is_dir():
-                missing.append(entry.relative_path)
-            checked += 1
-            continue
-        # 符号链接只记录目标字符串, 不复制内容, 因此不做存在性检查.
-        if entry.file_kind == "symlink":
-            checked += 1
-            continue
-        if not target.exists():
+        problem, counted = _inspect_entry(root, entry, deep=deep)
+        checked += int(counted)
+        if problem == "missing":
             missing.append(entry.relative_path)
-            continue
-        checked += 1
-        if deep and sha256_of_file(target) != entry.sha256:
+        elif problem == "mismatched":
             mismatched.append(entry.relative_path)
     if content_hash_of(entries) != str(raw.get("content_hash", "")):
         mismatched.append(MANIFEST_FILENAME)
@@ -312,30 +351,49 @@ def read_manifest(root: Path) -> SnapshotManifest:
     )
 
 
+def _source_index(item: dict[str, object]) -> int:
+    """来源序号: 必须是非负整数(布尔值不算)."""
+    index = item.get("index")
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise SnapshotError(f"快照来源序号非法: {item!r}")
+    return index
+
+
+def _source_path(item: dict[str, object]) -> str:
+    """来源路径: 必须是非空字符串."""
+    path = item.get("path")
+    if not isinstance(path, str) or not path:
+        raise SnapshotError(f"快照来源路径非法: {item!r}")
+    return path
+
+
+def _source_kind(item: dict[str, object]) -> PathKind:
+    """来源类型: 只能是 file 或 directory."""
+    raw_kind = item.get("kind")
+    if raw_kind not in ("file", "directory"):
+        raise SnapshotError(f"快照来源类型非法: {item!r}")
+    return "file" if raw_kind == "file" else "directory"
+
+
+def _source_from_item(item: object, seen: set[int]) -> SnapshotSource:
+    """把清单里的一个来源项解析成 :class:`SnapshotSource`(字段非法即抛错)."""
+    if not isinstance(item, dict):
+        raise SnapshotError("快照来源项必须是对象")
+    index = _source_index(item)
+    path = _source_path(item)
+    kind = _source_kind(item)
+    if index in seen:
+        raise SnapshotError(f"快照来源序号重复: {index}")
+    seen.add(index)
+    return SnapshotSource(path=path, kind=kind, index=index)
+
+
 def _parse_sources(raw: object) -> tuple[SnapshotSource, ...]:
     """解析清单里的来源列表, 字段非法时抛出异常."""
     if not isinstance(raw, list) or not raw:
         raise SnapshotError("快照清单缺少 sources 列表")
-    sources: list[SnapshotSource] = []
     seen: set[int] = set()
-    for item in raw:
-        if not isinstance(item, dict):
-            raise SnapshotError("快照来源项必须是对象")
-        index = item.get("index")
-        path = item.get("path")
-        raw_kind = item.get("kind")
-        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
-            raise SnapshotError(f"快照来源序号非法: {item!r}")
-        if not isinstance(path, str) or not path:
-            raise SnapshotError(f"快照来源路径非法: {item!r}")
-        if raw_kind not in ("file", "directory"):
-            raise SnapshotError(f"快照来源类型非法: {item!r}")
-        if index in seen:
-            raise SnapshotError(f"快照来源序号重复: {index}")
-        seen.add(index)
-        kind: PathKind = "file" if raw_kind == "file" else "directory"
-        sources.append(SnapshotSource(path=path, kind=kind, index=index))
-    return tuple(sources)
+    return tuple(_source_from_item(item, seen) for item in raw)
 
 
 def source_root(index: int) -> str:

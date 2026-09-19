@@ -294,6 +294,15 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
 )
 
 
+def _delete_result_text(plan: DeletionPlan) -> str:
+    """删除操作的结果文案: 连带子分支 / 顶替父节点 / 单节点三种."""
+    if plan.mode is DeletionMode.CASCADE:
+        return tr("result.delete_cascade", count=plan.removed_count)
+    if plan.mode is DeletionMode.SHIFT:
+        return tr("result.delete_shift")
+    return tr("result.delete_single")
+
+
 class DemoArchiveService:
     """基于内存演示数据的 :class:`ArchiveService` 实现."""
 
@@ -464,37 +473,43 @@ class DemoArchiveService:
         removed = {
             reverse[node_id] for node_id in plan.removed_ids if node_id in reverse
         }
-        if plan.mode is DeletionMode.SHIFT and plan.shifted_child_id is not None:
-            child_id = reverse.get(plan.shifted_child_id)
-            parent_id = (
-                None if plan.new_parent_id is None else reverse.get(plan.new_parent_id)
-            )
-            items = self._items[game_id]
-            self._items[game_id] = [
-                (
-                    replace(item, parent_id=parent_id)
-                    if item.backup_id == child_id
-                    else item
-                )
-                for item in items
-            ]
+        if plan.mode is DeletionMode.SHIFT:
+            self._reparent_shifted_child(game_id, plan, reverse)
         self._items[game_id] = [
             item for item in self._items[game_id] if item.backup_id not in removed
         ]
         if self._current.get(game_id) in removed:
-            # 当前节点被删除: 优先回退到父节点, 否则落到剩余的最新备份,
-            # 使列表里始终能看到"接下来的备份挂在哪里".
-            fallback = reverse.get(plan.new_parent_id) if plan.new_parent_id else None
-            remaining = {item.backup_id for item in self._items[game_id]}
-            self._current[game_id] = (
-                fallback if fallback in remaining else self._effective_current(game_id)
-            )
+            self._restore_current_after_delete(game_id, plan, reverse)
         self._revision += 1
-        if plan.mode is DeletionMode.CASCADE:
-            return tr("result.delete_cascade", count=plan.removed_count)
-        if plan.mode is DeletionMode.SHIFT:
-            return tr("result.delete_shift")
-        return tr("result.delete_single")
+        return _delete_result_text(plan)
+
+    def _reparent_shifted_child(
+        self, game_id: str, plan: DeletionPlan, reverse: dict[int, str]
+    ) -> None:
+        """SHIFT 模式: 把被顶替的子分支改挂到新的父节点上."""
+        if plan.shifted_child_id is None:
+            return
+        child_id = reverse.get(plan.shifted_child_id)
+        parent_id = (
+            None if plan.new_parent_id is None else reverse.get(plan.new_parent_id)
+        )
+        self._items[game_id] = [
+            replace(item, parent_id=parent_id) if item.backup_id == child_id else item
+            for item in self._items[game_id]
+        ]
+
+    def _restore_current_after_delete(
+        self, game_id: str, plan: DeletionPlan, reverse: dict[int, str]
+    ) -> None:
+        """当前节点被删除后重算"接下来的备份挂在哪里".
+
+        优先回退到父节点, 否则落到剩余的最新备份, 使列表里始终能看到锚点。
+        """
+        fallback = reverse.get(plan.new_parent_id) if plan.new_parent_id else None
+        remaining = {item.backup_id for item in self._items[game_id]}
+        self._current[game_id] = (
+            fallback if fallback in remaining else self._effective_current(game_id)
+        )
 
     def rename_backup(
         self, game_id: str, backup_id: str, *, title: str, note: str

@@ -127,6 +127,7 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 
 ```text
 quality (3 平台: ruff check / ruff format / mypy; 结论只把 Ubuntu 那份带进报告)
+analysis (ubuntu: deptry 依赖卫生 / bandit 安全扫描 / pip-audit 依赖漏洞 / radon+xenon 复杂度)
 pytest  (3 平台: 单元 + 集成 + 覆盖率 + Allure)
 performance (ubuntu: 基准与阈值)
 security    (3 平台: 越权与危险操作防护)
@@ -136,7 +137,7 @@ allure-summary (合并全部 allure-results-* → 写入环境信息与质量/�
 
 每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
 
-质量门禁本身也由脚本执行：`scripts/create_allure_quality.py` 依次跑 ruff check / ruff format --check / mypy，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。只有 **Ubuntu** 那份会上传（质量结论与平台无关），所以汇总报告里只出现一条，位于 Linux 环境下；性能之外的第二类"脚本生成项"就长这样（详见第 5 节）。
+质量门禁本身也由脚本执行：`scripts/create_allure_quality.py --group <组>` 依次跑该组的检查，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。它分两组：`core`（ruff check / ruff format --check / mypy，公共检查：与平台无关，只在 Ubuntu 跑一遍；mypy 另外跑 `--platform win32` 与 `--platform darwin` 两次，覆盖平台专属分支）与 `analysis`（deptry / bandit / pip-audit / radon / xenon，同样与平台无关，只跑 Ubuntu 一遍）。两组都只在 Ubuntu 执行，所以汇总报告里每个门禁只出现一条；质量结论项带 `env=common`，归入 `allurerc.mjs` 里**显式声明**的 `Common` 环境（不是某个平台的环境，也不是隐式的 `default`）；性能之外的第二类"脚本生成项"就长这样（详见第 5 节）。
 
 ### GUI 用例必须真的跑起来（skip 是有代价的）
 

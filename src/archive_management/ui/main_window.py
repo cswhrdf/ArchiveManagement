@@ -1108,6 +1108,7 @@ class ArchiveApp(ctk.CTk):
         self._render_selected(item)
 
     def _render_list(self) -> None:
+        """重建左侧备份列表(时间线/分支树两种视图共用一条流水线)."""
         if self._game_id is None:
             # 空库(首次启动): 没有可展示的备份, 保持空状态.
             return
@@ -1117,13 +1118,10 @@ class ArchiveApp(ctk.CTk):
         self._current_id = None if current is None else current.backup_id
         # 先按来源筛选再排序: 显式筛选"安全点"时, 分支视图也应把它们显示出来.
         selected = filter_by_source_label(self._items, self._filter_source.get())
-        show_safety = self._filter_source.get() == SourceFilter.SAFETY.label
-        if self._view == ViewKind.TIMELINE:
-            ordered = timeline_order(selected)
-            title, sub = tr("list.timeline_title"), tr("list.timeline_sub")
-        else:
-            ordered = branch_order(selected, include_safety=show_safety)
-            title, sub = tr("list.branch_title"), tr("list.branch_sub")
+        ordered, title, sub = self._ordered_for_view(
+            selected,
+            include_safety=(self._filter_source.get() == SourceFilter.SAFETY.label),
+        )
         self._list_title.configure(text=title)
         self._list_sub.configure(text=sub)
 
@@ -1134,12 +1132,7 @@ class ArchiveApp(ctk.CTk):
             self._backup_id = None
             self._render_selected(None)
 
-        for unsubscribe in self._card_unregisters:
-            unsubscribe()
-        self._card_unregisters = []
-        self._card_painters = {}
-        for child in self._list_scroll.winfo_children():
-            child.destroy()
+        self._clear_cards()
         if not items:
             empty = self.kit.label(
                 self._list_scroll,
@@ -1149,7 +1142,35 @@ class ArchiveApp(ctk.CTk):
             )
             empty.pack(padx=10, pady=16)
             return
+        self._build_cards(items)
 
+    def _ordered_for_view(
+        self, selected: list[BackupItem], *, include_safety: bool
+    ) -> tuple[list[BackupItem], str, str]:
+        """按当前视图排序并给出列表标题与说明(时间线按时间, 分支树按线路)."""
+        if self._view == ViewKind.TIMELINE:
+            return (
+                timeline_order(selected),
+                tr("list.timeline_title"),
+                tr("list.timeline_sub"),
+            )
+        return (
+            branch_order(selected, include_safety=include_safety),
+            tr("list.branch_title"),
+            tr("list.branch_sub"),
+        )
+
+    def _clear_cards(self) -> None:
+        """卸载卡片上登记的主题回调并清空列表区."""
+        for unsubscribe in self._card_unregisters:
+            unsubscribe()
+        self._card_unregisters = []
+        self._card_painters = {}
+        for child in self._list_scroll.winfo_children():
+            child.destroy()
+
+    def _build_cards(self, items: list[BackupItem]) -> None:
+        """逐张重建备份卡片, 并接上选中与悬停交互."""
         # 列表重建后悬停状态失效, 清掉避免指向已销毁的卡片.
         self._hover_id = None
         self._cards = {}

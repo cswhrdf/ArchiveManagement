@@ -23,9 +23,10 @@
  *   `allure generate ...`), 否则 CLI 找不到它, 环境会静默退化成 default ——
  *   `scripts/verify_allure_report.py` 会在自检时把这种情况报成失败。
  *
- * 本仓库实际设了四项: 报告标题(`name`)、默认端口(`port`)、历史趋势(`historyPath` /
- * `appendHistory` / `historyLimit`)与界面语言 + 环境映射。其它可用键、以及"生成后自动
- * 打开浏览器""单 HTML 报告"为什么故意不设, 见下面各项的注释。
+ * 本仓库实际设了六项: 报告标题(`name`)、默认端口(`port`)、历史趋势(`historyPath` /
+ * `appendHistory` / `historyLimit`)、界面语言、环境映射(三个平台 + 一个 `Common`
+ * 环境)与全局附件(`globalAttachments`)。
+ * 其它可用键、以及"生成后自动打开浏览器""单 HTML 报告"为什么故意不设, 见下面各项的注释。
  */
 export default {
   // 报告标题(显示在报告头部与 <title> 上). 不写就是通用的 "Allure Report"。
@@ -52,7 +53,7 @@ export default {
       },
     },
   },
-  // 环境映射: 平台 → 环境(靠结果上的 env 标签匹配, 见文件头说明).
+  // 环境映射: 平台 / 公共检查 → 环境(靠结果上的 env 标签匹配, 见文件头说明).
   //
   // 其它可用但这里不写的键(需要时临时用 CLI 参数覆盖即可):
   // - 顶层: `output`(报告目录, 默认 allure-report)、`resultsDir`(结果目录的 glob, generate 用
@@ -60,6 +61,35 @@ export default {
   //   自动开浏览器 —— CI 上会去拉浏览器, 所以不设)、`known-issues`(已知问题文件);
   // - awesome 插件: `theme`(默认 `auto` 跟随系统)、`logo`(头部图标)、`groupBy`(默认
   //   parentSuite/suite/subSuite)、`singleFile`(单 HTML, 会拆掉按需拉的详情资源)。
+  // 运行级产物: 报告首页「全局附件」页签装的是"不属于任何一条用例"的产物 —— 报告里
+  // 每条结果的附件挂在用例上, 挂不上用例的(整次运行的运行总账之类)就只能放这里。
+  // 值是**相对仓库根目录**的 glob(生成报告时必须在本文件所在目录执行, 否则匹配不到;
+  // 匹配不到不会报错, 只是没有这条附件)。
+  //
+  // 只放"没有归属"的东西: 覆盖率/性能/安全报告已经各自挂在对应的汇总项上(见
+  // scripts/create_allure_quality.py 与 create_allure_summary.py), 再放进这里只会
+  // 让报告 zip 变大一倍, 所以刻意不加。要加就把文件名追加到这个数组。
+  globalAttachments: ["allure-run-ledger.md"],
+  /**
+   * 为什么这里**没有** `qualityGate`(Allure 原生质量门) —— 实证结论, 以后升级 Allure
+   * 可以照这两个现象重测:
+   *
+   * 1. 首页「质量门」页签靠 `allure run` 实时回传的校验结果填充 —— 只有 `allure run` 与
+   *    `allure quality-gate` 会**执行**校验, `allure generate` 只读结果、不校验, 所以
+   *    generate 出来的报告里 `widgets/quality-gate.json` 恒为 `{}`, 页签永远是空的
+   *    (allure 3.16.1 与 3.17.0 实测相同)。
+   * 2. 配上 `historyPath` 后 `allure quality-gate` 会**谎报通过**: 即使规则是不可能满足的
+   *    阈值(实测 `minTestsCount: 99999` + `maxFailures: 0` 对两份结果), 命令也退出 0
+   *    且不输出任何内容; 同一个配置去掉 `historyPath` 才正常报错退 1。而本仓库必须有
+   *    `historyPath`(报告要跨运行的趋势), 所以这个门禁在本仓库会静默放行 —— 一个永远
+   *    不失败的门禁比没有门禁更坑。
+   *
+   * 于是结论改由 `scripts/create_allure_summary.py` 自己算, 汇总成一份"运行总账"
+   * (`allure-run-ledger.md`, 用 .md 是为了让报告直接渲染表格与标题): 质量门逐项结论
+   * + 覆盖率(各平台, 数字取自原始 XML) + 性能一行 + 安全各平台一行 + 产物清单
+   * (只列脚本生成的汇总项, 逐项核对原始文件在不在)。它由上面的
+   * `globalAttachments` 收进报告首页「全局附件」—— 结论在首页一眼可见, 而且可信。
+   */
   environments: {
     windows: {
       name: "Windows",
@@ -75,6 +105,15 @@ export default {
       name: "Linux",
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "Linux"),
+    },
+    // 公共检查(ruff / mypy / 静态分析): 与平台无关, CI 只在一个平台上跑一遍, 结论项带
+    // env=common。声明成独立环境后, 报告里它们属于 Common 而不是某个平台 —— 既不
+    // 会被环境筛选误伤为"Linux 上的质量检查", 也不必依赖隐式的 default。
+    common: {
+      // 名字与三个平台保持同一种风格(单个英文词)、与环境 id 一致。
+      name: "Common",
+      matcher: ({ labels }) =>
+        labels.some(({ name, value }) => name === "env" && value === "common"),
     },
   },
 };

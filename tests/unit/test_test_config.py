@@ -381,12 +381,15 @@ def _environment_block() -> str:
 
 
 def test_report_config_maps_every_platform_to_an_environment() -> None:
-    """``allurerc.mjs`` 必须为每个平台声明一个环境 matcher。
+    """``allurerc.mjs`` 必须为每个平台声明一个环境 matcher, 另加一个公共环境。
 
     环境不会只因为结果上有 ``env`` 标签就生效: Allure 3 在结果没有显式 environment 字段
     时会退到配置里的 matcher, 匹配不到就落到隐式的 default —— 那时三平台的结果会重新
     退化成"只能从参数/套件名里认平台"。这里锁住"代码能生成的每个平台展示名都在配置里
     有对应环境", 并顺便校验环境 id 合法(Allure 只接受 latin 字母/数字/下划线/连字符).
+
+    额外允许**一个非平台环境** ``Common``: 质量检查与静态分析跟平台无关(CI 只跑一遍),
+    结论项带 ``env=common`` 归到它而不是某个平台的环境。多出别的环境名则判失败。
 
     断言只看 ``environments`` 块内部: 配置顶层也有 ``name``(报告标题), 用整份文本去
     匹配会把它当成环境名。
@@ -395,11 +398,15 @@ def test_report_config_maps_every_platform_to_an_environment() -> None:
     names = re.findall(r'^\s{6}name: "([^"]+)"', block, re.MULTILINE)
     hint = f"allurerc.mjs 环境名 {names} 与平台名 {sorted(PLATFORM_LABELS.values())} 不一致"
 
-    assert set(names) == set(PLATFORM_LABELS.values()), hint
-    for name in names:
-        assert f'value === "{name}"' in block, f"缺少 {name} 的 matcher"
+    assert set(PLATFORM_LABELS.values()) <= set(names), hint
+    assert set(names) - set(PLATFORM_LABELS.values()) == {"Common"}, hint
+    # 三个平台用显示名当标签值、公共环境用 id(common): matcher 的取值集合在这里锭住。
+    matched = set(re.findall(r'value === "([^"]+)"', block))
+    assert matched == {*PLATFORM_LABELS.values(), "common"}, (
+        f"matcher 取值不一致: {matched}"
+    )
     env_ids = re.findall(r"^\s{4}([A-Za-z0-9_-]+): \{", block, re.MULTILINE)
-    assert env_ids == ["windows", "macos", "linux"]
+    assert env_ids == ["windows", "macos", "linux", "common"]
     assert all(re.fullmatch(r"[A-Za-z0-9_-]+", env_id) for env_id in env_ids)
 
 

@@ -58,6 +58,8 @@ cover/
 allure-results/
 allure-report*/
 .allure/
+# 运行总账(CI 生成, 由 allurerc.mjs 的 globalAttachments 收进报告「全局附件」)
+allure-run-ledger.md
 performance-results.json
 performance-results.csv
 security-results.json
