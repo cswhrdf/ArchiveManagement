@@ -285,7 +285,6 @@ class HomeStats:
     archived: int = 0
     risky: int = 0
     backed_up: int = 0
-    monitored: int = 0
 
     def count_for(self, view: HomeView) -> int:
         """返回某个视图下的游戏数量."""
@@ -305,13 +304,12 @@ def home_stats(games: Sequence[GameFacts], *, now: datetime) -> HomeStats:
     列数据。已归档的游戏单独计数(它们不算"全部", 但仍占归档视图的数字)。
     """
     active = [game for game in games if not game.archived]
-    recent = pending = risky = backed_up = monitored = 0
+    recent = pending = risky = backed_up = 0
     for game in active:
         recent += int(game.is_recent(now))
         pending += int(game.pending)
         risky += int(game.risk)
         backed_up += int(game.backup_count > 0)
-        monitored += int(game.monitored)
     return HomeStats(
         total=len(active),
         recent=recent,
@@ -319,7 +317,6 @@ def home_stats(games: Sequence[GameFacts], *, now: datetime) -> HomeStats:
         archived=sum(1 for game in games if game.archived),
         risky=risky,
         backed_up=backed_up,
-        monitored=monitored,
     )
 
 

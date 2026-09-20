@@ -233,7 +233,6 @@ def test_home_stats_skips_archived_games() -> None:
     assert stats.pending == 2
     assert stats.backed_up == 2
     assert stats.risky == 1
-    assert stats.monitored == 1
     assert stats.count_for(HomeView.ALL) == 3
     assert stats.count_for(HomeView.ARCHIVED) == 1
 

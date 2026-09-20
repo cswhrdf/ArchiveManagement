@@ -96,6 +96,10 @@ _NAME_FALLBACK_WIDTH = 200
 _SYNC_DELAY_MS = 60
 # 表头对齐最多迭代几轮(表头几何变化不会触发滚动区的 Configure, 得主动再量一轮).
 _ALIGN_MAX_ATTEMPTS = 4
+# 名称重裁在"宽度还没测量出来"时最多重试几轮. 各平台的布局时序不同: Linux/macOS
+# 上首次同步时行内标签可能还没被布局(``winfo_width()`` 是 1), 而之后再没有 Configure
+# 事件来补救 —— 不重试就会一直停在兜底宽度的短文本上。
+_REFIT_MAX_ATTEMPTS = 8
 # 海报卡片尺寸: 固定宽高, 保证封面始终是竖屏(高比宽大); 封面暂时没有图片,
 # 用游戏名前两个字代替, 备份数量贴在封面右下角.
 _POSTER_WIDTH = 190
@@ -172,6 +176,8 @@ class HomePage:
         self._head_pads: tuple[int, int] = (_HEAD_LEFT_PAD, _TABLE_SIDE_PAD)
         # 表头对齐已经调过几轮(收敛后就归零).
         self._align_attempts = 0
+        # 名称重裁因"宽度还没量出来"重试过几轮(每轮渲染重新计数).
+        self._refit_attempts = 0
         # 与行内标签同规格的字体对象, 用来量文本宽度(CTkFont 本身就是 Tk 字体).
         self._name_font = ctk.CTkFont(size=13, weight="bold")
         self._value_font = ctk.CTkFont(size=11)
@@ -223,11 +229,13 @@ class HomePage:
         self._paint_section_tabs()
 
     def _build_sections(self) -> None:
-        """分区页签: 游戏库 / 游戏发现, 右侧是游戏库的一句话说明."""
-        palette = self._palette
+        """分区页签: 游戏库 / 游戏发现.
+
+        这里不再放“本页怎么用”的长说明: 文案在窄窗口里容易被裁掉, 而且页面应当是
+        清爽的操作区 —— 相应的说明统一收在 ``docs/ui-notes.md``(待并入 wiki)。
+        """
         bar = ctk.CTkFrame(self.frame, fg_color="transparent")
         bar.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 6))
-        bar.grid_columnconfigure(len(HomeSection), weight=1)
         self._section_tabs: dict[HomeSection, ctk.CTkButton] = {}
         for index, section in enumerate(HomeSection):
             tab = ctk.CTkButton(
@@ -242,15 +250,6 @@ class HomePage:
             )
             tab.grid(row=0, column=index, padx=(0, 8))
             self._section_tabs[section] = tab
-        self._library_hint = ctk.CTkLabel(
-            bar,
-            text=tr("home.hint"),
-            anchor="e",
-            justify="right",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_muted,
-        )
-        self._library_hint.grid(row=0, column=len(HomeSection), sticky="e")
 
     def _build_toolbar(self) -> None:
         """筛选行: 视图页签(带数量) + 平台/类型下拉框 + 名称搜索.
@@ -586,7 +585,6 @@ class HomePage:
         self._section = section
         if section is HomeSection.LIBRARY:
             self._library.grid()
-            self._library_hint.grid()
             self._discovery.frame.grid_remove()
         else:
             # 发现分区的数据可能被别处改过(例如手动添加游戏后同名候选会被自动
@@ -594,7 +592,6 @@ class HomePage:
             self._discovery.reload()
             self._discovery.frame.grid()
             self._library.grid_remove()
-            self._library_hint.grid_remove()
         self._paint_section_tabs()
         log_action("ui.home_section", basic=True, section=section.value)
 
@@ -768,6 +765,7 @@ class HomePage:
         self._rows = {}
         self._row_parts = {}
         self._align_attempts = 0
+        self._refit_attempts = 0
         if self._filter.layout is HomeLayout.LIST:
             # 列表行用 pack 布局: 先把海报模式留下的列宽清干净.
             self._apply_poster_columns(0)
@@ -916,13 +914,29 @@ class HomePage:
 
         名称是唯一长度无法预期的内容, 所以它的可用宽度就是"剩下多少算多少"; 每次
         宽度变化都按真实宽度重裁一次, 长名称才会随窗口变宽而多显示。
+
+        宽度还没量出来(``winfo_width()`` 是 1: 首帧布局尚未完成)时**安排下一轮重试**,
+        而不是直接跳过 —— 各平台的布局时序不同, 有环境下首帧量不到宽度且之后不再有
+        尺寸变化, 不重试就会一直停在兜底宽度的短文本上。
         """
+        retry = False
         for parts in self._row_parts.values():
             width = parts.label.winfo_width()
-            if width > 1:
-                parts.label.configure(
-                    text=fit_text(parts.full_name, self._name_font, width)
-                )
+            if width <= 1:
+                retry = True
+                continue
+            parts.label.configure(
+                text=fit_text(parts.full_name, self._name_font, width)
+            )
+        if retry:
+            self._retry_refit()
+
+    def _retry_refit(self) -> None:
+        """为"宽度还没量出来"排下一轮名称重裁(有上限, 免得一直排下去)."""
+        if self._refit_attempts >= _REFIT_MAX_ATTEMPTS:
+            return
+        self._refit_attempts += 1
+        self._schedule_list_sync()
 
     def _build_poster(self, item: HomeGameItem) -> ctk.CTkFrame:
         """一张海报卡片: 竖屏封面(文字占位 + 右下角备份数) + 名称 + 最近活动时间."""

@@ -99,6 +99,10 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 1. `allure open allure-report`（标题、界面语言与端口都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）
 （完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
 
+用例失败时会**自动留现场**（coredumpy dump + 界面截图 + 摘要，机制与纪律见 [testing.md](testing.md) 第 6 节）：dump 落在仓库根的 `crash-dumps/`（已被忽略），用 `coredumpy load crash-dumps/<用例>.dump` 进 pdb，或在 VSCode 里用 coredumpy 扩展右键打开；不想留就加 `--crash-dump-depth=0`。
+
+CI 的 pytest 作业是**分片执行**的（每平台 3 片并行，报告作业再合并结果与覆盖率）。本地想复现同一套流程：`--shard-count` / `--shard-index` + `scripts/merge_allure_results.py` + `uv run coverage combine`，命令与实测数据见 [testing.md](testing.md) 第 6、7 节。
+
 ## 打包
 
 ```shell

@@ -40,6 +40,7 @@ dev = [
     "radon>=6.0.1",
     "xenon>=0.9.3",
     "deptry>=0.25.1",
+    "coredumpy>=0.5.0",
 ]
 
 [project.urls]
@@ -173,15 +174,19 @@ known_first_party = [
   "reporting",
   "conftest",
   "gui_support",
+  "sharding",
+  "crash_capture",
 ]
 exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
 
 [tool.deptry.per_rule_ignores]
 # 测试用例按设计导入开发依赖 —— pytest 与 allure-pytest 就是开发工具本身,
-# 出现在 tests/ 里是正常的(DEP004 默认只在"运行时代码"里才该报警)。
-DEP004 = ["pytest", "allure", "allure_pytest"]
-# `allure` 这个模块由 allure-pytest 带进来, 测试里直接用它记附件属正常用法。
-DEP003 = ["allure"]
+# 出现在 tests/ 里是正常的(DEP004 默认只在"运行时代码"里才该报警);
+# coredumpy 同理: 它只在用例失败时留现场(见 tests/crash_capture.py)。
+DEP004 = ["pytest", "allure", "allure_pytest", "coredumpy"]
+# `allure` 与 `allure_commons` 这两个模块由 allure-pytest 带进来, 测试里直接用它记
+# 附件(含 AttachmentType 类型标注)属正常用法。
+DEP003 = ["allure", "allure_commons"]
 
 
 [tool.pytest.ini_options]

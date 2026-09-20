@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -314,18 +315,24 @@ def test_every_discovery_filter_and_page_label_is_translated() -> None:
         assert not page.label.startswith("discovery.")
 
 
+# 存档路径建议的样本路径: "安全"那条必须**在两个平台上都是绝对路径**且不落在主目录/盘符
+# 根里。POSIX 上 "C:/Saves" 其实是相对路径, 会被判成"非绝对路径"→危险 —— 那条只在
+# Windows 上具备"普通存档目录"的语义, 因此按平台各挑一条(CI 的 Linux/macOS 就踩过)。
+_SAFE_PATH = "C:/Saves" if os.name == "nt" else "/opt/Saves"
+
+
 def test_save_path_suggestion_keeps_the_path_and_the_danger_note() -> None:
     """存档路径建议: 路径都来自可信渠道, 因此不再标可信度, 只标危险目标."""
     safe = SavePathSuggestion.from_candidate(
         SavePathCandidate(
-            path="C:/Saves",
+            path=_SAFE_PATH,
             path_kind="directory",
             confidence="high",
             reason_code="steam_remotecache",
         )
     )
     assert safe.risk_label == ""
-    assert safe.text == "C:/Saves"
+    assert safe.text == _SAFE_PATH
 
     risky = SavePathSuggestion.from_candidate(
         SavePathCandidate(
@@ -668,7 +675,7 @@ def test_home_board_summary_detail_and_options() -> None:
     )
 
     assert board.summary == tr("home.summary", total=2, recent=2, pending=1, archived=0)
-    assert board.detail == tr("home.detail", backed_up=2, monitored=0, risky=0)
+    assert board.detail == tr("home.detail", backed_up=2, risky=0)
     assert [option.key for option in board.views] == [view.value for view in HomeView]
     assert board.view_text == f"{tr('home.view_all')} (2)"
     assert board.origin_text == tr("home.origin_all")
@@ -727,7 +734,6 @@ def test_home_labels_are_all_translated() -> None:
     """回归: 缺 key 会让界面直接露出 home.xxx / dialog.xxx 这样的原始键名."""
     keys = (
         "home.title",
-        "home.hint",
         "home.search",
         "home.search_placeholder",
         "home.clear",

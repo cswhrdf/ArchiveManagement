@@ -172,8 +172,8 @@ def add_schedule_dialog(
         anchor="w",
         justify="left",
         wraplength=420,
-        font=ctk.CTkFont(size=11),
-        text_color=palette.text_muted,
+        font=ctk.CTkFont(size=12),
+        text_color=palette.text_hint,
     ).pack(padx=24, pady=(8, 10), anchor="w")
     if blocked:
         ctk.CTkLabel(
@@ -335,8 +335,8 @@ class ScheduleWindow:
             anchor="e",
             justify="right",
             wraplength=300,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         ).grid(row=0, column=1, rowspan=2, padx=16, sticky="e")
 
         toolbar = ctk.CTkFrame(container, fg_color="transparent")
@@ -482,8 +482,8 @@ class ScheduleWindow:
             anchor="w",
             justify="left",
             wraplength=380,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         )
         detail.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 9))
         state = ctk.CTkLabel(

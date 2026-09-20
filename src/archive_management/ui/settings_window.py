@@ -37,6 +37,13 @@ from archive_management.ui.palette import Palette
 logger = logging.getLogger(__name__)
 
 _ToggleTheme = Callable[[], str]
+
+# 窗口固定宽度 + 边距; 高度按内容算: 说明文字会随语言换行, 写死高度会把底部的
+# 说明与"关闭"按钮裁到窗口外面(用户看不到也点不到)。
+_WINDOW_WIDTH = 480
+_WINDOW_PAD_X = 18
+_WINDOW_PAD_Y = 16
+_WINDOW_MIN_HEIGHT = 500
 # 应用一个新组合键; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyShortcut = Callable[[str, str], "str | None"]
 # 切换界面语言; 返回 None 表示成功, 否则返回可直接展示的失败说明.
@@ -103,14 +110,17 @@ class SettingsWindow:
         window = ctk.CTkToplevel(self._parent)
         self._window = window
         window.title(tr("settings.title"))
-        window.geometry("480x500")
         window.resizable(False, False)
         window.transient(self._parent)
         window.configure(fg_color=palette.background)
-        _center(self._parent, window)
 
         self._container = ctk.CTkFrame(window, fg_color=palette.background)
-        self._container.pack(fill="both", expand=True, padx=18, pady=16)
+        self._container.pack(
+            fill="both",
+            expand=True,
+            padx=_WINDOW_PAD_X,
+            pady=_WINDOW_PAD_Y,
+        )
         self._container.grid_columnconfigure(0, weight=1)
 
         self._title_label = ctk.CTkLabel(
@@ -144,9 +154,9 @@ class SettingsWindow:
             text=tr("settings.appearance_hint"),
             anchor="w",
             justify="left",
-            wraplength=280,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            wraplength=240,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         )
         self._appearance_hint.grid(row=1, column=0, padx=16, sticky="w")
         self._toggle_btn = ctk.CTkButton(
@@ -195,9 +205,9 @@ class SettingsWindow:
             text=tr("settings.language_hint"),
             anchor="w",
             justify="left",
-            wraplength=280,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            wraplength=240,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         )
         self._language_hint.grid(row=1, column=0, padx=16, sticky="w")
         self._language_box = ctk.CTkComboBox(
@@ -283,8 +293,8 @@ class SettingsWindow:
             anchor="w",
             justify="left",
             wraplength=400,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         )
         self._shortcut_hint.grid(
             row=1 + len(_SHORTCUT_ROWS), column=0, columnspan=2, padx=16, sticky="w"
@@ -315,8 +325,8 @@ class SettingsWindow:
             anchor="w",
             justify="left",
             wraplength=400,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         )
         self._note_label.grid(row=4, column=0, sticky="w", pady=(12, 0))
 
@@ -335,6 +345,13 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
         )
         self._close_btn.grid(row=5, column=0, sticky="e", pady=(14, 0))
+
+        # 高度按**实际内容**算(说明文字会随语言换行): 固定高度会把底部裁掉,
+        # 算完再居中 —— 这样"关闭"按钮与最后的说明一定在窗口里。
+        window.update_idletasks()
+        content_height = self._container.winfo_reqheight() + _WINDOW_PAD_Y * 2
+        window.geometry(f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, content_height)}")
+        _center(self._parent, window)
 
     def _toggle_text(self) -> str:
         """按钮文案: 点击后会切到的主题."""
@@ -385,12 +402,12 @@ class SettingsWindow:
             (self._appearance_title, palette.text_primary),
             (self._language_title, palette.text_primary),
             (self._shortcut_title, palette.text_primary),
-            (self._appearance_hint, palette.text_muted),
-            (self._language_hint, palette.text_muted),
+            (self._appearance_hint, palette.text_hint),
+            (self._language_hint, palette.text_hint),
             (self._language_label, palette.text_muted),
-            (self._shortcut_hint, palette.text_muted),
+            (self._shortcut_hint, palette.text_hint),
             (self._shortcut_error, palette.danger),
-            (self._note_label, palette.text_muted),
+            (self._note_label, palette.text_hint),
             (self._theme_label, palette.text_muted),
         ):
             label.configure(text_color=color)

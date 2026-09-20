@@ -25,7 +25,7 @@ _PaletteKey = str
 _Repaint = Callable[..., None]
 _Unsubscribe = Callable[[], None]
 
-LabelStyle = Literal["primary", "body", "muted", "h2"]
+LabelStyle = Literal["primary", "body", "muted", "hint", "h2"]
 ButtonStyle = Literal["accent", "danger", "ghost", "soft"]
 
 
@@ -120,6 +120,7 @@ class UiKit:
             "primary": "text_primary",
             "body": "text_body",
             "muted": "text_muted",
+            "hint": "text_hint",
             "h2": "text_primary",
         }[style]
         self.register(

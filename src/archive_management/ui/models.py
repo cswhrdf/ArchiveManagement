@@ -847,11 +847,10 @@ class HomeBoard:
 
     @property
     def detail(self) -> str:
-        """底部第二行: 备份、探测关联与风险数量."""
+        """底部第二行: 备份与风险数量."""
         return tr(
             "home.detail",
             backed_up=self.stats.backed_up,
-            monitored=self.stats.monitored,
             risky=self.stats.risky,
         )
 

@@ -1503,7 +1503,7 @@ def test_home_reflects_backups_and_locations(tmp_path: Path) -> None:
     assert item.last_backup_label == ""
     assert tr("home.last_backup_none") in item.summary
     assert tr("home.cat_backup_none") in item.chips
-    assert board.detail == tr("home.detail", backed_up=0, monitored=0, risky=0)
+    assert board.detail == tr("home.detail", backed_up=0, risky=0)
 
     service.run_backup_now(summary.game_id)
 
@@ -1512,7 +1512,7 @@ def test_home_reflects_backups_and_locations(tmp_path: Path) -> None:
     assert refreshed.games[0].last_backup_label != ""
     assert tr("home.cat_backup_done") in refreshed.games[0].chips
     assert refreshed.stats.pending == 0
-    assert refreshed.detail == tr("home.detail", backed_up=1, monitored=0, risky=0)
+    assert refreshed.detail == tr("home.detail", backed_up=1, risky=0)
 
 
 def test_home_marks_games_without_locations_as_pending(tmp_path: Path) -> None:

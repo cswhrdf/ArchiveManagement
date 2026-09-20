@@ -219,8 +219,8 @@ class DiscoveryPanel:
             anchor="w",
             justify="left",
             wraplength=760,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         )
         self._dirs_hint.grid(row=0, column=0, padx=_PANEL_PAD, pady=(14, 0), sticky="w")
 
@@ -274,8 +274,8 @@ class DiscoveryPanel:
             anchor="w",
             justify="left",
             wraplength=760,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
         )
         self._hint_label.grid(
             row=0, column=0, padx=_PANEL_PAD, pady=(14, 0), sticky="w"

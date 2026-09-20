@@ -128,9 +128,11 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 ```text
 quality (3 平台: ruff check / ruff format / mypy; 结论只把 Ubuntu 那份带进报告)
 analysis (ubuntu: deptry 依赖卫生 / bandit 安全扫描 / pip-audit 依赖漏洞 / radon+xenon 复杂度)
-pytest  (3 平台: 单元 + 集成 + 覆盖率 + Allure)
+pytest  (3 平台 × 3 片: 单元 + 集成 + 各片自己的 Allure 结果与覆盖率数据)
 performance (ubuntu: 基准与阈值)
 security    (3 平台: 越权与危险操作防护)
+      ↓
+pytest-report (每平台一个作业: 合并各片的 Allure 结果与覆盖率 → 生成并自检报告)
       ↓
 allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全汇总 → 生成最终报告)
 ```
@@ -155,6 +157,13 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 
 这条曾经真实发生过：跑测试的解释器是 `uv python install 3.12` 下载的 uv 托管 standalone 构建，它靠**自身目录里的 tcl 数据文件**定位 Tcl（`<托管目录>/tcl/tcl8.6`），那份副本一旦陈旧或不完整，`tkinter` 就报 `Can't find a usable init.tcl`（上游是 python-build-standalone 的已知怪癖，见 astral-sh/uv#7036；本机 venv 用的是 python.org 的 CPython，自带完整 tcl，所以本机复现不出来）。既然重建解释器就能修好，工作流里用 `uv python install --reinstall 3.12`，而不是事后设 `TCL_LIBRARY`/`TK_LIBRARY`——后者路径随平台变，还会影响其它 Tcl 使用者。
 
+### GUI 布局用例不要和"首帧时序"赛跑
+
+名称按宽度重裁这类断言最容易在平台之间飘：`winfo_width()` 在首帧往往只有 1（各平台完成布局的时机不同），而且可能**不再有尺寸变化事件**来补救，于是名称停在"兜底宽度"的短文本上 —— 人眼看不出来，只有断言能发现。产品侧对这种"宽度还没量出来"的情况安排了有上限的重试（`home_page._REFIT_MAX_ATTEMPTS`）；用例侧两条纪律：
+
+- 判定"布局停在上一次宽度"这类回归**用假控件**（只实现 `_text` 与 `winfo_width()` 的替身），而不是在真窗口上改完文本再泵事件循环：后台重裁会在不同平台上以不同时机把文本改回去，自检会时灵时不灵。`test_gui_layout.py` 里两条用例正是这么分工的：一条跑真布局，一条用假标签验看门狗本身。
+- 断言"当前宽度下应当截成什么"时别写死像素或字符数：用同一个 `fit_text(full, font, label.winfo_width())` 生成期望值，比对**文本**（与字体是否缺字形无关），像素只用来卡"缝隙上限"。
+
 ### 报告自检与发布（不要跳过）
 
 报告是一套静态站点：用例详情页打开时才去取`data/test-results/<结果 id>.json`。这个目录一旦在传输或解压环节被丢掉，报告就只剩汇总与用例树——界面能看到用例通过与否，点开用例却是空的（生成阶段本身没问题，用同一个 allure 版本本地生成就有这些文件）。
@@ -175,6 +184,30 @@ Windows runner 的控制台是 cp1252：Python 默认按该编码输出，**打�
 uv run python scripts/verify_allure_report.py allure-report          # 只自检
 uv run python scripts/verify_allure_report.py allure-report --zip    # 自检并重新打包
 ```
+
+### 失败现场留证（dump + 界面截图）
+
+只在 CI 出现、本地怎么跑都不复现的失败，事后能拿到的往往只有一行 traceback。所以用例失败时会自动把现场挂到**该用例的 Allure 结果**上（`tests/crash_capture.py`）：
+
+- **崩溃现场 dump**：`coredumpy` 把最深一层栈帧的局部变量与对象属性写成 `crash-dumps/<用例>.dump`（在 `.gitignore` 里），附件与摘要都会写明落点。本地打开：`coredumpy load <文件>`（进 pdb），或在 VSCode 里用 coredumpy 扩展右键「Load with coredumpy」；只想知道哪个 dump 是哪条用例，用 `coredumpy peek crash-dumps`。
+- **界面截图**：本用例创建的窗口（`tests/gui_support.py` 的登记表）在失败时的画面。Windows 走 `ImageGrab.grab(window=hwnd)` 按**窗口句柄**抓：窗口被别的窗口盖住（全屏游戏、多个用例窗口叠放）也拍得到，也不受显示缩放影响（Tk 报逻辑坐标、按屏幕区域抓拿的是物理像素，缩放不是 100% 时会错位；本次就是用这条修掉的）；Linux 按屏幕区域抓（需要 `DISPLAY`，CI 由 xvfb 提供），macOS 同（需要屏幕录制权限）——抓不到时只在摘要里写一句原因，绝不影响用例结果。
+- **失败现场摘要**：平台 / Python / 提交号 + dump 与截图落点 + 复现命令，让报告里不只有一堆附件。
+
+三条纪律写在模块注释里：留证**绝不改变用例结果**（每一步各自兜底，整段编排外面还有一层，出错只打一行日志）、**失败才留证**（通过的用例不产生任何文件）、**有上限**（递归深度默认 5、单次 dump 时限 20s、超过 25 MiB 的 dump 只记落点不挂附件、最多 3 张截图，同一用例只留一次——失败后 teardown 常跟着再报一次错）。参数：`--crash-dump-dir`（默认 `crash-dumps`）与 `--crash-dump-depth`（`0` = 关掉 dump，仍留摘要）。
+
+报告侧不需要额外配置：附件由 allure-pytest 写进 `allure-results`，随 `allure-resources-<平台>` artifact 上传，`scripts/verify_allure_report.py` 会把它们一并核对（缺附件即报告不完整）。**dump 里是真实的局部变量**（coredumpy 默认会遮掉像密钥的字符串与 `os.environ` 的值）—— 把报告或 artifact 发给仓库以外的人之前先看一眼附件。
+
+### 分片执行与结果合并
+
+套件变长后，CI 的墙钟时间几乎全压在 pytest 上（2026-09 实测：Windows 298s / macOS 260s / Linux 132s，整次工作流约 9 分钟）。现在每个平台把用例拆成 **3 片并行**跑，再由 `pytest-report` 把各片结果合并成一份——墙钟时间只取决于最慢的那一片。
+
+- **分片规则**在 `tests/sharding.py`：先给目录经验权重（集成 2s、安全 0.6s、单元 0.05s，未知目录 0.3s），再“最慢的优先”贪心装箱（LPT）。套件耗时几乎都在 GUI 用例上，只按**条数**平分会把慢的全堆在一片；实测三片 71s / 81s / 81s（理想 77s）。
+- **参数**是 `--shard-count` / `--shard-index`（默认 `1`/`0` 即不分片），过滤发生在**严重等级过滤之后**：本地 `--min-severity=critical` 选出的子集也能分片跑。三条性质由 `tests/unit/test_sharding.py` 锁住：不重不漏（各片并集 == 全集）、同输入同分片、各片权重接近理想值。
+- **不要用 pytest-xdist 代替分片**：本机实测 `-n 4` 让 `tests/unit` 从 39s 降到 21s，但 `tests/integration` 没有收益（222s），`tests/integration/test_gui_buttons.py` 反而从 143s 变成 174s，并多出 Tk 初始化失败（`invalid command name "tcl_findLibrary"`）。GUI 用例各自起真实窗口，并行只会互相拖慢；分片是**进程级**并行（CI 上还是**机器级**），不碰这个坑。
+- **合并**在 `pytest-report`（每平台一个作业）：`scripts/merge_allure_results.py` 把各片结果目录搬进一份 `allure-results`（日志逐片给文件数，少一片能一眼看出来）；覆盖率用 `COVERAGE_FILE=.coverage.shard-<片>` 分片写，再 `uv run coverage combine` 合成一份。
+- **覆盖率门槛只在合并后判**：单片覆盖率天生偏低，所以分片作业用 `--cov-report=`（关掉报告）与 `--cov-fail-under=0`（关掉门槛），合并后单独一步跑 `uv run coverage report`（阈值仍取 pyproject 的 `[tool.coverage.report] fail_under`）。之所以单独成步：原生命令的非零退出码只有作为该步**最后一条**命令时才会让作业失败，混在一起写会让门槛静默失效。
+- **产物名不变**：`pytest-report` 上传的仍是 `allure-resources-<平台>` / `coverage-<平台>` / `allure-report-<平台>`，汇总作业照旧读它们（所以它的 `needs` 里必须有 `pytest-report`，否则会在产物上传完成前开始下载，报告静默地少掉各平台的测试结果）。
+- 片数出现在三处（`matrix.shard` 列表、`--shard-count`、传给 pytest 的 `--shard-index`）：两边不一致会让**一部分用例静默不跑**，所以 `tests/unit/test_sharding.py` 会校验矩阵与 `--shard-count` 一致、矩阵编号真的是 `0..N-1`。
 
 ## 7. 本地生成与查看报告
 
@@ -205,6 +238,22 @@ allure open allure-results
 uv run pytest tests/performance -m performance --alluredir=allure-results
 uv run pytest tests/security -m security --alluredir=allure-results
 ```
+
+本地想复现 CI 的分片流程（同一套参数与合并脚本）：
+
+```shell
+# 各片一份覆盖率数据与结果目录(单片覆盖率偏低是正常的, 所以关掉门槛)
+for k in 0 1 2; do
+  COVERAGE_FILE=".coverage.shard-$k" uv run pytest --shard-count 3 --shard-index "$k" \
+    --cov --cov-report= --cov-fail-under=0 --alluredir="allure-results-shard-$k"
+done
+
+uv run python scripts/merge_allure_results.py --output allure-results "allure-results-shard-*"
+uv run coverage combine && uv run coverage report   # 门槛在这里判(合并后的总覆盖率)
+allure generate allure-results --output allure-report
+```
+
+分片只改变“哪些用例在哪一次运行里跑”，不改收集结果：三片并集与全量收集逐条一致（`--collect-only` 核对过 1068 条），合并后的总覆盖率也与串行一致（91%）。命令行的 `--shard-count` / `--shard-index` 说明见上一节。
 
 也可以用下载下来的 CI 结果（artifact `allure-resources-*` 里的 `allure-results/`）在本地复现 CI 报告，命令与上面完全相同；`allure generate` 之后建议先跑一次自检再打开。
 

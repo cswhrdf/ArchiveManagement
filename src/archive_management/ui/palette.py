@@ -30,7 +30,8 @@ class Palette:
     border: str  # 面板描边
     text_primary: str  # 标题等强文本
     text_body: str  # 正文
-    text_muted: str  # 次要/说明文本
+    text_hint: str  # 功能说明文字(比 muted 清楚, 比正文淡)
+    text_muted: str  # 次要/元数据文本(时间、计数等)
     accent: str  # 强调主色(teal)
     accent_text: str  # 强调色上的文字
     accent_soft: str  # 强调淡底(选中项)
@@ -69,6 +70,7 @@ DARK = Palette(
     border="#253a55",
     text_primary="#f4f7fb",
     text_body="#d2dbea",
+    text_hint="#aab8ce",
     text_muted="#8291aa",
     accent="#55d6be",
     accent_text="#092329",
@@ -101,6 +103,7 @@ LIGHT = Palette(
     border="#d6dee6",
     text_primary="#1b2735",
     text_body="#405168",
+    text_hint="#4c5d73",
     text_muted="#657589",
     accent="#2fae97",
     accent_text="#ffffff",

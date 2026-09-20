@@ -88,12 +88,18 @@ jobs:
           if-no-files-found: ignore
 
   pytest:
-    name: Pytest 测试与报告 (${{ matrix.os }})
+    # 套件按平台拆成几片并行跑, 各片只负责自己那部分用例, 由后续的 pytest-report
+    # 作业把 Allure 结果与覆盖率数据合并成一份报告 —— 墙钟时间只取决于最慢的一片。
+    name: Pytest 分片测试 (${{ matrix.os }} · 片 ${{ matrix.shard }}/3)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # 分片规则在 tests/sharding.py(按目录经验权重“最慢的优先”装箱, 各片耗时接近)。
+        # 改片数要同时改这里的列表与下面 pytest 的 --shard-count: 两边不一致会让
+        # 部分用例静默不跑, 所以 tests/unit/test_sharding.py 会核对这两处。
+        shard: [0, 1, 2]
 
     steps:
       - name: Check out repository
@@ -128,19 +134,6 @@ jobs:
         if: runner.os != 'Linux'
         run: uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK')"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
-
-      - name: Install Allure 3 CLI
-        # 钉住 3.18.0: 3.13~3.17 在配了 historyPath 时会让质量门静默放行(issue #895,
-        # 3.18.0 的 PR #962 修复)。升级前请照 allurerc.mjs 里的说明重跑一次门禁。
-        run: npm install --global allure@3.18.0
-
-      - name: Check Allure version
-        run: allure --version
-
       - name: Install Xvfb (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -157,11 +150,124 @@ jobs:
 
       - name: Pytest with coverage (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
+        env:
+          # 每片写一份自己的覆盖率数据(合并放到 pytest-report 作业里)。
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        run: xvfb-run -a uv run pytest --shard-count 3 --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Pytest with coverage (Windows/macOS)
         if: runner.os != 'Linux'
-        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html --alluredir=allure-results
+        env:
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        # 单片覆盖率天生偏低, 所以这里关掉报告与门槛(--cov-report= / --cov-fail-under=0):
+        # 门槛只在合并后的总覆盖率上判, 见 pytest-report 作业。
+        run: uv run pytest --shard-count 3 --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+
+      - name: Upload shard Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-${{ matrix.os }}-${{ matrix.shard }}
+          path: allure-results/
+          if-no-files-found: ignore
+
+      - name: Upload shard coverage data
+        # .coverage.shard-* 是隐藏文件, 要显式允许上传。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
+          path: .coverage.shard-${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  pytest-report:
+    # 每个平台一个作业: 把该平台各片的 Allure 结果与覆盖率数据合并成一份报告。
+    # 产物名与以前完全一致(allure-resources-/coverage-/allure-report-<平台>), 汇总作业
+    # 与历史回填都照旧读它们。
+    name: 合并测试报告 (${{ matrix.os }})
+    needs: [pytest]
+    # 分片作业失败也要出报告: 报告正是用来看"哪一片挂了"的。
+    if: always()
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 依赖缓存的写入者是 pytest 作业(见其注释), 这里只读复用。
+          enable-cache: true
+          save-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install Allure 3 CLI
+        # 钉住 3.18.0: 3.13~3.17 在配了 historyPath 时会让质量门静默放行(issue #895,
+        # 3.18.0 的 PR #962 修复)。升级前请照 allurerc.mjs 里的说明重跑一次门禁。
+        run: npm install --global allure@3.18.0
+
+      - name: Check Allure version
+        run: allure --version
+
+      - name: Download shard Allure results
+        # merge-multiple: false —— 各片落在自己的目录里, 合并交给脚本(它会逐片打印文件数,
+        # 少了一片能一眼看出来, 而不是悄悄生成一份不完整的报告)。
+        # continue-on-error: 某片在跑测试前就挂了(没来得及上传产物)时不要连累整个作业 ——
+        # 这时候更需要一份报告来看“到底哪一片没结果”。
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: allure-results-${{ matrix.os }}-*
+          path: .
+
+      - name: Download shard coverage data
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: coverage-data-${{ matrix.os }}-*
+          path: .
+
+      - name: Merge shard Allure results
+        # 参数用引号包住通配符: pwsh 不会自己展开它, 由脚本统一展开(bash 展开了也无妨)。
+        run: uv run python scripts/merge_allure_results.py --output allure-results "allure-results-${{ matrix.os }}-*"
+
+      - name: Collect coverage data (Linux/macOS)
+        shell: bash
+        run: cp coverage-data-*/.coverage.shard-* ./
+
+      - name: Collect coverage data (Windows)
+        shell: pwsh
+        run: Get-ChildItem -Path coverage-data-* -Force -File | Copy-Item -Destination .
+
+      - name: Combine coverage data
+        run: uv run coverage combine
+
+      - name: Enforce the coverage threshold
+        # 门槛值在 pyproject 的 [tool.coverage.report] fail_under 里(与本地一致)。
+        # 单独一步: 原生命令的非零退出码只有作为该步最后一条命令时才会让作业失败。
+        run: uv run coverage report --show-missing
+
+      - name: Write coverage reports
+        if: always()
+        run: |
+          uv run coverage xml -o coverage.xml
+          uv run coverage html
 
       - name: Attach coverage report to Allure
         # 脚本把覆盖率摘要写成一条结果(按平台归到各环境), 并把原始 coverage.xml 作为
@@ -383,7 +489,9 @@ jobs:
   allure-summary:
     name: Allure 汇总报告
     runs-on: ubuntu-latest
-    needs: [quality, pytest, performance, security]
+    # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
+    # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。
+    needs: [quality, pytest-report, performance, security]
     if: always()
     steps:
       - name: Check out repository

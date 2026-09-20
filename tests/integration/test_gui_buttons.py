@@ -46,6 +46,7 @@ from archive_management.services.hotkeys import (
     UnavailableBackend,
     format_accelerator,
 )
+from archive_management.services.pathcheck import normalize_path
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.main_window import ArchiveApp
 from archive_management.ui.models import FeedbackKind
@@ -1347,9 +1348,11 @@ def test_discovery_import_confirms_paths_and_probes_artwork(
 
     imported = next(game for game in app.backend.list_games() if game.name == "星露谷")
     assert imported.saved_paths == 2
+    # 路径比对走 normalize_path: 后端存的是**规范化后的绝对路径**, 而 "C:\Saves" 这类
+    # Windows 风格写法的规范化结果与平台有关(POSIX 上会落到当前工作目录之下)。
     assert [item.path for item in app.backend.list_locations(imported.game_id)] == [
-        "C:\\Saves",
-        "D:\\Other",
+        normalize_path("C:\\Saves"),
+        normalize_path("D:\\Other"),
     ]
     # 页面提示写清登记了几条存档位置.
     assert panel._summary_label.cget("text") == tr(
@@ -1891,6 +1894,43 @@ def test_settings_window_holds_theme_and_hotkey_shortcuts(
         tr("theme.to_dark"),
     }
     assert tr(f"theme.name_{app._theme}") in window._theme_label.cget("text")
+
+
+def test_settings_window_fits_its_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """设置窗口的高度按内容算: 底部说明与"关闭"按钮必须在窗口里, 说明也不能被裁.
+
+    说明文字会随语言换行(实测中文 630px、英文 644px), 写死高度时"关闭"按钮会被推到
+    窗口外面 —— 用户看不到也点不到; 界面语言的说明还会被右侧下拉框挤掉一截。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+    # 窗口要先真的被映射/布局, 下面的尺寸才有意义(winfo_width 在未布局时是 1).
+    assert _wait_for(app, lambda: window._note_label.winfo_width() > 1), "窗口未布局"
+
+    frame = window._window
+    frame.update_idletasks()
+    bottom = frame.winfo_rooty() + frame.winfo_height()
+    for name, widget in (
+        ("说明", window._note_label),
+        ("关闭按钮", window._close_btn),
+    ):
+        edge = widget.winfo_rooty() + widget.winfo_height()
+        hint = f"{name}被推出窗口: {edge} > {bottom}"
+        assert edge <= bottom, hint
+    for name, label in (
+        ("外观说明", window._appearance_hint),
+        ("界面语言说明", window._language_hint),
+        ("快捷键说明", window._shortcut_hint),
+    ):
+        cut = label.winfo_reqwidth() - label.winfo_width()
+        hint = f"{name}被裁掉 {cut}px(换行宽度超过了可用宽度)"
+        assert cut <= 1, hint
 
 
 def test_settings_window_records_a_pressed_combination(

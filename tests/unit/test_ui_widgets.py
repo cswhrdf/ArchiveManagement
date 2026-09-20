@@ -123,12 +123,13 @@ def test_frame_without_border_key_has_no_border_color(kit: widgets.UiKit) -> Non
 def test_label_maps_each_style_color(kit: widgets.UiKit) -> None:
     labels = {
         style: kit.label(kit, style, style=style)
-        for style in ("primary", "body", "muted", "h2")
+        for style in ("primary", "body", "muted", "hint", "h2")
     }
     kit.apply(DARK)
     assert labels["primary"].kwargs["text_color"] == DARK.text_primary
     assert labels["body"].kwargs["text_color"] == DARK.text_body
     assert labels["muted"].kwargs["text_color"] == DARK.text_muted
+    assert labels["hint"].kwargs["text_color"] == DARK.text_hint
     assert labels["h2"].kwargs["text_color"] == DARK.text_primary
 
 

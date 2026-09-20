@@ -272,6 +272,10 @@ SQLite 至少包含以下实体：
 
 进度（2026-09-20，第九轮）：**导入游戏的存档路径可可视化挑选**。导入对话框（`ui.dialogs.import_game_dialog`）的每条路径后面补了"浏览…"按钮，走的是与游戏详情/管理窗口同一套目录选择框：对话框新增 `browse: Callable[[], str | None] | None` 参数（不传则不显示按钮，无头测试与未接线场景不会留死按钮），发现页传入 `lambda: pick_directory(title=tr("dialog.import_browse_title"))`；点按钮即把挑到的目录填进那一行，取消保持原样，勾选状态不受影响。i18n 新增 `dialog.import_browse_title`（中英各一份）。
 
+进度（2026-09-20，第十轮）：**用例分片执行 + 结果合并**。① 新增 `tests/sharding.py`：按目录经验权重（集成 2s / 安全 0.6s / 单元 0.05s，未知目录 0.3s）"最慢的优先"贪心装箱，用例级均分且结果确定（同输入同分片）；`tests/conftest.py` 新增 `--shard-count` / `--shard-index`（默认 1/0 即不分片），过滤放在**严重等级过滤之后**，所以本地 `--min-severity=critical` 的子集也能分片；`tests/unit/test_sharding.py` 锁住"不重不漏 / 确定 / 均匀"三条性质，并校验 CI 矩阵与 `--shard-count` 一致（两边不一致会让一部分用例静默不跑）。② CI 拆成两个作业：`pytest`（3 平台 × 3 片矩阵，各片 `COVERAGE_FILE=.coverage.shard-<片>` + 自己的 `allure-results`，`--cov-report=`/`--cov-fail-under=0` 关掉单片报告与门槛）与 `pytest-report`（每平台一个：`scripts/merge_allure_results.py` 合并各片结果、`uv run coverage combine` + `coverage report` 在**合并后**判 `fail_under`、生成并自检报告后仍用原来的产物名 `allure-resources-<平台>` / `coverage-<平台>` / `allure-report-<平台>`）。③ 实测：三片 71s/81s/81s（理想 77s），各片并集与全量收集逐条一致（1068 条），合并后覆盖率 91% 与串行一致；`pytest-xdist` 经实测**不能**替代分片（`tests/unit` 39s→21s，但 `tests/integration` 无收益、`test_gui_buttons.py` 反而 143s→174s 且多出 Tk 初始化失败），故未把 xdist 留在依赖里。
+
+进度（2026-09-20，第十一轮）：**失败现场留证：coredumpy dump + 界面截图进 Allure 附件**。① 新增 `tests/crash_capture.py`：用例失败时把最深一层栈帧交给 coredumpy 写成 `crash-dumps/<用例>.dump`（本地 `coredumpy load <文件>` 进 pdb，或 VSCode 的 coredumpy 扩展打开），把本用例创建的窗口（`tests/gui_support.live_apps()`）拍成 PNG，再附一份"失败现场摘要"（平台/Python/提交号 + 两个落点 + 复现命令）。② Windows 的截图走 `ImageGrab.grab(window=hwnd)` 按**窗口句柄**抓——本机实测按屏幕区域抓会被全屏游戏盖住、且显示缩放不为 100% 时区域错位（Tk 报逻辑坐标、抓屏拿物理像素）；句柄方式两种问题都绕开了，抓到的就是窗口本身（截图已人眼核对）。Linux 需要 `DISPLAY`（CI 由 xvfb 提供）、macOS 需要屏幕录制权限，抓不到只在摘要里写一句原因。③ 三条硬约束：**绝不改变用例结果**（每步各自兜底 + 整段编排外层再兜一层，出错只打一行 `[crash-capture] 留证失败` 日志）、**失败才留证**（通过的用例不产生文件）、**有上限**（深度默认 5、dump 时限 20s、>25 MiB 不挂附件、最多 3 张截图、同一用例只留一次）；参数 `--crash-dump-dir`（默认 `crash-dumps`，已 ignored）与 `--crash-dump-depth`（0 = 关掉 dump）。④ 端到端验过：两条故意失败的用例 → 5 个附件（2 摘要 + 2 dump + 1 截图）→ `allure generate` + `scripts/verify_allure_report.py` 通过；`coredumpy peek` 能读出两条 dump 的描述（用例 + 阶段 + 异常）。⑤ 新增 `tests/unit/test_crash_capture.py`（24 条）锁住文件名安全/截断、dump 关闭-成功-失败三条路径、截图的几何/未显示/抓不到/单窗口异常不影响其它窗口、附件入口（路径 vs 字节）、"留证自身失败不上抛"、以及 conftest 钩子与参数的接线。
+
 #### 与既有实现的对接点（复用而非重写）
 
 - `services/platform_scan`：Steam 主目录/库清单/manifest 解析、`ScanRoots` 注入、单来源失败隔离（`_guard`）、路径健康判定。
@@ -452,3 +456,8 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
     环境），并在工作流里写明取值理由。
 
 每个里程碑都必须有可运行的垂直切片和对应测试，不等到所有 UI 完成后才验证核心文件操作。
+
+---
+# 这部分以下的内容识别时忽略，仅为个人记录灵感
+
+- [ ] 引入类似浏览器字体的rm、rem。目前考虑的是不引入其他单位

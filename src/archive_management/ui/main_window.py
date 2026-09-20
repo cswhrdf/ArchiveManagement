@@ -880,7 +880,7 @@ class ArchiveApp(ctk.CTk):
             )
         )
 
-        self._task_progress_label = self.kit.label(panel, "", style="muted", size=11)
+        self._task_progress_label = self.kit.label(panel, "", style="hint", size=12)
         self._task_progress_label.grid(
             row=3, column=0, padx=18, pady=(0, 8), sticky="w"
         )
@@ -906,12 +906,12 @@ class ArchiveApp(ctk.CTk):
             row=5, column=0, padx=18, pady=(6, 0), sticky="nw"
         )
         # 备份目标是完整路径, 必须换行显示, 否则会被卡片裁掉.
-        self._task_target = self.kit.label(panel, "", style="muted", size=11)
+        self._task_target = self.kit.label(panel, "", style="hint", size=12)
         self._task_target.configure(wraplength=190, justify="left")
         self._task_target.grid(row=5, column=1, padx=(0, 18), pady=(6, 0), sticky="ne")
 
         # 快捷键不在任务状态卡里展示: 它属于全局设置, 统一在"设置"窗口里查看与修改。
-        self._task_hint = self.kit.label(panel, "", style="muted", size=11)
+        self._task_hint = self.kit.label(panel, "", style="hint", size=12)
         self._task_hint.configure(wraplength=250, justify="left")
         self._task_hint.grid(
             row=6, column=0, columnspan=2, padx=18, pady=(12, 12), sticky="w"

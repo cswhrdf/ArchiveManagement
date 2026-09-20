@@ -86,3 +86,4 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 | [platforms.md](./docs/platforms.md)     | Windows / macOS / Linux 支持矩阵与平台注意事项             |
 | [development.md](./docs/development.md) | 开发环境、命令行、配置文件、质量门禁、打包与发布           |
 | [testing.md](./docs/testing.md)         | 测试分类、性能基准与安全测试、Allure 报告汇总              |
+| [ui-notes.md](./docs/ui-notes.md)       | 从界面移出的说明文案（备用：待并入 wiki）                  |

@@ -47,6 +47,7 @@ from archive_management.ui.home_page import (
     _POSTER_NAME_LINES,
     _POSTER_TEXT_WIDTH,
     _POSTER_WIDTH,
+    _REFIT_MAX_ATTEMPTS,
 )
 from archive_management.ui.main_window import (
     _HEADER_NAME_LINES,
@@ -479,6 +480,23 @@ def _visible_text(widget: Any) -> str:
     return str(getattr(widget, "_text", ""))
 
 
+class _StubNameLabel:
+    """只具备看门狗所需两个接口的假名称标签(``_text`` 与 ``winfo_width``).
+
+    用于伪造"布局停在上一次窄宽度"这种回归形态: 用真窗口做不到确定性 —— 后台重裁
+    会在不同平台上以不同时机把文本改回去。
+    """
+
+    def __init__(self, text: str, width: int) -> None:
+        """记录"当前显示的文本"与"当前宽度"."""
+        self._text = text
+        self._width = width
+
+    def winfo_width(self) -> int:
+        """返回当前宽度(看门狗据此算出应有的裁剪结果)."""
+        return self._width
+
+
 def _pumped(app: Any, seconds: float = 0.4) -> None:
     """尺寸稳定后再多跑一会儿事件循环: 名称重裁是延后 60ms 的任务."""
     deadline = time.monotonic() + seconds
@@ -699,6 +717,9 @@ def test_the_fill_invariant_catches_a_stale_fit() -> None:
     看门狗自己也会失灵: 上一版的容忍度写成"一个字符宽", 在 CI 的字体度量下恒不成立,
     天天误报; 改完之后又得确认它**没有**变成永远通过 —— 这条用例伪造一次真实的回归
     形态(布局停在上一次的窄宽度上), 要求 :func:`_assert_name_fills` 抛错。
+
+    用假标签伪造而不是改真窗口: 真实窗口上改完文本再泵事件循环, 后台重裁会在不同
+    平台上以不同时机把它改回去(实测 Linux/macOS 上就不会报错), 自检因此时灵时不灵。
     """
     app = gui_app(_long_name_app, _HUGE_NAME)
     assert _wait_mapped(app)
@@ -706,13 +727,37 @@ def test_the_fill_invariant_catches_a_stale_fit() -> None:
     _settle_layout(app)
     _pumped(app)
 
-    parts = next(iter(page._row_parts.values()))
-    width = parts.label.winfo_width()
-    parts.label.configure(text=fit_text(parts.full_name, page._name_font, width - 60))
-    _pumped(app, seconds=0.1)  # 让 Tk 处理完这次 configure
+    width = int(next(iter(page._row_parts.values())).label.winfo_width())
+    stale = _StubNameLabel(fit_text(_HUGE_NAME, page._name_font, width - 60), width)
 
     with pytest.raises(AssertionError, match="不是按当前宽度"):
-        _assert_name_fills(parts.label, parts.full_name, page._name_font)
+        _assert_name_fills(stale, _HUGE_NAME, page._name_font)
+
+
+def test_row_names_retry_until_the_width_is_known(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """宽度还没量出来时按"下一轮再来"处理, 而不是跳过(重试且有上限).
+
+    各平台的布局时序不同: 首次同步时行内标签可能还没被布局(``winfo_width()`` 是 1),
+    而之后不再有尺寸变化事件 —— 老实现直接跳过, 名称就永远停在兜底宽度的短文本上。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    parts = next(iter(page._row_parts.values()))
+    scheduled: list[str] = []
+    monkeypatch.setattr(page, "_schedule_list_sync", lambda: scheduled.append("sync"))
+    monkeypatch.setattr(parts.label, "winfo_width", lambda: 1)
+
+    page._refit_row_names()
+
+    assert scheduled == ["sync"], "宽度未知时应当安排下一轮重试"
+    # 重试有上限: 一直量不出宽度也不会无限排任务.
+    page._refit_attempts = _REFIT_MAX_ATTEMPTS
+    page._refit_row_names()
+    assert scheduled == ["sync"]
 
 
 class _PosterStartService(DemoArchiveService):

@@ -55,8 +55,10 @@ coverage.xml
 cover/
 
 # Allure 报告与性能/安全结果(由 CI 生成并作为 artifact 上传)
-allure-results/
+allure-results*/
 allure-report*/
+# 分片跑测试时的产物(每片一份结果目录与覆盖率数据, 见 docs/testing.md)
+coverage-data-*/
 .allure/
 # 运行总账(CI 生成, 由 allurerc.mjs 的 globalAttachments 收进报告「全局附件」)
 allure-run-ledger.md
@@ -239,3 +241,7 @@ __marimo__/
 # allure
 /allure-report/
 /allure-results/
+# 失败现场 dump(coredumpy, 只在用例失败时生成; 见 tests/crash_capture.py)
+crash-dumps/
+# coredumpy 插件自己的默认目录(--enable-coredumpy 不带 --coredumpy-dir 时)
+coredumpy/

@@ -37,6 +37,14 @@ def gui_app(builder: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     return app
 
 
+def live_apps() -> tuple[Any, ...]:
+    """当前用例创建过、还没销毁的窗口(留证截图用: 失败时把现场拍下来).
+
+    返回元组的拷贝: 调用方可能正在遍历它取窗口尺寸, 而截图期间窗口列表不应被改动。
+    """
+    return tuple(_LIVE_APPS)
+
+
 def close_gui_apps() -> None:
     """销毁当前用例创建的全部窗口(后建先销).
 

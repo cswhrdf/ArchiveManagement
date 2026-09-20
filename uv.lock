@@ -94,6 +94,7 @@ dependencies = [
 dev = [
     { name = "allure-pytest" },
     { name = "bandit" },
+    { name = "coredumpy" },
     { name = "deptry" },
     { name = "mypy" },
     { name = "pip-audit" },
@@ -124,6 +125,7 @@ requires-dist = [
 dev = [
     { name = "allure-pytest", specifier = ">=2.16" },
     { name = "bandit", extras = ["toml"], specifier = ">=1.9.4" },
+    { name = "coredumpy", specifier = ">=0.5.0" },
     { name = "deptry", specifier = ">=0.25.1" },
     { name = "mypy", specifier = ">=2.3" },
     { name = "pip-audit", specifier = ">=2.10.1" },
@@ -417,6 +419,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "coredumpy"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/90/4ae87d5e23231d70ae516631101fb24c1a25f257d660813a80dacbdf9593/coredumpy-0.5.0.tar.gz", hash = "sha256:44ebe70b8e318306a1b6fc335c05aeda8be61b0f238f5d71df2de6a88345c156", size = 36238, upload-time = "2026-01-05T01:44:33.689Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/64/1f4b441175f729cd6171ae7ffdbf60ec9048e9609efa5822218fd2e13999/coredumpy-0.5.0-py3-none-any.whl", hash = "sha256:a7267a2fb8b3d76624ff8c6027fc24237e5fd13429cf7ab95051072f49ecf428", size = 31300, upload-time = "2026-01-05T01:44:32.556Z" },
 ]
 
 [[package]]

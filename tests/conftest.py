@@ -56,13 +56,15 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any
 
 import allure
 import pytest
 
+import crash_capture
+import sharding
 from archive_management.i18n import DEFAULT_LOCALE, set_locale
 from archive_management.services.audit import AUDIT_LOGGER_NAME
 from archive_management.services.platforms import current_platform, platform_label
@@ -199,13 +201,46 @@ def _restore_description(item: pytest.Item) -> None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """注册 --min-severity: 本地只保留不低于该级别的用例."""
+    """注册 --min-severity、分片参数与失败留证参数."""
     parser.addoption(
         "--min-severity",
         action="store",
         default=None,
         choices=list(_SEVERITY_LEVELS),
         help="只保留严重等级不低于该级别的测试(本地 CI 用 critical)",
+    )
+    # 分片: CI 把同一平台的用例拆到多个作业并行跑, 最后合并结果(见 tests/sharding.py)。
+    # 默认 1 片 = 与以前完全一样, 本地不需要关心。
+    parser.addoption(
+        "--shard-count",
+        type=int,
+        default=1,
+        metavar="N",
+        help="把用例均分成 N 片(默认 1 = 不分片)",
+    )
+    parser.addoption(
+        "--shard-index",
+        type=int,
+        default=0,
+        metavar="K",
+        help="本作业只跑第 K 片(0 基, 需与 --shard-count 一起用)",
+    )
+    # 失败现场留证(见 tests/crash_capture.py): 默认开启 —— 难以复现的问题只能在失败那一刻
+    # 留下来的东西里找; 失败本来就少见, 这点开销可忽略。
+    parser.addoption(
+        "--crash-dump-dir",
+        type=Path,
+        default=crash_capture.DUMP_DIRECTORY,
+        metavar="DIR",
+        help=f"失败现场 dump 的落盘目录(默认 {crash_capture.DUMP_DIRECTORY}); "
+        "dump 会作为附件挂进失败用例的 Allure 结果",
+    )
+    parser.addoption(
+        "--crash-dump-depth",
+        type=int,
+        default=crash_capture.DEFAULT_DEPTH,
+        metavar="N",
+        help=f"失败现场 dump 的递归深度(默认 {crash_capture.DEFAULT_DEPTH}; 0 = 不生成 dump)",
     )
 
 
@@ -268,7 +303,7 @@ def _validate_metadata(item: pytest.Item) -> None:
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """附加严重等级, 校验 Allure 标签, 并按 --min-severity 过滤."""
+    """附加严重等级, 校验 Allure 标签, 按 --min-severity 过滤, 再按分片取本片."""
     minimum = config.getoption("--min-severity")
     min_rank = _SEVERITY_RANK[minimum] if minimum is not None else None
     kept: list[pytest.Item] = []
@@ -286,6 +321,63 @@ def pytest_collection_modifyitems(
         items[:] = kept
         if deselected:
             config.hook.pytest_deselected(items=deselected)
+
+    _apply_shard(config, items)
+
+
+def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """按 ``--shard-count`` / ``--shard-index`` 只保留本片要跑的用例.
+
+    分片在**严重等级过滤之后**做: 本地 ``--min-severity=critical`` 选出来的子集也
+    能均分成几片跑, 与 CI 的全量分片互不影响。
+    """
+    count = int(config.getoption("--shard-count"))
+    index = int(config.getoption("--shard-index"))
+    if count < 1:
+        raise pytest.UsageError(f"--shard-count 至少为 1(当前 {count})")
+    if not 0 <= index < count:
+        raise pytest.UsageError(
+            f"--shard-index 必须在 0..{count - 1} 之间(当前 {index})"
+        )
+    if count == 1:
+        return
+    buckets = sharding.shard_plan([item.nodeid for item in items], count=count)
+    mine = set(buckets[index])
+    total = sharding.load_of([item.nodeid for item in items])
+    planned = sharding.load_of(buckets[index])
+    print(
+        f"[shard {index + 1}/{count}] 本片 {len(mine)} 个用例, "
+        f"预计 {planned:.0f}s / 全量 {total:.0f}s"
+    )
+    deselected = [item for item in items if item.nodeid not in mine]
+    items[:] = [item for item in items if item.nodeid in mine]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+
+
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[Any]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """用例失败时把现场留进它的 Allure 结果(见 ``tests/crash_capture.py``).
+
+    - 钩子跑在**阶段报告生成时**, 也就是任何 teardown 夹具之前: 那时界面窗口还活着,
+      截图才拍得到现场(``tests/gui_support.py`` 的登记表由夹具在用例结束后清空);
+    - 只处理失败的报告; 每个用例只留一次现场(失败后 teardown 常跟着报第二次错);
+    - 留证自身出错也只是附件里的一句话, 绝不影响用例结果与退出码。
+    """
+    report = yield
+    if report.failed:
+        from gui_support import live_apps
+
+        crash_capture.attach_failure_evidence(
+            item,
+            call,
+            directory=item.config.getoption("--crash-dump-dir"),
+            depth=int(item.config.getoption("--crash-dump-depth")),
+            apps=live_apps(),
+        )
+    return report
 
 
 def _configure_allure(item: pytest.Item) -> None:
