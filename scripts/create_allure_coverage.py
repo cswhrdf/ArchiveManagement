@@ -4,15 +4,21 @@
 (默认是 ``coverage.xml``) —— 与性能/安全汇总项(``scripts/create_allure_summary.py``)
 同一做法: 报告里能直接下载原始数据, 而不只是看到一张渲染过的表。HTML 报告是整站,
 仍旧由 CI 的 ``coverage-<os>`` artifact 提供。
+
+结论归入哪个平台由 ``--platform`` 决定(不传则按当前主机判断): CI 的报告作业固定跑在
+Ubuntu 上, 却要合并**各个平台**的分片数据, 所以必须显式传 —— 否则每个平台的覆盖率结论
+都会被标成 Linux。
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import platform
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +42,11 @@ COVERAGE_SEVERITY = "trivial"
 
 
 def platform_name() -> str:
-    """返回覆盖率测量平台的显示名称(Windows/Linux/macOS).
+    """返回**当前主机**的显示名称(Windows/Linux/macOS).
 
     这个名称写进 ``env`` 与 ``os`` 标签、以及 ``Platform`` 参数:
 
-    - ``env`` 标签 + 仓库根的 ``allurerc.mjs`` 把它变成 Allure 的"环境", 三个平台的
+    - ``env`` 标签 + 仓库根的 ``allurerc.mjs`` 把它变成 Allure 的"环境", 每个平台的
       覆盖率摘要各归各自的环境(报告顶部可切换, 用例详情页的环境分页能逐个对照),
       因此**标题里不再拼平台名**;
     - ``平台`` 参数与 ``os`` 标签是兼底: 生成报告时没读到报告配置的话, 环境会静默退回
@@ -50,6 +56,33 @@ def platform_name() -> str:
     return {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}.get(
         system, system or "Unknown"
     )
+
+
+def resolve_platform(requested: str | None) -> str:
+    """决定这条覆盖率结论算哪个平台的.
+
+    默认按当前主机判断(本地手动跑一次就够); CI 的报告作业用 ``--platform`` 显式指定 ——
+    它固定跑在 Ubuntu 上, 却要合并**各个平台**的分片数据: 用宿主平台的名字会把每个平台的
+    覆盖结论都标成 Linux(与平台专属检查同一个坑: 结论的归属要由数据决定, 不能由执行位置
+    决定)。
+    """
+    return requested or platform_name()
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """解析命令行参数."""
+    parser = argparse.ArgumentParser(
+        description="把覆盖率报告写成 Allure 结果(含原始报告附件)"
+    )
+    parser.add_argument(
+        "--platform",
+        default=None,
+        help=(
+            "这条结论属于哪个平台(Windows/Linux/macOS); 不传则按当前主机判断。"
+            "报告作业跑在 Ubuntu 上但合并的是别的平台的数据, 必须显式传。"
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 def percentage(value: str | None) -> str:
@@ -166,11 +199,11 @@ def write_result(result: dict[str, Any], result_id: str) -> None:
     result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """创建一条包含覆盖率摘要与原始报告附件的 Allure 结果."""
     result_id = str(uuid.uuid4())
     timestamp = time.time_ns() // 1_000_000
-    name = platform_name()
+    name = resolve_platform(parse_args(argv).platform)
     attachments = raw_report_attachments(result_id)
     result: dict[str, Any] = {
         "uuid": result_id,

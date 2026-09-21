@@ -26,22 +26,43 @@ license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 
 [dependency-groups]
-dev = [
-    "mypy>=2.3",
-    "pre-commit>=4",
-    "pyinstaller>=6",
+# 开发依赖按**作业**拆组: CI 里每个作业只装自己需要的那一组(见 .github/workflows/ci.yml 的
+# `uv sync --locked --no-default-groups --group <组>`), 免得每个作业实例都下一次 bandit /
+# pip-audit / pyinstaller —— 一趟 CI 有十几个实例, 这类重复下载是最容易省掉的固定开销。
+#
+# 哪一组装给谁, 由作业真正执行的命令决定:
+#   test     —— 跑 pytest(单元/集成/性能/安全)并采集 Allure 结果与失败现场
+#   coverage —— 只有报告作业需要(合并各片数据、判覆盖率门槛); 它不跑用例, 所以不装 pytest
+#   quality  —— 代码质量门禁(ruff / 格式 / 宿主平台 mypy)与本地提交钩子
+#   analysis —— 静态分析与依赖检查(由 create_allure_quality.py --group analysis 逐项调用)
+#   package  —— PyInstaller 打包(只有 release 工作流需要)
+# 本地 `uv sync` 仍然**全部装上**(默认组在 [tool.uv] 的 default-groups 里), 所以下面的
+# 分组不会改变本地开发与提交钩子的用法。
+test = [
     "pytest>=9",
     "pytest-cov>=7",
-    "allure-pytest>=2.16",
-    "ruff>=0.16",
     "pytest-timeout>=2.4.0",
+    "allure-pytest>=2.16",
+    "coredumpy>=0.5.0",
+]
+
+coverage = ["coverage>=7.16.0"]
+
+quality = [
+    "ruff>=0.16",
+    "mypy>=2.3",
+    "pre-commit>=4",
+]
+
+analysis = [
     "bandit[toml]>=1.9.4",
     "pip-audit>=2.10.1",
     "radon>=6.0.1",
     "xenon>=0.9.3",
     "deptry>=0.25.1",
-    "coredumpy>=0.5.0",
 ]
+
+package = ["pyinstaller>=6"]
 
 [project.urls]
 Homepage = "https://github.com/cswhrdf/ArchiveManagement"
@@ -69,6 +90,11 @@ path = "src/archive_management/packaging.py"
 # 2. PyInstaller 打包出的可执行文件(见 packaging/archive-management.spec; 它用 pathex
 #    指向 src, 与上面的机制无关)。
 package = false
+
+# 本地 `uv sync` / `uv run` 默认把**所有**开发依赖装上 —— 与拆分依赖组之前的行为完全一致,
+# 所以本地能直接 `uv run pytest` / `uv run ruff` / `uv run pyinstaller`。
+# 只有 CI 会显式跳过默认组(`--no-default-groups --group <组>`), 让每个作业少下几十 MB。
+default-groups = ["test", "coverage", "quality", "analysis", "package"]
 
 [tool.ruff]
 target-version = "py312"
@@ -176,14 +202,16 @@ known_first_party = [
   "gui_support",
   "sharding",
   "crash_capture",
+  "ci_workflow",
 ]
 exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
 
 [tool.deptry.per_rule_ignores]
 # 测试用例按设计导入开发依赖 —— pytest 与 allure-pytest 就是开发工具本身,
 # 出现在 tests/ 里是正常的(DEP004 默认只在"运行时代码"里才该报警);
-# coredumpy 同理: 它只在用例失败时留现场(见 tests/crash_capture.py)。
-DEP004 = ["pytest", "allure", "allure_pytest", "coredumpy"]
+# coredumpy 同理: 它只在用例失败时留现场(见 tests/crash_capture.py);
+# coverage 是 CI 里直接调用的工具(合并/报告覆盖率), 用例也用它验证"跨平台合并"这件事。
+DEP004 = ["pytest", "allure", "allure_pytest", "coredumpy", "coverage"]
 # `allure` 与 `allure_commons` 这两个模块由 allure-pytest 带进来, 测试里直接用它记
 # 附件(含 AttachmentType 类型标注)属正常用法。
 DEP003 = ["allure", "allure_commons"]
@@ -237,6 +265,11 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["src/archive_management"]
+# 记录**相对工作目录**的文件名: 报告作业在 Ubuntu 上合并各平台的分片数据(见
+# docs/testing.md 第 6 节), 绝对路径在另一台机器上无法还原。相对文件名让 Windows 与
+# Linux 记下的名字都形如 `src/archive_management/app.py`, `coverage combine` 再把它
+# 归一到当前仓库根下的真实文件 —— 覆盖率数字与平台无关, 只有"哪台机器产的"不同。
+relative_files = true
 
 [tool.coverage.report]
 exclude_also = [

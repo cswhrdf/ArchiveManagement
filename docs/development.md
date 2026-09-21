@@ -6,9 +6,11 @@
 - [uv](https://docs.astral.sh/uv/)（依赖与虚拟环境管理）
 
 ```shell
-uv sync --locked     # 安装依赖（含 dev 组），不安装当前项目本身
+uv sync --locked     # 安装依赖（本地默认装全部开发组），不安装当前项目本身
 uv run pre-commit install
 ```
+
+开发依赖按**作业**拆成五组（`test` / `coverage` / `quality` / `analysis` / `package`，见 `pyproject.toml` 的 `[dependency-groups]`）：CI 里每个作业只装自己需要的那一组（`uv sync --locked --no-default-groups --group ...`，另外靠顶层 `UV_NO_SYNC=1` 拦住 `uv run` 的隐式 sync），本地则通过 `[tool.uv] default-groups` 一次装齐，所以上面的命令与以前完全一样。要只跑某一类检查时也可以手动 `uv sync --no-default-groups --group test`（注意它会把其它组从 `.venv` 里卸掉）。
 
 上面的命令在**仓库根目录**执行。本项目以工具形式开发、**不作为包安装**（不发布到 PyPI，也不声明 `[project.scripts]`），自身源码靠仓库根的 `.env` 进入导入路径：`uv run` 会自动加载它（内容是 `PYTHONPATH=src`），所以 `python -m archive_management` 不需要安装就能运行。绕过 `uv run`（例如直接调用 `.venv\Scripts\python.exe -m archive_management`）时该文件不会生效，需要自己设置 `PYTHONPATH=src`；个人本地覆盖请另建 `.env.local` 并用 `uv run --env-file .env.local ...`——仓库自带的 `.env` 会被提交，不要往里放密钥（凭据走系统凭据库）。
 
@@ -50,7 +52,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 ## 质量门禁
 
-本地提交钩子 + CI 里跑的检查（`pytest --cov` 与平台相关，Windows/Ubuntu/macOS 三平台都跑；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
+本地提交钩子 + CI 里跑的检查（`pytest --cov` 与平台相关，Windows/Ubuntu 两个平台都跑 —— **macOS 暂时屏蔽**，见 [testing.md](testing.md) 第 4 节的说明；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
 
 ```shell
 uv run ruff check .
@@ -97,7 +99,7 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 
 输出应为 **0 个文件需要改动**，且与 `ruff format --check .` 同时成立。
 
-本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`），并把 `src/archive_management/resources/` 顶层的**固定数据清单**（如平台工具排除清单）自动压回单行紧凑 JSON（`scripts/compact_json.py`）。这个钩子跑完会把文件 **`git add` 进暂存区**（这次没改写也会加一次，顺手把索引里可能残留的多行版本同步成单行）：工作区与索引一起变成单行后 pre-commit 就不算它“弄脏了文件”，本次提交直接带上转换好的内容，不需要重新 `git add`；万一把结果加不进索引（没有 git 等），才会退回“就地改写并拦下提交”。`resources/i18n/*.json` 是给人审校的文案资源，不受影响。CI 会在 Windows、Ubuntu、macOS 上运行全量测试，并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`），并把 `src/archive_management/resources/` 顶层的**固定数据清单**（如平台工具排除清单）自动压回单行紧凑 JSON（`scripts/compact_json.py`）。这个钩子跑完会把文件 **`git add` 进暂存区**（这次没改写也会加一次，顺手把索引里可能残留的多行版本同步成单行）：工作区与索引一起变成单行后 pre-commit 就不算它“弄脏了文件”，本次提交直接带上转换好的内容，不需要重新 `git add`；万一把结果加不进索引（没有 git 等），才会退回“就地改写并拦下提交”。`resources/i18n/*.json` 是给人审校的文案资源，不受影响。CI 会在 Windows、Ubuntu 上运行全量测试（macOS 暂时屏蔽，见 [testing.md](testing.md) 第 4 节），并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
 
 ### 想在本地看 Allure 报告：
 
@@ -108,7 +110,7 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 
 用例失败时会**自动留现场**（coredumpy dump + 界面截图 + 摘要，机制与纪律见 [testing.md](testing.md) 第 6 节）：dump 落在仓库根的 `crash-dumps/`（已被忽略），用 `coredumpy load crash-dumps/<用例>.dump` 进 pdb，或在 VSCode 里用 coredumpy 扩展右键打开；不想留就加 `--crash-dump-depth=0`。
 
-CI 的 pytest 作业是**分片执行**的（每平台 3 片并行，报告作业再合并结果与覆盖率）。本地想复现同一套流程：`--shard-count` / `--shard-index` + `scripts/merge_allure_results.py` + `uv run coverage combine`，命令与实测数据见 [testing.md](testing.md) 第 6、7 节。
+CI 的 pytest 作业是**分片执行**的（Linux 3 片、Windows 2 片并行，报告作业再合并结果与覆盖率）。本地想复现同一套流程：`--shard-count` / `--shard-index` + `scripts/merge_allure_results.py` + `uv run coverage combine`，命令与实测数据见 [testing.md](testing.md) 第 6、7 节。
 
 ## 打包
 

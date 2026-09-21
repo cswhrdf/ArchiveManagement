@@ -28,6 +28,8 @@ from typing import Any
 
 import pytest
 
+import ci_workflow
+
 pytestmark = [
     pytest.mark.minor,
     pytest.mark.epic("工程与发布"),
@@ -64,6 +66,18 @@ def _load_verifier() -> Any:
 
 # 模块级加载一次: 脚本无副作用(入口在 __main__ 守卫里)。
 verifier = _load_verifier()
+
+
+def required_platforms() -> tuple[str, ...]:
+    """读出 ``allurerc.mjs`` 里质量门要求的平台列表(漏一个平台会让门禁形同虚设).
+
+    CI 里三处引用它: 配置里的 ``environmentsTested``、汇总作业的 ``--expect-platforms``
+    与各矩阵的平台列表 —— 由这里的守卫核对着一致。
+    """
+    gate = _ALLURE_CONFIG.read_text(encoding="utf-8").split("qualityGate:", 1)[1]
+    matched = re.search(r"environmentsTested:\s*\[([^\]]+)\]", gate)
+    assert matched is not None, "配置里要有 environmentsTested"
+    return tuple(name.strip().strip('"') for name in matched.group(1).split(","))
 
 
 @dataclass(frozen=True)
@@ -308,6 +322,50 @@ def test_platform_with_only_summary_items_is_reported(
     assert "按平台用例: Windows 1 用例 + 0 汇总项" in capsys.readouterr().out
 
 
+def test_required_platforms_match_the_ci_matrix() -> None:
+    """要求哪些平台要有用例: 配置、汇总作业的参数、CI 矩阵三处必须是同一个集合.
+
+    这三处一旦不一致就会变成两种错法: 矩阵里跑了而没要求 -> 那个平台的产物丢了没人发现;
+    要求了而矩阵里没跑 -> 报告必然不完整, 门禁无意义地红。
+    macOS 在开发阶段被屏蔽(省额度), 恢复时按同样的规矩把三处一起加回去。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+
+    required = set(required_platforms())
+    assert required == {"Windows", "Linux"}, (
+        "macOS 屏蔽期间只要求两个平台; 恢复时这一条也要跟着改"
+    )
+
+    summary = workflow.split("name: Check every platform contributed tests", 1)[1]
+    command = summary.split("run:", 1)[1].splitlines()[0]
+    passed = re.search(r"--expect-platforms\s+(\S+)", command)
+    assert passed is not None, "汇总作业要传 --expect-platforms"
+    assert set(passed.group(1).split(",")) == required, (
+        "汇总作业的平台列表与 allurerc.mjs 不一致"
+    )
+
+    # CI 矩阵里实际跑测试的平台: pytest 与 pytest-report 用 include 逐条列(条目里的 os 是
+    # runner, platform 是报告里的环境名), security 还是 os 列表。三处都必须是同一个集合 ——
+    # 一处不一致就会变成两种错法: 矩阵里跑了而没要求 -> 那个平台的产物丢了没人发现;
+    # 要求了而矩阵里没跑 -> 报告必然不完整, 门禁无意义地红。
+    for job in ("pytest", "pytest-report"):
+        platforms = {
+            entry["platform"] for entry in ci_workflow.matrix_entries(workflow, job)
+        }
+        assert platforms == required, (
+            f"{job} 的矩阵 {sorted(platforms)} 与要求的平台 {sorted(required)} 不一致"
+        )
+
+    listed = re.search(r"os: \[([^\]]+)\]", ci_workflow.job_block(workflow, "security"))
+    assert listed is not None, "security 没有矩阵平台列表"
+    platforms = {
+        ci_workflow.OS_PLATFORMS[item.strip()] for item in listed.group(1).split(",")
+    }
+    assert platforms == required, (
+        f"security 的矩阵 {sorted(platforms)} 与要求的平台 {sorted(required)} 不一致"
+    )
+
+
 def test_expect_platforms_flag_decides_the_run(
     layout: _Layout, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -484,18 +542,18 @@ def test_ci_publishes_only_verified_report() -> None:
     assert workflow.count("steps.verify-report.outcome == 'success'") == len(zip_checks)
     assert workflow.count("path: allure-report.zip") == len(zip_checks)
     assert "path: allure-report/" not in workflow, "报告目录不再直接发布"
-    # 平台用例检查: pytest 作业传自己那个平台(runner.os 就是 Windows/macOS/Linux),
-    # 汇总作业传三个平台 —— 两处都要有, 少一处就等于少一道检查(只数 `run:` 行, 注释不算)。
+    # 平台用例检查: pytest 作业的报告传矩阵里的平台(报告作业固定跑在 Ubuntu 上,
+    # runner.os 会说 Linux), 汇总作业传汇总要求的两个平台 —— 两处都要有, 少一处就等于
+    # 少一道检查(只数 `run:` 行, 注释不算)。
     platform_checks = [
         command for command in commands if "--expect-platforms" in command
     ]
     assert len(platform_checks) == 2, "pytest 作业与汇总作业各要检查一次平台用例"
     assert (
-        sum('--expect-platforms "${{ runner.os }}"' in c for c in platform_checks) == 1
+        sum('--expect-platforms "${{ matrix.platform }}"' in c for c in platform_checks)
+        == 1
     )
-    assert (
-        sum("--expect-platforms Windows,macOS,Linux" in c for c in platform_checks) == 1
-    )
+    assert sum("--expect-platforms Windows,Linux" in c for c in platform_checks) == 1
     # 汇总作业里那条不拦发布(报告正是用来看"哪个平台没数据"的地方), 所以它的结论必须有
     # 地方接手: 末尾的门禁结论步骤要带上它, 否则失败了也没人管。
     step = workflow.split("name: Check every platform contributed tests", 1)[1]
@@ -564,7 +622,7 @@ def test_coverage_item_lands_in_the_platform_environment(
     monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
     monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
 
-    module.main()
+    module.main([])
 
     written = next(results.glob("*-result.json"))
     payload = json.loads(written.read_text(encoding="utf-8"))
@@ -582,6 +640,34 @@ def test_coverage_item_lands_in_the_platform_environment(
     assert "Coverage by package" in payload["description"]
 
 
+def test_coverage_item_platform_comes_from_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--platform`` 压过宿主平台: 报告作业在 Ubuntu 上合并别的平台的数据.
+
+    CI 的报告作业固定跑在 Ubuntu(合并、覆盖率汇总、报告生成都是纯文件操作), 而它处理的
+    是 Windows / Linux 各自的分片数据 —— 用宿主平台判断的话, 两个平台的覆盖率结论都会
+    被标成 Linux, 报告里"按平台看覆盖率"就失去意义(与平台专属检查同一个坑)。
+    """
+    module = _load_script("create_allure_coverage")
+    results = tmp_path / "allure-results"
+    coverage_xml = tmp_path / "coverage.xml"
+    coverage_xml.write_text(_COVERAGE_XML, encoding="utf-8")
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
+
+    module.main(["--platform", "Windows"])
+
+    payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
+    labels = {label["name"]: label["value"] for label in payload["labels"]}
+
+    assert labels["env"] == "Windows"
+    assert labels["os"] == "Windows"
+    assert payload["parameters"] == [{"name": "Platform", "value": "Windows"}]
+    # 不传就还是宿主平台(本地手动跑不需要记平台名)。
+    assert module.resolve_platform(None) == module.platform_name()
+
+
 def test_coverage_item_carries_the_raw_report_as_an_attachment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -594,7 +680,7 @@ def test_coverage_item_carries_the_raw_report_as_an_attachment(
     monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
     monkeypatch.setattr(module, "RAW_REPORT_FILES", (coverage_xml,))
 
-    module.main()
+    module.main([])
 
     payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
     attachment = payload["attachments"]
@@ -622,7 +708,7 @@ def test_coverage_item_attaches_only_the_raw_reports_that_exist(
         (coverage_xml, text_report, tmp_path / "coverage.json"),
     )
 
-    module.main()
+    module.main([])
 
     payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
     assert [item["name"] for item in payload["attachments"]] == [
@@ -645,7 +731,7 @@ def test_coverage_item_without_the_raw_file_has_no_attachment(
     monkeypatch.setattr(module, "COVERAGE_XML", tmp_path / "coverage.xml")
     monkeypatch.setattr(module, "RAW_REPORT_FILES", (tmp_path / "coverage.xml",))
 
-    module.main()
+    module.main([])
 
     payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
     assert payload["status"] == "broken"
@@ -884,7 +970,7 @@ def test_quality_gate_asks_every_platform_for_real_tests() -> None:
     assert verifier.REAL_TEST_VALUE == "pytest"
     assert f'name === "{verifier.REAL_TEST_LABEL}"' in gate
     assert f'value === "{verifier.REAL_TEST_VALUE}"' in gate
-    assert 'environmentsTested: ["Windows", "macOS", "Linux"]' in gate
+    assert 'environmentsTested: ["Windows", "Linux"]' in gate
     # 规则集要有 id: 门禁失败时输出的是 `<规则集 id>/<规则名>`, 一眼看出是哪条不过。
     assert re.search(r'id:\s*"[\w-]+"', gate) is not None
 
@@ -1066,13 +1152,51 @@ def test_platform_specific_checks_use_the_platform_environment(
 
 
 def test_quality_job_runs_on_one_platform() -> None:
-    """公共检查只在 Ubuntu 跑一遍(跑三平台只会得到三份一样的结论)."""
+    """公共检查(ruff/mypy/静态分析/性能基准)只在一个平台上跑一遍, 而且在一个作业里.
+
+    跑多平台只会得到多份一样的结论; 拆成多个作业则要多付一整套 checkout / uv / 依赖同步
+    的固定开销。所以三批公共检查在同一个 Ubuntu 作业里依次跑。
+    """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     block = re.search(r"\n  quality:\n(.*?)\n  \w", workflow, re.DOTALL)
     assert block is not None, "ci.yml 里找不到 quality job"
     job = block.group(1)
     assert "runs-on: ubuntu-latest" in job
-    assert "matrix" not in job, "质量作业不应再按平台展开"
+    assert "matrix" not in job, "质量作业不应按平台展开"
+    assert "--group core" in job, "公共质量门禁在这个作业里跑"
+    assert "--group analysis" in job, "静态分析也在这个作业里跑"
+    assert "pytest tests/performance" in job, "性能基准也在这个作业里跑"
+    assert "allure-results-performance" in job, "性能结果照旧要上传(汇总作业要读)"
+    assert "\n  analysis:\n" not in workflow, "不要再把静态分析拆成独立作业"
+    assert "\n  performance:\n" not in workflow, "不要再把性能基准拆成独立作业"
+
+
+def test_report_job_does_not_depend_on_the_host_platform() -> None:
+    """报告作业跑在 Ubuntu 上, 平台必须由矩阵给出 —— 不能看 runner.os.
+
+    合并、覆盖率汇总、报告生成与自检都是纯文件操作, 所以两个平台都在 Ubuntu 上跑(省掉
+    Windows runner 的 2 倍计价与那些 pwsh 分支)。但"这份结果算哪个平台的"由数据决定:
+    再用 ``runner.os`` 当平台名, 两个平台的结论都会被标成 Linux(两台机器都是 Linux)。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    job = ci_workflow.job_block(workflow, "pytest-report")
+
+    assert "runs-on: ubuntu-latest" in job
+    # 只看命令, 不看注释(注释里会拿 runner.os 当反面说明)。
+    steps = job.split("steps:", 1)[1]
+    commands = "\n".join(
+        line for line in steps.splitlines() if not line.strip().startswith("#")
+    )
+    assert "runner.os" not in commands, (
+        "报告作业里不能再按 runner.os 分支: 两台都是 Linux, 平台只能来自矩阵"
+    )
+    platforms = {
+        entry["platform"]
+        for entry in ci_workflow.matrix_entries(workflow, "pytest-report")
+    }
+    assert platforms == set(required_platforms()), (
+        "报告作业的平台必须与质量门要求的平台一致"
+    )
 
 
 def test_platform_checks_only_run_on_their_own_platform(
@@ -1133,35 +1257,95 @@ def test_platform_checks_only_run_on_their_own_platform(
 
 
 def test_platform_check_runs_in_a_job_on_its_own_platform() -> None:
-    """平台专属检查要放在对应平台的作业里跑, 结论还要被汇总作业收走.
+    """平台专属检查要真的跑在对应平台上, 且结论要被汇总作业收走.
 
-    以前的写法是在 Ubuntu 上把 ``--platform win32`` 与 ``--platform darwin`` 各跑一遍:
-    检查本身能过, 但报告里那两条结论标着 Windows / macOS 却产自 Linux —— 环境选择器一筛,
-    "哪个平台的专属代码路径出问题"这件事就被说错了。现在拆成独立作业(按平台展开),
-    这里把"跑在哪个平台"与"标着哪个平台"钉在一起。
+    ``mypy --platform win32`` / ``darwin`` 只把类型检查指向某支代码, 并不校验执行环境:
+    在 Ubuntu 上跑出来的结论挂到 Windows 环境里就是假的归属。所以它放在 pytest 作业的
+    **片 0**、且仅限 Windows/macOS(单独开作业只是多付一套固定开销 —— 而且其中一个是
+    最贵的 macOS runner)。这里把"跑在哪个平台"与"标着哪个平台"钉在一起。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
-    block = re.search(r"\n  quality-platform:\n(.*?)\n  \w", workflow, re.DOTALL)
-    assert block is not None, "ci.yml 里找不到 quality-platform job"
+    block = re.search(r"\n  pytest:\n(.*?)\n  \w", workflow, re.DOTALL)
+    assert block is not None, "ci.yml 里找不到 pytest job"
     job = block.group(1)
-    assert "os: [windows-latest, macos-latest]" in job, "两个平台各跑自己那一支"
-    assert "runs-on: ${{ matrix.os }}" in job
-    assert "ubuntu-latest" not in job, "平台专属检查不该再跑到 Ubuntu 上"
-    assert "scripts/create_allure_quality.py --group platform" in job
+    step = job.split("name: Run the platform-specific check", 1)[1]
+    step_condition = step.split("run:", 1)[0]
+    assert "matrix.shard == 0" in step_condition, "只需一片跑: 多跑只是重复"
+    assert "runner.os != 'Linux'" in step_condition, "平台专属检查不该跑到 Ubuntu 上"
+    assert "always()" in step_condition, "测试失败也要给出这条结论"
+    assert "--group platform" in step
     assert "allure-results-quality-platform-${{ matrix.os }}" in job
-    assert "save-cache: false" in job, "依赖缓存只由 pytest 第 0 片写入"
-
     # 公共质量作业不再代跑平台专属检查(否则同一批检查会跑两遍, 归属还重复)。
     quality = re.search(r"\n  quality:\n(.*?)\n  \w", workflow, re.DOTALL)
     assert quality is not None
     assert "--group platform" not in quality.group(1)
+    assert "\n  quality-platform:\n" not in workflow, "也不该再有独立的平台检查作业"
 
-    # 汇总作业必须等这个作业, 并把它的产物收进报告。
+    # 汇总作业必须能等到它, 并把产物收进报告。
     summary = re.search(r"\n  allure-summary:\n(.*)", workflow, re.DOTALL)
     assert summary is not None, "ci.yml 里找不到 allure-summary job"
-    assert "quality-platform" in summary.group(1), "汇总作业要等平台专属检查跑完"
     assert "pattern: allure-results-quality-platform-*" in summary.group(1)
+
+
+def test_ci_cancels_superseded_runs_and_skips_docs_only_pushes() -> None:
+    """连续 push 要取消被取代的运行; 纯文档 push 不必跑整套 CI.
+
+    旧的一轮没人看, 却跟新的一轮一样贵(约 21 个作业)。路径过滤**只加在 push 上**:
+    PR 被过滤掉会让分支保护里的必需检查永远停在 pending, 反而合不了。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+
+    assert re.search(r"^concurrency:\n", workflow, re.MULTILINE) is not None
+    assert "cancel-in-progress: true" in workflow
+    assert "group: ${{ github.workflow }}-${{ github.ref }}" in workflow, (
+        "按 ref 分组: PR 与 dev/main 各管各的"
+    )
+    push_block = workflow.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0]
+    assert "paths-ignore:" in push_block
+    assert '"**/*.md"' in push_block
+    assert '"docs/**"' in push_block
+    pull_block = workflow.split("\n  pull_request:", 1)[1].split("\njobs:", 1)[0]
+    assert "paths-ignore" not in pull_block, "PR 不能用路径过滤: 必需检查会停在 pending"
+
+
+def test_tkinter_check_still_fails_the_job_when_tcl_is_broken() -> None:
+    """Tkinter 自检要保留"修不好就红"的语义(只是从"每次重装"改成"失败才重装").
+
+    先普通安装解释器、自检失败时才 `--reinstall` 是省额度用的, 但**不能**把这道守卫削弱:
+    那一步失败的 `continue-on-error` 必须由紧随其后的修复步骤接手(它再复检一次, 且没有
+    continue-on-error), 否则 Tcl 坏掉只会表现为一堆 GUI 用例 skip, 覆盖率门槛变成难定位的失败。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    block = re.search(r"\n  pytest:\n(.*?)\n  \w", workflow, re.DOTALL)
+    assert block is not None, "ci.yml 里找不到 pytest job"
+    job = block.group(1)
+
+    setup = job.split("name: Set up Python", 1)[1].split("- name:", 1)[0]
+    # 只看命令本身(注释里会提到 --reinstall 作为反面说明)。
+    setup_command = setup.split("run:", 1)[1].strip()
+    assert setup_command.startswith("uv python install 3.12")
+    assert "--reinstall" not in setup_command, "不应无条件重装解释器(那等于每次都重下)"
+
+    check = job.split("name: Verify Tkinter works (Windows/macOS)", 1)[1]
+    check_head = check.split("run:", 1)[0]
+    assert "id: tkinter" in check_head, "修复步骤要靠这个 id 判断自检结果"
+    assert "continue-on-error: true" in check_head
+
+    repair = job.split("name: Repair the interpreter and re-check Tkinter", 1)[1]
+    repair_head = repair.split("run:", 1)[0]
+    repair_body = repair.split("run:", 1)[1].split("- name:", 1)[0]
+    assert "steps.tkinter.outcome == 'failure'" in repair_head, "只在自检失败时重装"
+    # 只看步骤自己的键(注释里会写"这一步没有 continue-on-error"来解释语义)。
+    repair_keys = [
+        line.strip()
+        for line in repair_head.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    assert "continue-on-error: true" not in repair_keys, "修复步骤自己要能拦住提交"
+    assert "uv python install --reinstall 3.12" in repair_body
+    assert "uv sync --locked" in repair_body, "重装解释器后让虚拟环境跟上"
+    assert repair_body.count("import tkinter") == 1, "修完必须复检一次"
 
 
 def test_quality_output_reaches_the_report_without_control_sequences(

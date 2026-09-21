@@ -17,6 +17,11 @@ on:
 permissions:
   contents: read
 
+# 与 ci.yml 同理: 关掉 `uv run` 的隐式 sync, 否则它会按 pyproject 的**默认组**把整套开发
+# 依赖装回来(这个作业已经显式装了 test / quality / package 三组)。
+env:
+  UV_NO_SYNC: "1"
+
 jobs:
   build:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && (github.event.pull_request.head.ref == 'dev' || startsWith(github.event.pull_request.head.ref, 'bugfix/'))) }}
@@ -64,7 +69,9 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked
+        # 只装这个作业要用的组(见 pyproject 的 [dependency-groups]): 构建前的门禁要
+        # 质量组(ruff/mypy)与测试组(pytest --cov), 打包要 package 组(pyinstaller)。
+        run: uv sync --locked --no-default-groups --group test --group quality --group package
 
       - name: Run build checks
         run: |

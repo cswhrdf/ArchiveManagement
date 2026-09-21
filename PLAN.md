@@ -457,6 +457,185 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 
 每个里程碑都必须有可运行的垂直切片和对应测试，不等到所有 UI 完成后才验证核心文件操作。
 
+## 11. CI 执行时间优化（2026-09-21 记录，供逐项评估）
+
+背景：一轮 CI 会消耗约 **52 分钟** 的 Actions 额度。当前工作流有 8 个作业定义、实际 **21 个作业实例**
+（`Ubuntu 9 / Windows 6 / macOS 6`），每个实例都要重付一遍固定开销。本节是完整的优化思路与取舍，
+按"收益 / 风险"分三档；**档 1 已在 2026-09-21 实施**，档 2、档 3 待评估。
+
+### 11.1 先确认"52 分钟"的口径（决定优化方向）
+
+| 口径         | 含义                       | 怎么查                                                                        |
+| ------------ | -------------------------- | ----------------------------------------------------------------------------- |
+| 墙钟时长     | 整次运行从开始到结束       | run 页面顶部的总时长（分片后约 6–8 分钟）                                     |
+| 作业时长之和 | 21 个作业各自耗时的加总    | run 的 Jobs 列表逐个加，或 `gh run view <id> --json jobs`                     |
+| 计费额度     | 按 runner 倍率加权后的分钟 | Settings → Billing → Actions（Linux ×1、Windows ×2、**macOS ×10**，私有仓库） |
+
+52 分钟与"作业时长之和"同量级，因此大概率是第二种口径。若实际按倍率计费，**6 个 macOS 作业就是绝对大头**，
+"把工作从 macOS 移到 Ubuntu / 减少 macOS 作业数"的收益要乘 10 看。**先抄一份 21 个作业的耗时基线表**，
+否则后续优化都是猜测。
+
+### 11.2 现状：每个作业都要重付的固定开销
+
+- `checkout` + `setup-uv` + `uv python install` + `uv sync --locked`：**21 次**，且每次都装**全部** dev 依赖
+  （bandit / pip-audit / radon / xenon / pyinstaller / coredumpy 也在内，即使那个作业只用 ruff）。
+- `npm install --global allure@3.18.0`：4 次（`pytest-report` × 3 + `allure-summary`），无 npm 缓存。
+- `pytest` 作业的 `uv python install --reinstall 3.12`：9 次，`--reinstall` 刻意绕过缓存、每次都重新下载解释器。
+- 报告链路重复劳动：每个平台的 `pytest-report` 各做一次"下载分片 → 合并 → `coverage combine` →
+  `allure generate` → 自检 → `--zip`"，汇总作业再把同一批数据合并、再生成一次报告、再打一次 zip。
+
+按仓库已测数据（串行 Windows 298s / macOS 260s / Linux 132s；分片 71/81/81s）估算：
+Ubuntu ≈ 24 分钟、Windows ≈ 19、macOS ≈ 19，合计 ≈ 62 分钟，与 52 同量级。
+
+### 11.3 档 1 · 零风险（**2026-09-21 已实施 5 项，2 项暂缓**）
+
+| #   | 改动                                                                           | 省什么                                                                                                                                | 状态                                                                                                                                                                                                                  |
+| --- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 顶层加 `concurrency` + `cancel-in-progress: true`                              | 连续 push 时自动取消被取代的运行（原先旧运行会一直跑完）                                                                              | 已实施                                                                                                                                                                                                                |
+| 2   | `push` 加 `paths-ignore`（`docs/**`、`**/*.md`、`.github/instructions/**` 等） | 纯文档改动不再触发整轮 CI。**只加在 `push` 上**：`pull_request` 若被 path 过滤跳过，分支保护里的必需检查会永远停在 pending，PR 合不了 | 已实施（仅 push）                                                                                                                                                                                                     |
+| 3   | `analysis` 并入 `quality`，成一个 Ubuntu 作业                                  | 少一次 `uv sync` 与一整套 setup；两个 Allure 产物名不变，汇总作业无需改                                                               | 已实施                                                                                                                                                                                                                |
+| 4   | `quality-platform` 折进 `pytest` 的**片 0**（仅 Windows/macOS）                | 少 2 个作业及其全套 setup（其中一个是按倍率最贵的 macOS）。放在测试与上传**之后**，门禁失败不会让这次的测试结果拿不到                 | 已实施                                                                                                                                                                                                                |
+| 5   | `--reinstall 3.12` 改成"自检失败才重装"                                        | 正常路径不再重下解释器（9 次 → 0 次）；Tkinter 不变式仍然成立：自检 `continue-on-error`，由紧随的修复步骤再复检一次并拦住提交         | 已实施                                                                                                                                                                                                                |
+| 6   | 缓存 npm 缓存目录                                                              | 4 次 allure CLI 安装各省 10–20s（约 1 分钟/轮）                                                                                       | **暂缓**：需要新增 `actions/cache`，而仓库里没有这个 action 的先例（其它 action 都在 v7/v9），版本号需要你定；收益只有 ~1 分钟，不值得冒一次改坏工作流的风险                                                          |
+| 7   | 缓存 uv 托管的 Python 目录                                                     | 省掉 21 次 `uv python install` 的下载（约 2.5 分钟/轮）                                                                               | **暂缓**：这个目录正是之前 Tcl 损坏（`Can't find a usable init.tcl`）的来源，缓存它可能把偶发失败带回来；第 5 项的"失败才重装"已经是兜底，等有了工时基线再评估（setup-uv 的 `enable-cache` 可能已经覆盖了一部分下载） |
+
+实际效果：**作业实例 21 → 18**（`quality` 合并 −1、`quality-platform` −2），档 1 的目标是"少花钱、不改墙钟"，所以墙钟基本不变。
+
+> 顺带记下一条：这一档改完后，工作流只剩 6 个作业定义。守护用例已经把"公共两组检查必须同一个作业""平台专属检查必须在片 0 且不在 Linux""Tkinter 自检修不好必须红""PR 不能用路径过滤"都钉住了 —— 以后想再拆回去会先被测试拦住。
+
+### 11.4 档 2 · 结构性瘦身（**2026-09-21 已实施 3 项，第 10 条暂缓**）
+
+| #   | 改动                                               | 收益与代价                                                                                                                                                                                                                                    | 状态                                                                                                                                 |
+| --- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 8   | **`pytest-report` 合并成一个 Ubuntu 作业**         | 报告生成/合并/自检都是纯文件操作，与平台无关，产物名保持不变。省一整套 setup，并且不再用 Windows runner（按倍率计费是 Ubuntu 的 2 倍）                                                                                                        | 已实施：“一个 Ubuntu 作业 + 平台矩阵”。真·单实例（一个作业里跑两遍流水线）只多省一次 setup，却要把产物名与覆盖率合并硬编码两份，不值 |
+| 9   | **分片数按平台分开**：Linux 3 片、Windows 2 片     | 每平台总时长 = 片数 × setup + 串行时间 T。Linux（T=132s，setup≈35s）：3 片 252s / 2 片 212s；Windows：2 片即可（T≈298s）。**减片省额度、加片省墙钟**，所以便宜的平台保持并行、贵的平台降并行。代价：矩阵要从 `os × shard` 改成 `include` 组合 | 已实施（macOS 屏蔽后只剩两个平台；恢复 macOS 时给它 1~2 片）                                                                         |
+| 10  | `security` 的 macOS 作业改为只在 push 到 main 跑   | 安全用例确实验平台语义（大小写不敏感文件系统、符号链接权限），所以是降频而不是砍平台                                                                                                                                                          | **暂缓**：macOS 已整体屏蔽（见 11.9），“只在 main 跑”这一层细分等恢复 macOS 时再定；现在做没有可验证的对象                           |
+| 11  | `performance` 并入 `quality`（同一个 Ubuntu 作业） | 又省一套 setup（`analysis` 已在那里，所以并到 `quality` 而不是单独的作业）                                                                                                                                                                    | 已实施                                                                                                                               |
+
+实际效果：**作业实例 13 → 11**（`quality` 1 + `pytest` 5 + `pytest-report` 2 + `security` 2 + `allure-summary` 1），
+且 Windows 上的实例从 5 个降到 2 个（只留 pytest 的分片）—— 按倍率计费时这部分是 ×2 的差额。
+墙钟基本不变（并行度下降的是较快的那个平台：Windows 3 片 → 2 片）。
+
+顺带得到的两条不变式（都已写成守卫）：
+
+- **报告作业不再依赖宿主平台**：两台都跑在 Ubuntu 上，所以平台只能来自矩阵（`--platform` / `--expect-platforms`），
+  用 `runner.os` 会把两个平台的结论都标成 Linux。守卫：`test_report_job_does_not_depend_on_the_host_platform`。
+- **跨平台合并覆盖率数据靠 `relative_files = true`**：Windows 记下的名字是反斜杠形式的相对路径，`coverage combine`
+  会归一成本机写法；少了它会是“合并成功但一个文件都对不上”（只在 Linux 上暴露）。守卫：
+  `test_coverage_data_from_another_platform_can_be_combined`（造一份反斜杠数据真跑一次 combine）。
+
+### 11.5 档 3 · 分级执行（最省，但要同步改门禁）
+
+| #   | 改动                                                                                                  | 说明                                                                                                                                                                                                                        |
+| --- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 12  | **PR 只跑 Linux 全量 + 分片；main 跑三平台**                                                          | 把 52 分钟变成个位数最直接的办法                                                                                                                                                                                            |
+| 13  | PR 上用**已有的** `--min-severity blocker`（或 `critical`）只跑关键用例，main 跑全量                  | 仓库已经实现了这个开关，几乎零开发量                                                                                                                                                                                        |
+| 14  | 给最慢的 GUI 用例打 `pytest.mark.slow`，PR 上 `-m "not slow"`                                         | 需要先按耗时排序（`--durations=20` 或 Allure 里的 duration）                                                                                                                                                                |
+| 15  | 按作业拆依赖分组：`[dependency-groups]` 拆成 `test` / `coverage` / `quality` / `analysis` / `package` | 各作业只装必需项；**已实施（2026-09-21）**，实测收益比原估小得多：缓存热时每实例只省约 0.5~1 秒（`uv sync` 装 51 个包 522ms），真正省下的是**冷缓存**那一轮（锁文件一变就得重建 uv 缓存）与各作业的安装体积。两个坑写在下面 |
+
+#### 15 的落地细节与实测（2026-09-21）
+
+- 分组：`test`（pytest / pytest-cov / 超时插件 / allure-pytest / coredumpy）、`coverage`（只有报告作业要，它不跑用例）、
+  `quality`（ruff / mypy / pre-commit）、`analysis`（deptry / bandit / pip-audit / radon / xenon）、`package`（pyinstaller）。
+  各作业实际装的组：`quality` = test+quality+analysis；`pytest` = test+quality（片 0 的平台检查要 mypy）；
+  `pytest-report` = coverage；`security` = test；`allure-summary` = **一组不装**（脚本只用标准库，Allure CLI 走 npm）；
+  release 的 build = test+quality+package。
+- **坑 1（会让整件事白做）**：`uv run` 默认先 sync 一次，而 sync 装的是**默认组** —— 实测在只装了 test 组的临时环境里跑一次
+  `uv run pytest`，uv 又把 51 个包装回来（ruff / mypy / bandit / pip-audit / pyinstaller 全回来了）。
+  所以两个工作流都在顶层设 `UV_NO_SYNC=1`，环境只由各作业自己那句 `uv sync` 决定（少写一组的失败是响亮的：
+  `Failed to spawn: ruff`，退出码 2）。
+- **坑 2**：同一作业里的每次 `uv sync` 必须带同一组参数 —— Tkinter 修复步骤那次也会 sync，只写 `--group test`
+  会把刚装好的 `quality` 组（mypy）删掉，平台检查随即红。
+- 本地不受影响：`[tool.uv] default-groups` 覆盖全部组，`uv sync` / `uv run` / 提交钩子照旧什么都有。
+- 守卫：`test_ci_installs_only_the_dependency_groups_each_job_needs`（按“命令 ↔ 组”自动推出每个作业该装哪些组，
+  且每次 `uv sync` 必须一致 + `--locked --no-default-groups`）、`test_uv_run_does_not_silently_sync_the_default_groups`、
+  `test_local_sync_still_installs_every_group`。
+
+### 11.6 红线：这些不能顺手砍掉（否则门禁会红）
+
+前几轮建立的"报告真实性"体系与平台分级是耦合的，改档 3 必须一起改：
+
+1. `allurerc.mjs` 的 `tests-on-every-platform`：要求三个环境里都**有真实用例结果** → PR 只跑 Linux 必然失败。
+2. `scripts/verify_allure_report.py --expect-platforms Windows,Linux`（汇总作业，macOS 屏蔽期间，见 11.9）同理。
+3. `pytest-report` 的 `--expect-platforms "${{ matrix.platform }}"`（平台来自矩阵，不是 `runner.os`）与**按平台判的覆盖率门槛** `coverage report`：
+   意味着"每个平台都要跑全量套件"。任何"macOS 只跑一部分用例"的方案都得先决定覆盖率门槛改为只按 Linux 判。
+4. 产物清单的 `--expect-shards 0,1,2` 与矩阵的 `shard` 列表必须一致（守卫会核对）；**改片数要同时改两处**。
+
+正确做法是让"本次运行要求哪些平台"跟着事件走（PR → Linux，main → 三平台），
+`quality-platform`/`--expect-platforms`/覆盖率门槛三处都读同一个值，这样门禁仍然"按声明判"，不会因为跑得少而永远绿。
+
+### 11.7 不建议做的
+
+- **用 pytest-xdist 替代分片**：已实测 GUI 用例无收益，还会多出 Tk 初始化失败。
+- **全矩阵 `fail-fast: true`**：只在失败时省，且会丢掉"哪一片挂了"的报告，与仓库现有取舍相反。
+- **缓存整个 `.venv`**：跨平台无效，uv 缓存已覆盖大部分收益。
+- **砍掉某个平台的用例结果**：直接踩 11.6 的红线。
+
+### 11.8 落地顺序与验收
+
+1. 档 1（已完成 5/7）：作业 21 → 18，重复固定开销下降；剩两项（npm 缓存、解释器目录缓存）已列明暂缓理由，等基线数据决定要不要做。
+2. 档 2（已完成 3/4：第 8、9、11 条）：作业 18 → 13（第 11.9 节 macOS 屏蔽）→ **11**（本节）；Windows 上的实例从 5 个降到 2 个。第 10 条随 macOS 一起暂缓。
+3. 档 3（**第 15 条已完成，其余暂缓**）：依赖分组按作业拆分已落地（收益与两个坑见 11.5 的小节）。
+   第 12、13、14 条（PR 只跑 Linux / 按严重等级 / `slow` 标记）要同步改门禁与覆盖率门槛策略，
+   缓做 —— 它们是"少跑多少"的量级，比作业数与下载量更值钱，但需要先确认"PR 上少跑"是想要的口径。
+   覆盖率门槛策略同步待定：`pytest-report` 的 `coverage report` 是**按平台**判的，PR 只跑 Linux 时
+   要么门槛只按 Linux 判，要么报告里声明"本次只要求 Linux"。
+
+每档改完都对照 11.1 的基线表复核：**先量、再改、再量**。基线的量法：`gh run view <id> --json jobs` 看逐作业耗时，
+Settings → Billing → Actions 看按倍率加权后的额度。
+
+### 11.9 macOS 暂时屏蔽（2026-09-21，已实施）
+
+**决定**：开发阶段不跑 macOS runner，等工具进入维护期再加回来。
+
+**理由**：macOS runner 按 10 倍率计费（Linux ×1 / Windows ×2 / macOS ×10），而当前 macOS 上跑的东西
+对开发阶段的价值最低：用例里覆盖 macOS **代码路径**的那批（`test_platforms.py` / `test_platform_scan.py` /
+`test_steam_cloud.py` / `test_hotkeys.py` / `test_processes.py` / `test_snapshot.py` / `test_ui_models.py`）
+本来就是**在任意平台上跑都成立**的单元用例，在 Linux/Windows 上照样执行；真正只能在 macOS 上得到的
+只有“GUI 在真实 macOS 上能跑起来”与“`mypy --platform darwin` 那一次”。
+
+**做法**（三处必须一致，已由 `tests/unit/test_report_verification.py::test_required_platforms_match_the_ci_matrix` 核对）：
+
+1. `ci.yml` 的三个平台列表（`pytest` / `pytest-report` 的矩阵条目与 `security` 的 `os:` 列表）只剩两个平台；
+2. `allurerc.mjs` 的 `tests-on-every-platform.environmentsTested` → `["Windows", "Linux"]`；
+3. 汇总作业的 `--expect-platforms Windows,Linux`。
+
+报告配置里的 `macos` 环境 matcher **保留**（本地在 macOS 上跑一次就能看到它，恢复时不用改；
+`tests/unit/test_test_config.py` 也依赖它覆盖全部平台标签）。
+
+**额度收益**：作业实例 18 → **13**（`quality` 1 + `pytest` 6 + `pytest-report` 2 + `performance` 1 + `security` 2 + `allure-summary` 1）。
+因为 macOS 那 4 个实例都是按 ×10 计价，实际额度降幅远大于实例数从 18 到 13 的 28%。
+（档 2 之后是 **11** 个实例，见 11.4。）
+
+**代价（要诚实记下来）**：
+
+- `mypy --platform darwin` 在此阶段**不再被执行**：`Check.host_platform = "darwin"` 在 Windows 上被跳过，
+  darwin 专属分支暂时没有类型检查覆盖（不是被误判为通过，而是根本没跑 —— 报告里也不会出现伪造的 macOS 环境）；
+- “GUI 能在真实 macOS 上跑起来”不再有 CI 证据，`docs/platforms.md` 的支持矩阵要按“未经实机测试”看；
+- 不涉及：`docs/` 里讲平台差异的内容、`tests/` 里那些验 macOS 代码路径的用例都保留原样。
+
+**恢复清单**（按顺序做，不要漏项）：
+
+1. `ci.yml`：`pytest` 与 `pytest-report` 的矩阵都是 `include` 逐条列（见 11.4），所以是**加条目**而不是加列表项 ——
+   `pytest` 加 1~2 条 `{ os: macos-latest, platform: macOS, shard: N, shards: N }`，
+   `pytest-report` 加一条 `{ os: macos-latest, platform: macOS, expect_shards: ... }`（片号要与上面的条目一致），
+   `security` 的 `os: [...]` 列表加回 `macos-latest`；
+2. `allurerc.mjs`：`environmentsTested` 加回 `"macOS"`；
+3. `ci.yml` 汇总作业：`--expect-platforms Windows,macOS,Linux`；
+4. 守卫：`test_quality_gate_asks_every_platform_for_real_tests` 的期望值、`test_ci_publishes_only_verified_report` 的计数、
+   `test_required_platforms_match_the_ci_matrix` 里的期望集合；
+5. 文档：`README.md`、`docs/development.md`、`docs/testing.md` 里“macOS 暂时屏蔽”的说明全部去掉（搜这个关键词即可定位）；
+6. 跑一次 CI 确认 macOS 三个作业都能起来（Tkinter 自检那一步在 macOS 上也会执行）。
+
+**备选方案（想保留 darwin 那支类型检查时用）**：把 `platform` 组改成“在任意平台上执行、结论归 `common`”
+（只需把 `Check.host_platform` 从两条平台检查上去掉，同步改守卫与 `docs/testing.md`），几十秒的成本就能
+覆盖 darwin 分支。前提是接受 11.1 那条结论：`--platform` 只选 typeshed 与分支，本仓库本地在
+Windows / Linux / darwin 三种 `--platform` 下都报 `Success: no issues found in 145 source files`，
+与宿主无关；唯一会变的是“平台专属第三方包”的解析（本仓库只有 `winreg`，它是标准库且用
+`importlib.import_module` 延迟导入 + 本地 Protocol 声明，另有 `ignore_missing_imports = true` 兜底）。
+若将来有 Windows-only 的第三方包（例如 pywin32）被 `sys.platform == "win32"` 分支导入，
+Linux 宿主上的 `--platform win32` 会把它静默降级为 `Any`，那时必须把这条检查搬回 Windows。
+
 ---
 # 这部分以下的内容识别时忽略，仅为个人记录灵感
 

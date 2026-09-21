@@ -7,8 +7,9 @@
 - 每个测试模块都声明了 epic/feature/story/layer 四层 Allure 标签,
   保证报告里"按产品级模块/功能/场景的稳定性分布"与"按层耗时"不会出现空分类;
 - 默认收集范围只含单元与集成测试, 性能/安全测试只在 CI 执行;
-- 跨模块共享的测试辅助模块(``tests/helpers.py``、``tests/reporting.py``)可导入,
-  避免各模块重复维护同一批构造器; mypy 也要能解析它们(见下一条)。
+- 跨模块共享的测试辅助模块(``tests/helpers.py``、``tests/reporting.py``、``tests/ci_workflow.py``)
+  可导入, 避免各模块重复维护同一批构造器(最后一个负责解析 CI 工作流文本, 报告与分片
+  两组守卫都用它); mypy 也要能解析它们(见下一条)。
 - ``pyproject.toml`` 的 ``mypy_path`` 包含 ``tests`` 目录: pre-commit 与编辑器会用
   "只检查改动文件"的方式词用 mypy, 此时 ``files`` 配置不生效, 找不到共享模块的
   导入会被静默当成 ``Any``(表现为 ``no-any-return`` 误报)。
@@ -28,9 +29,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import allure
+import coverage
 import pytest
 from allure_pytest.utils import allure_name
 
+import ci_workflow
 import conftest
 from archive_management.services.platforms import PLATFORM_LABELS
 
@@ -147,9 +150,190 @@ def test_every_test_has_a_maximum_runtime(pytestconfig: pytest.Config) -> None:
     assert pytestconfig.getoption("timeout_method") == "thread"
 
 
+def test_coverage_data_from_another_platform_can_be_combined(
+    pytestconfig: pytest.Config, tmp_path: Path
+) -> None:
+    """各平台的覆盖率数据要能在报告作业(Ubuntu)上合并: 记相对路径, 分隔符自动归一.
+
+    报告生成是纯文件操作, 所以两个平台的数据都在 Ubuntu 上合并(见 docs/testing.md 第 6 节),
+    而 Windows 记下的名字是反斜杠形式。``relative_files = true`` 让两边的名字都相对仓库根,
+    ``coverage combine`` 再把分隔符换成本机的那一种 —— 少了这个设置会变成"合并成功但一个
+    文件都对不上"(覆盖率报告空掉, 而 Windows 上跑这条用例看不出来, 只有 Linux 才暴露)。
+    """
+    root = Path(str(pytestconfig.rootpath))
+    with (root / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    assert config["tool"]["coverage"]["run"]["relative_files"] is True, (
+        "报告作业要在 Ubuntu 上合并 Windows 的分片数据: 绝对路径在那台机器上还原不出来"
+    )
+
+    # 造一份"在另一台机器上产出的"数据: Windows 记下的是反斜杠形式的相对路径。
+    recorded = "\\".join(["src", "archive_management", "config.py"])
+    source = tmp_path / ".coverage.other"
+    data = coverage.CoverageData(basename=str(source))
+    data.add_lines({recorded: {1: 1}})
+    data.write()
+
+    combined = tmp_path / ".coverage.combined"
+    coverage.Coverage(data_file=str(combined)).combine(data_paths=[str(source)])
+    reader = coverage.Coverage(data_file=str(combined))
+    reader.load()
+    measured = reader.get_data().measured_files()
+
+    assert len(measured) == 1
+    assert Path(measured.pop()).is_file(), (
+        '合并后的路径要对上本机的真实文件(否则 coverage report 只会报"没有数据")'
+    )
+
+
+def test_ci_matrix_parser_accepts_both_layouts() -> None:
+    """工作流文本解析要认两种排版: 行内 ``- { os: ..., shard: 0 }`` 与多行写法.
+
+    守卫读的是工作流**文本**, 而编辑器会在两种排版之间重排(本仓库的 ``needs:`` 就被摊成过
+    多行)。解析助手认不下另一种写法时守卫会误报 —— 那比没有守卫更糟, 所以这里两种都钉住。
+    """
+    inline = (
+        "\n  demo:\n    strategy:\n      matrix:\n        include:\n"
+        "          - { os: ubuntu-latest, platform: Linux, shard: 0, shards: 3 }\n"
+        "          - { os: windows-latest, platform: Windows, shard: 0, shards: 2 }\n"
+        "    steps:\n      - name: 无关的步骤\n"
+    )
+    block = (
+        "\n  demo:\n    strategy:\n      matrix:\n        include:\n"
+        "          - os: ubuntu-latest\n            platform: Linux\n"
+        "            shard: 0\n            shards: 3\n"
+        "          - os: windows-latest\n            platform: Windows\n"
+        "            shard: 0\n            shards: 2\n"
+        "    steps:\n      - name: 无关的步骤\n"
+    )
+
+    expected = [
+        {"os": "ubuntu-latest", "platform": "Linux", "shard": "0", "shards": "3"},
+        {"os": "windows-latest", "platform": "Windows", "shard": "0", "shards": "2"},
+    ]
+    assert ci_workflow.matrix_entries(inline, "demo") == expected
+    assert ci_workflow.matrix_entries(block, "demo") == expected
+
+
 def test_timeout_marker_can_override_default(pytestconfig: pytest.Config) -> None:
     """插件需支持按用例覆盖超时(慢用例可用 @pytest.mark.timeout 放宽)."""
     assert pytestconfig.pluginmanager.has_plugin("timeout")
+
+
+# 作业里的命令 → 它需要的依赖组(见 pyproject 的 [dependency-groups] 注释)。
+# 按"命令 ↔ 组"而不是手写一张作业清单: 手写的清单会在改动命令时过期, 而这里只要某个作业
+# 开始跑 pytest / 调质量门禁脚本, 就会自动要求对应的组。
+_CI_COMMAND_GROUPS = (
+    (r"\buv run pytest\b", "test"),
+    (r"\buv run coverage\b", "coverage"),
+    (r"\buv run ruff\b", "quality"),
+    (r"\buv run mypy\b", "quality"),
+    (r"\buv run pyinstaller\b", "package"),
+    # 质量门禁脚本的三组各跑什么: core/platform 是 ruff/mypy(质量组), analysis 是那 5 个工具。
+    (r"create_allure_quality\.py --group (?:core|platform)", "quality"),
+    (r"create_allure_quality\.py --group analysis", "analysis"),
+)
+# 本地提交钩子与常见本地命令要用的工具: 默认组装不下它们, 本地就跑不了。
+_LOCAL_TOOLS = (
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "deptry",
+    "pytest",
+    "coverage",
+    "pyinstaller",
+)
+
+
+def _without_comments(text: str) -> str:
+    """去掉整行注释(注释里会拿命令当例子说明, 不能算作"这个作业跑了它")."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith("#")
+    )
+
+
+def _dev_groups() -> dict[str, list[str]]:
+    """读出 pyproject 的开发依赖分组."""
+    with (_REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        groups = tomllib.load(handle)["dependency-groups"]
+    return cast("dict[str, list[str]]", groups)
+
+
+def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
+    """CI 每个作业只装自己需要的那一组依赖, 而且每组都在 `uv sync` 里显式列出来.
+
+    一趟 CI 有十几个作业实例, 每个都装全套开发依赖(bandit / pip-audit / pyinstaller ...)
+    是最容易省掉的固定开销 —— 尤其冷缓存那一轮(锁文件一变, uv 缓存就得重建)。
+    两条判据: ① 作业里出现的命令所需的那几组必须都被某次 `uv sync` 装上(缺了会以
+    "Failed to spawn: xxx" 响亮地失败, 但仍值得在本地拦住); ② 同一作业里的每次 `uv sync`
+    必须是同一套参数(否则修复步骤那一次会把刚装好的组又删掉)。
+    """
+    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+        text = workflow.read_text(encoding="utf-8")
+        for name, body in ci_workflow.jobs(text).items():
+            commands = _without_comments(body)
+            synced = re.findall(r"uv sync[^\n]*", commands)
+
+            assert synced, f"{workflow.name} 的 {name} 没有 uv sync"
+            assert len(set(synced)) == 1, f"{name} 里每次 uv sync 必须一致: {synced}"
+            command = synced[0]
+            assert "--locked" in command, f"{name} 的 uv sync 没用 --locked"
+            # 默认组是给本地开发用的: CI 里它会把整套依赖静默装回来(实测一次装回 51 个包)。
+            assert "--no-default-groups" in command, f"{name} 的 uv sync 没关掉默认组"
+
+            listed = set(re.findall(r"--group ([\w-]+)", command))
+            hint = f"{name} 引用了不存在的依赖组: {sorted(listed)}"
+            assert listed <= set(_dev_groups()), hint
+
+            needed = {
+                group
+                for pattern, group in _CI_COMMAND_GROUPS
+                if re.search(pattern, commands)
+            }
+            hint = (
+                f"{name} 缺依赖组: {sorted(needed - listed)} (它跑了需要这些组的命令)"
+            )
+            assert needed <= listed, hint
+
+
+def test_uv_run_does_not_silently_sync_the_default_groups() -> None:
+    """CI 里必须关掉 `uv run` 的隐式 sync —— 否则上一条守卫的收益会被它悄悄吃掉.
+
+    `uv run` 默认先 sync 一次, 而 sync 装的是**默认组**: 实测在"只装了测试组"的环境里跑一次
+    `uv run pytest`, uv 又装回 51 个包(ruff / mypy / bandit / pip-audit / pyinstaller 全回来了)。
+    所以两个工作流都在顶层设 `UV_NO_SYNC=1`, 环境只由每个作业自己那句 `uv sync` 决定。
+    """
+    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+        text = workflow.read_text(encoding="utf-8")
+        head = text.split("\njobs:", 1)[0]
+
+        hint = (
+            f"{workflow.name} 顶层 env 缺少 UV_NO_SYNC: uv run 会按默认组装回全套依赖"
+        )
+        assert "UV_NO_SYNC" in head, hint
+
+
+def test_local_sync_still_installs_every_group() -> None:
+    """本地 `uv sync` 必须仍然是"全部装上": 分组只是给 CI 省带宽, 不能改变本地用法.
+
+    所以 pyproject 的 `[tool.uv] default-groups` 要覆盖**所有**组 —— 否则本地 `uv sync`
+    之后 `uv run ruff` / `uv run pytest` / 提交钩子会报 "Failed to spawn"。
+    """
+    with (_REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    groups = config["dependency-groups"]
+    defaults = list(config["tool"]["uv"]["default-groups"])
+
+    assert set(defaults) == set(groups), (
+        f"默认组 {sorted(defaults)} 与声明的组 {sorted(groups)} 不一致"
+    )
+    declared = {
+        name.split("[")[0].split(">")[0].split("=")[0].strip()
+        for group in groups.values()
+        for name in group
+    }
+    missing = [tool for tool in _LOCAL_TOOLS if tool not in declared]
+    assert not missing, f"这些工具没被任何组声明: {missing}"
 
 
 def _declared_markers(path: Path) -> set[str]:

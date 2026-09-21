@@ -3,7 +3,22 @@ name: CI
 on:
   push:
     branches: [main, dev]
+    # 纯文档改动不值得跑整套 CI(一轮约 21 个作业)。**只加在 push 上**: pull_request 若被
+    # 路径过滤跳过, 分支保护里的必需检查会永远停在 pending, PR 反而合不了 —— 需要给 PR
+    # 也省额度就改用"轻量作业 + 条件跳过重量级作业", 而不是让整个工作流不触发。
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/instructions/**"
+      - ".github/skills/**"
+      - ".github/prompts/**"
   pull_request:
+
+# 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(21 个作业)。
+# 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -14,13 +29,24 @@ permissions:
 # 顺带让文件默认编码与仓库约定一致(代码里本来就处处显式写 utf-8)。
 env:
   PYTHONUTF8: "1"
+  # `uv run` 默认会先 sync 一次环境 —— 而 sync 装的是**默认组**(见 pyproject 的
+  # [tool.uv] default-groups), 于是每个作业里第一句 `uv run ...` 就会把整套开发依赖
+  # (bandit / pip-audit / pyinstaller ...) 又装回来, 上面那句按作业分组的
+  # `uv sync --no-default-groups --group X` 就白做了(实测: 只装 test 组的临时环境里跑一次
+  # `uv run pytest`, 51 个包被重新装回, 包括 ruff/mypy/pyinstaller)。所以 CI 里统一关掉
+  # 隐式 sync: 环境只由每个作业自己那句 `uv sync --locked --no-default-groups --group ...` 决定。
+  # 少写一组依赖时的表现是**响亮**的失败(uv run 报 "Failed to spawn: ruff", 退出码 2)。
+  # 本地不受影响(默认组装全部), 所以这里只是在工作流层面覆盖。
+  UV_NO_SYNC: "1"
 
 jobs:
   quality:
-    name: 代码质量检查 (ubuntu-latest)
-    # 公共检查: ruff / ruff format / mypy 与平台无关(不涉及路径分隔符、显示或字体),
-    # 只在 Ubuntu 跑一遍 —— 跑三遍只会得到三份同样的结论, 还让报告里出现"某个平台的
-    # 质量检查"这种误导性归属(结论项因此不带平台标签, 落在报告的 default 环境)。平台专属的两次 mypy 不在这个作业里(见 quality-platform)。
+    name: 质量检查、静态分析与性能基准 (ubuntu-latest)
+    # 三批检查在一个作业里依次跑: ruff / ruff format / mypy(宿主平台)、deptry / bandit /
+    # pip-audit / radon / xenon、性能基准。它们都与平台无关(不涉及路径分隔符、显示或字体;
+    # 性能基准的数值也需要稳定的运行环境, 所以固定在这一个平台上采集), 只在 Ubuntu 跑一遍
+    # 就够 —— 每个作业实例都要重付一遍 checkout / uv 安装 / 依赖同步的固定开销。
+    # 平台专属的两次 mypy 不在这个作业里(见 pytest 作业的片 0)。
     runs-on: ubuntu-latest
 
     steps:
@@ -37,7 +63,12 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked
+        # 只装这一作业需要的组(见 pyproject 的 [dependency-groups]): 这个作业跑三道门禁
+        # —— 质量组(ruff/格式/mypy)、静态分析组(deptry/bandit/pip-audit/radon/xenon)
+        # 与性能基准(要 pytest + allure-pytest, 即测试组)。
+        # `--no-default-groups` 是必需的: 默认组是给本地开发用的, 在 CI 里它会静悄悄把
+        # 全套依赖装回来(守卫会核对每次 uv sync 都显式列组)。
+        run: uv sync --locked --no-default-groups --group test --group quality --group analysis
 
       - name: Run quality gates (ruff / format / mypy)
         # 三项检查在脚本里依次执行: 未通过时脚本以非 0 退出(作业照常红), 但结论与完整输出
@@ -53,71 +84,10 @@ jobs:
           path: allure-results-quality/
           if-no-files-found: ignore
 
-  quality-platform:
-    # 平台专属类型检查: `mypy --platform win32` / `darwin` 只把类型检查指向某支代码,
-    # 并不校验执行环境 —— 要让报告里"Windows 的结论"真的产自 Windows, 就得在那个平台上
-    # 跑。脚本会按 `Check.host_platform` 自己挑(放错平台的组直接报错, 不会默默跳过)。
-    name: 平台专属检查 (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
-          enable-cache: true
-          save-cache: false
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      - name: Run the platform-specific check (mypy --platform)
-        # Windows 只跑 --platform win32, macOS 只跑 --platform darwin(另一支自动跳过)。
-        run: uv run python scripts/create_allure_quality.py --group platform --results-dir allure-results-quality-platform
-
-      - name: Upload platform check Allure results
-        # 结论归入那个平台的环境, 与同一平台的测试结果一起看。
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: allure-results-quality-platform-${{ matrix.os }}
-          path: allure-results-quality-platform/
-          if-no-files-found: ignore
-
-  analysis:
-    name: 静态分析与依赖检查 (ubuntu-latest)
-    runs-on: ubuntu-latest
-    # 这五项与平台无关(不涉及路径分隔符、显示或字体), 只跑一个平台;
-    # 结论同样写进 Allure, 与 quality job 汇总成同一份报告。
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
-          enable-cache: true
-          save-cache: false
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --locked
-
       - name: Run static analysis (deptry / bandit / pip-audit / radon / xenon)
+        # 上一步没过也要跑完静态分析: 两类结论各管各的, 报告里一并展示。
         # 依赖卫生与漏洞、安全扫描、复杂度: 逐项跑并写进 allure-results-analysis。
+        if: always()
         run: uv run python scripts/create_allure_quality.py --group analysis --results-dir allure-results-analysis
 
       - name: Upload analysis Allure results
@@ -128,19 +98,76 @@ jobs:
           path: allure-results-analysis/
           if-no-files-found: ignore
 
+      - name: Run performance benchmarks
+        # 基准只在单一平台采集: 跨运行比较需要稳定的运行环境, 换平台会让数值失去可比性。
+        # 与上面两批检查合并到同一个作业: 它们都是"跑一次就够"的公共结论, 分作业只是多付
+        # 一整套 checkout / uv / 依赖同步的固定开销。
+        # 前面的门禁没过也要跑完: 三类结论各管各的, 报告里一并展示。
+        # 阈值写在用例里: 超出预算即失败, 性能回归直接体现在 CI 状态上。
+        if: always()
+        run: uv run pytest tests/performance -m performance --alluredir=allure-results-performance
+
+      - name: Upload performance baseline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-results
+          path: |
+            performance-results.json
+            performance-results.csv
+          if-no-files-found: ignore
+
+      - name: Upload performance Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-performance
+          path: allure-results-performance/
+          if-no-files-found: ignore
+
   pytest:
     # 套件按平台拆成几片并行跑, 各片只负责自己那部分用例, 由后续的 pytest-report
     # 作业把 Allure 结果与覆盖率数据合并成一份报告 —— 墙钟时间只取决于最慢的一片。
-    name: Pytest 分片测试 (${{ matrix.os }} · 片 ${{ matrix.shard }}/3)
+    # 平台专属的 mypy 检查也在这个作业里(片 0 的各平台各跑一次), 不再单独开作业:
+    # 单独开只是多付一整套 checkout / uv / 依赖同步的固定开销, 而这里本来就有对应平台的作业。
+    name: Pytest 分片测试 (${{ matrix.platform }} · 片 ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        # 分片规则在 tests/sharding.py(按目录经验权重“最慢的优先”装箱, 各片耗时接近)。
-        # 改片数要同时改这里的列表与下面 pytest 的 --shard-count: 两边不一致会让
-        # 部分用例静默不跑, 所以 tests/unit/test_sharding.py 会核对这两处。
-        shard: [0, 1, 2]
+        # 逐个列条目(而不是 os × shard 两个轴): 各平台的**片数不一样**, 而且每个平台的片号
+        # 必须从 0 连续编到“片数-1” —— 只声明一个 shard 轴就没法表达"Linux 三片、Windows 两片",
+        # 而片号缺号或越界会让一部分用例静默不跑(pytest 按 --shard-index 取模选片)。
+        # 片数按固定开销算(见 PLAN.md 第 11.4 节第 9 条): 某平台总时长 ≈ 片数 × 固定开销 +
+        # 串行测试时间 T —— 减片省额度、加片省墙钟。
+        # 改片数要同时改这里的 shards 与报告作业的 expect_shards:
+        # tests/unit/test_sharding.py 会核对两边, 产物清单也照它声明"必须有哪几片"。
+        #
+        # macOS 暂时屏蔽(2026-09-21): 开发阶段先不跑 macOS runner —— 按倍率计费时它是
+        # Linux 的 10 倍。**恢复清单**: 在这里加一条 macos-latest 的条目(以及 pytest-report
+        # 与 security 的矩阵)、allurerc.mjs 的 environmentsTested、汇总作业的
+        # --expect-platforms —— 三处必须一致, 守卫会核对。见 PLAN.md 第 11.9 节。
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+            shard: 0
+            shards: 3
+          - os: ubuntu-latest
+            platform: Linux
+            shard: 1
+            shards: 3
+          - os: ubuntu-latest
+            platform: Linux
+            shard: 2
+            shards: 3
+          - os: windows-latest
+            platform: Windows
+            shard: 0
+            shards: 2
+          - os: windows-latest
+            platform: Windows
+            shard: 1
+            shards: 2
 
     steps:
       - name: Check out repository
@@ -158,23 +185,40 @@ jobs:
           save-cache: ${{ matrix.shard == 0 }}
 
       - name: Set up Python
-        # --reinstall 是刻意的: uv 托管的 standalone 构建靠自身目录里的 tcl 数据文件
-        # 定位 Tcl, 那份副本一旦陈旧或不完整(缓存复用后出现过), tkinter 就会以
-        # "Can't find a usable init.tcl" 失败(上游: astral-sh/uv#7036)。重建解释器
-        # 比事后设 TCL_LIBRARY/TK_LIBRARY 更可靠, 也不影响其它平台。
-        run: uv python install --reinstall 3.12
+        # 先普通安装(命中 uv 的下载缓存时很快), **不**无条件 --reinstall: 那等于每次都
+        # 重下解释器。Tcl 数据文件损坏的情况交给下面"自检失败才重装"那一步。
+        run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked
+        # 只装测试组(pytest / pytest-cov / allure-pytest / 超时插件 / 失败现场留证)**与
+        # 质量组** —— 后者是给片 0 的平台专属检查用的(它跑 mypy --platform win32, 由
+        # scripts/create_allure_quality.py 的 platform 组调用)。矩阵是共享的, 所以各片
+        # 都装同样的组: 按片加条件会让这两句话各自带一份 ${{ }} 表达式, 得不偿失。
+        run: uv sync --locked --no-default-groups --group test --group quality
 
       - name: Verify Tkinter works (Windows/macOS)
         # GUI 用例把"Tk 起不来"当作环境问题 skip(见 tests/integration/test_gui_*.py 的
         # 环境守卫), 于是 Tcl 坏掉只会表现为一堆 skip —— 而 GUI 用例占覆盖率很大一块,
         # 默不作声地全 skip 会让覆盖率门槛变成一个难定位的失败(实测 67.88% < 85%)。
-        # 这里先显式确认一次: 坏掉时就用一行清楚的错误把原因抬到表面。
+        # 这一步失败**不等于**作业失败(continue-on-error): 先给一次修复机会, 真正的判定
+        # 在后面那次复检 —— 修不好照样红(所以不如"直接 --reinstall"容易漏掉问题)。
         # Linux 的显示环境由下面的 xvfb 提供, 不在这里检查。
+        id: tkinter
         if: runner.os != 'Linux'
+        continue-on-error: true
         run: uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK')"
+
+      - name: Repair the interpreter and re-check Tkinter
+        # 只有上一步真的失败了才重装(跳过与失败不同, 所以 Linux 不会走到这里)。uv 托管的
+        # standalone 构建靠自身目录里的 tcl 数据文件定位 Tcl, 那份副本陈旧或不完整(缓存
+        # 复用后出现过)时 tkinter 会报 "Can't find a usable init.tcl"(上游 astral-sh/uv#7036)。
+        # 重建解释器比事后设 TCL_LIBRARY/TK_LIBRARY 更可靠, 也不影响其它平台; 重装后再 sync
+        # 一次让虚拟环境跟着新解释器走, 然后立刻复检(这一步没有 continue-on-error)。
+        if: steps.tkinter.outcome == 'failure'
+        run: |
+          uv python install --reinstall 3.12
+          uv sync --locked --no-default-groups --group test --group quality
+          uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK after repair')"
 
       - name: Install Xvfb (Linux)
         if: runner.os == 'Linux'
@@ -195,7 +239,7 @@ jobs:
         env:
           # 每片写一份自己的覆盖率数据(合并放到 pytest-report 作业里)。
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
-        run: xvfb-run -a uv run pytest --shard-count 3 --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+        run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Pytest with coverage (Windows/macOS)
         if: runner.os != 'Linux'
@@ -203,7 +247,7 @@ jobs:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         # 单片覆盖率天生偏低, 所以这里关掉报告与门槛(--cov-report= / --cov-fail-under=0):
         # 门槛只在合并后的总覆盖率上判, 见 pytest-report 作业。
-        run: uv run pytest --shard-count 3 --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+        run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Upload shard Allure results
         if: always()
@@ -223,19 +267,52 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
 
+      - name: Run the platform-specific check (Windows/macOS, shard 0)
+        # 平台专属类型检查(mypy --platform win32 / darwin)只在该平台上跑: `--platform` 只是
+        # "检查哪支代码", 并不校验执行环境 —— 放到 Ubuntu 上跑出来的结论, 挂到 Windows 环境里
+        # 就是假的归属(见 scripts/create_allure_quality.py 的 platform 组)。
+        # 放在测试与上传之后: 它是门禁, 而门禁失败不该让这次的测试结果拿不到。
+        # 片 0 兼顾两件事(依赖缓存写入 + 这条检查), 其余片与 Linux 都不跑。
+        if: matrix.shard == 0 && runner.os != 'Linux' && always()
+        run: uv run python scripts/create_allure_quality.py --group platform --results-dir allure-results-quality-platform
+
+      - name: Upload platform check Allure results
+        # 结论归入那个平台的环境, 与同一平台的测试结果一起看。
+        if: matrix.shard == 0 && runner.os != 'Linux' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-quality-platform-${{ matrix.os }}
+          path: allure-results-quality-platform/
+          if-no-files-found: ignore
+
   pytest-report:
-    # 每个平台一个作业: 把该平台各片的 Allure 结果与覆盖率数据合并成一份报告。
-    # 产物名与以前完全一致(allure-resources-/coverage-/allure-report-<平台>), 汇总作业
-    # 与历史回填都照旧读它们。
-    name: 合并测试报告 (${{ matrix.os }})
+    # 每个平台一份报告: 把该平台各片的 Allure 结果与覆盖率数据合并成一份。
+    # **两台机器都在 Ubuntu 上**(矩阵里只列平台, 不再列 runner): 合并、覆盖率汇总、报告生成
+    # 与自检全是纯文件操作, 与产出数据的平台无关 —— Windows runner 要按 2 倍计价, 而结论
+    # 完全一样(原来那些 pwsh 分支也一起没了)。
+    # 归到哪个平台由矩阵的 platform 决定, **不能再用 runner.os**(两台都是 Linux): 否则报告里
+    # 会出现"产自 Ubuntu 的 Windows 结论"。覆盖率数据也是**按平台分开**合并与判门槛的。
+    # 产物名与以前完全一致(allure-resources-/coverage-/allure-report-<runner 镜像名>), 汇总
+    # 作业与历史回填都照旧读它们 —— 历史也按平台各一条, 改名会把累计曲线清零。
+    name: 合并测试报告 (${{ matrix.platform }})
     needs: [pytest]
     # 分片作业失败也要出报告: 报告正是用来看"哪一片挂了"的。
     if: always()
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 与 pytest 作业同一个平台列表与同一套片数(见那里的说明): 条目里的 os 只用来拼
+        # 产物名(哪个平台的产物), platform 是报告里的环境名。
+        # expect_shards 必须与那个平台在 pytest 矩阵里的片号一致
+        # (tests/unit/test_sharding.py 会核对): 声明一个根本没人跑的片号等于白声明。
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+            expect_shards: "0,1,2"
+          - os: windows-latest
+            platform: Windows
+            expect_shards: "0,1"
 
     steps:
       - name: Check out repository
@@ -252,7 +329,9 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked
+        # 这个作业不跑用例: 它只用覆盖率 CLI 把各片数据合起来、判门槛、出报告(报告与
+        # 自检脚本只用标准库), 所以只装覆盖率那一组。
+        run: uv sync --locked --no-default-groups --group coverage
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -287,20 +366,22 @@ jobs:
 
       - name: Merge shard Allure results
         # 参数用引号包住通配符: pwsh 不会自己展开它, 由脚本统一展开(bash 展开了也无妨)。
+        # --platform 是这个平台的**展示名**(不是 runner 镜像名): 它写进产物清单, 汇总作业
+        # 拿它与报告里的环境对齐; 两台报告作业都跑在 Ubuntu 上, 所以只能由矩阵给出。
         # --expect-shards 与矩阵的 shard 列表一致(tests/unit/test_sharding.py 会核对):
         # 少一片时合并照常成功、报告也只是安静地少一部分用例(环境/通过率都看不出来),
         # 所以把"谁报了多少条、缺哪几片"写成产物清单, 随产物上传给汇总作业对数。
-        run: uv run python scripts/merge_allure_results.py --output allure-results --platform "${{ runner.os }}" --expect-shards 0,1,2 --manifest allure-manifest.json "allure-results-${{ matrix.os }}-*"
+        run: uv run python scripts/merge_allure_results.py --output allure-results --platform "${{ matrix.platform }}" --expect-shards ${{ matrix.expect_shards }} --manifest allure-manifest.json "allure-results-${{ matrix.os }}-*"
 
-      - name: Collect coverage data (Linux/macOS)
+      - name: Collect coverage data
+        # 各片的 COVERAGE_FILE 是隐藏文件, 合并要求它们就在当前目录(coverage combine
+        # 只扫工作目录); 下载来的产物各自落在以产物名命名的子目录里, 所以先摊平。
         shell: bash
         run: cp coverage-data-*/.coverage.shard-* ./
 
-      - name: Collect coverage data (Windows)
-        shell: pwsh
-        run: Get-ChildItem -Path coverage-data-* -Force -File | Copy-Item -Destination .
-
       - name: Combine coverage data
+        # 只含**这一个平台**各片的数据(这一步的下载范围就是本平台的产物): 混在一起的话
+        # 某个平台掉了一半数据也看不出来。
         run: uv run coverage combine
 
       - name: Enforce the coverage threshold
@@ -317,8 +398,10 @@ jobs:
       - name: Attach coverage report to Allure
         # 脚本把覆盖率摘要写成一条结果(按平台归到各环境), 并把原始 coverage.xml 作为
         # 附件一起放进 allure-results —— 报告里能直接下载原始数据, 不只是渲染好的表。
+        # --platform 是这个平台的展示名: 这台机器是 Ubuntu, 但它合并的是那个平台的数据,
+        # 宿主平台自己认(platform.system()) 会把结论标成 Linux。
         if: always()
-        run: uv run python scripts/create_allure_coverage.py
+        run: uv run python scripts/create_allure_coverage.py --platform "${{ matrix.platform }}"
 
       - name: Resolve previous successful run
         id: prev-run
@@ -366,25 +449,18 @@ jobs:
           path: .previous-allure-resources
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore previous Allure history (Linux/macOS)
-        if: steps.prev-run.outputs.run_id != '' && runner.os != 'Windows'
+      - name: Restore previous Allure history
+        if: steps.prev-run.outputs.run_id != ''
         shell: bash
         run: |
           mkdir -p .allure
           cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
 
-      - name: Restore previous Allure history (Windows)
-        if: steps.prev-run.outputs.run_id != '' && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force .allure | Out-Null
-          Copy-Item .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
-
-      - name: Generate Allure report (Linux/macOS)
+      - name: Generate Allure report
         # 历史设置(historyPath/appendHistory/historyLimit)与环境映射都在仓库根的
         # allurerc.mjs 里, CLI 会从工作目录自动读取 —— 不再临时写 `.allure/allurerc.json`
         # 再 `--config` 指定(那样会忽略仓库配置, 平台也就不会成为报告的"环境").
-        if: always() && runner.os != 'Windows'
+        if: always()
         shell: bash
         run: |
           mkdir -p .allure
@@ -394,28 +470,17 @@ jobs:
             echo "没有可用的 allure-results, 跳过报告生成"
           fi
 
-      - name: Generate Allure report (Windows)
-        if: always() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force .allure | Out-Null
-          if (Get-ChildItem allure-results -File -ErrorAction SilentlyContinue | Select-Object -First 1) {
-            allure generate allure-results --output allure-report
-          } else {
-            Write-Host "没有可用的 allure-results, 跳过报告生成"
-          }
-
       - name: Verify Allure report
         # 报告是静态站点: 用例详情页要按需取 data/test-results/*.json。这个目录一旦
         # 在传输/解压环节丢掉, 报告就只剩"通过/失败", 点开用例是空的 —— 所以发布前
         # 先自检, 并通过 --zip 打成单个文件发布(整目录被静默丢掉的情况不会再出现)。
-        # --expect-platforms 传本作业自己的平台(runner.os 就是 Windows/macOS/Linux):
-        # 要求这台机器的报告里真的有**用例**结果, 只有覆盖率/安全汇总项不算。
+        # --expect-platforms 传的是矩阵里的平台: 要求这份报告里真的有**用例**结果,
+        # 只有覆盖率/安全汇总项不算(本作业跑在 Ubuntu 上, runner.os 会说 Linux)。
         # --manifest 把报告里的用例数与分片自报的条数对齐 —— 少一片只有这里能发现。
         id: verify-report
         if: always()
         shell: bash
-        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip --expect-platforms "${{ runner.os }}" --manifest allure-manifest.json
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip --expect-platforms "${{ matrix.platform }}" --manifest allure-manifest.json
 
       - name: Upload Allure resources
         if: always()
@@ -448,56 +513,14 @@ jobs:
           path: allure-report.zip
           if-no-files-found: ignore
 
-  performance:
-    name: 性能基准 (ubuntu-latest)
-    runs-on: ubuntu-latest
-    # 基准只在单一平台采集: 跨运行比较需要稳定的运行环境, 换平台会让数值失去可比性.
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
-          enable-cache: true
-          save-cache: false
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      - name: Run performance benchmarks
-        # 阈值写在用例里: 超出预算即失败, 性能回归直接体现在 CI 状态上.
-        run: uv run pytest tests/performance -m performance --alluredir=allure-results-performance
-
-      - name: Upload performance baseline
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: performance-results
-          path: |
-            performance-results.json
-            performance-results.csv
-          if-no-files-found: ignore
-
-      - name: Upload performance Allure results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: allure-results-performance
-          path: allure-results-performance/
-          if-no-files-found: ignore
-
   security:
     name: 安全测试 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 与 pytest 作业同一个平台列表(见那里的"macOS 暂时屏蔽"说明)。
+        os: [ubuntu-latest, windows-latest]
     # 安全防护是跨平台正确性属性: 路径越界、符号链接与权限差异都要在每个平台验证.
     steps:
       - name: Check out repository
@@ -514,7 +537,8 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked
+        # 安全用例也是 pytest 跑的, 同样只需要测试组。
+        run: uv sync --locked --no-default-groups --group test
 
       - name: Run security tests
         run: uv run pytest tests/security -m security --alluredir=allure-results-security
@@ -541,15 +565,10 @@ jobs:
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
     # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure
     # 结果的作业"一致(tests/unit/test_sharding.py 会核对)。
-    needs:
-      [
-        quality,
-        quality-platform,
-        analysis,
-        pytest-report,
-        performance,
-        security,
-      ]
+    # 平台专属检查、静态分析与性能基准现在都跑在 pytest 的片 0 与 quality 作业里, 所以清单里
+    # 不再有 quality-platform / analysis / performance: 它们要出的产物都由这两个作业上传,
+    # 等它们跑完即可。
+    needs: [quality, pytest-report, security]
     if: always()
     steps:
       - name: Check out repository
@@ -566,7 +585,9 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked
+        # 这个作业一行 Python 依赖都不需要: 脚本只用标准库(读 JSON/XML、写 Allure 结果),
+        # Allure CLI 由 npm 提供。所以一个开发组都不装 —— 这一档里最划算的一个作业。
+        run: uv sync --locked --no-default-groups
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -597,7 +618,7 @@ jobs:
           fi
 
       - name: Collect shard manifests
-        # 各平台报告作业写的产物清单(逐分片条数 + 缺哪几片): 三个平台同名, 用产物目录名
+        # 各平台报告作业写的产物清单(逐分片条数 + 缺哪几片): 各平台同名, 用产物目录名
         # 区分后放到同一个目录里, 交给下面的校验脚本一次性对齐。
         if: always()
         shell: bash
@@ -639,7 +660,8 @@ jobs:
           path: allure-results
 
       - name: Download platform check Allure results
-        # 平台专属检查(Windows / macOS)各自在对应平台上产出, 归入那个平台的环境。
+        # 平台专属检查(当前只剩 Windows 的 mypy --platform win32)在对应平台上产出,
+        # 归入那个平台的环境; macOS 屏蔽期间没有这份产物(下载步骤容忍缺失)。
         if: always()
         uses: actions/download-artifact@v7
         continue-on-error: true
@@ -781,6 +803,8 @@ jobs:
         # 用例全没合并进来"就没人发现(实测: 删掉 Linux 的 1166 条用例后环境依然齐全)。
         # --manifest 再补一道"分片都到齐了吗": 少一片时环境、通过率、格式自检全都正常,
         # 只有把分片自报的条数与最终条数对齐才能看出来。
+        # --expect-platforms 要与实际跑的矩阵一致(macOS 暂时屏蔽时就不能要求它,
+        # 否则每个平台都没数据会必然失败); 守卫会把三处拷在一起。
         # 这一条不拦发布(`continue-on-error`): 这属于**内容**问题, 而报告正是用来看
         # "哪个平台没数据"的东西, 拦下来反而拿不到证据; 判定交给末尾的门禁结论步骤。
         # 另外它也是仓库自己表达同一道不变式的地方(不只靠 Allure 配置里的 filter)。
@@ -788,7 +812,7 @@ jobs:
         if: always()
         continue-on-error: true
         shell: bash
-        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --expect-platforms Windows,macOS,Linux --manifest "allure-manifests/*.json"
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --expect-platforms Windows,Linux --manifest "allure-manifests/*.json"
 
       - name: Upload final Allure resources
         if: always()

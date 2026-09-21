@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+import ci_workflow
 import sharding
 
 pytestmark = [
@@ -31,7 +32,6 @@ pytestmark = [
 ]
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def _load_script(name: str) -> Any:
@@ -113,28 +113,54 @@ def test_cost_of_uses_directory_weights() -> None:
 
 def _workflow_text() -> str:
     """读取 CI 工作流文本(与 test_report_verification.py 一样直接看文本)."""
-    return _WORKFLOW.read_text(encoding="utf-8")
+    return ci_workflow.workflow_text()
 
 
-def _matrix_shards(text: str) -> list[int]:
-    """取出 pytest 矩阵里的分片列表."""
-    match = re.search(r"^\s*shard: \[([0-9,\s]+)\]$", text, re.MULTILINE)
-    assert match is not None, "CI 里找不到分片矩阵(shard: [...])"
-    return [int(value) for value in re.findall(r"\d+", match.group(1))]
+def _shards_per_platform(text: str) -> dict[str, list[int]]:
+    """从 pytest 矩阵里取出"每个平台有哪些片号"."""
+    shards: dict[str, list[int]] = {}
+    for entry in ci_workflow.matrix_entries(text, "pytest"):
+        shards.setdefault(entry["platform"], []).append(int(entry["shard"]))
+    return shards
 
 
 def test_ci_shard_count_matches_the_matrix() -> None:
-    """片数与 --shard-count 必须一致: 矩阵多一片会让那部分用例永远不跑."""
+    """每个平台的片数与它的 --shard-count 必须一致, 且片号连续(否则有用例静默不跑)."""
     text = _workflow_text()
-    shards = _matrix_shards(text)
+    shards = _shards_per_platform(text)
 
-    counts = {int(value) for value in re.findall(r"--shard-count (\d+)", text)}
-    hint = (
-        "CI 的 shard 矩阵与 --shard-count 不一致; "
-        f"矩阵={shards}, --shard-count={sorted(counts)}"
-    )
-    assert counts == {len(shards)}, hint
-    assert shards == list(range(len(shards))), "分片编号必须是 0..N-1"
+    hint = "pytest 命令要用矩阵里的片数, 不能写死一个数字"
+    assert "--shard-count ${{ matrix.shards }}" in text, hint
+    assert re.findall(r"--shard-count (\d+)", text) == [], hint
+
+    for platform, plan in shards.items():
+        assert sorted(plan) == list(range(len(plan))), (
+            f"{platform} 的片号必须是 0..N-1: {sorted(plan)}"
+        )
+    # 每条矩阵条目自报的 shards 要与那个平台实际列出的片号个数一致。
+    for entry in ci_workflow.matrix_entries(text, "pytest"):
+        assert int(entry["shards"]) == len(shards[entry["platform"]]), (
+            f"{entry['platform']} 的 shards 与列出条数对不上"
+        )
+
+
+def test_ci_matrix_runners_match_the_platform_labels() -> None:
+    """矩阵里的 runner 与平台名必须是同一台机器: 错配就是报告里的假归属.
+
+    报告里的"环境"由矩阵的 platform 决定(报告作业固定跑在 Ubuntu 上, 不能再读
+    runner.os), 所以这一对一旦写岔, 一个平台的结论就会被挂到另一个环境里 ——
+    而这种错不会让任何一步失败。
+    """
+    text = _workflow_text()
+    entries = [
+        *ci_workflow.matrix_entries(text, "pytest"),
+        *ci_workflow.matrix_entries(text, "pytest-report"),
+    ]
+
+    for entry in entries:
+        assert ci_workflow.OS_PLATFORMS[entry["os"]] == entry["platform"], (
+            f"{entry['os']} 上跑的不是 {entry['platform']}"
+        )
 
 
 def test_ci_passes_the_shard_index_to_pytest() -> None:
@@ -156,18 +182,12 @@ def test_ci_merges_shard_results_with_the_script() -> None:
     # 汇总作业要等齐**所有**产出结论的作业: 漏一个就会漏收它的产物(报告里少一块),
     # 或者在该作业上传完之前就去下载(拿到半份)。新增产出 Allure 结果的作业时一起改这里。
     # 断言只看标识符集合, 不管 YAML 是写成一行还是摊成多行(编辑器会按自己的风格重排)。
-    needs = re.search(r"needs:\s*\[([^\]]+)\]", text.split("allure-summary:", 1)[1])
-    assert needs is not None, "allure-summary 没有声明 needs"
-    # 摊成多行时末尾会多一个逗号, 空项要滤掉。
-    names = {name.strip() for name in needs.group(1).split(",") if name.strip()}
-    assert names == {
+    # 平台专属检查/静态分析/性能基准都并在 pytest 与 quality 里, 所以清单里没有它们的名字。
+    assert ci_workflow.needs_of(text, "allure-summary") == {
         "quality",
-        "quality-platform",
-        "analysis",
         "pytest-report",
-        "performance",
         "security",
-    }
+    }, "公共检查与性能基准在 quality 里, 所以不需要单独的作业名"
 
 
 # ---------------------------------------------------------------- 结果合并脚本
@@ -311,14 +331,26 @@ def test_ci_records_shard_counts_in_a_manifest() -> None:
     所以这份清单是唯一判据: 声明期望的片号、记下逐片条数、上传、汇总后对齐。
     """
     text = _workflow_text()
-    shards = re.findall(r"^\s+shard: \[([^\]]+)\]", text, re.MULTILINE)
-    assert len(shards) == 1, f"期望只有一个分片矩阵, 实际 {shards}"
-    expected = ",".join(re.findall(r"\d+", shards[0]))
+    shards = _shards_per_platform(text)
+    declared = {
+        entry["platform"]: entry["expect_shards"]
+        for entry in ci_workflow.matrix_entries(text, "pytest-report")
+    }
 
-    assert f"--expect-shards {expected}" in text, (
-        "清单声明的片号必须与矩阵的 shard 列表一致(不一致等于白声明)"
+    assert set(declared) == set(shards), (
+        "报告作业的平台必须与 pytest 矩阵一致(少一个平台的报告就没人生成)"
     )
-    assert '--platform "${{ runner.os }}"' in text, "清单要记下是哪个平台"
+    for platform, plan in shards.items():
+        expected = ",".join(str(index) for index in sorted(plan))
+        assert declared[platform] == expected, (
+            f"{platform} 声明的片号 {declared[platform]!r} 与矩阵 {expected!r} 不一致"
+        )
+    assert "--expect-shards ${{ matrix.expect_shards }}" in text, (
+        "清单声明的片号要来自矩阵(不一致等于白声明)"
+    )
+    assert '--platform "${{ matrix.platform }}"' in text, (
+        "清单要记下是哪个平台; 报告作业跑在 Ubuntu 上, 不能用 runner.os"
+    )
     assert "--manifest allure-manifest.json" in text, "报告作业要把清单写下来"
     # 清单要随平台的产物上传, 否则汇总作业收不到。
     upload = text.split("- name: Upload Allure resources", 1)[1]

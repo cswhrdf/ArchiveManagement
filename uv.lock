@@ -91,21 +91,30 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-dev = [
-    { name = "allure-pytest" },
+analysis = [
     { name = "bandit" },
-    { name = "coredumpy" },
     { name = "deptry" },
-    { name = "mypy" },
     { name = "pip-audit" },
-    { name = "pre-commit" },
+    { name = "radon" },
+    { name = "xenon" },
+]
+coverage = [
+    { name = "coverage" },
+]
+package = [
     { name = "pyinstaller" },
+]
+quality = [
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "ruff" },
+]
+test = [
+    { name = "allure-pytest" },
+    { name = "coredumpy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
-    { name = "radon" },
-    { name = "ruff" },
-    { name = "xenon" },
 ]
 
 [package.metadata]
@@ -122,21 +131,26 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "allure-pytest", specifier = ">=2.16" },
+analysis = [
     { name = "bandit", extras = ["toml"], specifier = ">=1.9.4" },
-    { name = "coredumpy", specifier = ">=0.5.0" },
     { name = "deptry", specifier = ">=0.25.1" },
-    { name = "mypy", specifier = ">=2.3" },
     { name = "pip-audit", specifier = ">=2.10.1" },
+    { name = "radon", specifier = ">=6.0.1" },
+    { name = "xenon", specifier = ">=0.9.3" },
+]
+coverage = [{ name = "coverage", specifier = ">=7.16.0" }]
+package = [{ name = "pyinstaller", specifier = ">=6" }]
+quality = [
+    { name = "mypy", specifier = ">=2.3" },
     { name = "pre-commit", specifier = ">=4" },
-    { name = "pyinstaller", specifier = ">=6" },
+    { name = "ruff", specifier = ">=0.16" },
+]
+test = [
+    { name = "allure-pytest", specifier = ">=2.16" },
+    { name = "coredumpy", specifier = ">=0.5.0" },
     { name = "pytest", specifier = ">=9" },
     { name = "pytest-cov", specifier = ">=7" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "radon", specifier = ">=6.0.1" },
-    { name = "ruff", specifier = ">=0.16" },
-    { name = "xenon", specifier = ">=0.9.3" },
 ]
 
 [[package]]

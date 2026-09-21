@@ -21,7 +21,7 @@
 要求：Python >= 3.12 与 uv。
 
 ```shell
-uv sync --locked                                              # 安装依赖(含 dev 组)，不安装当前项目本身
+uv sync --locked                                              # 安装依赖(本地默认装全部开发组)，不安装当前项目本身
 uv run python -m archive_management init --root .\dev-data    # 初始化目录/配置/数据库
 uv run python -m archive_management doctor --root .\dev-data  # 健康检查
 uv run python -m archive_management gui --root .\dev-data     # 启动图形界面
@@ -59,11 +59,12 @@ uv run pytest --cov
 uv run deptry .       # 依赖卫生(未声明 / 多余 / 传递依赖)
 ```
 
-上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中 `pytest --cov` 在 Windows、Ubuntu、macOS 三平台各跑一遍，`ruff` / `mypy`（宿主平台各一次）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（与平台无关的结论项带 `env=common`，归入报告的 `Common` 环境）；覆盖平台专属分支的两条 mypy 检查（`--platform win32` / `darwin`）**各自在对应平台上跑**，结论归入那个平台的 `Windows` / `macOS` 环境，与那个平台的测试结果一起看。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
+上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中 `pytest --cov` 在 Windows、Ubuntu 两个平台各跑一遍（**macOS 在开发阶段暂时屏蔽**，见 [testing.md](./docs/testing.md) 第 4 节），`ruff` / `mypy`（宿主平台各一次）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（与平台无关的结论项带 `env=common`，归入报告的 `Common` 环境）；覆盖平台专属分支的 mypy 检查（`--platform win32`）在 Windows 上跑，结论归入那个平台的 `Windows` 环境，与那个平台的测试结果一起看。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
 
 提交钩子只运行本次变动的静态检查与最高严重等级的单元测试（快速反馈）；CI 在 Windows、
-Ubuntu、macOS 上运行全量测试，并单独执行性能基准与安全测试，最后合并成一份 Allure 报告。
-测试分类、基准阈值与报告内容见 [testing.md](./docs/testing.md)。
+Ubuntu 上运行全量测试（macOS 暂时屏蔽，见 [testing.md](./docs/testing.md) 第 4 节），并单独执行
+性能基准与安全测试，最后合并成一份 Allure 报告。测试分类、基准阈值与报告内容见
+[testing.md](./docs/testing.md)。
 
 ## 打包
 

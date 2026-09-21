@@ -98,12 +98,12 @@ export default {
       // 脚本生成的结论项(覆盖率/性能/安全/质量检查)也算在这里: 它们的状态本身就是结论,
       // 滤掉的话"覆盖率项 broken"这类失败就没人管了。
       { maxFailures: 0, successRate: 0.98 },
-      // 第二条规则集: **只看真实用例**, 要求三个平台各自都有。
+      // 第二条规则集: **只看真实用例**, 要求每个跑测试的平台各自都有。
       //
       // 为什么不再用 `minTestsCount: 3000` 兜"某个平台的产物漏收": 绝对值会随用例规模往
       // **更松**的方向漂 —— 每条平台用例数涨到 1400 上下之后, 缺一整个平台也仍然高于 3000,
       // 规则静默失效且没有任何信号(实测: 三平台合计 3P+154, 缺一个平台 = 2P+154)。现在用
-      // 环境维度表达同一件事: 滤掉脚本生成的结论项后, 三个环境里都还得剩着用例。
+      // 环境维度表达同一件事: 滤掉脚本生成的结论项后, 那些环境里都还得剩着用例。
       //
       // 判据用**必须有 `framework=pytest`** 而不是"不能带 testCategory": 这个标签由
       // allure-pytest 自己写(真实用例都有), 而我们的脚本产物一律不写它
@@ -117,13 +117,18 @@ export default {
       // 合并进一两片时, 环境、通过率、这条规则全都正常)。那一层交给产物清单:
       // scripts/merge_allure_results.py 写、各平台作业上传、由
       // scripts/verify_allure_report.py --manifest 与最终条数对齐(见 docs/testing.md 第 6 节)。
+      //
+      // **macOS 暂时屏蔽**(2026-09-21, 开发阶段省额度: macOS runner 是 Linux 的 10 倍), 
+      // 所以这里只要求两个平台。**恢复清单**: 把 "macOS" 加回这个数组, 并同步
+      // CI 的三个矩阵(pytest / pytest-report / security)与汇总作业的 --expect-platforms
+      // —— 三处必须一致, tests/unit/test_report_verification.py 会核对。见 PLAN.md 第 11.9 节。
       {
         id: "tests-on-every-platform",
         filter: (tr) =>
           tr.labels.some(
             ({ name, value }) => name === "framework" && value === "pytest",
           ),
-        environmentsTested: ["Windows", "macOS", "Linux"],
+        environmentsTested: ["Windows", "Linux"],
       },
     ],
   },
@@ -134,6 +139,8 @@ export default {
         labels.some(({ name, value }) => name === "env" && value === "Windows"),
     },
     macos: {
+      // macOS 暂时屏蔽(2026-09-21): CI 里没有这个平台的作业, 所以正常情况下报告里不会出现
+      // 这个环境。matcher 保留着 —— 本地在 macOS 上跑一次就能看到它, 恢复 CI 矩阵时也不用改。
       name: "macOS",
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "macOS"),
