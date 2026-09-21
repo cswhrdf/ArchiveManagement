@@ -56,11 +56,18 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy                     # 宿主平台(本地钩子里跑的也是这一条)
-uv run mypy --platform win32    # Windows 专属分支(宿主那次只收窄自己那一支)
-uv run mypy --platform darwin   # macOS 专属分支
 uv run pytest --cov
 uv run deptry .                 # 依赖卫生: 未声明 / 多余 / 传递依赖(本地钩子也会跑)
 ```
+
+平台专属的类型检查（CI 里各在对应平台上的 `quality-platform` 作业跑一次，本地想复现就手动执行）：
+
+```shell
+uv run mypy --platform win32    # Windows 专属分支，在 Windows 上跑
+uv run mypy --platform darwin   # macOS 专属分支，在 macOS 上跑
+```
+
+这两条只在对应平台上执行（`scripts/create_allure_quality.py` 的 `platform` 组）：`--platform` 只把类型检查指向某支代码，不代表执行环境；在别的平台上跑虽然也能过，但报告里"Windows 的结论"就是假的归属，所以脚本会按平台自己挑，放错平台的组直接报错。
 
 与平台无关的静态分析与依赖检查（CI 的 `analysis` job 跑一次，本地想复现就手动执行）：
 

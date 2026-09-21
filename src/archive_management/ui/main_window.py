@@ -185,6 +185,8 @@ class ArchiveApp(ctk.CTk):
         self._detail_name = ""
         self._detail_subtitle = ""
         self._refit_job: str | None = None
+        # 消息轮询任务的 id(destroy() 里要撤掉, 见那里的说明)。
+        self._poll_job: str | None = None
 
         self._messages: queue.Queue[
             tuple[Literal["ok", "err", "unchanged", "hotkey"], str]
@@ -215,7 +217,7 @@ class ArchiveApp(ctk.CTk):
         self._show_page(AppPage.HOME)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(100, self._poll_messages)
+        self._poll_job = self.after(100, self._poll_messages)
         if smoke_seconds is None:
             # 启动时补一次译名探测: 后台线程、只对当前语言缺条目的游戏联网(有缓存就
             # 直接复用), 探到新名字会抬高数据版本, 界面自动重绘。--smoke 不触发,
@@ -1141,12 +1143,15 @@ class ArchiveApp(ctk.CTk):
             self._set_detail_names()
 
     def _on_content_resize(self, _event: tk.Event) -> None:
-        """内容区尺寸变化: 名称的可用宽度变了, 延后重新裁一次."""
+        """内容区尺寸变化: 名称的可用宽度变了, 延后重新裁一次.
+
+        只合并、不推后(已有任务就不另排): 取消重排会让密集的尺寸事件把任务无限拖延,
+        名称就一直按旧宽度裁着 —— 与 ``HomePage._schedule_list_sync`` 同一条规则。
+        """
         if self._page is not AppPage.DETAIL or not self._detail_name:
             return
         if self._refit_job is not None:
-            with contextlib.suppress(tk.TclError):
-                self._content.after_cancel(self._refit_job)
+            return
         self._refit_job = self._content.after(_REFIT_DELAY_MS, self._refit_detail_names)
 
     def _render_task(self, task: TaskStatus) -> None:
@@ -2074,6 +2079,27 @@ class ArchiveApp(ctk.CTk):
             logger.warning("释放后台资源失败: %s", exc)
         self.destroy()
 
+    def destroy(self) -> None:
+        """销毁前撤掉挂在自己身上的定时任务.
+
+        消息轮询(每 100ms)与详情名称重裁都是 ``after`` 任务; 控件销毁后它们仍在 Tk 的
+        队列里, 下一次事件循环会以 ``invalid command name "..._poll_messages"`` 报错 ——
+        输出落到 stderr, 在 CI 里会挂到**下一个用例**的 stderr 附件上掩盖真问题(实测报告
+        里的 stderr 附件就是这么来的)。
+
+        任务 id 从 ``self.__dict__`` 里取而不是 ``getattr``: 构造中途失败时这些字段还没建好,
+        而 Tk 控件的 ``__getattr__`` 会把未知名字转发给 ``self.tk``(连 ``tk`` 都还没有时
+        会无限递归成 ``RecursionError``)。销毁函数自己不能因为"属性没建好"再抛一个异常,
+        把真正的失败现场搅乱。
+        """
+        for name in ("_poll_job", "_refit_job"):
+            job = self.__dict__.get(name)
+            if job is not None:
+                with contextlib.suppress(tk.TclError):
+                    self.after_cancel(job)
+            setattr(self, name, None)
+        super().destroy()
+
     # ---------------------------------------------------------------- 反馈与后台
 
     def _feedback(self, kind: FeedbackKind, text: str) -> None:
@@ -2130,7 +2156,7 @@ class ArchiveApp(ctk.CTk):
                 continue
             self._finish_message(kind, payload)
         self._refresh_task()
-        self.after(100, self._poll_messages)
+        self._poll_job = self.after(100, self._poll_messages)
 
     def _run_hotkey(self, payload: str) -> None:
         """执行快捷键请求; 停用或归档的游戏不触发(全局只有一款游戏启用)."""

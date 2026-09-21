@@ -20,7 +20,7 @@ jobs:
     name: 代码质量检查 (ubuntu-latest)
     # 公共检查: ruff / ruff format / mypy 与平台无关(不涉及路径分隔符、显示或字体),
     # 只在 Ubuntu 跑一遍 —— 跑三遍只会得到三份同样的结论, 还让报告里出现"某个平台的
-    # 质量检查"这种误导性归属(结论项因此不带平台标签, 落在报告的 default 环境)。
+    # 质量检查"这种误导性归属(结论项因此不带平台标签, 落在报告的 default 环境)。平台专属的两次 mypy 不在这个作业里(见 quality-platform)。
     runs-on: ubuntu-latest
 
     steps:
@@ -53,6 +53,47 @@ jobs:
           path: allure-results-quality/
           if-no-files-found: ignore
 
+  quality-platform:
+    # 平台专属类型检查: `mypy --platform win32` / `darwin` 只把类型检查指向某支代码,
+    # 并不校验执行环境 —— 要让报告里"Windows 的结论"真的产自 Windows, 就得在那个平台上
+    # 跑。脚本会按 `Check.host_platform` 自己挑(放错平台的组直接报错, 不会默默跳过)。
+    name: 平台专属检查 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
+          enable-cache: true
+          save-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run the platform-specific check (mypy --platform)
+        # Windows 只跑 --platform win32, macOS 只跑 --platform darwin(另一支自动跳过)。
+        run: uv run python scripts/create_allure_quality.py --group platform --results-dir allure-results-quality-platform
+
+      - name: Upload platform check Allure results
+        # 结论归入那个平台的环境, 与同一平台的测试结果一起看。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-quality-platform-${{ matrix.os }}
+          path: allure-results-quality-platform/
+          if-no-files-found: ignore
+
   analysis:
     name: 静态分析与依赖检查 (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -65,7 +106,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # 只读复用依赖缓存(写入交给 pytest job).
+          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
           enable-cache: true
           save-cache: false
 
@@ -108,12 +149,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # 本 job 是依赖缓存的唯一写入者: 同一个 uv.lock 在所有 job 里会算出同一个
-          # cache key, 并行保存时只有第一个能成功, 其余会打印
-          # "Unable to reserve cache ... another job may be creating this cache"。
-          # 其它 job 因此只读复用(见各自的 save-cache: false), 既没有警告也不多占缓存.
+          # 依赖缓存的唯一写入者是**每个平台的分片 0**: 同一个 uv.lock 在同一平台会算出同一个
+          # cache key, 三片并行保存时只有一个能抢到, 其余两片会打印
+          # "Failed to save: Unable to reserve cache ... another job may be creating this cache"
+          # (分片上线后三个平台都出现过)。所以只让片 0 写, 与本 job 的其它分片、以及其它 job
+          # 都只读复用(见各自的 save-cache: false) —— 每个平台只有一个写入者。
           enable-cache: true
-          save-cache: true
+          save-cache: ${{ matrix.shard == 0 }}
 
       - name: Set up Python
         # --reinstall 是刻意的: uv 托管的 standalone 构建靠自身目录里的 tcl 数据文件
@@ -202,7 +244,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # 依赖缓存的写入者是 pytest 作业(见其注释), 这里只读复用。
+          # 依赖缓存的写入者是 pytest 作业的分片 0(见其注释), 这里只读复用。
           enable-cache: true
           save-cache: false
 
@@ -245,7 +287,10 @@ jobs:
 
       - name: Merge shard Allure results
         # 参数用引号包住通配符: pwsh 不会自己展开它, 由脚本统一展开(bash 展开了也无妨)。
-        run: uv run python scripts/merge_allure_results.py --output allure-results "allure-results-${{ matrix.os }}-*"
+        # --expect-shards 与矩阵的 shard 列表一致(tests/unit/test_sharding.py 会核对):
+        # 少一片时合并照常成功、报告也只是安静地少一部分用例(环境/通过率都看不出来),
+        # 所以把"谁报了多少条、缺哪几片"写成产物清单, 随产物上传给汇总作业对数。
+        run: uv run python scripts/merge_allure_results.py --output allure-results --platform "${{ runner.os }}" --expect-shards 0,1,2 --manifest allure-manifest.json "allure-results-${{ matrix.os }}-*"
 
       - name: Collect coverage data (Linux/macOS)
         shell: bash
@@ -364,10 +409,13 @@ jobs:
         # 报告是静态站点: 用例详情页要按需取 data/test-results/*.json。这个目录一旦
         # 在传输/解压环节丢掉, 报告就只剩"通过/失败", 点开用例是空的 —— 所以发布前
         # 先自检, 并通过 --zip 打成单个文件发布(整目录被静默丢掉的情况不会再出现)。
+        # --expect-platforms 传本作业自己的平台(runner.os 就是 Windows/macOS/Linux):
+        # 要求这台机器的报告里真的有**用例**结果, 只有覆盖率/安全汇总项不算。
+        # --manifest 把报告里的用例数与分片自报的条数对齐 —— 少一片只有这里能发现。
         id: verify-report
         if: always()
         shell: bash
-        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip --expect-platforms "${{ runner.os }}" --manifest allure-manifest.json
 
       - name: Upload Allure resources
         if: always()
@@ -376,6 +424,7 @@ jobs:
           name: allure-resources-${{ matrix.os }}
           path: |
             .allure/history.jsonl
+            allure-manifest.json
             allure-results/
           include-hidden-files: true
           if-no-files-found: ignore
@@ -410,7 +459,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # 只读复用依赖缓存(写入交给 pytest job).
+          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
           enable-cache: true
           save-cache: false
 
@@ -457,7 +506,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # 只读复用依赖缓存(写入交给 pytest job).
+          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
           enable-cache: true
           save-cache: false
 
@@ -490,8 +539,17 @@ jobs:
     name: Allure 汇总报告
     runs-on: ubuntu-latest
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
-    # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。
-    needs: [quality, pytest-report, performance, security]
+    # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure
+    # 结果的作业"一致(tests/unit/test_sharding.py 会核对)。
+    needs:
+      [
+        quality,
+        quality-platform,
+        analysis,
+        pytest-report,
+        performance,
+        security,
+      ]
     if: always()
     steps:
       - name: Check out repository
@@ -500,7 +558,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # 只读复用依赖缓存(写入交给 pytest job).
+          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
           enable-cache: true
           save-cache: false
 
@@ -538,6 +596,21 @@ jobs:
               -exec cp {} allure-results/ \;
           fi
 
+      - name: Collect shard manifests
+        # 各平台报告作业写的产物清单(逐分片条数 + 缺哪几片): 三个平台同名, 用产物目录名
+        # 区分后放到同一个目录里, 交给下面的校验脚本一次性对齐。
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p allure-manifests
+          if [ -d downloaded-allure-resources ]; then
+            find downloaded-allure-resources -type f -name 'allure-manifest.json' \
+              -print0 | while IFS= read -r -d '' source; do
+              cp "${source}" "allure-manifests/$(basename "$(dirname "${source}")").json"
+            done
+          fi
+          ls -1 allure-manifests || true
+
       - name: Download performance Allure results
         if: always()
         uses: actions/download-artifact@v7
@@ -556,13 +629,24 @@ jobs:
           merge-multiple: true
 
       - name: Download quality Allure results
-        # 只有 Ubuntu 上传了这一份(见 quality job), 所以报告里只有一条质量结论。
+        # 只有 Ubuntu 上传了这一份(见 quality job): 公共检查不分平台, 所以每个门禁在报告里
+        # 仍只有一条结论; 平台专属的那两条在下一份里。
         if: always()
         uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           name: allure-results-quality
           path: allure-results
+
+      - name: Download platform check Allure results
+        # 平台专属检查(Windows / macOS)各自在对应平台上产出, 归入那个平台的环境。
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: allure-results-quality-platform-*
+          path: allure-results
+          merge-multiple: true
 
       - name: Download analysis Allure results
         # 静态分析与依赖检查同样只上传 Ubuntu 一份。
@@ -692,6 +776,20 @@ jobs:
         shell: bash
         run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip
 
+      - name: Check every platform contributed tests
+        # "环境存在"很容易被覆盖率/安全汇总项或平台专属的质量检查满足 —— 那样"某个平台的
+        # 用例全没合并进来"就没人发现(实测: 删掉 Linux 的 1166 条用例后环境依然齐全)。
+        # --manifest 再补一道"分片都到齐了吗": 少一片时环境、通过率、格式自检全都正常,
+        # 只有把分片自报的条数与最终条数对齐才能看出来。
+        # 这一条不拦发布(`continue-on-error`): 这属于**内容**问题, 而报告正是用来看
+        # "哪个平台没数据"的东西, 拦下来反而拿不到证据; 判定交给末尾的门禁结论步骤。
+        # 另外它也是仓库自己表达同一道不变式的地方(不只靠 Allure 配置里的 filter)。
+        id: verify-platforms
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --expect-platforms Windows,macOS,Linux --manifest "allure-manifests/*.json"
+
       - name: Upload final Allure resources
         if: always()
         uses: actions/upload-artifact@v7
@@ -715,8 +813,9 @@ jobs:
         # 质量门是"结论"而不是"步骤": 报告已生成、两份 artifact 都上传完了, 现在再用它的
         # 退出码决定作业成败 —— 否则门禁不通过时连报告都拿不到(结论与输出都在首页
         # 「全局附件」的运行总账里)。放在最末尾也免得后面的 `if: success()` 步骤被跳过。
-        if: always() && steps.quality-gate.outcome == 'failure'
+        # "有平台没有用例结果"也在这里一起判: 它同样属于"报告已经出来了才敢下结论"的事。
+        if: always() && (steps.quality-gate.outcome == 'failure' || steps.verify-platforms.outcome == 'failure')
         shell: bash
         run: |
-          echo "::error::质量门未通过 —— 详见报告首页「全局附件」的运行总账"
+          echo "::error::质量门未通过 或 有平台没有合并进用例结果 —— 见上面的逐平台条数与报告首页「全局附件」的运行总账"
           exit 1

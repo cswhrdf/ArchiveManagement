@@ -143,6 +143,9 @@ class _RowParts:
     # 名称标签与它的**完整**名称(标签上只放裁剪后的文本).
     label: ctk.CTkLabel
     full_name: str
+    # 上次裁到多少像素(0 = 还没裁过): 宽度没变就不重设文本, 免得反复改文本触发新的
+    # Configure 互相追着跑。
+    fitted_width: int = 0
 
 
 class HomePage:
@@ -193,6 +196,9 @@ class HomePage:
         self._origin_keys: dict[str, str] = {}
         self._category_keys: dict[str, str] = {}
         self.frame = ctk.CTkFrame(parent, fg_color=palette.background, corner_radius=0)
+        # 帧销毁时撤掉挂起的同步任务: after 回调打到已销毁的控件上会在 stderr 里留下
+        # `invalid command name ...` 噪声(报告里会挂到下一个用例的 stderr 附件上)。
+        self.frame.bind("<Destroy>", self._on_frame_destroyed, add="+")
         self._build()
         self.reload()
 
@@ -862,11 +868,32 @@ class HomePage:
         self._place_cards()
 
     def _schedule_list_sync(self) -> None:
-        """延后合并一次"表头对齐 + 名称重裁"(拖窗口时别每个像素都跑一遍)."""
+        """延后合并一次"表头对齐 + 名称重裁": 已排过队就直接返回.
+
+        **不取消也不重新计时**。改成"每次请求先取消再重新计时"看起来更平滑, 但事件流
+        只要足够密集(无窗口管理器的 Xvfb、CustomTkinter 的延迟重绘、滚动区尺寸连续变化),
+        任务就会被无限推后 —— CI 上 Linux/macOS 的名称重裁就是这么被饿死的: 现场里
+        ``_refit_attempts=1`` 而且任务仍挂在队列里, 名称停在兜底宽度的短文本上。
+        合并(而不是推后)能保证它一定在 :data:`_SYNC_DELAY_MS` 内跑一次, 拿到的也是最
+        新几何; 拖窗口时约 16 次/秒的重算代价可以接受。
+        """
         if self._sync_job is not None:
-            with contextlib.suppress(tk.TclError):
-                self.frame.after_cancel(self._sync_job)
+            return
         self._sync_job = self.frame.after(_SYNC_DELAY_MS, self._sync_list_layout)
+
+    def _on_frame_destroyed(self, event: tk.Event) -> None:
+        """宿主帧被销毁时撤掉挂起的同步任务(子控件的 Destroy 事件会冒泡上来, 要过滤)."""
+        if event.widget is not self.frame:
+            return
+        self.cancel_list_sync()
+
+    def cancel_list_sync(self) -> None:
+        """撤掉挂起的"表头对齐 + 名称重裁"任务(控件销毁前调用)."""
+        if self._sync_job is None:
+            return
+        with contextlib.suppress(tk.TclError):
+            self.frame.after_cancel(self._sync_job)
+        self._sync_job = None
 
     def _sync_list_layout(self) -> None:
         """把表头对齐到数据行, 并按名称块的**实际宽度**重新裁剪每行的名称."""
@@ -921,15 +948,36 @@ class HomePage:
         """
         retry = False
         for parts in self._row_parts.values():
-            width = parts.label.winfo_width()
+            width = int(parts.label.winfo_width())
             if width <= 1:
                 retry = True
                 continue
-            parts.label.configure(
-                text=fit_text(parts.full_name, self._name_font, width)
-            )
+            self._fit_row_name(parts, width)
         if retry:
             self._retry_refit()
+
+    def _fit_row_name(self, parts: _RowParts, width: int) -> None:
+        """按给定宽度裁一行名称; 宽度未知或没变就不动.
+
+        "没变就不动"有两层作用: 省掉一次无谓的文本重设, 也不会出现"改文本 → 新的
+        Configure → 再裁一次"这种来回追。
+        """
+        if width <= 1 or parts.fitted_width == width:
+            return
+        parts.fitted_width = width
+        parts.label.configure(text=fit_text(parts.full_name, self._name_font, width))
+
+    def _on_name_resize(self, game_id: str, event: tk.Event) -> None:
+        """名称标签自己的宽度变了 → **立刻**裁这一行.
+
+        滚动区的 ``<Configure>`` 只在**它自己**的尺寸变化时来: 内宽变了而外宽没变
+        (滚动条出现/消失、表头内边距被重算)不会触发它, 行刚重建、标签刚量到真实宽度
+        时也未必等到下一轮。所以这里直接盯标签自己: 宽度一量出来就按它裁好, 不用等
+        延后的那一轮(与容器事件互补)。只裁这一行, 拖窗口时的开销是一行一次。
+        """
+        parts = self._row_parts.get(game_id)
+        if parts is not None:
+            self._fit_row_name(parts, int(event.width))
 
     def _retry_refit(self) -> None:
         """为"宽度还没量出来"排下一轮名称重裁(有上限, 免得一直排下去)."""
@@ -1098,6 +1146,11 @@ class HomePage:
             text_color=palette.text_body,
         )
         name.pack(side="left", fill="x", expand=True, padx=(_NAME_PAD, 0))
+        # 名称标签盯住自己的宽度: 容器事件不一定来(见 _on_name_resize), 而"名称按当前
+        # 宽度裁好"是要对用户兑现的。
+        name.bind(
+            "<Configure>", lambda event: self._on_name_resize(item.game_id, event)
+        )
         self._row_parts[item.game_id] = _RowParts(left, columns, name, item.name)
         # 状态标签也封顶: 标签变多时它会把整行撑宽(横向溢出), 超出部分补省略号.
         chips = fit_text(" · ".join(item.chips), self._value_font, _COLUMNS[-1][1])

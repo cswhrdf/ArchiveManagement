@@ -222,6 +222,199 @@ def test_missing_environment_widget_is_reported(layout: _Layout) -> None:
     assert any("environments.json" in problem for problem in problems)
 
 
+def _write_platform_report(layout: _Layout) -> None:
+    """把 fixture 的报告改造成三平台形态: 一个 Windows 用例 + 一个 macOS 汇总项."""
+    windows_id, macos_id = _RESULT_IDS
+    (layout.report / "widgets" / "environments.json").write_text(
+        json.dumps(
+            [
+                {"id": "default", "name": "default"},
+                {"id": "windows", "name": "Windows"},
+                {"id": "macos", "name": "macOS"},
+                {"id": "linux", "name": "Linux"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (layout.report / "test-results.json").write_text(
+        json.dumps(
+            {
+                "byId": {
+                    windows_id: {
+                        "id": windows_id,
+                        "status": "passed",
+                        "environment": "Windows",
+                    },
+                    macos_id: {
+                        "id": macos_id,
+                        "status": "passed",
+                        "environment": "macOS",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    details = layout.report / "data" / "test-results"
+    (details / f"{windows_id}.json").write_text(
+        json.dumps(
+            {"id": windows_id, "labels": [{"name": "framework", "value": "pytest"}]}
+        ),
+        encoding="utf-8",
+    )
+    # macOS 只有一条脚本生成的汇总项(没有 framework 标签): 环境存在, 用例一条都没有。
+    (details / f"{macos_id}.json").write_text(
+        json.dumps(
+            {"id": macos_id, "labels": [{"name": "testCategory", "value": "coverage"}]}
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_platform_with_only_summary_items_is_reported(
+    layout: _Layout, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """要求每个平台里都有真实用例: 只剩汇总项时必须判为不完整.
+
+    覆盖率/性能/安全汇总项、平台专属的质量检查都带平台的 ``env``, 所以"缺一整个平台的
+    用例"在报告里看上去和三平台齐全一模一样(2026-09-21 用真实数据验过: 删掉 Linux 的
+    1166 条用例后, 不过滤的 ``environmentsTested`` 照样通过)。这里校验我们自己那一道。
+    """
+    _write_platform_report(layout)
+
+    facts, problems = verifier.verify_report(
+        layout.report, expected_platforms=("Windows", "macOS", "Linux")
+    )
+
+    assert facts is not None
+    message = next(problem for problem in problems if "没有用例结果" in problem)
+    assert "macOS" in message
+    assert "Linux" in message
+    assert "Windows" not in message.split("(")[0], "Windows 有用例, 不该被列进去"
+    # 逐平台条数要能写出来: 一眼看出"macOS 只有汇总项"。
+    assert facts.tests_by_environment == (
+        ("Windows", 1, 0),
+        ("macOS", 0, 1),
+        ("Linux", 0, 0),
+    )
+
+    # 这个检查只按调用方声明的平台范围做: 只要 Windows 时就没有问题。
+    _, only_windows = verifier.verify_report(
+        layout.report, expected_platforms=("Windows",)
+    )
+    assert [item for item in only_windows if "没有用例结果" in item] == []
+
+    verifier.report_facts(facts, layout.report)
+    assert "按平台用例: Windows 1 用例 + 0 汇总项" in capsys.readouterr().out
+
+
+def test_expect_platforms_flag_decides_the_run(
+    layout: _Layout, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--expect-platforms`` 能直接决定自检成败(CI 就是靠它按平台自查)."""
+    _write_platform_report(layout)
+
+    exit_code = verifier.main(
+        [
+            str(layout.report),
+            "--results",
+            str(layout.results),
+            "--expect-platforms",
+            "macOS,Linux",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "这些平台里没有用例结果" in captured.err
+    assert "macOS" in captured.err
+    # 不传就不做这项检查: 本地核对下载的 artifact 时不必知道是哪个平台。
+    assert verifier.main([str(layout.report), "--results", str(layout.results)]) == 0
+
+
+def _write_manifest(
+    path: Path,
+    *,
+    platform: str = "Windows",
+    results: int = 1,
+    missing: tuple[str, ...] = (),
+) -> Path:
+    """写一份产物清单(字段与 merge_allure_results.write_manifest 一致)."""
+    path.write_text(
+        json.dumps(
+            {
+                "platform": platform,
+                "expected_shards": ["0", "1", "2"],
+                "missing_shards": list(missing),
+                "sources": [
+                    {"name": "shard-0", "shard": "0", "files": 1, "results": 1}
+                ],
+                "total_files": results,
+                "total_results": results,
+                "overwritten": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_manifest_flags_missing_shards_and_count_mismatches(
+    layout: _Layout, tmp_path: Path
+) -> None:
+    """产物清单要能发现"少一片"与"条数对不上"—— 这是环境维度看不出来的部分.
+
+    三条判据: 声明必须有的片号到齐了、各分片自报的条数不超过最终结果数、报告里每个平台的
+    用例数不少于该平台分片自报的条数。
+    """
+    _write_platform_report(layout)
+    manifest = _write_manifest(
+        tmp_path / "allure-manifest.json",
+        platform="Windows",
+        results=5,
+        missing=("1",),
+    )
+
+    _, problems = verifier.verify_report(
+        layout.report,
+        layout.results,
+        expected_platforms=("Windows", "macOS"),
+        manifest_pattern=str(manifest),
+    )
+
+    assert any("缺少分片 1" in problem for problem in problems), problems
+    assert any("结果数与产物清单对不上" in problem for problem in problems), problems
+    assert any("少于分片自报的 5 条" in problem for problem in problems), problems
+
+
+def test_manifest_numbers_are_printed_and_absent_pattern_fails(
+    layout: _Layout, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """清单的条数要打进日志; 模式一个文件都没匹配到也要报错(清单没上传等于没有检查)."""
+    _write_platform_report(layout)
+    manifest = _write_manifest(tmp_path / "allure-manifest.json", results=1)
+
+    facts, problems = verifier.verify_report(
+        layout.report,
+        layout.results,
+        expected_platforms=("Windows",),
+        manifest_pattern=str(manifest),
+    )
+
+    assert problems == []
+    assert facts is not None
+    verifier.report_facts(facts, layout.report)
+    assert "分片产物清单: Windows 1 条结果(1 片)" in capsys.readouterr().out
+
+    _, missing = verifier.verify_report(
+        layout.report,
+        layout.results,
+        expected_platforms=("Windows",),
+        manifest_pattern=str(tmp_path / "allure-manifests" / "*.json"),
+    )
+    assert any("没找到产物清单" in problem for problem in missing), missing
+
+
 def test_declared_attachment_must_exist(
     layout: _Layout, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -278,10 +471,39 @@ def test_ci_publishes_only_verified_report() -> None:
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     verifications = workflow.count("scripts/verify_allure_report.py")
 
-    assert verifications >= 2, "pytest 与汇总作业都要自检报告"
-    assert workflow.count("steps.verify-report.outcome == 'success'") == verifications
-    assert workflow.count("path: allure-report.zip") == verifications
+    assert verifications >= 3, "两个作业的结构自检 + 汇总作业的平台用例检查"
+    # 发布 zip 的前提是**出 zip 的那次自检**通过: 两个作业各一份。
+    commands = [
+        line.strip()
+        for line in workflow.splitlines()
+        if line.strip().startswith("run:") and "verify_allure_report.py" in line
+    ]
+    assert len(commands) == verifications, "自检点数量与命令数量对不上"
+    zip_checks = [command for command in commands if "--zip" in command]
+    assert len(zip_checks) == 2, "pytest 与汇总作业各出一份 zip 报告"
+    assert workflow.count("steps.verify-report.outcome == 'success'") == len(zip_checks)
+    assert workflow.count("path: allure-report.zip") == len(zip_checks)
     assert "path: allure-report/" not in workflow, "报告目录不再直接发布"
+    # 平台用例检查: pytest 作业传自己那个平台(runner.os 就是 Windows/macOS/Linux),
+    # 汇总作业传三个平台 —— 两处都要有, 少一处就等于少一道检查(只数 `run:` 行, 注释不算)。
+    platform_checks = [
+        command for command in commands if "--expect-platforms" in command
+    ]
+    assert len(platform_checks) == 2, "pytest 作业与汇总作业各要检查一次平台用例"
+    assert (
+        sum('--expect-platforms "${{ runner.os }}"' in c for c in platform_checks) == 1
+    )
+    assert (
+        sum("--expect-platforms Windows,macOS,Linux" in c for c in platform_checks) == 1
+    )
+    # 汇总作业里那条不拦发布(报告正是用来看"哪个平台没数据"的地方), 所以它的结论必须有
+    # 地方接手: 末尾的门禁结论步骤要带上它, 否则失败了也没人管。
+    step = workflow.split("name: Check every platform contributed tests", 1)[1]
+    assert "continue-on-error: true" in step.split("\n      - name:", 1)[0]
+    verdict = workflow.split("name: Report quality gate verdict", 1)[-1]
+    assert "steps.verify-platforms.outcome == 'failure'" in verdict, (
+        "平台用例检查的结论必须由末尾的门禁结论步骤接手"
+    )
 
 
 def test_report_summary_items_declare_a_severity() -> None:
@@ -483,18 +705,22 @@ def test_quality_items_record_pass_and_fail(
 
 
 def test_quality_items_cover_every_ci_gate() -> None:
-    """两组门禁都在脚本里, 且 CI 分两处调用它们: 漏一项报告就缺项."""
+    """三组门禁都在脚本里, 且 CI 分三处调用它们: 漏一项报告就缺项."""
     module = _load_script("create_allure_quality")
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
     core = [check.key for check in module.CHECKS if check.group == "core"]
+    platform = [check.key for check in module.CHECKS if check.group == "platform"]
     analysis = [check.key for check in module.CHECKS if check.group == "analysis"]
-    assert core == ["ruff-check", "ruff-format", "mypy", "mypy-win32", "mypy-darwin"]
+    assert core == ["ruff-check", "ruff-format", "mypy"]
+    assert platform == ["mypy-win32", "mypy-darwin"]
     assert analysis == ["deptry", "bandit", "pip-audit", "radon", "xenon"]
     # 平台专属分支: 这两项必须带着 --platform, 否则等于把宿主平台又跑了一遍。
     for check in (item for item in module.CHECKS if item.key.startswith("mypy-")):
         assert "--platform" in check.command
+        assert check.host_platform is not None, "平台专属检查要声明自己在哪个平台跑"
     assert "scripts/create_allure_quality.py --group core" in workflow
+    assert "scripts/create_allure_quality.py --group platform" in workflow
     assert "scripts/create_allure_quality.py --group analysis" in workflow
     assert "allure-results-quality" in workflow
     assert "allure-results-analysis" in workflow
@@ -616,7 +842,7 @@ def test_native_quality_gate_is_configured_and_pinned() -> None:
     """
     config = _ALLURE_CONFIG.read_text(encoding="utf-8")
     assert re.search(r"^\s*qualityGate\s*:", config, re.MULTILINE) is not None
-    for rule in ("maxFailures", "minTestsCount", "successRate", "environmentsTested"):
+    for rule in ("maxFailures", "successRate", "environmentsTested"):
         assert rule in config, f"配置里缺少规则 {rule}"
     assert "3.18.0" in config, "注释里要写明版本要求与原因"
     assert "#895" in config, "注释里要留 issue 号, 便于日后重测"
@@ -631,6 +857,49 @@ def test_native_quality_gate_is_configured_and_pinned() -> None:
     assert "Report quality gate verdict" in workflow, "门禁结论要能决定作业成败"
     # 先跑门禁(留日志给总账), 再生成报告: 顺序反了日志就进不了报告。
     assert workflow.index(gate) < workflow.index("Generate final Allure report")
+
+
+def test_quality_gate_asks_every_platform_for_real_tests() -> None:
+    """要求三个平台各自都有真实用例, 而不是靠会漂的绝对计数.
+
+    ``minTestsCount: 3000`` 这样的常量会随用例规模往**更松**的方向漂: 实测签名是
+    3P+154(每平台 P 条用例), 每平台涨到 1400 上下之后, 缺一整个平台的运行也仍然高于
+    3000 —— 规则静默失效, 而且失效时没有任何信号。所以改成滤掉脚本生成的结论项后要求
+    三个环境里都还有用例(环境维度上一个平台都没有时会直接报"未被测试")。
+
+    判据必须是**正向**的(必须有 ``framework=pytest``), 否则会悄悄变绿: 反向判据
+    ("不能带 testCategory")遇到将来某个脚本忘了打标签, 那条汇总项就会被当成真实用例,
+    规则从此失去意义 —— 而正向判据漏判时会直接变红。因此这里同时锁住两件事: 配置里
+    按 ``framework`` 选, 而 ``scripts/`` 下的产物一律不写这个标签。
+    """
+    config = _ALLURE_CONFIG.read_text(encoding="utf-8")
+    # 注释里可以拿它当反例说明(所以只禁止它作为**规则**出现)。
+    assert re.search(r"^\s*minTestsCount\s*:", config, re.MULTILINE) is None, (
+        "绝对计数会随规模变松, 已换成环境维度"
+    )
+    gate = config.split("qualityGate:", 1)[1]
+    assert "filter:" in gate, "只看真实用例的规则集要带 filter"
+    # 判据必须与校验脚本一致: 两处都在回答"这条结果是用例还是脚本产物"。
+    assert verifier.REAL_TEST_LABEL == "framework"
+    assert verifier.REAL_TEST_VALUE == "pytest"
+    assert f'name === "{verifier.REAL_TEST_LABEL}"' in gate
+    assert f'value === "{verifier.REAL_TEST_VALUE}"' in gate
+    assert 'environmentsTested: ["Windows", "macOS", "Linux"]' in gate
+    # 规则集要有 id: 门禁失败时输出的是 `<规则集 id>/<规则名>`, 一眼看出是哪条不过。
+    assert re.search(r'id:\s*"[\w-]+"', gate) is not None
+
+    # 只有"写结果"的脚本受这条约束(校验脚本要**读**这个标签, 不在其列: 它自己就是
+    # 用 framework=pytest 判断"这条结果是用例还是脚本产物"的那个实现)。
+    writers = (
+        "create_allure_quality",
+        "create_allure_coverage",
+        "create_allure_summary",
+    )
+    for script in writers:
+        text = (_REPO_ROOT / "scripts" / f"{script}.py").read_text(encoding="utf-8")
+        assert '"framework"' not in text, (
+            f"{script}.py 写了 framework 标签: 脚本生成的结论项会被当成真实用例"
+        )
 
 
 def test_run_ledger_has_every_section_and_flags_missing_artifacts(
@@ -731,6 +1000,71 @@ def test_quality_items_use_the_declared_common_environment(
     assert matcher in config, f"配置里缺少匹配 {matcher} 的 matcher"
 
 
+def test_platform_specific_checks_use_the_platform_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """平台专属检查要落进**那个平台**的环境里, 而不是 Common.
+
+    ``mypy --platform win32`` 验的是 Windows 专属代码路径, 结论放在 ``Common`` 里会被混进
+    "与平台无关"的一堆结论中; 放进 Windows 环境才能和那个平台的测试结果一起看(环境选择器
+    一筛就只剩这个平台的东西)。环境标签由 ``Check.host_platform`` 推出, 所以"标签"与
+    "该在哪台机器上跑"是同一个事实, 不会各自漂移; 本用例把派生结果与 ``allurerc.mjs`` 里
+    的环境名、matcher 钉在一起。
+    """
+    module = _load_script("create_allure_quality")
+    assert module.PLATFORM_ENVIRONMENTS == {"win32": "Windows", "darwin": "macOS"}
+
+    # 真实的检查表: 两条平台专属的 mypy 检查必须带上各自平台的环境标签。
+    environments = {check.key: check.environment for check in module.CHECKS}
+    assert environments["mypy-win32"] == "Windows"
+    assert environments["mypy-darwin"] == "macOS"
+    assert environments["mypy"] == module.QUALITY_ENVIRONMENT
+    assert environments["ruff-check"] == module.QUALITY_ENVIRONMENT
+
+    results = tmp_path / "allure-results"
+    probes = tuple(
+        module.Check(
+            f"probe-{flag}",
+            f"Probe check ({flag})",
+            (sys.executable, "-c", "print('ok')"),
+            group="platform",
+            host_platform=flag,
+        )
+        for flag in module.PLATFORM_ENVIRONMENTS
+    )
+    monkeypatch.setattr(module, "CHECKS", probes)
+    # 探针归各自平台所有, 而当前机器只可能是其中之一: 把"当前平台"固定成 win32,
+    # 于是这条用例在任何平台上都跑同一套流程(另一条探针走"跳过"分支)。
+    original_select = module.select_checks
+    monkeypatch.setattr(
+        module,
+        "select_checks",
+        lambda group, _host: original_select(group, "win32"),
+    )
+
+    assert module.main(["--group", "platform", "--results-dir", str(results)]) == 0
+
+    config = _ALLURE_CONFIG.read_text(encoding="utf-8")
+    payloads = [
+        json.loads(item.read_text(encoding="utf-8"))
+        for item in sorted(results.glob("*-result.json"))
+    ]
+    assert len(payloads) == 1, "只有当前平台那一支会产出结果"
+    payload = payloads[0]
+    labels = {label["name"]: label["value"] for label in payload["labels"]}
+    assert labels["testCategory"] == "quality"
+    # 平台由 env 表达: 不带 os 标签(也不带平台参数), 执行主机只写进描述。
+    assert "os" not in labels
+    assert payload.get("parameters", []) == []
+    # 跑在 win32 上, 所以结果的环境就是 Windows(而不是 Common)。
+    assert labels["env"] == module.PLATFORM_ENVIRONMENTS["win32"]
+    assert f"env={module.PLATFORM_ENVIRONMENTS['win32']}" in payload["description"]
+    for environment in module.PLATFORM_ENVIRONMENTS.values():
+        assert f'name: "{environment}"' in config, f"配置里要声明 {environment} 环境"
+        matcher = f'value === "{environment}"'
+        assert matcher in config, f"配置里缺少匹配 {matcher} 的 matcher"
+
+
 def test_quality_job_runs_on_one_platform() -> None:
     """公共检查只在 Ubuntu 跑一遍(跑三平台只会得到三份一样的结论)."""
     workflow = _WORKFLOW.read_text(encoding="utf-8")
@@ -739,6 +1073,95 @@ def test_quality_job_runs_on_one_platform() -> None:
     job = block.group(1)
     assert "runs-on: ubuntu-latest" in job
     assert "matrix" not in job, "质量作业不应再按平台展开"
+
+
+def test_platform_checks_only_run_on_their_own_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """平台专属检查只能跑在自己那一支上, 跑不了的分组要明确报错而不是默默放过.
+
+    ``--platform`` 是"检查哪一支代码", 不是"在哪台机器上跑": 放到别的平台上照样退 0,
+    报告里却会出现一条"产自 Ubuntu 的 Windows 结论"。所以脚本按 ``Check.host_platform``
+    自己挑: 不匹配就跳过并写出理由; 显式要一个在当前平台全都跑不了的分组时以退出码 2
+    报错 —— 悄悄什么都不做等于这道门禁不存在。
+    """
+    module = _load_script("create_allure_quality")
+    original = module.select_checks
+    plain = module.Check(
+        "probe-plain", "Probe plain", (sys.executable, "-c", "print('ok')")
+    )
+    win32_probe = module.Check(
+        "probe-win32",
+        "Probe win32",
+        (sys.executable, "-c", "print('ok')"),
+        group="platform",
+        host_platform="win32",
+    )
+    monkeypatch.setattr(module, "CHECKS", (plain, win32_probe))
+
+    # 直接看挑选逻辑: 在 win32 上只跑自己那一支, 在 linux 上整组都不适用(all 仍能跑公共检查)。
+    assert [item.key for item in original("platform", "win32")[0]] == ["probe-win32"]
+    assert original("platform", "linux")[0] == ()
+    assert [item.key for item in original("platform", "linux")[1]] == ["probe-win32"]
+    assert [item.key for item in original("all", "linux")[0]] == ["probe-plain"]
+    assert [item.key for item in original("all", "linux")[1]] == ["probe-win32"]
+
+    monkeypatch.setattr(
+        module, "select_checks", lambda group, _host: original(group, "linux")
+    )
+
+    # 跑全部: 不适用的那支跳过并说明理由, 其余照常跑。
+    results = tmp_path / "allure-results"
+    assert module.main(["--results-dir", str(results)]) == 0
+    written = [
+        json.loads(item.read_text(encoding="utf-8"))["name"]
+        for item in sorted(results.glob("*-result.json"))
+    ]
+    assert written == ["Probe plain"]
+    printed = capsys.readouterr().out
+    assert "跳过 Probe win32" in printed
+    assert "只在 Windows 上执行" in printed
+    assert "(当前平台 " in printed, "跳过时要写清当前平台"
+
+    # 显式点名一个在当前平台跑不了的分组: 退出码 2, 且不写任何"通过"的结论。
+    wrong_platform = tmp_path / "wrong-platform"
+    assert (
+        module.main(["--group", "platform", "--results-dir", str(wrong_platform)]) == 2
+    )
+    assert not list(wrong_platform.glob("*-result.json"))
+    assert "平台专属检查必须在对应平台上跑" in capsys.readouterr().err
+
+
+def test_platform_check_runs_in_a_job_on_its_own_platform() -> None:
+    """平台专属检查要放在对应平台的作业里跑, 结论还要被汇总作业收走.
+
+    以前的写法是在 Ubuntu 上把 ``--platform win32`` 与 ``--platform darwin`` 各跑一遍:
+    检查本身能过, 但报告里那两条结论标着 Windows / macOS 却产自 Linux —— 环境选择器一筛,
+    "哪个平台的专属代码路径出问题"这件事就被说错了。现在拆成独立作业(按平台展开),
+    这里把"跑在哪个平台"与"标着哪个平台"钉在一起。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+
+    block = re.search(r"\n  quality-platform:\n(.*?)\n  \w", workflow, re.DOTALL)
+    assert block is not None, "ci.yml 里找不到 quality-platform job"
+    job = block.group(1)
+    assert "os: [windows-latest, macos-latest]" in job, "两个平台各跑自己那一支"
+    assert "runs-on: ${{ matrix.os }}" in job
+    assert "ubuntu-latest" not in job, "平台专属检查不该再跑到 Ubuntu 上"
+    assert "scripts/create_allure_quality.py --group platform" in job
+    assert "allure-results-quality-platform-${{ matrix.os }}" in job
+    assert "save-cache: false" in job, "依赖缓存只由 pytest 第 0 片写入"
+
+    # 公共质量作业不再代跑平台专属检查(否则同一批检查会跑两遍, 归属还重复)。
+    quality = re.search(r"\n  quality:\n(.*?)\n  \w", workflow, re.DOTALL)
+    assert quality is not None
+    assert "--group platform" not in quality.group(1)
+
+    # 汇总作业必须等这个作业, 并把它的产物收进报告。
+    summary = re.search(r"\n  allure-summary:\n(.*)", workflow, re.DOTALL)
+    assert summary is not None, "ci.yml 里找不到 allure-summary job"
+    assert "quality-platform" in summary.group(1), "汇总作业要等平台专属检查跑完"
+    assert "pattern: allure-results-quality-platform-*" in summary.group(1)
 
 
 def test_quality_output_reaches_the_report_without_control_sequences(

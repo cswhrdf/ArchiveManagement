@@ -389,7 +389,10 @@ def test_report_config_maps_every_platform_to_an_environment() -> None:
     有对应环境", 并顺便校验环境 id 合法(Allure 只接受 latin 字母/数字/下划线/连字符).
 
     额外允许**一个非平台环境** ``Common``: 质量检查与静态分析跟平台无关(CI 只跑一遍),
-    结论项带 ``env=common`` 归到它而不是某个平台的环境。多出别的环境名则判失败。
+    结论项带 ``env=common`` 归到它而不是某个平台的环境; 覆盖平台专属代码分支的两条 mypy
+    检查(``--platform win32`` / ``darwin``)则**在对应平台上执行**并带那个平台的 ``env``
+    (见 ``scripts/create_allure_quality.py`` 的 ``PLATFORM_ENVIRONMENTS``)。多出别的环境名
+    则判失败。
 
     断言只看 ``environments`` 块内部: 配置顶层也有 ``name``(报告标题), 用整份文本去
     匹配会把它当成环境名。

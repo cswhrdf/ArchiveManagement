@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -150,8 +151,23 @@ def test_ci_merges_shard_results_with_the_script() -> None:
 
     hint = "CI 没有用 scripts/merge_allure_results.py 合并分片结果"
     assert "scripts/merge_allure_results.py" in text, hint
-    assert re.search(r"needs: \[pytest\]", text) is not None
-    assert "needs: [quality, pytest-report, performance, security]" in text
+    assert re.search(r"needs:\s*\[pytest\]", text) is not None
+
+    # 汇总作业要等齐**所有**产出结论的作业: 漏一个就会漏收它的产物(报告里少一块),
+    # 或者在该作业上传完之前就去下载(拿到半份)。新增产出 Allure 结果的作业时一起改这里。
+    # 断言只看标识符集合, 不管 YAML 是写成一行还是摊成多行(编辑器会按自己的风格重排)。
+    needs = re.search(r"needs:\s*\[([^\]]+)\]", text.split("allure-summary:", 1)[1])
+    assert needs is not None, "allure-summary 没有声明 needs"
+    # 摊成多行时末尾会多一个逗号, 空项要滤掉。
+    names = {name.strip() for name in needs.group(1).split(",") if name.strip()}
+    assert names == {
+        "quality",
+        "quality-platform",
+        "analysis",
+        "pytest-report",
+        "performance",
+        "security",
+    }
 
 
 # ---------------------------------------------------------------- 结果合并脚本
@@ -198,8 +214,11 @@ def test_merge_copies_every_shard_file(tmp_path: Path) -> None:
         "aaa-result.json",
         "bbb-result.json",
     ]
-    assert [count for _source, count in summary.per_source] == [1, 1]
+    assert [item.files for item in summary.per_source] == [1, 1]
+    assert [item.results for item in summary.per_source] == [1, 1]
+    assert [item.shard for item in summary.per_source] == ["0", "1"]
     assert summary.copied == 2
+    assert summary.results == 2
     assert summary.overwritten == 0
 
 
@@ -212,7 +231,101 @@ def test_merge_reports_a_shard_that_produced_nothing(tmp_path: Path) -> None:
 
     summary = merger.merge_directories([first, empty], output=tmp_path / "out")
 
-    assert [count for _source, count in summary.per_source] == [1, 0]
+    assert [item.files for item in summary.per_source] == [1, 0]
+    assert [item.results for item in summary.per_source] == [1, 0]
+
+
+def test_manifest_records_every_shard_with_its_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """产物清单要把逐分片的文件数/结果数与合计写下来(报告就靠它对数)."""
+    for index, names in enumerate((("aaa", "bbb"), ("ccc",), ())):
+        directory = tmp_path / f"allure-results-shard-{index}"
+        directory.mkdir()
+        for name in names:
+            _write_result(directory, f"{name}-result.json")
+    manifest = tmp_path / "allure-manifest.json"
+
+    exit_code = merger.main(
+        [
+            "--output",
+            str(tmp_path / "out"),
+            "--platform",
+            "Linux",
+            "--expect-shards",
+            "0,1,2",
+            "--manifest",
+            str(manifest),
+            str(tmp_path / "allure-results-shard-*"),
+        ]
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["platform"] == "Linux"
+    assert payload["expected_shards"] == ["0", "1", "2"]
+    assert payload["missing_shards"] == []
+    assert [item["results"] for item in payload["sources"]] == [2, 1, 0]
+    assert payload["total_results"] == 3
+    assert payload["total_files"] == 3
+    # 日志里逐片给出"文件数(结果数, 片号)": 少一片能从日志一眼看出来。
+    printed = capsys.readouterr().out
+    assert "2 条结果, 片 0" in printed
+    assert "0 条结果, 片 2" in printed
+
+
+def test_manifest_flags_a_shard_that_never_arrived(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """声明必须有而没找到的片号要写进清单并提醒 —— 这是"少一片"的唯一可靠信号."""
+    (tmp_path / "allure-results-shard-0").mkdir()
+    (tmp_path / "allure-results-shard-2").mkdir()
+    _write_result(tmp_path / "allure-results-shard-0", "aaa-result.json")
+    _write_result(tmp_path / "allure-results-shard-2", "ccc-result.json")
+    manifest = tmp_path / "allure-manifest.json"
+
+    exit_code = merger.main(
+        [
+            "--output",
+            str(tmp_path / "out"),
+            "--expect-shards",
+            "0,1,2",
+            "--manifest",
+            str(manifest),
+            str(tmp_path / "allure-results-shard-*"),
+        ]
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    # 合并本身不算失败(报告还要照生成): 结论由校验脚本给。
+    assert exit_code == 0
+    assert payload["missing_shards"] == ["1"]
+    assert payload["total_results"] == 2
+    assert "缺 1" in capsys.readouterr().err
+
+
+def test_ci_records_shard_counts_in_a_manifest() -> None:
+    """分片条数要写成产物清单并随平台产物上传, 最后由汇总作业对齐.
+
+    少一片时合并照常成功、报告只是安静地少一部分用例(环境、通过率、格式自检全看不出来),
+    所以这份清单是唯一判据: 声明期望的片号、记下逐片条数、上传、汇总后对齐。
+    """
+    text = _workflow_text()
+    shards = re.findall(r"^\s+shard: \[([^\]]+)\]", text, re.MULTILINE)
+    assert len(shards) == 1, f"期望只有一个分片矩阵, 实际 {shards}"
+    expected = ",".join(re.findall(r"\d+", shards[0]))
+
+    assert f"--expect-shards {expected}" in text, (
+        "清单声明的片号必须与矩阵的 shard 列表一致(不一致等于白声明)"
+    )
+    assert '--platform "${{ runner.os }}"' in text, "清单要记下是哪个平台"
+    assert "--manifest allure-manifest.json" in text, "报告作业要把清单写下来"
+    # 清单要随平台的产物上传, 否则汇总作业收不到。
+    upload = text.split("- name: Upload Allure resources", 1)[1]
+    assert "allure-manifest.json" in upload.split("- name:", 1)[0]
+    # 汇总作业收集各平台的清单, 并交给自检脚本与最终条数对齐。
+    assert "Collect shard manifests" in text
+    assert '--manifest "allure-manifests/*.json"' in text
 
 
 def test_merge_warns_about_colliding_files(tmp_path: Path) -> None:

@@ -17,14 +17,19 @@
    就会静默退回单个 ``default`` 环境(详见 :func:`environment_problems`);
 5. 结果文件声明的**附件**都在(覆盖率/性能/安全/质量汇总项把原始报告挂在条目上,
    附件文件与结果文件同在 ``allure-results`` 里, 详见 :func:`attachment_problems`);
-6. ``--zip`` 额外把报告打成单个 ``<报告目录>.zip``: 单个文件发布不会出现"整个目录
+6. ``--expect-platforms`` 指定的每个平台环境里都要有**真实用例**结果 —— 覆盖率/安全/质量
+   这些脚本生成的汇总项也带平台的 ``env``, 只看"环境存在"会把它们当成"这个平台测过了"
+   (详见 :func:`platform_test_problems`; pytest 作业传自己那个平台, 汇总作业传三个平台);
+7. ``--zip`` 额外把报告打成单个 ``<报告目录>.zip``: 单个文件发布不会出现"整个目录
    被悄悄丢掉"的静默损坏, 并打印条目数与 SHA256 便于人工核对.
 
 报告目录不存在视为"本次没有结果, 未生成报告"(退出码 0); 其余情况缺资源即退出码 1.
 
 用法:
 
-- CI: ``uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip``
+- CI(pytest-report 作业): ``uv run python scripts/verify_allure_report.py allure-report
+  --results allure-results --zip --expect-platforms "${{ runner.os }}"``
+- CI(allure-summary 作业): 同上, 但 ``--expect-platforms Windows,macOS,Linux``
 - 本地核对下载的 artifact: ``uv run python scripts/verify_allure_report.py allure-report``
 """
 
@@ -53,6 +58,12 @@ JsonObject = dict[str, object]
 # ``widgets/<环境>/<name>.json``(按环境), 两处任意一处存在即可.
 REQUIRED_WIDGETS = ("statistic.json", "tree.json")
 RESULT_FILE_SUFFIX = "-result.json"
+# "真实用例"的判据: ``framework`` 标签由 allure-pytest 自己写, 脚本生成的汇总项
+# (覆盖率/性能/安全/质量检查)一律不带。必须与仓库根 ``allurerc.mjs`` 里质量门规则集的
+# ``filter`` 判据一致 —— 两处都在回答"这条结果是用例还是脚本产物",
+# tests/unit/test_report_verification.py 有守卫把两处钉在一起。
+REAL_TEST_LABEL = "framework"
+REAL_TEST_VALUE = "pytest"
 # 输出里最多列出这么多条缺失文件名, 其余用总数概括, 避免刷屏.
 MAX_REPORTED_MISSING = 5
 
@@ -68,6 +79,10 @@ class ReportFacts:
     environments: tuple[str, ...] = ()
     attachments: int | None = None
     archive_entries: int | None = None
+    # 逐平台的 (环境名, 用例条数, 汇总项条数); 没要求 ``--expect-platforms`` 时为空。
+    tests_by_environment: tuple[tuple[str, int, int], ...] = ()
+    # 各平台分片作业自报的产物清单; 没传 ``--manifest`` 时为空。
+    manifests: tuple[ManifestFacts, ...] = ()
 
 
 def load_object(path: Path) -> JsonObject | None:
@@ -149,8 +164,8 @@ def attachment_problems(declared: Sequence[Path]) -> list[str]:
     ]
 
 
-def environment_ids(report_dir: Path) -> set[str] | None:
-    """返回报告里的环境 id 集合; 文件缺失或无法解析时返回 None."""
+def environment_entries(report_dir: Path) -> list[tuple[str, str]] | None:
+    """返回报告里的 (环境 id, 显示名) 列表; 文件缺失或无法解析时返回 None."""
     path = report_dir / "widgets" / ENVIRONMENTS_WIDGET
     if not path.is_file():
         return None
@@ -160,11 +175,232 @@ def environment_ids(report_dir: Path) -> set[str] | None:
         return None
     if not isinstance(payload, list):
         return None
-    return {
-        str(entry["id"])
+    return [
+        (str(entry["id"]), str(entry.get("name") or entry["id"]))
         for entry in payload
         if isinstance(entry, dict) and entry.get("id") is not None
+    ]
+
+
+def environment_ids(report_dir: Path) -> set[str] | None:
+    """返回报告里的环境 id 集合; 文件缺失或无法解析时返回 None."""
+    entries = environment_entries(report_dir)
+    return None if entries is None else {env_id for env_id, _ in entries}
+
+
+def environment_alias_lookup(report_dir: Path) -> dict[str, str]:
+    """{环境 id / 显示名(大小写不敏感): 显示名} —— 结果上的 ``environment`` 两种都可能写."""
+    lookup: dict[str, str] = {}
+    for env_id, name in environment_entries(report_dir) or []:
+        lookup[env_id.lower()] = name
+        lookup[name.lower()] = name
+    return lookup
+
+
+def indexed_environments(report_dir: Path) -> dict[str, str]:
+    """返回结果 id → 结果索引里记的环境(原始取值, 未归一化)."""
+    payload = load_object(report_dir / "test-results.json")
+    if payload is None:
+        return {}
+    by_id = payload.get("byId")
+    if not isinstance(by_id, dict):
+        return {}
+    return {
+        str(key): str(entry["environment"])
+        for key, entry in by_id.items()
+        if isinstance(entry, dict) and isinstance(entry.get("environment"), str)
     }
+
+
+def is_real_test(report_dir: Path, result_id: str) -> bool:
+    """这条结果是不是真实用例(详情文件里带 allure-pytest 写的 ``framework=pytest``)."""
+    payload = load_object(report_dir / DETAIL_DIRECTORY / f"{result_id}.json")
+    if payload is None:
+        return False
+    labels = payload.get("labels")
+    if not isinstance(labels, list):
+        return False
+    return any(
+        isinstance(label, dict)
+        and label.get("name") == REAL_TEST_LABEL
+        and label.get("value") == REAL_TEST_VALUE
+        for label in labels
+    )
+
+
+def platform_test_counts(
+    report_dir: Path, platforms: Sequence[str]
+) -> dict[str, tuple[int, int]]:
+    """统计指定各平台环境里的 (真实用例条数, 脚本生成的汇总项条数).
+
+    只读这些平台的详情文件: 校验脚本没必要为了一个数字去解析整份报告(三平台合计三千多
+    条结果时, 全部读一遍也要几秒)。
+    """
+    if not platforms:
+        return {}
+    wanted = {name.lower(): name for name in platforms}
+    lookup = environment_alias_lookup(report_dir)
+    tests = dict.fromkeys(platforms, 0)
+    summaries = dict.fromkeys(platforms, 0)
+    for result_id, raw in indexed_environments(report_dir).items():
+        name = wanted.get(lookup.get(raw.lower(), raw).lower())
+        if name is None:
+            continue
+        if is_real_test(report_dir, result_id):
+            tests[name] += 1
+        else:
+            summaries[name] += 1
+    return {name: (tests[name], summaries[name]) for name in platforms}
+
+
+@dataclass(frozen=True)
+class ManifestFacts:
+    """一份产物清单(分片作业里的合并脚本写的): 分片条数与缺失分片."""
+
+    path: Path
+    platform: str
+    results: int
+    files: int
+    shards: int
+    missing_shards: tuple[str, ...]
+
+    @property
+    def label(self) -> str:
+        """日志里怎么称呼这份清单(有平台名就用它, 否则用文件名)."""
+        return self.platform or self.path.name
+
+
+def _match_manifest_paths(pattern: str) -> list[Path]:
+    """展开产物清单的模式.
+
+    绝对模式要拆成"锚点 + 相对模式"才能交给 :meth:`Path.glob`(它不接受绝对模式)。
+    与 ``merge_allure_results.py`` 里的展开逻辑同一套 —— scripts 不是包, 所以各留一份。
+    """
+    path = Path(pattern)
+    anchor = path.anchor
+    if anchor:
+        candidates = Path(anchor).glob(str(path.relative_to(anchor)))
+    else:
+        candidates = Path().glob(pattern)
+    return sorted(candidate for candidate in candidates if candidate.is_file())
+
+
+def as_int(value: object) -> int:
+    """把清单里的数值安全地转成 int(缺失或类型不对就当 0)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
+def as_str_tuple(value: object) -> tuple[str, ...]:
+    """把清单里的字符串数组安全地转成元组(类型不对就当空)."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def load_manifests(pattern: str) -> tuple[tuple[ManifestFacts, ...], list[str]]:
+    """读取产物清单(``--manifest`` 给的通配模式), 返回 (清单, 问题).
+
+    模式匹配不到文件也算问题: 清单没上传/没下载到时, "少一片"同样看不出来 ——
+    而这正是这些清单存在的理由。
+    """
+    if not pattern:
+        return (), []
+    paths = _match_manifest_paths(pattern)
+    if not paths:
+        return (), [
+            f"没找到产物清单: {pattern}"
+            "(分片作业的 --manifest 没上传或没下载到, 那样缺片就看不出来了)"
+        ]
+    facts: list[ManifestFacts] = []
+    problems: list[str] = []
+    for path in paths:
+        payload = load_object(path)
+        if payload is None:
+            problems.append(f"产物清单无法解析: {path}")
+            continue
+        sources = payload.get("sources")
+        facts.append(
+            ManifestFacts(
+                path=path,
+                platform=str(payload.get("platform") or ""),
+                results=as_int(payload.get("total_results")),
+                files=as_int(payload.get("total_files")),
+                shards=len(sources) if isinstance(sources, list) else 0,
+                missing_shards=as_str_tuple(payload.get("missing_shards")),
+            )
+        )
+    return tuple(facts), problems
+
+
+def manifest_problems(
+    manifests: Sequence[ManifestFacts],
+    *,
+    result_files: int | None,
+    counts: dict[str, tuple[int, int]],
+) -> list[str]:
+    """把"分片自报的条数"与"最终收集到的条数"对齐(这一项就是方案 D).
+
+    ``--expect-platforms`` 只能证明"这个平台有用例结果", 证明不了"三个分片都到齐了":
+    少一片时环境、通过率、格式自检全都正常, 报告只是安静地少一部分用例(2026-09-21 实测:
+    删掉 Linux 的 1166 条用例后, 不过滤的 ``environmentsTested`` 照样通过)。产物清单
+    (``merge_allure_results.py`` 写、报告作业上传) 在这里对上三件事:
+
+    1. 声明必须有的片号都到了 —— 缺片只有这里能看出来;
+    2. 各分片自报的结果数**不超过**最终结果目录里的结果文件数(超了说明合并之后掉过数据);
+    3. 报告里每个平台的用例数**不少于**该平台分片自报的结果数(少了两者必有一个不对)。
+    """
+    problems: list[str] = [
+        f"{manifest.label} 缺少分片 {', '.join(manifest.missing_shards)} 的结果"
+        "(分片作业的产物没上传或没合并进来, 该平台会少一部分用例)"
+        for manifest in manifests
+        if manifest.missing_shards
+    ]
+    declared = sum(manifest.results for manifest in manifests)
+    if manifests and result_files is not None and declared > result_files:
+        problems.append(
+            f"结果数与产物清单对不上: 各分片自报共 {declared} 条结果, "
+            f"而结果目录里只有 {result_files} 个(合并之后掉过数据)"
+        )
+    for manifest in manifests:
+        if not manifest.label or manifest.label not in counts:
+            continue
+        tests = counts[manifest.label][0]
+        if tests < manifest.results:
+            problems.append(
+                f"{manifest.label} 的报告里只有 {tests} 条用例, 少于分片自报的 "
+                f"{manifest.results} 条(报告生成时掉过数据)"
+            )
+    return problems
+
+
+def platform_test_problems(
+    counts: dict[str, tuple[int, int]], platforms: Sequence[str]
+) -> list[str]:
+    """要求每个指定平台的环境里都有真实用例结果(脚本生成的汇总项不算).
+
+    "环境存在"很容易被非用例的东西满足: 覆盖率/性能/安全汇总项、平台专属的质量检查都带
+    平台的 ``env``, 于是"某个平台的用例全没合并进来"在报告里看不出来(2026-09-21 用真实
+    数据验过: 删掉 Linux 的 1166 条用例后, 不过滤的 ``environmentsTested`` 照样通过)。
+    质量门那边用规则集上的 ``filter`` 表达同一件事, 这里再补一道是为了能**逐个平台报数**
+    (日志里直接看到 "Linux 1166 用例 / 3 汇总项"), 也方便在 pytest 作业里按单个平台自查。
+    """
+    rows = [(name, counts.get(name, (0, 0))) for name in platforms]
+    missing = [name for name, (tests, _) in rows if tests == 0]
+    if not missing:
+        return []
+    detail = "; ".join(
+        f"{name}: {tests} 用例 / {summaries} 汇总项"
+        for name, (tests, summaries) in rows
+    )
+    return [
+        f"这些平台里没有用例结果: {', '.join(missing)} "
+        f"(脚本生成的汇总项不算用例; 逐平台: {detail})"
+    ]
 
 
 def environment_problems(report_dir: Path) -> list[str]:
@@ -243,9 +479,19 @@ def group_reference_problems(
 
 
 def verify_report(
-    report_dir: Path, results_dir: Path | None = None
+    report_dir: Path,
+    results_dir: Path | None = None,
+    *,
+    expected_platforms: Sequence[str] = (),
+    manifest_pattern: str = "",
 ) -> tuple[ReportFacts | None, list[str]]:
-    """校验报告完整性: 返回 (计数事实, 问题清单); 报告不存在时返回 (None, [])."""
+    """校验报告完整性: 返回 (计数事实, 问题清单); 报告不存在时返回 (None, []).
+
+    ``expected_platforms`` 指定哪些平台环境里必须各有真实用例结果(见
+    :func:`platform_test_problems`); 不传就不做这项检查(pytest 作业传自己那个平台,
+    汇总作业传三个平台)。``manifest_pattern`` 是产物清单的通配模式, 用来对齐"分片自报的
+    条数"与"最终收集到的条数"(见 :func:`manifest_problems`)。
+    """
     if not report_dir.is_dir():
         return None, []
     problems = static_problems(report_dir)
@@ -258,9 +504,16 @@ def verify_report(
         group_reference_problems(report_dir, expected, grouped_result_ids(report_dir))
     )
     problems.extend(environment_problems(report_dir))
+    counts = platform_test_counts(report_dir, expected_platforms)
+    problems.extend(platform_test_problems(counts, expected_platforms))
+    manifests, manifest_load_problems = load_manifests(manifest_pattern)
+    problems.extend(manifest_load_problems)
     declared = declared_attachments(results_dir)
     problems.extend(attachment_problems(declared))
     result_files = count_result_files(results_dir)
+    problems.extend(
+        manifest_problems(manifests, result_files=result_files, counts=counts)
+    )
     if result_files is not None and result_files != len(expected):
         problems.append(
             f"结果数不一致: allure-results 有 {result_files} 个结果文件, "
@@ -273,6 +526,10 @@ def verify_report(
         result_files=result_files,
         environments=tuple(sorted(environment_ids(report_dir) or ())),
         attachments=None if results_dir is None else len(declared),
+        tests_by_environment=tuple(
+            (name, tests, summaries) for name, (tests, summaries) in counts.items()
+        ),
+        manifests=manifests,
     )
     return facts, problems
 
@@ -314,6 +571,25 @@ def report_facts(facts: ReportFacts, report_dir: Path) -> None:
     print(f"环境: {', '.join(facts.environments) or '未识别'}")
     print(f"结果附件: {attachments_text} 个")
     print(f"allure-results 结果文件: {results_text}")
+    if facts.tests_by_environment:
+        # 逐平台的用例/汇总项构成: “某个平台只剩下汇总项”在数字上是一眼可见的。
+        rows = ", ".join(
+            f"{name} {tests} 用例 + {summaries} 汇总项"
+            for name, tests, summaries in facts.tests_by_environment
+        )
+        print(f"按平台用例: {rows}")
+    if facts.manifests:
+        # 分片自报的条数: “少一片”在数字上是一眼可见的(环境与通过率都看不出来)。
+        rows = ", ".join(
+            f"{manifest.label} {manifest.results} 条结果({manifest.shards} 片)"
+            + (
+                f", 缺片 {'/'.join(manifest.missing_shards)}"
+                if manifest.missing_shards
+                else ""
+            )
+            for manifest in facts.manifests
+        )
+        print(f"分片产物清单: {rows}")
 
 
 def ensure_utf8_output() -> None:
@@ -351,7 +627,30 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="校验通过后把报告打包成 <报告目录>.zip",
     )
+    parser.add_argument(
+        "--expect-platforms",
+        default="",
+        help=(
+            "要求这些环境里各有至少一条真实用例结果(逗号分隔); "
+            "pytest 作业传自己那个平台, 汇总作业传 Windows,macOS,Linux"
+        ),
+    )
+    parser.add_argument(
+        "--manifest",
+        default="",
+        help=(
+            "产物清单(合并脚本写的 JSON)的通配模式, 如 allure-manifest.json 或 "
+            'allure-manifests/*.json; 用来对齐"分片自报的条数"与最终条数'
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def expected_platforms(args: argparse.Namespace) -> tuple[str, ...]:
+    """把 ``--expect-platforms`` 拆成平台名(空值表示不做这项检查)."""
+    return tuple(
+        name.strip() for name in str(args.expect_platforms).split(",") if name.strip()
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -359,7 +658,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ensure_utf8_output()
     args = parse_args(argv)
     report_dir = Path(args.report)
-    facts, problems = verify_report(report_dir, args.results)
+    facts, problems = verify_report(
+        report_dir,
+        args.results,
+        expected_platforms=expected_platforms(args),
+        manifest_pattern=str(args.manifest),
+    )
     if facts is None:
         print(f"报告目录不存在, 视为本次没有结果, 跳过校验: {report_dir}")
         return 0

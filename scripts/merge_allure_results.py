@@ -1,4 +1,4 @@
-"""把多个 Allure 结果目录合并成一份.
+r"""把多个 Allure 结果目录合并成一份.
 
 CI 把同一平台的套件分片跑在多个作业上, 每个作业各自产出 ``allure-results-<平台>-<片>``。
 报告作业要把它们合成一份目录再生成报告 —— 不然报告只反映最后一片。
@@ -10,16 +10,25 @@ Allure 的每条结果就是一个以 uuid 命名的 ``*-result.json``, 附件�
 参数按**通配模式**展开: CI 在 pwsh 里不会自己展开 ``allure-results-windows-*``(Linux/macOS 的
 bash 会), 所以统一交给脚本展开; 日志里逐片给出文件数, 少一片能一眼看出来。
 
+**产物清单(``--manifest``)**: 上面那句"不报错"留下了一个盲区 —— 少一片时合并与后续步骤
+都正常, 报告只是静默地少了一部分用例(环境、通过率、上游自检都看不出来)。所以合并时可以
+写一份 JSON: 逐分片的文件数与**结果**条数、合并合计、以及 ``--expect-shards`` 声明必须有
+而实际没找到的片号。这份清单由报告作业上传, 最终由 ``verify_allure_report.py --manifest``
+与"分片自报的条数"对齐(见那里的说明)。
+
 用法(CI 报告作业, 也可本地复核分片结果):
 
-    uv run python scripts/merge_allure_results.py --output allure-results \
-        "allure-results-linux-*"
+    uv run python scripts/merge_allure_results.py --output allure-results \\
+        --platform Windows --expect-shards 0,1,2 --manifest allure-manifest.json \\
+        "allure-results-windows-*"
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import json
+import re
 import shutil
 import sys
 from collections.abc import Sequence
@@ -27,6 +36,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 RESULTS_DIRECTORY = Path("allure-results")
+# 分片目录名以片号结尾(``allure-results-ubuntu-latest-0``): 清单靠它把目录对回矩阵里的片号。
+SHARD_SUFFIX = re.compile(r"-(\d+)$")
+# 每条结果就是一个 ``*-result.json``(附件、容器文件不算结果).
+RESULT_FILE_SUFFIX = "-result.json"
 
 
 def ensure_utf8_output() -> None:
@@ -43,16 +56,37 @@ def ensure_utf8_output() -> None:
 
 
 @dataclass(frozen=True)
+class SourceCount:
+    """一个分片目录搬进来的文件数, 以及其中算作"一条结果"的 ``*-result.json`` 数."""
+
+    name: str
+    files: int
+    results: int
+    shard: str | None = None
+
+
+@dataclass(frozen=True)
 class MergeSummary:
     """合并结果: 逐片文件数 + 合计, 以及重名覆盖次数."""
 
-    per_source: tuple[tuple[Path, int], ...]
+    per_source: tuple[SourceCount, ...]
     overwritten: int
 
     @property
     def copied(self) -> int:
         """搬进来的文件总数."""
-        return sum(count for _source, count in self.per_source)
+        return sum(item.files for item in self.per_source)
+
+    @property
+    def results(self) -> int:
+        """搬进来的结果条数(清单与报告就按这个数对齐)."""
+        return sum(item.results for item in self.per_source)
+
+
+def shard_index(name: str) -> str | None:
+    """从目录名末尾取片号(``allure-results-ubuntu-latest-0`` → ``"0"``); 取不到返回 None."""
+    matched = SHARD_SUFFIX.search(name)
+    return matched.group(1) if matched else None
 
 
 def expand_sources(patterns: Sequence[str]) -> tuple[list[Path], list[str]]:
@@ -94,19 +128,68 @@ def merge_directories(sources: Sequence[Path], *, output: Path) -> MergeSummary:
     所以要计数并提示, 而不是悄悄盖掉一条结果。
     """
     output.mkdir(parents=True, exist_ok=True)
-    per_source: list[tuple[Path, int]] = []
+    per_source: list[SourceCount] = []
     overwritten = 0
     for source in sources:
-        count = 0
+        files = 0
+        results = 0
         for path in sorted(source.iterdir()):
             if not path.is_file():
                 continue
             if (output / path.name).exists():
                 overwritten += 1
             shutil.copy2(path, output / path.name)
-            count += 1
-        per_source.append((source, count))
+            files += 1
+            if path.name.endswith(RESULT_FILE_SUFFIX):
+                results += 1
+        per_source.append(
+            SourceCount(
+                name=source.name,
+                files=files,
+                results=results,
+                shard=shard_index(source.name),
+            )
+        )
     return MergeSummary(per_source=tuple(per_source), overwritten=overwritten)
+
+
+def missing_shards(summary: MergeSummary, expected: Sequence[str]) -> list[str]:
+    """返回声明必须有、实际却没找到的片号.
+
+    这是分片丢数据的唯一可靠判据: 只看文件数或环境是看不出来的 —— 少一片的运行与齐全的
+    运行在报告里长得一样(环境还在、通过率还高), 只是少了一部分用例。
+    """
+    found = {item.shard for item in summary.per_source if item.shard is not None}
+    return [shard for shard in expected if shard not in found]
+
+
+def write_manifest(
+    path: Path,
+    *,
+    platform: str,
+    summary: MergeSummary,
+    expected: Sequence[str],
+    missing: Sequence[str],
+) -> None:
+    """写产物清单: 谁在哪个平台合并了哪些分片、各多少条结果、缺了哪几片."""
+    payload = {
+        "platform": platform,
+        "expected_shards": list(expected),
+        "missing_shards": list(missing),
+        "sources": [
+            {
+                "name": item.name,
+                "shard": item.shard,
+                "files": item.files,
+                "results": item.results,
+            }
+            for item in summary.per_source
+        ],
+        "total_files": summary.copied,
+        "total_results": summary.results,
+        "overwritten": summary.overwritten,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _parse(argv: Sequence[str]) -> argparse.Namespace:
@@ -119,6 +202,24 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
         help=f"合并后的结果目录(默认 {RESULTS_DIRECTORY})",
     )
     parser.add_argument(
+        "--platform",
+        default="",
+        help="本平台展示名(写进产物清单, CI 传 runner.os)",
+    )
+    parser.add_argument(
+        "--expect-shards",
+        default="",
+        help=(
+            "声明必须有哪几个分片(逗号分隔, 如 0,1,2); 缺哪片会写进产物清单并与矩阵列表一致"
+        ),
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="产物清单的输出路径(JSON); 不传就不写",
+    )
+    parser.add_argument(
         "sources",
         nargs="+",
         help="各分片的结果目录或通配模式; 没匹配到的模式会被跳过并提示",
@@ -126,14 +227,23 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(list(argv))
 
 
+def expected_shard_list(value: str) -> list[str]:
+    """把 ``--expect-shards`` 拆成片号列表(空值表示不声明)."""
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """合并结果目录; 一个文件都没搬进来时返回 1(说明没有可汇报的结果)."""
     args = _parse(sys.argv[1:] if argv is None else argv)
     sources, missing = expand_sources(args.sources)
     summary = merge_directories(sources, output=args.output)
-    for source, count in summary.per_source:
-        print(f"  {source}: {count} 个文件")
-    print(f"已合并 {len(sources)} 个分片目录, {summary.copied} 个文件 -> {args.output}")
+    for item in summary.per_source:
+        shard = f"片 {item.shard}" if item.shard else "片号无法从目录名识别"
+        print(f"  {item.name}: {item.files} 个文件({item.results} 条结果, {shard})")
+    print(
+        f"已合并 {len(summary.per_source)} 个分片目录, {summary.copied} 个文件"
+        f"({summary.results} 条结果) -> {args.output}"
+    )
     if missing:
         print(
             "以下模式没匹配到目录, 已跳过(分片目录缺失/命名变化都会走到这里): "
@@ -145,12 +255,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"警告: {summary.overwritten} 个文件重名并被覆盖, 分片结果可能被复用",
             file=sys.stderr,
         )
+
+    expected = expected_shard_list(args.expect_shards)
+    absent = missing_shards(summary, expected)
+    if args.manifest is not None:
+        write_manifest(
+            args.manifest,
+            platform=args.platform,
+            summary=summary,
+            expected=expected,
+            missing=absent,
+        )
+        print(f"产物清单已写入 {args.manifest}")
+    if absent:
+        print(
+            f"警告: 声明必须有的分片里缺 {', '.join(absent)} —— 该平台的用例会静默少一部分"
+            "(产物清单已记录, 校验脚本会报出来)",
+            file=sys.stderr,
+        )
     return 0 if summary.copied else 1
-
-
-if __name__ == "__main__":
-    ensure_utf8_output()
-    raise SystemExit(main())
 
 
 if __name__ == "__main__":

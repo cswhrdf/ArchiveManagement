@@ -21,6 +21,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import replace
 from math import ceil
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -43,6 +44,7 @@ from archive_management.services.hotkeys import (
 from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.home_page import (
     _COLUMNS,
+    _NAME_FALLBACK_WIDTH,
     _POSTER_HEIGHT,
     _POSTER_NAME_LINES,
     _POSTER_TEXT_WIDTH,
@@ -506,12 +508,48 @@ def _pumped(app: Any, seconds: float = 0.4) -> None:
         time.sleep(0.02)
 
 
+class _FakeFont:
+    """替身字体: 每个字符 10px, 于是裁剪结果可以手算(与 ``test_textfit`` 同思路)."""
+
+    def measure(self, text: str) -> int:
+        """字符数乘 10."""
+        return len(text) * 10
+
+
 def _resize(app: ArchiveApp, width: int) -> int:
     """把窗口调到 ``width``, 返回**实际**宽度(窗口管理器可能把它压回屏幕内)."""
     app.geometry(f"{width}x820")
     _settle_layout(app)
     _pumped(app)
     return int(app.winfo_width())
+
+
+def _wait_until_the_name_fits(
+    app: Any, page: Any, game_id: str, full: str, *, timeout: float = 3.0
+) -> Any:
+    """等到名称按**当前宽度**裁好, 返回那一行的部件(超时报错并给出实际显示).
+
+    名称重裁有两个"延迟源", 都不能用固定时长的泵事件去赌: 行会因为异步加载落地而**重建**
+    (重建后先回到兜底宽度的短文本), 重裁本身也是延后 60ms 的任务。CI 上真实挂过 ——
+    Linux 上异步数据到得晚, 断言正好落在"新行刚建好、重裁任务还没跑"的那一瞬间, 报出来
+    的字数与宽度对不上(现场 dump 里 `_sync_job` 还挂着、`_refit_attempts` 才 1)。
+
+    所以这里等的是**不变量本身**(显示文本 == 该宽度下的 `fit_text` 结果), 而不是"跑够
+    多少秒"; 行可能被重建, 所以每次都重新取一遍部件。
+    """
+    deadline = time.monotonic() + timeout
+    shown = ""
+    while time.monotonic() < deadline:
+        app.update_idletasks()
+        app.update()
+        parts = page._row_parts.get(game_id)
+        if parts is not None:
+            width = int(parts.label.winfo_width())
+            shown = _visible_text(parts.label)
+            if width > 1 and shown == fit_text(full, page._name_font, width):
+                return parts
+        time.sleep(0.02)
+    pytest.fail(f"名称一直没按当前宽度裁好: 显示 {shown[:40]!r}")
 
 
 def _assert_lines(label: Any, limit: int) -> None:
@@ -613,6 +651,47 @@ def test_long_game_name_does_not_widen_the_list_rows() -> None:
     assert 0 <= gap <= 20, f"固定列块没有贴右: 右侧还空着 {gap}px"
 
 
+def test_name_fits_again_after_a_full_rerender() -> None:
+    """整页重建后名称仍会按当前宽度裁好(重建先把文本打回兜底宽度那一版).
+
+    CI 上 Linux 的真实失败形态就发生在这个窗口里: 异步数据到得晚, 行刚重建、重裁还没轮到,
+    断言紧接着就来了(现场 dump 里任务还挂着)。这里重建一次, 然后**只泵事件**、不手动调
+    重裁, 要求名称自己恢复 —— 产品侧除了延后任务, 标签自己也会在量到宽度时立刻裁一次
+    (见 ``HomePage._on_name_resize``)。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    game_id = next(iter(page._row_parts))
+    _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+
+    page._render_games()
+
+    parts = _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+
+    _assert_name_fills(parts.label, _HUGE_NAME, page._name_font)
+
+
+def test_the_stale_fit_wait_reports_a_stale_name() -> None:
+    """自检助手本身要有效: 名称一直没按当前宽度裁好时必须报错, 不能静静地报到超时为止.
+
+    它现在是名称断言的第一道门(先等不变量成立), 一旦退化成“总是通过”, 长名称回归就
+    再也拦不住了 —— 所以用假页面/假标签伪造一次真实回归形态。
+    """
+    width = 300
+    stale = _StubNameLabel(
+        fit_text(_HUGE_NAME, _FakeFont(), _NAME_FALLBACK_WIDTH), width
+    )
+    page = SimpleNamespace(
+        _row_parts={"g": SimpleNamespace(label=stale)}, _name_font=_FakeFont()
+    )
+    app = SimpleNamespace(update_idletasks=lambda: None, update=lambda: None)
+
+    with pytest.raises(pytest.fail.Exception, match="一直没按当前宽度裁好"):
+        _wait_until_the_name_fits(app, page, "g", _HUGE_NAME, timeout=0.2)
+
+
 def test_long_game_name_wraps_inside_the_poster_card() -> None:
     """海报卡片里的名称最多折两行并截断, 且卡片尺寸不变、内容不越出卡片."""
     app = gui_app(_long_name_app)
@@ -678,17 +757,19 @@ def test_names_follow_the_window_width() -> None:
     assert _wait_mapped(app)
     page = app._home_page
     _settle_layout(app)
-    _pumped(app)
     game_id = next(iter(page._row_parts))
-    _assert_name_fills(page._row_parts[game_id].label, _HUGE_NAME, page._name_font)
+    # 名称重裁是延后的任务, 行还可能被异步加载重建 —— 等不变量成立再断言(见助手说明)。
+    parts = _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+    _assert_name_fills(parts.label, _HUGE_NAME, page._name_font)
 
     narrow_window = int(app.winfo_width())
-    narrow_chars = len(_visible_text(page._row_parts[game_id].label))
+    narrow_chars = len(_visible_text(parts.label))
     # 先直接要求一个明显更宽的窗口: 无窗口管理器的环境(Xvfb)会照做, 带窗口管理器
     # 的平台则可能把它压回屏幕内 —— 那就只能退化到不变量断言(见下面的 skip).
     wide_window = _resize(app, 1900)
-    wide_chars = len(_visible_text(page._row_parts[game_id].label))
-    _assert_name_fills(page._row_parts[game_id].label, _HUGE_NAME, page._name_font)
+    parts = _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+    wide_chars = len(_visible_text(parts.label))
+    _assert_name_fills(parts.label, _HUGE_NAME, page._name_font)
 
     if wide_window <= narrow_window + 100:
         pytest.skip(

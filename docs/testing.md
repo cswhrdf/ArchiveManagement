@@ -126,7 +126,8 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 ## 6. CI 流程
 
 ```text
-quality (3 平台: ruff check / ruff format / mypy; 结论只把 Ubuntu 那份带进报告)
+quality (ubuntu: 公共检查 ruff check / ruff format / mypy → 结论带 env=common)
+quality-platform (Windows / macOS: mypy --platform win32 / darwin → 结论归入对应平台的环境)
 analysis (ubuntu: deptry 依赖卫生 / bandit 安全扫描 / pip-audit 依赖漏洞 / radon+xenon 复杂度)
 pytest  (3 平台 × 3 片: 单元 + 集成 + 各片自己的 Allure 结果与覆盖率数据)
 performance (ubuntu: 基准与阈值)
@@ -139,9 +140,11 @@ allure-summary (合并全部 allure-results-* → 写入环境信息与质量/�
 
 每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
 
-质量门禁本身也由脚本执行：`scripts/create_allure_quality.py --group <组>` 依次跑该组的检查，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。它分两组：`core`（ruff check / ruff format --check / mypy，公共检查：与平台无关，只在 Ubuntu 跑一遍；mypy 另外跑 `--platform win32` 与 `--platform darwin` 两次，覆盖平台专属分支）与 `analysis`（deptry / bandit / pip-audit / radon / xenon，同样与平台无关，只跑 Ubuntu 一遍）。两组都只在 Ubuntu 执行，所以汇总报告里每个门禁只出现一条；质量结论项带 `env=common`，归入 `allurerc.mjs` 里**显式声明**的 `Common` 环境（不是某个平台的环境，也不是隐式的 `default`）；性能之外的第二类"脚本生成项"就长这样（详见第 5 节）。
+质量门禁本身也由脚本执行：`scripts/create_allure_quality.py --group <组>` 依次跑该组的检查，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。它分三组：`core`（ruff check / ruff format --check / mypy 宿主平台那一次，公共检查：与平台无关，只在 Ubuntu 跑一遍 → `quality` 作业）、`platform`（mypy 的 `--platform win32` 与 `--platform darwin`，各**在那个平台上执行** → `quality-platform` 作业按平台展开）与 `analysis`（deptry / bandit / pip-audit / radon / xenon，同样与平台无关，只跑 Ubuntu 一遍 → `analysis` 作业）。`core` 与 `analysis` 都只在 Ubuntu 执行，所以汇总报告里每个公共门禁只出现一条。**结论归入哪个环境分两种**：与平台无关的检查带 `env=common`，归入 `allurerc.mjs` 里**显式声明**的 `Common` 环境（不是某个平台的环境，也不是隐式的 `default`）；两条平台专属 mypy 检查带对应平台的 `env`，归入报告里那个平台的 `Windows` / `macOS` 环境 —— 它们验的就是那个平台，**而且真的在那台机器上跑**（`Check.host_platform`），所以“标着 Windows 的结论一定产自 Windows”是结构上的事实：`--platform` 只是“检查哪支代码”，不代表执行环境，放在 Ubuntu 上跑虽然也能过，但环境归属就是假的。放在环境选择器里能与该平台的测试结果一起看（执行主机只写进描述，二者不混）。脚本会自己挑适用的一支：显式点名一个在当前平台跑不了的分组时以退出码 2 报错（默默跳过等于这道门禁不存在）。顺便说明为什么宿主平台那次 mypy 仍在 `Common`：公共检查的判据是“**结论本身与平台无关**”，不是“跑在哪台机器上” —— 除开两条平台专属分支（另有 `platform` 组专门验）之外，那次 mypy 在哪个平台上跑都是同一个结论，所以它归 `Common` 而不是 `Linux`；平台专属那两条则相反，它们表达的就是“某平台的代码路径类型对不对”。
 
-除此之外，汇总作业还会跑一次 **Allure 原生质量门**：`allure quality-gate --config allurerc.mjs allure-results`。规则写在 `allurerc.mjs` 的 `qualityGate.rules` 里，管的是整次运行（失败数 / 用例数 / 通过率 / 三个平台是否都合并进来了），与逐项检查互补；它的退出码直接决定作业成败，输出写进 `allure-quality-gate.txt` 并由运行总账收进报告首页「全局附件」。**CLI 版本必须 ≥ 3.18.0**：3.13~3.17 在配了 `historyPath` 时会静默放行（退出 0 且不输出任何内容 —— 根因是本地历史流的句柄悬空，`AllureReport.done()` 永不返回，Node 在校验前就退出了，见 issue [#895](https://github.com/allure-framework/allure3/issues/895)，修于 3.18.0 的 PR #962），所以 CI 把 CLI 钉在 3.18.0。本地复现：`npx allure@3.18.0 quality-gate --config allurerc.mjs allure-results`（单平台跑会因 `environmentsTested` 失败，属预期）。
+除此之外，汇总作业还会跑一次 **Allure 原生质量门**：`allure quality-gate --config allurerc.mjs allure-results`。规则写在 `allurerc.mjs` 的 `qualityGate.rules` 里，管的是整次运行，与逐项检查互补；它的退出码直接决定作业成败，输出写进 `allure-quality-gate.txt` 并由运行总账收进报告首页「全局附件」。规则分两条规则集：第一条不过滤（`maxFailures: 0` / `successRate: 0.98`），脚本生成的结论项也算在内 —— 否则“覆盖率项 broken”这类失败就没人管了；第二条**只看真实用例**，要求 `Windows` / `macOS` / `Linux` 三个环境里都还有用例（`filter` 选出带 `framework=pytest` 标签的结果再 `environmentsTested`）。
+
+**为什么要用环境维度、不用 `minTestsCount: 3000`**：绝对计数会随用例规模往**更松**的方向漂 —— 实测签名是 `3P+154`（每平台 P 条用例），每平台涨到 1400 上下之后，即使缺一整个平台的产物也仍然高于 3000，规则静默失效且没有任何信号（“常量失效时没人知道”正是这类规则最难查的地方）。环境维度不随规模变化：只带汇总项的环境不算“测过”（实测 3.18.0 的规则集级 `filter` 对 `environmentsTested` 生效）。判据用的是 **`framework=pytest` 这类正向标记**而不是“不能带 `testCategory`”这类反向排除：正向判据漏判时**会红**，反向判据漏判时**会绿**（将来某个脚本忘了打标签，它的汇总项就会被当成真实用例）。同一道不变式在仓库自检脚本里也有一份（`--expect-platforms`，见上一节）。**它管不到"少一片"**：那条属于"部分漏收"，由产物清单负责（`--manifest`，见第 6 节的分片段与自检段）。**CLI 版本必须 ≥ 3.18.0**：3.13~3.17 在配了 `historyPath` 时会静默放行（退出 0 且不输出任何内容 —— 根因是本地历史流的句柄悬空，`AllureReport.done()` 永不返回，Node 在校验前就退出了，见 issue [#895](https://github.com/allure-framework/allure3/issues/895)，修于 3.18.0 的 PR #962），所以 CI 把 CLI 钉在 3.18.0。本地复现：`npx allure@3.18.0 quality-gate --config allurerc.mjs allure-results`（单平台跑会因 `environmentsTested` 失败，属预期）。
 
 ### GUI 用例必须真的跑起来（skip 是有代价的）
 
@@ -164,6 +167,13 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 - 判定"布局停在上一次宽度"这类回归**用假控件**（只实现 `_text` 与 `winfo_width()` 的替身），而不是在真窗口上改完文本再泵事件循环：后台重裁会在不同平台上以不同时机把文本改回去，自检会时灵时不灵。`test_gui_layout.py` 里两条用例正是这么分工的：一条跑真布局，一条用假标签验看门狗本身。
 - 断言"当前宽度下应当截成什么"时别写死像素或字符数：用同一个 `fit_text(full, font, label.winfo_width())` 生成期望值，比对**文本**（与字体是否缺字形无关），像素只用来卡"缝隙上限"。
 
+**重裁本身还必须保证"一定会发生"，而且不能靠"等够多少秒"去赌**。它有两层触发机制，缺一层就会漏：
+
+- **容器事件**（滚动区 `<Configure>`）负责"可用宽度变了"这件事，走延后 60ms 的**合并**式排队：已排过队就不再排，也**不撤销**已排的那个（`HomePage._schedule_list_sync`、`ArchiveApp._on_content_resize`）。改成"每次请求先取消再重新计时"看起来更平滑，但触发源是**连续**的尺寸事件（无窗口管理器的 Xvfb、CustomTkinter 的延迟重绘），任务会被无限推后、永远轮不到执行。判据：触发源**离散**（用户按键、单次点击）才可以用"取消重排"的 debounce（如设置窗口的录制收尾计时器）；触发源**可能连续**，就必须合并而不是推后。
+- **标签自己的 `<Configure>`** 负责兜住容器事件不来的情况：内宽变了而外宽没变（滚动条出现/消失、表头内边距被重算）、行刚重建且标签刚量到真实宽度时，滚动区都不会发事件。所以名称标签直接盯自己的宽度，量到就**立刻**按它裁一次（`HomePage._on_name_resize` → `_fit_row_name`，宽度没变则不重写文本，避免"改文本 → 新事件 → 再裁"互相追）。这两层合起来才让"名称按当前宽度显示"成为**不用等多久**就会成立的事实 —— 而不是"恰好没被下一次事件推后"的运气。
+
+对应地，**用例这边不要和这段延迟赛跑**：名称的显示被两个延迟源影响（重裁任务延后 60ms；行还会因为异步加载落地而**整体重建**，重建后先回到兜底宽度的短文本）。所以断言前先等**不变量本身**成立（显示文本 == 该宽度下的 `fit_text` 结果，见 `_wait_until_the_name_fits`，超时才失败），而不是泵固定时长的事件循环 —— CI 上真实挂过：Linux 上异步数据到得晚，断言正好落在"新行刚建好、重裁还没轮到"的那一瞬间，报出来的字数与标签宽度对不上（现场 dump 里 `_sync_job` 还挂着、`_refit_attempts` 才 1）。契约守卫见 `tests/unit/test_ui_scheduling.py`（用替身控件驱动真实的调度与裁剪方法，不建窗口）。
+
 ### 报告自检与发布（不要跳过）
 
 报告是一套静态站点：用例详情页打开时才去取`data/test-results/<结果 id>.json`。这个目录一旦在传输或解压环节被丢掉，报告就只剩汇总与用例树——界面能看到用例通过与否，点开用例却是空的（生成阶段本身没问题，用同一个 allure 版本本地生成就有这些文件）。
@@ -172,9 +182,18 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 
 - 检查入口资源：`index.html`、单个 `app-*.js`、`summary.json`、`test-results.json`、`widgets/**/statistic.json`、`widgets/**/tree.json`；
 - 逐条核对结果索引（`test-results.json` 的 `byId`）引用的详情文件是否存在，并确认条数与 `allure-results` 里的结果文件一致；
-- 校验用例分组（`data/test-env-groups/*.json`）引用的结果 id 都在索引里。
+- 校验用例分组（`data/test-env-groups/*.json`）引用的结果 id 都在索引里；
+- `--expect-platforms` 指定的每个平台环境里都要有**真实用例**结果（判据 `framework=pytest`，与质量门那条规则同一个判据）；
+- 传了 `--manifest` 时，还要把"分片自报的条数"与最终条数对上（见下）。
 
 任一项不通过即作业失败，且**不发布报告**（`Upload Allure report` 只在自检成功时执行）；标准输出里的"结果索引 / 详情文件 / 用例分组"三个计数就是排查入口。自检通过后用 `--zip` 把报告打成单个 `allure-report.zip` 发布：单文件要么完整到达、要么直接报错，不会出现"整个目录被悄悄丢掉"的半损坏状态（改动前的 artifact 就踩过一次）。
+
+**平台用例这一项是唯一不拦发布的**（`continue-on-error: true`，结论由汇总作业末尾的门禁结论步骤接手）：它属于**内容**问题而不是"报告坏了"，而报告正是用来看"哪个平台没数据"的地方 —— 拦下来反而拿不到证据（分片作业全挂时更需要看到报告）。两处接线：
+
+- `pytest-report` 作业传 `--expect-platforms "${{ runner.os }}"`（`runner.os` 就是 `Windows` / `macOS` / `Linux`，与本仓库的平台展示名一致），逐平台自查；
+- 汇总作业传 `--expect-platforms Windows,macOS,Linux`，在生成完最终报告之后运行（它不拦发布，结论由末尾的门禁结论步骤接手），输出里的 `按平台用例: Windows 1155 用例 + 2 汇总项, ...` 就是"哪个平台只剩汇总项"的直接证据。
+
+为什么它能发现质量门的 `environmentsTested` 发现不了的事：覆盖率/安全汇总项、平台专属的质量检查都带平台的 `env`，所以"环境存在"不等于"这个平台测过"。两道都在（Allure 规则 + 仓库自检）是有意的 —— 后者能逐平台报数，也不会因为 CLI 升级后 `filter` 语义变化而静默失效。已验证（2026-09-21，用真实报告重建的 3493 条结果）：删掉 Linux 的 1166 条用例后，自检报 `这些平台里没有用例结果: Linux (脚本生成的汇总项不算用例; 逐平台: ... Linux: 0 用例 / 3 汇总项)`，质量门报 `tests-on-every-platform/environmentsTested`。
 
 Windows runner 的控制台是 cp1252：Python 默认按该编码输出，**打印中文会直接 `UnicodeEncodeError` 打断步骤**（报告自检在 CI 上踩过）。因此工作流最外层设了 `PYTHONUTF8=1`，两个报告脚本自己也会把标准输出切成 UTF-8（取不到 `reconfigure` 的替身如 pytest `capsys` 就跳过）。新增会向终端打中文的脚本时注意这条。
 
@@ -183,7 +202,11 @@ Windows runner 的控制台是 cp1252：Python 默认按该编码输出，**打�
 ```shell
 uv run python scripts/verify_allure_report.py allure-report          # 只自检
 uv run python scripts/verify_allure_report.py allure-report --zip    # 自检并重新打包
+uv run python scripts/verify_allure_report.py allure-report --expect-platforms Windows,macOS,Linux
+uv run python scripts/verify_allure_report.py allure-report --results allure-results --manifest "allure-manifests/*.json"
 ```
+
+`--manifest` 的三条判据（都在"内容检查"那一侧，不拦发布）：声明必须有的片号都到了、各分片自报的结果数**不超过**结果目录里的结果文件数（超了说明合并之后掉过数据）、报告里每个平台的用例数**不少于**该平台分片自报的结果数。输出里的 `分片产物清单: Linux 725 条结果(2 片), 缺片 1` 就是缺片的直接证据。
 
 ### 失败现场留证（dump + 界面截图）
 
@@ -205,9 +228,11 @@ uv run python scripts/verify_allure_report.py allure-report --zip    # 自检并
 - **参数**是 `--shard-count` / `--shard-index`（默认 `1`/`0` 即不分片），过滤发生在**严重等级过滤之后**：本地 `--min-severity=critical` 选出的子集也能分片跑。三条性质由 `tests/unit/test_sharding.py` 锁住：不重不漏（各片并集 == 全集）、同输入同分片、各片权重接近理想值。
 - **不要用 pytest-xdist 代替分片**：本机实测 `-n 4` 让 `tests/unit` 从 39s 降到 21s，但 `tests/integration` 没有收益（222s），`tests/integration/test_gui_buttons.py` 反而从 143s 变成 174s，并多出 Tk 初始化失败（`invalid command name "tcl_findLibrary"`）。GUI 用例各自起真实窗口，并行只会互相拖慢；分片是**进程级**并行（CI 上还是**机器级**），不碰这个坑。
 - **合并**在 `pytest-report`（每平台一个作业）：`scripts/merge_allure_results.py` 把各片结果目录搬进一份 `allure-results`（日志逐片给文件数，少一片能一眼看出来）；覆盖率用 `COVERAGE_FILE=.coverage.shard-<片>` 分片写，再 `uv run coverage combine` 合成一份。
+- **产物清单（`--manifest`）是"少一片"的唯一判据**：少一片时合并照常成功，报告只是安静地少一部分用例 —— 环境、通过率、格式自检、甚至 Allure 原生质量门的 `environmentsTested` 全都看不出来（2026-09-21 实测：删掉 Linux 的一整片 382 条用例后，质量门 `exit 0`）。所以合并时同时写一份 JSON：逐分片的文件数与**结果**条数、合并合计、以及 `--expect-shards 0,1,2` 声明必须有而实际没找到的片号。它随 `allure-resources-<平台>` 上传，汇总作业收集成 `allure-manifests/*.json`，由 `scripts/verify_allure_report.py --manifest` 与最终条数对齐（见第 6 节的自检那段）。清单给的三个数分别是：各分片自报的结果数、`allure-results` 里实际的结果文件数、报告里各平台的用例数。
 - **覆盖率门槛只在合并后判**：单片覆盖率天生偏低，所以分片作业用 `--cov-report=`（关掉报告）与 `--cov-fail-under=0`（关掉门槛），合并后单独一步跑 `uv run coverage report`（阈值仍取 pyproject 的 `[tool.coverage.report] fail_under`）。之所以单独成步：原生命令的非零退出码只有作为该步**最后一条**命令时才会让作业失败，混在一起写会让门槛静默失效。
 - **产物名不变**：`pytest-report` 上传的仍是 `allure-resources-<平台>` / `coverage-<平台>` / `allure-report-<平台>`，汇总作业照旧读它们（所以它的 `needs` 里必须有 `pytest-report`，否则会在产物上传完成前开始下载，报告静默地少掉各平台的测试结果）。
 - 片数出现在三处（`matrix.shard` 列表、`--shard-count`、传给 pytest 的 `--shard-index`）：两边不一致会让**一部分用例静默不跑**，所以 `tests/unit/test_sharding.py` 会校验矩阵与 `--shard-count` 一致、矩阵编号真的是 `0..N-1`。
+- **依赖缓存只让片 0 写**（`save-cache: ${{ matrix.shard == 0 }}`）：同一平台的各片算出的 cache key 完全相同，并行保存时只有第一个能抢到，其余片会打印 `Failed to save: Unable to reserve cache ... another job may be creating this cache`（分片上线后三个平台都出现过）。写入者按平台唯一，其余片与其它作业全部 `save-cache: false`（只读复用）—— 守卫会盯住这条不变式。
 
 ## 7. 本地生成与查看报告
 
@@ -251,6 +276,15 @@ done
 uv run python scripts/merge_allure_results.py --output allure-results "allure-results-shard-*"
 uv run coverage combine && uv run coverage report   # 门槛在这里判(合并后的总覆盖率)
 allure generate allure-results --output allure-report
+```
+
+本地想连产物清单一起核对（片号从目录名末尾认，所以目录名要以片号结尾）：
+
+```shell
+uv run python scripts/merge_allure_results.py --output allure-results \
+  --platform Linux --expect-shards 0,1,2 --manifest allure-manifest.json "allure-results-shard-*"
+uv run python scripts/verify_allure_report.py allure-report --results allure-results \
+  --expect-platforms Linux --manifest allure-manifest.json
 ```
 
 分片只改变“哪些用例在哪一次运行里跑”，不改收集结果：三片并集与全量收集逐条一致（`--collect-only` 核对过 1068 条），合并后的总覆盖率也与串行一致（91%）。命令行的 `--shard-count` / `--shard-index` 说明见上一节。
