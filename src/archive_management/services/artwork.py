@@ -44,23 +44,35 @@ DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 # Steam 公开 CDN 的地址规则与海报用的竖版封面资源名(无凭据, 缺失即占位).
 STEAM_CDN_ROOT = "https://cdn.cloudflare.steamstatic.com/steam/apps"
 STEAM_COVER_ASSET = "library_600x900.jpg"
-# 图标不是单独下载的资源: 它由封面裁成方形生成(见 :func:`square_icon`).
-# 版本号同时是缓存文件名的一部分, 换裁剪规则就会重新生成。
+# 官方图标(``clienticon``)的 CDN 规则: 哈希来自本机 appinfo.vdf, 见
+# :mod:`archive_management.services.steam_appinfo`。本机 ``steam/games/<哈希>.ico``
+# 优先(离线可用), CDN 只作兜底 —— 与封面同一条“本地优先”。
+STEAM_ICON_CDN_ROOT = (
+    "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps"
+)
+STEAM_ICON_ASSET = "ico"
+# 图标缓存版本: 官方图标直接用它的哈希(Steam 换图标就换文件名, 不会拿旧图当新
+# 图), 只有平台给不出官方图标时才回落“封面裁方形” —— 那一种用下面这个版本名,
+# 缓存文件名要如实说明这份图是怎么来的。
 ICON_VERSION = "cover-square-256"
 ICON_SIZE = 256
 
 # 允许的图片类型与其扩展名; 类型以文件头为准, 声明值只用于校验.
+# ico 是官方图标自带的格式(多尺寸, 取最大那张), 下载后会被转成 PNG 再进图标缓存。
 _EXTENSIONS: dict[str, str] = {
     "image/png": "png",
     "image/jpeg": "jpg",
     "image/webp": "webp",
     "image/gif": "gif",
+    "image/x-icon": "ico",
+    "image/vnd.microsoft.icon": "ico",
 }
 _SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"GIF87a", "image/gif"),
     (b"GIF89a", "image/gif"),
+    (b"\x00\x00\x01\x00", "image/x-icon"),
 )
 _WEBP_MARKER = b"WEBP"
 
@@ -244,16 +256,18 @@ def local_artwork(game: PlatformGame, kind: ArtworkKind) -> Path | None:
 def cached_artwork(
     game: PlatformGame, kind: ArtworkKind, cache: ArtworkCache
 ) -> Path | None:
-    """界面渲染用: 只查平台本地文件与缓存, 不发起网络请求.
+    """界面渲染用: 只查缓存与平台本地文件, 不发起网络请求.
 
-    详情页与海报卡片是同步渲染的, 一次网络请求会把界面卡住; 下载统一交给
-    :func:`resolve_artwork`(可由后台线程调用)。
+    顺序是"缓存 → 平台本地文件": 缓存里那份是已经归一化好的成品(图标会被转成
+    固定边长的方形 PNG), 与后台补齐时的判断一致; 平台本地文件只作为"还没补上"
+    时的即时来源(装好的游戏通常马上就有图可看)。详情页与海报卡片是同步渲染的,
+    一次网络请求会把界面卡住; 下载统一交给 :func:`resolve_artwork`(可由后台
+    线程调用)。
     """
-    local = local_artwork(game, kind)
-    if local is not None:
-        return local
     cached = cache.lookup_any(game.platform, game.game_id, kind)
-    return cached if cached is not None and _usable(cached) else None
+    if cached is not None and _usable(cached):
+        return cached
+    return local_artwork(game, kind)
 
 
 def platform_game(
@@ -287,43 +301,78 @@ def steam_cover(app_id: str) -> ArtworkRef:
     )
 
 
-def steam_icon(app_id: str) -> ArtworkRef:
-    """兼容入口: 图标不再从 CDN 取, 这里返回一个"由封面派生"的空地址引用.
+def steam_icon(
+    app_id: str, clienticon: str, *, local_path: Path | None = None
+) -> ArtworkRef:
+    """按官方图标哈希构造图标引用(本机文件优先, CDN 兜底).
 
-    保留函数是为了让调用方仍能用同一套 ``ArtworkRef`` 描述两类资源; 真实生成在
-    :func:`square_icon`(由后端在封面到位后调用)。
+    哈希来自本机 ``appinfo.vdf`` 的 ``clienticon`` 字段: 本机 ``steam/games/``
+    里通常已经有同名 ``.ico``(完全离线可用), 没有才去 CDN 取同哈希的资源。
+    ``version`` 直接用哈希 —— 缓存文件名跟着官方图标走。
     """
-    return ArtworkRef(kind="icon", url="", version=ICON_VERSION)
+    return ArtworkRef(
+        kind="icon",
+        url=f"{STEAM_ICON_CDN_ROOT}/{app_id}/{clienticon}.{STEAM_ICON_ASSET}",
+        local_path="" if local_path is None else str(local_path),
+        version=clienticon,
+    )
 
 
-def steam_artwork(app_id: str) -> tuple[ArtworkRef, ...]:
-    """返回一款 Steam 游戏需要下载的图片引用(只有封面需要联网)."""
-    return (steam_cover(app_id), steam_icon(app_id))
+def steam_artwork(
+    app_id: str, clienticon: str = "", *, local_path: Path | None = None
+) -> tuple[ArtworkRef, ...]:
+    """返回一款 Steam 游戏的图片引用: 封面 + 能拿到官方图标时的图标.
+
+    拿不到 ``clienticon``(没有 appinfo、版本不认识、游戏不在里面)时只返回封面:
+    后台会用封面裁一块方形当图标, 界面不会因为少一个哈希而变空。
+    """
+    if not clienticon:
+        return (steam_cover(app_id),)
+    return (steam_cover(app_id), steam_icon(app_id, clienticon, local_path=local_path))
+
+
+def icon_version(game: PlatformGame) -> str:
+    """图标缓存版本: 有官方图标用它的哈希, 否则用封面裁剪的版本名."""
+    reference = _reference_for(game, "icon")
+    if reference is None or not reference.version:
+        return ICON_VERSION
+    return reference.version
 
 
 def square_icon(source: Path, *, size: int = ICON_SIZE) -> bytes | None:
-    """把一张封面裁成方形并编码成 PNG, 供界面当图标使用.
+    """把一张图片裁成方形并编码成 PNG, 供界面当图标使用.
 
-    为什么不直接下载平台的图标资源: Steam 的 ``logo.png`` 是**游戏标题图**
-    (艺术字 + 透明背景), 缩成头像后既看不清也认不出游戏; 从封面正中偏上裁一块
-    正方形得到的是画面主体, 且不额外产生网络请求。裁不开(文件损坏/格式不支持)
-    时返回 ``None``, 由调用方回落占位。
+    两种来源共用它: **官方图标**(``clienticon`` 的多尺寸 ``.ico``, 本身就是方的)
+    与平台给不出官方图标时的**封面裁剪**。统一转 PNG 的理由: 界面与缓存校验只认
+    位图格式, 而两类来源的尺寸差异很大(16x16 到 256x256), 统一到 :data:`ICON_SIZE`
+    后头像位不会忽大忽小。有透明通道就保留(官方图标常带透明), 贴到深色界面上
+    不会变成黑底。裁不开(文件损坏/格式不支持)时返回 ``None``, 由调用方回落占位。
     """
     try:
         with Image.open(source) as image:
-            picture = image.convert("RGB")
+            picture = _keep_transparency(image)
             side = min(picture.size)
             left = (picture.width - side) // 2
-            # 略向上偏移: 竖版封面的主体(角色/场景)通常在上半部分.
+            # 略向上偏移: 竖版封面的主体(角色/场景)通常在上半部分; 本身是方形的
+            # 官方图标算出来就是 0, 不会被动到。
             top = max((picture.height - side) // 2 - side // 8, 0)
             square = picture.crop((left, top, left + side, top + side))
             resized = square.resize((size, size), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
             resized.save(buffer, format="PNG")
     except (OSError, ValueError) as exc:
-        logger.warning("封面无法裁成图标(%s): %s", source, exc)
+        logger.warning("图片无法裁成图标(%s): %s", source, exc)
         return None
     return buffer.getvalue()
+
+
+def _keep_transparency(image: Image.Image) -> Image.Image:
+    """有透明通道就保留(RGBA), 否则转成不透明位图(封面是拼合过的 jpg)."""
+    if image.mode in {"RGBA", "LA"} or (
+        image.mode == "P" and "transparency" in image.info
+    ):
+        return image.convert("RGBA")
+    return image.convert("RGB")
 
 
 def sniff_media_type(data: bytes) -> str | None:

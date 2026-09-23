@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import json
 import platform
+import struct
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from archive_management.application.backup import BackupService
 from archive_management.domain import (
@@ -227,6 +230,71 @@ def steam_tree(root: Path) -> Path:
     steam = root / "Program Files (x86)" / "Steam"
     (steam / "steamapps" / "common").mkdir(parents=True, exist_ok=True)
     return steam
+
+
+# appinfo.vdf 的魔数(低 24 位是标识, 最低字节是格式版本)与默认键名表。
+STEAM_APPINFO_MAGIC = 0x07564429
+STEAM_APPINFO_KEYS: tuple[str, ...] = (
+    "appinfo",
+    "appid",
+    "public_only",
+    "common",
+    "name",
+    "type",
+    "clienticon",
+)
+
+
+def appinfo_bytes(
+    entries: Mapping[str, Mapping[str, str]],
+    *,
+    keys: Sequence[str] = STEAM_APPINFO_KEYS,
+    magic: int = STEAM_APPINFO_MAGIC,
+    table_offset: int | None = None,
+) -> bytes:
+    """造一份结构忠实的 ``appinfo.vdf``: 文件头 + 应用条目 + 末尾字符串表.
+
+    与真实文件一致的三点: 键名只在字符串表里出现一次, 条目里用**键序号**引用;
+    字符串值以 NUL 结尾; 条目区在字符串表之前。``table_offset`` 可覆盖, 用来
+    制造"字符串表偏移越界"这类损坏形态。
+    """
+    table = struct.pack("<I", len(keys))
+    for key in keys:
+        table += key.encode("utf-8") + b"\0"
+    body = b""
+    for app_id, fields in entries.items():
+        blob = b"\x00" + struct.pack("<I", keys.index("appinfo"))
+        for name, value in fields.items():
+            blob += b"\x01" + struct.pack("<I", keys.index(name))
+            blob += value.encode("utf-8") + b"\0"
+        blob += b"\x08" * 2
+        body += struct.pack("<II", int(app_id), len(blob)) + blob
+    where = 16 + len(body) if table_offset is None else table_offset
+    header = struct.pack("<IIQ", magic, 1, where)
+    return header + body + table
+
+
+def write_steam_appinfo(
+    steam: Path,
+    entries: Mapping[str, Mapping[str, str]],
+    **kwargs: Any,
+) -> Path:
+    """把 :func:`appinfo_bytes` 写进 Steam 主目录并返回文件路径."""
+    path = steam / "appcache" / "appinfo.vdf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(appinfo_bytes(entries, **kwargs))
+    return path
+
+
+def write_steam_icon(
+    steam: Path, clienticon: str, sizes: Sequence[int] = (64,)
+) -> Path:
+    """写入一张真实的 ``steam/games/<哈希>.ico``(多尺寸)并返回路径."""
+    path = steam / "steam" / "games" / f"{clienticon}.ico"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    picture = Image.new("RGBA", (max(sizes), max(sizes)), (200, 30, 30, 255))
+    picture.save(path, format="ICO", sizes=[(size, size) for size in sizes])
+    return path
 
 
 def write_steam_manifest(

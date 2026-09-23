@@ -1,7 +1,9 @@
 """Steam 数据配置模型.
 
-只定义从本地数据文件读取时需要的数据模型与字段校验边界, 不包含网络访问
-逻辑; 未来接入 Steam Web API 时沿用同一套模型.
+只定义从本地数据文件读取时需要的数据模型与字段校验边界: 本模块自己不访问
+网络。联网获取的东西在 ``services`` 层, 且都只作为兜底或可选增强 —— 封面与
+图标见 ``services/artwork.py``(本地优先, 公开 CDN 兜底), 译名见
+``services/game_names.py``(缺缓存时才问公开商店接口).
 """
 
 from __future__ import annotations

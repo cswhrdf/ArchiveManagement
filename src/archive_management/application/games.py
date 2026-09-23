@@ -6,7 +6,7 @@
 
 按"被监控的游戏进程是否启动"自动切换启用态这件事只留了接缝
 (:class:`ActivationPolicy` + :func:`apply_activation`), 具体策略尚未实现, 需求与
-约束写在 PLAN.md 的 G-6.5 子步骤里。
+约束写在 PLAN.md 的 G-6 子步骤里。
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def active_game(database: Database) -> Game | None:
 class ActivationPolicy(Protocol):
     """决定"现在应该由哪一款游戏处于启用态"的策略.
 
-    这是按游戏进程自动启停(PLAN 的 G-6.5)的接入点: 未来由"被监控的游戏是否
+    这是按游戏进程自动启停(PLAN 的 G-6)的接入点: 未来由"被监控的游戏是否
     启动"算出目标游戏 id。**返回 None 表示"不做判断"** —— 用户手动调整过之后
     策略必须能表达"保持现状", 否则下一次轮询就会把手动选择刷回去。
     """

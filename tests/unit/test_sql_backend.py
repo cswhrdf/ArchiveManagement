@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import archive_management.application.locations as locations_mod
+import helpers
 from archive_management.domain import (
     ArtworkRef,
     Game,
@@ -32,6 +33,7 @@ from archive_management.services.artwork import (
     STEAM_COVER_ASSET,
     artwork_cache_at,
     steam_cover,
+    steam_icon,
 )
 from archive_management.services.game_names import NameFetcher, name_cache_at
 from archive_management.services.platform_adapters import SaveCandidateSource
@@ -41,6 +43,9 @@ from archive_management.ui.sql_backend import SqlArchiveService
 
 # 一张最小的 PNG 文件头(封面缓存只认文件头就能判定可用).
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+# 一款游戏的官方图标哈希(appinfo.vdf 的 clienticon).
+_ICON_HASH = "b2f863a4c63bc1c5667a8a7e3e9355ef260ce6d2"
 
 pytestmark = [
     pytest.mark.backend,
@@ -902,7 +907,7 @@ class _FakeSaveSource:
 
 
 class _FakeAdapter:
-    """测试替身适配器: 存档候选来自固定来源, 取图仍按公开 CDN 规则."""
+    """测试替身适配器: 存档候选来自固定来源, 图片引用由调用方指定."""
 
     platform: PlatformId = "steam"
     supported: bool = True
@@ -910,8 +915,11 @@ class _FakeAdapter:
     supports_save_paths: bool = True
     supports_artwork: bool = True
 
-    def __init__(self, cloud: SaveCandidateSource) -> None:
+    def __init__(
+        self, cloud: SaveCandidateSource, *, icon: ArtworkRef | None = None
+    ) -> None:
         self._cloud = cloud
+        self._icon = icon
 
     def list_games(self) -> list[PlatformGame]:
         """替身不提供游戏列表(用例自己造游戏记录)."""
@@ -922,8 +930,13 @@ class _FakeAdapter:
         return self._cloud.candidates(game.game_id, install_dir=None)
 
     def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
-        """封面按公开 CDN 规则构造(与真实适配器一致)."""
-        return () if not game.game_id else (steam_cover(game.game_id),)
+        """封面按公开 CDN 规则构造; 另可注入一份官方图标引用(与真实适配器一致)."""
+        if not game.game_id:
+            return ()
+        refs = [steam_cover(game.game_id)]
+        if self._icon is not None:
+            refs.append(self._icon)
+        return tuple(refs)
 
 
 class _StubNames:
@@ -946,6 +959,7 @@ def _steam_service(
     *paths: str,
     cache_dir: Path | None = None,
     name_fetcher: NameFetcher | None = None,
+    icon: ArtworkRef | None = None,
 ) -> tuple[SqlArchiveService, str, Database]:
     """一个带 Steam AppID 的游戏 + 固定候选来源与替身适配器的服务实例."""
     database = Database(tmp_path / "app.db")
@@ -957,7 +971,7 @@ def _steam_service(
         scheduler=BackupScheduler(backend=ManualBackend()),
         cache_dir=cache_dir,
         save_source=source,
-        adapters={"steam": _FakeAdapter(source)},
+        adapters={"steam": _FakeAdapter(source, icon=icon)},
         name_fetcher=name_fetcher,
     )
     game_id = service.add_game("Demo").game_id
@@ -1153,7 +1167,7 @@ def test_delete_game_removes_its_artwork_cache(tmp_path: Path) -> None:
 
 
 def test_icon_is_derived_from_the_cover(tmp_path: Path) -> None:
-    """封面到位后从它裁出方形图标(Steam 的 logo.png 是标题图, 不用)."""
+    """封面兜底: 平台给不出官方图标时, 从封面裁出方形图标."""
     from PIL import Image
 
     cache_dir = tmp_path / "cache"
@@ -1181,6 +1195,88 @@ def test_icon_is_derived_from_the_cover(tmp_path: Path) -> None:
     assert icon != ""
     with Image.open(icon) as made:
         assert made.size == (ICON_SIZE, ICON_SIZE)
+
+
+def test_official_icon_wins_over_the_cover_crop(tmp_path: Path) -> None:
+    """有官方图标时用它: 缓存里的像素来自 ico, 而不是封面(两者颜色不同)."""
+    from PIL import Image
+
+    cache_dir = tmp_path / "cache"
+    cache = artwork_cache_at(cache_dir)
+    cover = tmp_path / "cover.png"
+    Image.new("RGB", (300, 450), (10, 20, 30)).save(cover)
+    cache.store(
+        "steam",
+        "730",
+        "cover",
+        STEAM_COVER_ASSET,
+        content=cover.read_bytes(),
+        extension="png",
+    )
+    official = helpers.write_steam_icon(tmp_path, _ICON_HASH)
+    service, _game_id, database = _steam_service(
+        tmp_path,
+        cache_dir=cache_dir,
+        icon=steam_icon("730", _ICON_HASH, local_path=official),
+    )
+    game = GameRepository(database).get(1)
+    assert game is not None
+    referenced = service._artwork_game(game)
+    assert referenced is not None
+
+    assert service._fetch_artwork(cache, referenced) == 1
+
+    stored = cache.lookup_any("steam", "730", "icon")
+    assert stored is not None
+    # 文件名说明这份图是怎么来的: 官方图标用哈希, 且已经归一化成方形 PNG.
+    assert stored.name == f"icon-{_ICON_HASH}.png"
+    with Image.open(stored) as made:
+        assert made.size == (ICON_SIZE, ICON_SIZE)
+        # 官方图标带透明通道: 颜色来自 ico(红)而不是封面(深蓝), 且透明度保留.
+        assert made.getpixel((ICON_SIZE // 2, ICON_SIZE // 2)) == (200, 30, 30, 255)
+    # 界面拿到的是缓存里那份成品(而不是平台目录里的原始 .ico).
+    assert service.artwork_path("1", "icon") == str(stored)
+
+
+def test_a_cover_crop_icon_is_replaced_by_the_official_one(tmp_path: Path) -> None:
+    """已有裁出来的封面图标时, 拿到官方图标要覆盖它(否则升级后仍是旧图)."""
+    from PIL import Image
+
+    cache_dir = tmp_path / "cache"
+    cache = artwork_cache_at(cache_dir)
+    crop = tmp_path / "crop.png"
+    Image.new("RGB", (ICON_SIZE, ICON_SIZE), (10, 20, 30)).save(crop)
+    cache.store(
+        "steam", "730", "icon", ICON_VERSION, content=crop.read_bytes(), extension="png"
+    )
+    # 封面也预置好: 这样这一轮要补的只有图标(返回值只数图标那 1 份).
+    cache.store(
+        "steam",
+        "730",
+        "cover",
+        STEAM_COVER_ASSET,
+        content=crop.read_bytes(),
+        extension="png",
+    )
+    official = helpers.write_steam_icon(tmp_path, _ICON_HASH)
+    service, _game_id, database = _steam_service(
+        tmp_path,
+        cache_dir=cache_dir,
+        icon=steam_icon("730", _ICON_HASH, local_path=official),
+    )
+    game = GameRepository(database).get(1)
+    assert game is not None
+    referenced = service._artwork_game(game)
+    assert referenced is not None
+
+    assert service._fetch_artwork(cache, referenced) == 1
+
+    # 只剩官方图标那一版: 旧的封面裁剪已按“同类型过期文件”清掉.
+    assert cache.lookup("steam", "730", "icon", ICON_VERSION) is None
+    stored = cache.lookup("steam", "730", "icon", _ICON_HASH)
+    assert stored is not None
+    with Image.open(stored) as made:
+        assert made.getpixel((4, 4)) == (200, 30, 30, 255)
 
 
 def test_import_candidate_writes_the_confirmed_save_paths(tmp_path: Path) -> None:

@@ -64,10 +64,10 @@ from archive_management.infrastructure.repository import (
     ScheduledJobRepository,
 )
 from archive_management.services.artwork import (
-    ICON_VERSION,
     ArtworkCache,
     artwork_cache_at,
     cached_artwork,
+    icon_version,
     platform_game,
     resolve_artwork,
     square_icon,
@@ -1035,19 +1035,26 @@ class SqlArchiveService:
         fetched = 0
         if cache.lookup_any(referenced.platform, referenced.game_id, "cover") is None:
             fetched += int(resolve_artwork(referenced, "cover", cache).found)
-        return fetched + int(self._derive_icon(cache, referenced) is not None)
+        return fetched + int(self._store_icon(cache, referenced) is not None)
 
-    def _derive_icon(
-        self, cache: ArtworkCache, referenced: PlatformGame
-    ) -> Path | None:
-        """图标由封面裁成方形生成(平台给不出方形图标, 只能自己裁)."""
+    def _store_icon(self, cache: ArtworkCache, referenced: PlatformGame) -> Path | None:
+        """把图标写进缓存: **官方图标优先**, 平台给不出官方图标才裁封面.
+
+        官方图标由适配器给出(本机 ``steam/games/<哈希>.ico`` 或 CDN 同哈希资源)。
+        无论哪种来源都统一转成方形 PNG: 界面与缓存校验只认位图, 而且两类来源的
+        尺寸跨度很大(16x16 到 256x256), 统一到固定边长后头像位不会忽大忽小。
+        裁不开(文件损坏)时返回 ``None``, 界面回落名称首字位图。
+        """
         platform, game_id = referenced.platform, referenced.game_id
-        if cache.lookup_any(platform, game_id, "icon") is not None:
+        version = icon_version(referenced)
+        # 只认“当前来源对应的那一版”: 以前裁出来的封面图标(版本名不同)会被下面
+        # 这次覆盖掉 —— 否则拿到官方图标之后仍会一直显示旧的裁剪图。
+        if cache.lookup(platform, game_id, "icon", version) is not None:
             return None
-        cover = cache.lookup_any(platform, game_id, "cover")
-        if cover is None:
+        source = self._icon_source(cache, referenced)
+        if source is None:
             return None
-        content = square_icon(cover)
+        content = square_icon(source)
         if content is None:
             return None
         try:
@@ -1055,13 +1062,22 @@ class SqlArchiveService:
                 platform,
                 game_id,
                 "icon",
-                ICON_VERSION,
+                version,
                 content=content,
                 extension="png",
             )
         except OSError as exc:
             logger.warning("写入图标缓存失败: %s", exc)
             return None
+
+    def _icon_source(
+        self, cache: ArtworkCache, referenced: PlatformGame
+    ) -> Path | None:
+        """图标原图: 官方图标(本机 ico → CDN ico)优先, 都没有才用封面."""
+        official = resolve_artwork(referenced, "icon", cache)
+        if official.path is not None:
+            return official.path
+        return cache.lookup_any(referenced.platform, referenced.game_id, "cover")
 
     def _artwork_cache(self) -> ArtworkCache | None:
         """图片缓存; 未配置缓存目录时返回 None(界面走占位图)."""

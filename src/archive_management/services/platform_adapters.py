@@ -35,11 +35,15 @@ from archive_management.domain import (
     PlatformId,
     SavePathCandidate,
 )
-from archive_management.services.artwork import steam_cover
+from archive_management.services.artwork import steam_artwork
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.platform_scan import (
     ScanRoots,
     read_steam_installs,
+)
+from archive_management.services.steam_appinfo import (
+    SteamIcons,
+    load_steam_icons,
 )
 from archive_management.services.steam_cloud import SteamCloudSource
 
@@ -112,15 +116,25 @@ class SteamAdapter:
 
     游戏列表来自本机应用清单(``appmanifest_*.acf``, 顺带补齐 AppID), 存档候选
     来自云端同步清单(``userdata/<account>/<appid>/remotecache.vdf``): 两者都是
-    Steam 自己维护的数据, 不需要网络, 也不需要 API Key。
+    Steam 自己维护的本机文件, 不需要网络。
+
+    图片: 封面按公开 CDN 规则取; **官方图标**要先从 ``appcache/appinfo.vdf``
+    读出 ``clienticon`` 哈希, 再去本机 ``steam/games/<哈希>.ico`` 拿(离线可用),
+    本机没有才去 CDN 取同哈希的资源。拿不到哈希时只给封面, 后台会裁封面兜底。
     """
 
     def __init__(
-        self, roots: ScanRoots, *, cloud: SaveCandidateSource | None = None
+        self,
+        roots: ScanRoots,
+        *,
+        cloud: SaveCandidateSource | None = None,
+        icons: Mapping[str, SteamIcons] | None = None,
     ) -> None:
-        """绑定探测环境; 存档候选来源可注入, 便于用例替换成替身."""
+        """绑定探测环境; 存档候选与官方图标来源都可注入, 便于用例替换成替身."""
         self._roots = roots
         self._cloud = SteamCloudSource(roots) if cloud is None else cloud
+        self._icons = icons
+        self._icons_loaded = icons is not None
 
     @property
     def platform(self) -> PlatformId:
@@ -148,10 +162,26 @@ class SteamAdapter:
         return True
 
     def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
-        """返回封面引用(按公开 CDN 规则); 没有 AppID 时没有可用资源."""
+        """返回封面与官方图标引用; 拿不到图标哈希时只给封面(界面裁封面兜底).
+
+        图标哈希来自本机 ``appinfo.vdf``: 解析一次后缓存在适配器实例里, 所以
+        每款游戏只付一次字典查找。
+        """
         if game.platform != "steam" or not game.game_id:
             return ()
-        return (steam_cover(game.game_id),)
+        icons = self._steam_icons().get(game.game_id)
+        if icons is None:
+            return steam_artwork(game.game_id)
+        return steam_artwork(
+            game.game_id, icons.clienticon, local_path=icons.local_path
+        )
+
+    def _steam_icons(self) -> Mapping[str, SteamIcons]:
+        """本机各 Steam 主目录登记的官方图标; 第一次用到时才解析 ``appinfo.vdf``."""
+        if not self._icons_loaded:
+            self._icons = load_steam_icons(self._roots)
+            self._icons_loaded = True
+        return {} if self._icons is None else self._icons
 
     def list_games(self) -> list[PlatformGame]:
         """返回本机已安装的 Steam 游戏.

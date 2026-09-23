@@ -23,12 +23,14 @@ from archive_management.services.artwork import (
     ICON_VERSION,
     STEAM_CDN_ROOT,
     STEAM_COVER_ASSET,
+    STEAM_ICON_CDN_ROOT,
     ArtworkCache,
     FetchedArtwork,
     HttpArtworkFetcher,
     artwork_cache,
     artwork_cache_at,
     cached_artwork,
+    icon_version,
     platform_game,
     resolve_artwork,
     sniff_media_type,
@@ -48,7 +50,11 @@ pytestmark = [
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 _JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+_ICO = b"\x00\x00\x01\x00" + b"\x00" * 32
 _HTML = b"<html><body>not an image</body></html>"
+
+# 一款 Steam 游戏的官方图标哈希(来自 appinfo.vdf 的 clienticon).
+_ICON_HASH = "b2f863a4c63bc1c5667a8a7e3e9355ef260ce6d2"
 
 
 class _FakeFetcher:
@@ -97,6 +103,7 @@ def test_sniff_media_type_recognises_supported_images() -> None:
     assert sniff_media_type(_PNG) == "image/png"
     assert sniff_media_type(_JPEG) == "image/jpeg"
     assert sniff_media_type(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "image/webp"
+    assert sniff_media_type(_ICO) == "image/x-icon"
     assert sniff_media_type(_HTML) is None
 
 
@@ -305,16 +312,80 @@ def test_steam_cover_uses_the_public_cdn_rule(tmp_path: Path) -> None:
     assert reference.version == STEAM_COVER_ASSET
 
 
-def test_steam_icon_is_derived_from_the_cover() -> None:
-    """图标不再是下载资源: 引用不带地址, 由封面裁出来."""
-    icon = steam_icon("730")
-    assert icon.kind == "icon"
-    assert icon.url == ""
-    assert icon.version == ICON_VERSION
+def test_steam_icon_uses_the_official_hash(tmp_path: Path) -> None:
+    """图标按官方 clienticon 哈希构造: 版本是哈希, 本机 ico 给路径, CDN 给同哈希."""
+    local = tmp_path / f"{_ICON_HASH}.ico"
+    icon = steam_icon("730", _ICON_HASH, local_path=local)
 
-    pair = steam_artwork("730")
-    assert [reference.kind for reference in pair] == ["cover", "icon"]
+    assert icon.kind == "icon"
+    assert icon.version == _ICON_HASH
+    assert icon.url == f"{STEAM_ICON_CDN_ROOT}/730/{_ICON_HASH}.ico"
+    assert icon.local_path == str(local)
+
+
+def test_steam_artwork_without_a_hash_only_offers_the_cover() -> None:
+    """拿不到官方图标哈希时只给封面: 后台裁封面兜底, 界面不会因此没图."""
+    assert [item.kind for item in steam_artwork("730")] == ["cover"]
+
+    pair = steam_artwork("730", _ICON_HASH)
+    assert [item.kind for item in pair] == ["cover", "icon"]
     assert pair[0].url.endswith(STEAM_COVER_ASSET)
+
+
+def test_icon_version_distinguishes_both_sources() -> None:
+    """缓存文件名要说明这份图怎么来的: 官方图标用哈希, 封面裁剪用版本名."""
+    official = platform_game(
+        store="steam",
+        game_id="730",
+        name="Demo",
+        artwork=(steam_cover("730"), steam_icon("730", _ICON_HASH)),
+    )
+    cropped = platform_game(
+        store="steam", game_id="730", name="Demo", artwork=(steam_cover("730"),)
+    )
+
+    assert icon_version(official) == _ICON_HASH
+    assert icon_version(cropped) == ICON_VERSION
+
+
+def test_a_local_official_icon_needs_no_network(tmp_path: Path) -> None:
+    """本机已有 ico(已安装的游戏通常都有)时完全离线: 一次请求也不发."""
+    cache = _cache(tmp_path)
+    local = tmp_path / f"{_ICON_HASH}.ico"
+    local.write_bytes(_ICO)
+    game = platform_game(
+        store="steam",
+        game_id="730",
+        name="Demo",
+        artwork=(steam_icon("730", _ICON_HASH, local_path=local),),
+    )
+    fetcher = _FakeFetcher()
+
+    result = resolve_artwork(game, "icon", cache, fetcher=fetcher)
+
+    assert result.source == "local"
+    assert result.path is not None
+    assert result.path.suffix == ".ico"
+    assert fetcher.calls == []
+
+
+def test_the_official_icon_is_downloaded_from_the_cdn_as_ico(tmp_path: Path) -> None:
+    """本机没有图标时去 CDN 取同哈希的 .ico(声明类型是 image/x-icon)."""
+    cache = _cache(tmp_path)
+    game = platform_game(
+        store="steam",
+        game_id="730",
+        name="Demo",
+        artwork=(steam_icon("730", _ICON_HASH),),
+    )
+    fetcher = _FakeFetcher(content=_ICO, declared="image/x-icon")
+
+    result = resolve_artwork(game, "icon", cache, fetcher=fetcher)
+
+    assert result.source == "cdn"
+    assert result.path is not None
+    assert result.path.suffix == ".ico"
+    assert fetcher.calls == [f"{STEAM_ICON_CDN_ROOT}/730/{_ICON_HASH}.ico"]
 
 
 def test_forget_removes_every_cached_image_of_a_game(tmp_path: Path) -> None:
@@ -339,7 +410,7 @@ def test_forget_removes_every_cached_image_of_a_game(tmp_path: Path) -> None:
 
 
 def test_square_icon_crops_the_cover_into_a_square(tmp_path: Path) -> None:
-    """方形图标: 从竖版封面裁出正方形(Steam 的 logo.png 是标题图, 不适合当图标)."""
+    """封面兜底: 平台给不出官方图标时, 从竖版封面裁出正方形当图标."""
     cover = tmp_path / "cover.png"
     Image.new("RGB", (300, 450), (10, 20, 30)).save(cover)
 
@@ -348,6 +419,23 @@ def test_square_icon_crops_the_cover_into_a_square(tmp_path: Path) -> None:
     assert content is not None
     with Image.open(io.BytesIO(content)) as made:
         assert made.size == (ICON_SIZE, ICON_SIZE)
+
+
+def test_square_icon_accepts_an_official_ico(tmp_path: Path) -> None:
+    """官方图标本身是方形多尺寸 ico: 取最大那张并统一到缓存的边长."""
+    source = tmp_path / "icon.ico"
+    Image.new("RGBA", (64, 64), (200, 30, 30, 255)).save(
+        source, format="ICO", sizes=[(32, 32), (64, 64)]
+    )
+
+    content = square_icon(source)
+
+    assert content is not None
+    with Image.open(io.BytesIO(content)) as made:
+        assert made.size == (ICON_SIZE, ICON_SIZE)
+        # 透明通道要保留: 否则透明图标贴到深色界面上会变成黑底.
+        assert made.mode == "RGBA"
+        assert made.getpixel((ICON_SIZE // 2, ICON_SIZE // 2)) == (200, 30, 30, 255)
 
 
 def test_square_icon_returns_none_for_a_broken_file(tmp_path: Path) -> None:

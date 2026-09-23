@@ -39,6 +39,8 @@ pytestmark = [
 
 _LOGGER = "archive_management.services.platform_adapters"
 _APP_ID = "753640"
+# 一款游戏的官方图标哈希(appinfo.vdf 的 clienticon).
+_ICON_HASH = "b2f863a4c63bc1c5667a8a7e3e9355ef260ce6d2"
 
 
 class BrokenRegistry:
@@ -127,6 +129,37 @@ def test_steam_declares_capabilities_and_artwork_refs(
     refs = steam.artwork_refs(game)
     assert [item.kind for item in refs] == ["cover"]
     assert _APP_ID in refs[0].url
+
+
+def test_steam_offers_the_official_icon_when_appinfo_knows_it(tmp_path: Path) -> None:
+    """官方图标: 本机已有 ico 时给本地路径, 没有时给 CDN 上的同哈希地址."""
+    steam = helpers.steam_tree(tmp_path)
+    helpers.write_steam_manifest(steam, _APP_ID, "Outer Wilds", "OuterWilds")
+    helpers.write_steam_appinfo(
+        steam, {_APP_ID: {"name": "Outer Wilds", "clienticon": _ICON_HASH}}
+    )
+    local = helpers.write_steam_icon(steam, _ICON_HASH)
+    adapter = SteamAdapter(helpers.scan_roots(tmp_path))
+    game = PlatformGame(platform="steam", game_id=_APP_ID, name="Outer Wilds")
+
+    refs = adapter.artwork_refs(game)
+
+    assert [item.kind for item in refs] == ["cover", "icon"]
+    assert refs[1].version == _ICON_HASH
+    assert refs[1].local_path == str(local)
+    assert refs[1].url.endswith(f"/{_APP_ID}/{_ICON_HASH}.ico")
+
+
+def test_steam_offers_only_the_cover_without_appinfo(tmp_path: Path) -> None:
+    """读不到 appinfo(未装、版本不认识)时只给封面: 后台裁封面兜底."""
+    steam = helpers.steam_tree(tmp_path)
+    helpers.write_steam_manifest(steam, _APP_ID, "Outer Wilds", "OuterWilds")
+    adapter = SteamAdapter(helpers.scan_roots(tmp_path))
+    game = PlatformGame(platform="steam", game_id=_APP_ID, name="Outer Wilds")
+
+    refs = adapter.artwork_refs(game)
+
+    assert [item.kind for item in refs] == ["cover"]
 
 
 def test_adapter_contract_is_verified_at_runtime(
