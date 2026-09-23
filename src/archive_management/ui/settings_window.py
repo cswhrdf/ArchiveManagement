@@ -3,6 +3,9 @@
 工作区的"设置"入口打开这个窗口, 目前包含:
 
 - **外观**: 浅色/深色主题切换按钮(顶栏不再放置切换按钮);
+- **界面语言**: 切换后界面整体重建, 并按新语言重探游戏译名;
+- **日志**: “启用调试日志”开关(默认关闭)。关闭时日志里只保留 INFO 及以上的
+  操作, 开启后 DEBUG 级基础操作也会写进日志 —— 排查问题时才需要;
 - **快捷键**: 全局保存与创建分支的组合键, 点击按键区域即可现场录制新组合;
 - 后续计划中的设置项说明。
 
@@ -48,6 +51,8 @@ _WINDOW_MIN_HEIGHT = 500
 _ApplyShortcut = Callable[[str, str], "str | None"]
 # 切换界面语言; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyLanguage = Callable[[str], "str | None"]
+# 切换调试日志开关; 返回 None 表示成功, 否则返回可直接展示的失败说明.
+_ApplyDebug = Callable[[bool], "str | None"]
 # 录制开始/结束的钩子(主窗口据此暂停与恢复全局快捷键).
 _CaptureHook = Callable[[], None]
 
@@ -73,21 +78,25 @@ class SettingsWindow:
         palette: Palette,
         theme: str,
         language: str,
+        debug: bool,
         shortcuts: Mapping[str, str],
         on_toggle_theme: _ToggleTheme,
         on_apply_language: _ApplyLanguage,
+        on_apply_debug: _ApplyDebug,
         on_apply_shortcut: _ApplyShortcut,
         on_capture_start: _CaptureHook,
         on_capture_end: _CaptureHook,
     ) -> None:
-        """构造设置窗口并绑定主题、语言与快捷键回调."""
+        """构造设置窗口并绑定主题、语言、调试开关与快捷键回调."""
         self._parent = parent
         self._palette = palette
         self._theme = theme
         self._language = language
+        self._debug = debug
         self._shortcuts: dict[str, str] = dict(shortcuts)
         self._on_toggle_theme = on_toggle_theme
         self._on_apply_language = on_apply_language
+        self._on_apply_debug = on_apply_debug
         self._on_apply_shortcut = on_apply_shortcut
         self._on_capture_start = on_capture_start
         self._on_capture_end = on_capture_end
@@ -244,6 +253,60 @@ class SettingsWindow:
             row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
         )
 
+        self._logging_panel = ctk.CTkFrame(
+            self._container,
+            fg_color=palette.panel,
+            corner_radius=10,
+            border_width=1,
+            border_color=palette.border,
+        )
+        self._logging_panel.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self._logging_panel.grid_columnconfigure(0, weight=1)
+        self._logging_title = ctk.CTkLabel(
+            self._logging_panel,
+            text=tr("settings.logging"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        self._logging_title.grid(row=0, column=0, padx=16, pady=(14, 2), sticky="w")
+        self._logging_hint = ctk.CTkLabel(
+            self._logging_panel,
+            text=tr("settings.logging_hint"),
+            anchor="w",
+            justify="left",
+            wraplength=240,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
+        )
+        self._logging_hint.grid(row=1, column=0, padx=16, sticky="w")
+        self._debug_switch = ctk.CTkSwitch(
+            self._logging_panel,
+            text=tr("settings.debug_logging"),
+            command=self._on_debug_toggled,
+            width=120,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+            progress_color=palette.accent,
+            button_color=palette.text_muted,
+            button_hover_color=palette.item_hover,
+            fg_color=palette.input_bg,
+        )
+        self._set_debug_switch(self._debug)
+        self._debug_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=14)
+        self._debug_label = ctk.CTkLabel(
+            self._logging_panel,
+            text=self._debug_state_text(),
+            anchor="w",
+            justify="left",
+            wraplength=400,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._debug_label.grid(
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
+        )
+
         self._shortcut_panel = ctk.CTkFrame(
             self._container,
             fg_color=palette.panel,
@@ -251,7 +314,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._shortcut_panel.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self._shortcut_panel.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         self._shortcut_panel.grid_columnconfigure(0, weight=1)
         self._shortcut_title = ctk.CTkLabel(
             self._shortcut_panel,
@@ -328,7 +391,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._note_label.grid(row=4, column=0, sticky="w", pady=(12, 0))
+        self._note_label.grid(row=5, column=0, sticky="w", pady=(12, 0))
 
         self._close_btn = ctk.CTkButton(
             self._container,
@@ -344,7 +407,7 @@ class SettingsWindow:
             border_color=palette.border,
             font=ctk.CTkFont(size=12),
         )
-        self._close_btn.grid(row=5, column=0, sticky="e", pady=(14, 0))
+        self._close_btn.grid(row=6, column=0, sticky="e", pady=(14, 0))
 
         # 高度按**实际内容**算(说明文字会随语言换行): 固定高度会把底部裁掉,
         # 算完再居中 —— 这样"关闭"按钮与最后的说明一定在窗口里。
@@ -379,6 +442,36 @@ class SettingsWindow:
             text=tr("settings.language_failed", reason=error)
         )
 
+    def _debug_state_text(self) -> str:
+        """调试开关当前状态的说明文字."""
+        state = tr("settings.debug_on" if self._debug else "settings.debug_off")
+        return tr("settings.debug_state", state=state)
+
+    def _set_debug_switch(self, enabled: bool) -> None:
+        """把开关拨到指定状态.
+
+        ``select``/``deselect`` 只改控件的值, **不会**触发 ``command``(那只有
+        真实点击才会走), 所以下面用开关失败回滚时不会递归回调。
+        """
+        if enabled:
+            self._debug_switch.select()
+        else:
+            self._debug_switch.deselect()
+
+    def _on_debug_toggled(self) -> None:
+        """切换调试日志开关: 交给主窗口应用; 失败时说明原因并把开关拨回去."""
+        wanted = bool(self._debug_switch.get())
+        if wanted == self._debug:
+            return
+        error = self._on_apply_debug(wanted)
+        if error is not None:
+            self._debug_label.configure(text=tr("settings.debug_failed", reason=error))
+            # 开关拨回实际生效的状态: 否则看起来像已经改成功了.
+            self._set_debug_switch(self._debug)
+            return
+        self._debug = wanted
+        self._debug_label.configure(text=self._debug_state_text())
+
     # -- 交互 ---------------------------------------------------------------
 
     def _toggle_theme(self) -> None:
@@ -394,6 +487,7 @@ class SettingsWindow:
         for panel in (
             self._appearance_panel,
             self._language_panel,
+            self._logging_panel,
             self._shortcut_panel,
         ):
             panel.configure(fg_color=palette.panel, border_color=palette.border)
@@ -401,10 +495,13 @@ class SettingsWindow:
             (self._title_label, palette.text_primary),
             (self._appearance_title, palette.text_primary),
             (self._language_title, palette.text_primary),
+            (self._logging_title, palette.text_primary),
             (self._shortcut_title, palette.text_primary),
             (self._appearance_hint, palette.text_hint),
             (self._language_hint, palette.text_hint),
             (self._language_label, palette.text_muted),
+            (self._logging_hint, palette.text_hint),
+            (self._debug_label, palette.text_muted),
             (self._shortcut_hint, palette.text_hint),
             (self._shortcut_error, palette.danger),
             (self._note_label, palette.text_hint),
@@ -416,6 +513,13 @@ class SettingsWindow:
             fg_color=palette.accent,
             hover_color=palette.accent,
             text_color=palette.accent_text,
+        )
+        self._debug_switch.configure(
+            text_color=palette.text_body,
+            progress_color=palette.accent,
+            button_color=palette.text_muted,
+            button_hover_color=palette.item_hover,
+            fg_color=palette.input_bg,
         )
         self._theme_label.configure(
             text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}"))

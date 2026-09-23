@@ -11,6 +11,7 @@ import archive_management.config as config_module
 from archive_management.config import (
     AppConfig,
     HotkeySettings,
+    LoggingSettings,
     load_config,
     load_or_reset_config,
     parse_config,
@@ -134,10 +135,26 @@ def test_parse_rejects_invalid_hotkeys(tmp_path: Path, value: str) -> None:
         load_config(path)
 
 
-def test_parse_rejects_invalid_log_level(tmp_path: Path) -> None:
+def test_debug_logging_defaults_to_off() -> None:
+    """调试日志默认关闭: 日志里只保留 INFO 及以上的操作."""
+    assert LoggingSettings().debug is False
+    assert AppConfig().logging.debug is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"level": "DEBUG"}, {"level": "ERROR"}, {"verbose": True}],
+)
+def test_parse_rejects_unknown_logging_fields(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    """严格校验: 除 debug/max_bytes/backup_count/console 之外的字段一律拒绝.
+
+    升级前用过的 ``level`` 也在拒绝之列 —— 不做兼容读入, 手改配置写错就得被看见。
+    """
     path = tmp_path / "config.json"
     path.write_text(
-        json.dumps({"version": 1, "logging": {"level": "TRACE"}}),
+        json.dumps({"version": 1, "logging": payload}),
         encoding="utf-8",
     )
     with pytest.raises(ConfigurationError):

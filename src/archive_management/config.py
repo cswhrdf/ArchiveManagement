@@ -19,7 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 
 from archive_management.exceptions import ConfigurationError
 from archive_management.i18n import DEFAULT_LOCALE, available_locales
@@ -44,11 +50,17 @@ DEFAULT_LOG_MAX_BYTES = 100 * 1024 * 1024
 
 
 class LoggingSettings(BaseModel):
-    """日志滚动参数."""
+    """日志滚动参数.
+
+    与其他配置段一样严格校验: 除下面这几个字段之外一律拒绝 —— 升级前用过的
+    ``level`` 也在拒绝之列, 不做兼容读入。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR)$")
+    # 调试日志开关(默认关闭): 关闭时日志文件与控制台都只留 INFO 及以上, 开启后
+    # DEBUG 级的基础操作也会被记录 —— 排查问题时才需要, 平时没必要把日志写满。
+    debug: bool = False
     max_bytes: int = Field(default=DEFAULT_LOG_MAX_BYTES, ge=1)
     backup_count: int = Field(default=5, ge=0)
     console: bool = True

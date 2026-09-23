@@ -41,7 +41,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 - 不带子命令运行时默认执行 `init`。
 - `--root` 可以把全部数据收敛到指定目录（便携模式与开发调试），此时配置、数据、日志、缓存都在该目录下；不加则使用系统约定的应用目录。
-- 全局 `--verbose` 让控制台也打印 DEBUG 级基础操作（默认只有 INFO 及以上的高风险操作会打印）。
+- 全局 `--verbose` 本次启动就打开调试日志（默认只记录 INFO 及以上的高风险操作）；同一个开关也可以在软件设置里拨（写入 `config.json` 的 `logging.debug`，默认关闭，拨完立即生效）。
 - 命令要在**仓库根目录**执行：仓库根的 `.env` 提供 `PYTHONPATH=src`（`uv run` 自动加载），其中的 `src` 是相对当前目录解析的。
 
 ## 配置文件

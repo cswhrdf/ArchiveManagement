@@ -1418,6 +1418,50 @@ def test_settings_window_language_switch_closes_the_window() -> None:
     assert window._window.winfo_exists() == 0
 
 
+def test_settings_window_toggles_debug_logging() -> None:
+    """设置窗口里拨调试开关: 交给主窗口应用, 并就地更新状态说明."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+    applied: list[bool] = []
+
+    def apply(enabled: bool) -> str | None:
+        applied.append(enabled)
+        return None
+
+    window._on_apply_debug = apply
+    window._debug_switch.select()
+    window._on_debug_toggled()
+    _pump(app)
+
+    assert applied == [True]
+    assert window._debug is True
+    assert window._debug_label.cget("text") == tr(
+        "settings.debug_state", state=tr("settings.debug_on")
+    )
+
+
+def test_settings_window_reverts_the_switch_when_applying_fails() -> None:
+    """应用失败时说明原因, 并把开关拨回实际生效的状态(不能看着像拨成了)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+    assert window._debug is False
+
+    window._on_apply_debug = lambda enabled: "写配置失败"
+    window._debug_switch.select()
+    window._on_debug_toggled()
+    _pump(app)
+
+    assert window._debug is False
+    assert bool(window._debug_switch.get()) is False
+    assert "写配置失败" in window._debug_label.cget("text")
+
+
 def test_discovery_rows_show_the_localized_name() -> None:
     """探测结果行直接显示当前语言的译名, 并把探测到的原名放在括号里."""
     from archive_management.ui.demo_backend import DemoArchiveService
@@ -1830,9 +1874,11 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         palette=app.p,
         theme=app._theme,
         language=app._language,
+        debug=app._debug,
         shortcuts=app._shortcuts,
         on_toggle_theme=app._on_toggle_theme,
         on_apply_language=app._on_language_change,
+        on_apply_debug=app._on_debug_change,
         on_apply_shortcut=apply,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,

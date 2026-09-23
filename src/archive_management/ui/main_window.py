@@ -36,6 +36,7 @@ from archive_management.exceptions import (
 )
 from archive_management.i18n import DEFAULT_LOCALE, set_locale, tr
 from archive_management.infrastructure.paths import ApplicationPaths
+from archive_management.logging_config import apply_debug
 from archive_management.services.audit import log_action
 from archive_management.services.hotkeys import (
     ACTION_CREATE_BRANCH,
@@ -205,6 +206,8 @@ class ArchiveApp(ctk.CTk):
         # 语言要在构造界面之前生效: 所有文案都是构建时取的.
         self._language = self._apply_language(loaded.config.language)
         self._shortcuts = self._shortcuts_from(loaded)
+        # 调试日志开关来自同一份配置(默认关闭): 设置窗口展示的与生效的要是同一个值.
+        self._debug = loaded.config.logging.debug
         self.title(title)
         self.minsize(*WINDOW_MIN_SIZE)
         self.geometry("1360x860")
@@ -306,6 +309,38 @@ class ArchiveApp(ctk.CTk):
         self._feedback(
             FeedbackKind.INFO,
             tr("settings.language_switched", language=tr(f"locale.{locale}")),
+        )
+        return None
+
+    def _save_debug(self, enabled: bool) -> None:
+        """把调试开关写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        # 内容非法时 load_or_reset_config 已经还原过, 因此这里总能拿到一份可用配置。
+        config = load_or_reset_config(self._paths.config_path).config
+        config.logging.debug = enabled
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存调试开关失败: %s", exc)
+
+    def _on_debug_change(self, enabled: bool) -> str | None:
+        """开关调试日志: 立即生效 + 写回配置; 返回 None 表示成功.
+
+        关掉后日志里不再出现 DEBUG 级记录(平时不必把日志写满), 打开才会把基础操作
+        一起记进去 —— 因此应用后立刻记一条 INFO 审计: 这个改动本身总看得见。
+        """
+        apply_debug(enabled)
+        self._debug = enabled
+        self._save_debug(enabled)
+        log_action("ui.switch_debug_log", enabled=enabled)
+        self._feedback(
+            FeedbackKind.INFO,
+            tr(
+                "settings.debug_switched_on"
+                if enabled
+                else "settings.debug_switched_off"
+            ),
         )
         return None
 
@@ -2027,9 +2062,11 @@ class ArchiveApp(ctk.CTk):
             palette=self.p,
             theme=self._theme,
             language=self._language,
+            debug=self._debug,
             shortcuts=self._shortcuts,
             on_toggle_theme=self._on_toggle_theme,
             on_apply_language=self._on_language_change,
+            on_apply_debug=self._on_debug_change,
             on_apply_shortcut=self._apply_shortcut,
             on_capture_start=self._hotkeys.suspend,
             on_capture_end=self._hotkeys.resume,
@@ -2233,9 +2270,9 @@ def run_gui(
 ) -> int:
     """启动基于 SQLite 的真实后端并进入主循环, 返回退出码.
 
-    日志会在进入主循环前装配: 文件始终记录全部级别的用户操作, 控制台默认只显示
-    高风险操作(``verbose=True`` 时放宽到 DEBUG); 单文件上限与保留份数取自配置里的
-    ``logging`` 段。
+    日志会在进入主循环前装配: 默认只记录 INFO 及以上的高风险操作,
+    ``verbose=True`` 或配置里的“启用调试日志”打开时才把 DEBUG 也记进去;
+    单文件上限与保留份数取自配置里的 ``logging`` 段。
     """
     from archive_management.config import load_or_reset_config
     from archive_management.infrastructure.database import Database

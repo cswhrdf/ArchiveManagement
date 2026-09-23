@@ -1,7 +1,7 @@
 """审计日志与日志装配的单元测试.
 
 用户操作不落数据库, 只写日志文件: 高风险操作用 INFO(默认打印 + 落盘),
-基础操作用 DEBUG(默认只落盘, ``--verbose`` 才打印)。这里同时验证字段渲染、
+基础操作用 DEBUG(默认不记录, 打开设置里的调试开关或 ``--verbose`` 时才写入)。这里同时验证字段渲染、
 路径脱敏、敏感字段隐藏与截断规则。
 """
 
@@ -16,6 +16,7 @@ import pytest
 
 from archive_management.config import DEFAULT_LOG_MAX_BYTES, LoggingSettings
 from archive_management.logging_config import (
+    apply_debug,
     configure_from_settings,
     configure_logging,
 )
@@ -145,7 +146,11 @@ def test_redacted_path_keeps_last_two_segments() -> None:
 
 
 def test_logging_writes_debug_to_file_but_info_to_console(tmp_path: Path) -> None:
-    """文件永远记录全部级别; 控制台默认只看高风险操作."""
+    """底层装配: 不显式传级别时文件记全部级别、控制台只看高风险操作.
+
+    用户可见的策略(调试开关)在 :func:`configure_from_settings` 里, 它会给两边
+    传同一个级别; 这里验证的是更下面那层的默认值。
+    """
     configure_logging(tmp_path / "logs")
     try:
         root = logging.getLogger("archive_management")
@@ -198,9 +203,9 @@ def test_default_log_file_limit_is_100_mib(tmp_path: Path) -> None:
 
 
 def test_configure_from_settings_honours_user_limits(tmp_path: Path) -> None:
-    """配置里的 logging 段决定滚动上限、保留份数、控制台开关与级别."""
+    """配置里的 logging 段决定滚动上限、保留份数、控制台开关与调试开关."""
     settings = LoggingSettings(
-        level="WARNING", max_bytes=8 * 1024 * 1024, backup_count=2, console=True
+        debug=True, max_bytes=8 * 1024 * 1024, backup_count=2, console=True
     )
     configure_from_settings(tmp_path / "logs", settings)
     try:
@@ -210,14 +215,16 @@ def test_configure_from_settings_honours_user_limits(tmp_path: Path) -> None:
         assert file_handler.maxBytes == 8 * 1024 * 1024
         assert file_handler.backupCount == 2
         assert file_handler.level == logging.DEBUG
-        assert console_handler.level == logging.WARNING
+        assert console_handler.level == logging.DEBUG
     finally:
         _detach_handlers()
 
 
-def test_verbose_relaxes_console_level_only(tmp_path: Path) -> None:
-    """--verbose 只放宽控制台级别, 不会覆盖 console=False 这种显式设置."""
-    configure_from_settings(tmp_path / "logs", LoggingSettings(), verbose=True)
+def test_verbose_forces_debug_for_this_run(tmp_path: Path) -> None:
+    """--verbose 是“本次启动强制开启调试日志”: 文件与控制台都放宽到 DEBUG."""
+    configure_from_settings(
+        tmp_path / "logs", LoggingSettings(debug=False), verbose=True
+    )
     try:
         root = logging.getLogger("archive_management")
         assert [handler.level for handler in root.handlers] == [
@@ -235,5 +242,84 @@ def test_verbose_relaxes_console_level_only(tmp_path: Path) -> None:
         root = logging.getLogger("archive_management")
         assert len(root.handlers) == 1
         assert isinstance(root.handlers[0], RotatingFileHandler)
+    finally:
+        _detach_handlers()
+
+
+def test_debug_switch_controls_what_reaches_the_file(tmp_path: Path) -> None:
+    """关闭调试开关时日志里就没有 DEBUG 级记录, 开启后才写进去."""
+    logs = tmp_path / "logs"
+    configure_from_settings(logs, LoggingSettings(debug=False))
+    try:
+        root = logging.getLogger("archive_management")
+        assert [handler.level for handler in root.handlers] == [
+            logging.INFO,
+            logging.INFO,
+        ]
+
+        log_action("ui.select", basic=True, backup_id=7)
+        log_action("backup.create", game_id=1)
+        for handler in root.handlers:
+            handler.flush()
+        text = (logs / "archive-management.log").read_text(encoding="utf-8")
+        assert "ui.select backup_id=7" not in text
+        assert "backup.create game_id=1" in text
+    finally:
+        _detach_handlers()
+
+    # 同一个目录上重新装配并打开开关: 这一轮 DEBUG 那条必须落盘.
+    configure_from_settings(logs, LoggingSettings(debug=True))
+    try:
+        root = logging.getLogger("archive_management")
+        assert [handler.level for handler in root.handlers] == [
+            logging.DEBUG,
+            logging.DEBUG,
+        ]
+
+        log_action("ui.select", basic=True, backup_id=8)
+        for handler in root.handlers:
+            handler.flush()
+        text = (logs / "archive-management.log").read_text(encoding="utf-8")
+        assert "ui.select backup_id=8" in text
+    finally:
+        _detach_handlers()
+
+
+def test_apply_debug_changes_the_levels_without_rebuilding_handlers(
+    tmp_path: Path,
+) -> None:
+    """设置里拨开关立即生效: 只改门槛, 不重建处理器(不重开日志文件)."""
+    configure_from_settings(tmp_path / "logs", LoggingSettings(debug=False))
+    try:
+        root = logging.getLogger("archive_management")
+        handlers = list(root.handlers)
+        assert [handler.level for handler in handlers] == [logging.INFO] * 2
+
+        apply_debug(True)
+
+        assert list(root.handlers) == handlers
+        assert [handler.level for handler in handlers] == [logging.DEBUG] * 2
+        assert root.level == logging.DEBUG
+
+        apply_debug(False)
+
+        assert list(root.handlers) == handlers
+        assert [handler.level for handler in handlers] == [logging.INFO] * 2
+        assert root.level == logging.INFO
+    finally:
+        _detach_handlers()
+
+
+def test_apply_debug_works_without_a_console(tmp_path: Path) -> None:
+    """console=False 是显式选择: 拨开关只影响文件处理器, 不会把控制台输出打开."""
+    configure_from_settings(tmp_path / "logs", LoggingSettings(console=False))
+    try:
+        root = logging.getLogger("archive_management")
+
+        apply_debug(True)
+
+        assert len(root.handlers) == 1
+        assert isinstance(root.handlers[0], RotatingFileHandler)
+        assert root.handlers[0].level == logging.DEBUG
     finally:
         _detach_handlers()

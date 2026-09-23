@@ -102,7 +102,7 @@ SQLite 至少包含以下实体：
 - `backup_files`：备份内文件相对路径、大小、哈希、文件类型，支持恢复前校验。
 - `scheduled_jobs`：备份周期、启用状态、上次运行和下次运行时间、失败信息。
 
-用户操作（备份、恢复、删除原始位置、删除备份、修改计划等）不写入数据库，而是记入日志目录下的审计日志：高风险操作用 INFO 级别（默认落盘并打印），基础操作用 DEBUG 级别（默认只落盘，`--verbose` 时打印）。
+用户操作（备份、恢复、删除原始位置、删除备份、修改计划等）不写入数据库，而是记入日志目录下的审计日志：高风险操作用 INFO 级别（默认落盘并打印），基础操作用 DEBUG 级别（**默认不记录**：只有打开设置里的“启用调试日志”或加 `--verbose` 时才落盘）。
 
 分支关系用 `parent_id` 表示：
 
@@ -279,6 +279,8 @@ SQLite 至少包含以下实体：
 进度（2026-09-23）：**G-6 删除，G-6 复核完成**。① 实测确认“本地清单 + 公开 CDN + 公开商店接口”给出的游戏信息已满足使用预期，因此删掉可选的 G-6（Steam Web API + `keyring` 存取 API Key）：子步骤表、里程碑 M7.4 与 §3.2 的 `keyring` 依赖声明一并移除，`application/games.py` 里指向旧编号的引用（原写作 G-6.5）改为 G-6；全仓库不再有“平台凭据”这类功能承诺，只保留“日志不记录凭据”这条通用脱敏要求。② G-6 按该行定义的范围（手动启停链路 + `ActivationPolicy`/`apply_activation` 接缝，自动部分刻意不实现）已完整落地：`application/games.py::set_enabled` 是唯一启用入口（全局至多一款、拒绝启用已归档游戏），主页「启用/停用」按钮与管理窗口都有入口，由 `tests/unit/test_game_state.py`、`tests/unit/test_sql_backend.py`、`tests/integration/test_gui_buttons.py` 锁住；默认策略 `ManualActivation` 仍无任何调用点（无人轮询就不会自动切换）。
 
 进度（2026-09-24）：**游戏图标改用 Steam 官方图标（``appinfo.vdf`` 的 ``clienticon``）**，上一轮 ⑥ 里“图标不再下载、改为封面裁方形”的做法作废。① 实测确认**公开接口里没有这张图**：``appdetails`` 只有 header/capsule/background，``appmanifest_*.acf`` 也没有图标字段；它只存在于本机 ``appcache/appinfo.vdf``，每个 AppID 记了三个哈希 —— ``clienticon``（对应本机 ``steam/games/<哈希>.ico`` 与 CDN 上同哈希的 ``.ico``）、``clienttga``、``icon``（CDN 上只有 32x32 jpg，放大到头像尺寸就糊）。同款资源实测：``clienticon`` 的 ico 内含 16/32/48/64/128/256 六级尺寸（214 KB），CDN 可按 ``.../images/apps/<appid>/<哈希>.ico`` 直取，所以**离线也能有图**（本机 appinfo 里 1698 条游戏，124 条本机已有 ico）。② 新增 ``services/steam_appinfo.py``：按魔数 ``0x07564429`` 认版本，读文件末尾字符串表拿到 ``clienticon`` 的键序号，再在**该 AppID 自己的条目**里找 ``<字符串类型><键序号><40 位十六进制>`` —— 刻意不做通用二进制 KV 解析（那要跟着 Steam 的内部格式一路演进），版本/结构认不出就当作没有图标并记 DEBUG；实测 10.1 MB 的文件解析 **10 ms**，按“路径 + 大小 + 修改时间”缓存。③ 取图链：适配器的 ``artwork_refs`` 现在额外给出图标引用（``local_path`` = 本机 ico，``url`` = CDN 同哈希，``version`` = 哈希），后端 ``_store_icon`` 拿到 ico 后统一转成 256x256 方形 PNG 进图标缓存；**拿不到官方图标才回落原来的封面裁剪**，两种来源的缓存版本名不同（``cover-square-256`` 就是封面裁的那一种），文件名如实说明图是怎么来的。④ ``cached_artwork`` 顺序改为“缓存 → 平台本地文件”：缓存里是归一化好的成品，与后台补齐时的判断一致。⑤ 端到端实测（本机真实数据）：未安装的游戏走 CDN（214 KB ico → 256x256 RGBA PNG），已安装的游戏**一个请求也不发**（本机 161 KB ico → 同一个 PNG）。⑥ 新增 ``tests/unit/test_steam_appinfo.py``（合成 appinfo：正常读取、版本不认识、字符串表截断、缺 ``clienticon`` 键名、值不是哈希、条目越界只丢后面的游戏、换图标后重读），``test_artwork.py`` / ``test_platform_adapters.py`` / ``test_sql_backend.py`` 的图标用例改成“官方图标优先、封面兜底”。
+
+进度（2026-09-24，第二轮）：**设置里的“是否开启调试日志”开关**。① 配置里的 `logging.level`（文本等级）在同一天内先做成了等级下拉框，随即按真实需求改成**布尔开关** `logging.debug`（默认关闭）：关闭时**日志文件与控制台都只留 INFO 及以上**，开启后 DEBUG 级基础操作才落盘 —— “平时别把日志写满”才是真实需求，能调但默认仍记 DEBUG 的等级下拉达不到这个效果。② **不做兼容**：`logging` 段只认 `debug`/`max_bytes`/`backup_count`/`console`，升级前用过的 `level` 与任何拼错的字段一样按未知字段拒绝 —— 手改配置写错就应该被看见（`load_or_reset_config` 会把文件还原成默认值，原文件保留为 `config.json.invalid`），与仓库对其余配置段的严格校验策略一致。③ 新增 `logging_config.apply_debug(enabled)`：只改日志器与各处理器的门槛（**日志器自身的级别必须一起改**，否则它会先把 DEBUG 记录挡在处理器之前，开了开关也看不到），不重建处理器、不重开日志文件；`console=False` 时只有文件处理器受影响。④ 主窗口 `_on_debug_change` 应用 + 写回配置 + 状态栏提示 + 审计记 `ui.switch_debug_log`；失败时开关拨回实际生效状态。⑤ 用例：`test_audit.py` 断言“关闭时日志文件里**没有** DEBUG 那条、开启后才有”、开关只改门槛不重建处理器、无控制台时只动文件；`test_config.py` 锁定默认关闭、旧 `level` 的兼容读入与“未知字段仍然拒绝”；GUI 用例覆盖拨开关与失败拨回。
 
 #### 与既有实现的对接点（复用而非重写）
 

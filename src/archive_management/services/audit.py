@@ -4,8 +4,8 @@
 
 - 备份、分支、恢复、删除原始目录、删除备份、修改计划等**高风险操作**用
   INFO 级别, 默认既落盘也打印到控制台;
-- 主题/视图切换、选择、打开对话框等**基础操作**用 DEBUG 级别, 默认只落盘,
-  控制台不打印(需要时用 ``--verbose`` 打开)。
+- 主题/视图切换、选择、打开对话框等**基础操作**用 DEBUG 级别, 默认**不记录**
+  (需要时在设置里打开“启用调试日志”, 或用 ``--verbose`` 临时打开)。
 
 日志中不写入凭据、文件内容或完整敏感路径: 路径字段
 请用 :func:`redacted_path` 脱敏成"父目录名/条目名"后再传入。
@@ -18,7 +18,7 @@ import logging
 AUDIT_LOGGER_NAME = "archive_management.audit"
 # 高风险操作: 默认打印并落盘.
 LEVEL_OPERATION = logging.INFO
-# 基础操作: 默认只落盘(不打印).
+# 基础操作: 只有打开调试日志时才记录.
 LEVEL_BASIC = logging.DEBUG
 
 _MAX_FIELD_LENGTH = 200
