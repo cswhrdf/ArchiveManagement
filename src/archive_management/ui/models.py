@@ -150,7 +150,8 @@ class GameDetail:
     total_backups_label: str
     total_backups_sub: str
     next_backup_label: str
-    # 录入时识别到的原始名称(与当前名称不同则表示用户改过名).
+    # 录入时识别到的原始名称(与当前名称不同只说明当前名字不是录入时那个:
+    # 可能是用户改的, 也可能是程序写入的译名 —— 区分靠 Game.localized_name).
     original_name: str = ""
     # 备份根目录下实际使用的目录名; 尚未备份过时为空.
     storage_folder: str = ""

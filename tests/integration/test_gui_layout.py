@@ -21,7 +21,6 @@ import time
 from collections.abc import Iterator
 from dataclasses import replace
 from math import ceil
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -37,7 +36,7 @@ try:
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
-from archive_management.domain import ArtworkKind, HomeFilter, HomeLayout
+from archive_management.domain import HomeFilter, HomeLayout
 from archive_management.services.hotkeys import (
     GlobalHotkeyService,
     UnavailableBackend,
@@ -932,56 +931,10 @@ def test_poster_shows_a_green_dot_only_for_the_enabled_game() -> None:
         assert dot.grid_info()["sticky"] == "sw", "启用标记要贴在封面左下角"
 
 
-def _poster_markers(card: Any) -> list[Any]:
-    """卡片封面上的标记控件(封面框的子控件里, 第一个是封面/占位标签)."""
-    cover = card.winfo_children()[0]
-    return list(cover.winfo_children()[1:])
-
-
-def _one_cover_app(cover: str) -> ArchiveApp:
-    """只有第一款游戏有封面图的演示窗口(其余回落名称占位)."""
-
-    class _OneCoverService(DemoArchiveService):
-        """演示后端 + 只给一款游戏提供封面路径(省去真实下载)."""
-
-        def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
-            """只有 outer-wilds 有图; 其余返回空串, 界面回落文字占位."""
-            return cover if game_id == "outer-wilds" else ""
-
-    app = ArchiveApp(
-        _OneCoverService(delay=0),
-        title="海报底衬测试",
-        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
-    )
-    app.geometry(_WINDOW_SIZE)
-    return app
-
-
-def test_poster_markers_only_get_a_backing_over_a_real_cover(tmp_path: Path) -> None:
-    """底衬按“这张卡片有没有封面图”给: 真封面才有底衬, 没有封面时彻底看不见背景.
-
-    图上是什么颜色都有可能, 绿点与备份数没有底衬会看不清; 而回落成名称占位时封面
-    底色是纯色, 标签的 ``transparent`` 取到的正是这个底色 —— 这才真的“没有背景色”。
-    """
-    from PIL import Image
-
-    cover = tmp_path / "cover.png"
-    Image.new("RGB", (10, 10), (0, 0, 0)).save(cover)
-
-    app = gui_app(_one_cover_app, str(cover))
-    assert _wait_mapped(app)
-    page = app._home_page
-    page._on_layout_change(HomeLayout.POSTER.label)
-    _settle_layout(app)
-
-    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
-    assert "cover:outer-wilds" in page._artwork_images, "封面没走缓存就测不到底衬分支"
-    for game_id, card in page._rows.items():
-        # 只有真的画了封面图的那张卡片才要底衬. 演示后端种子三款游戏都是启用的,
-        # 所以每张卡片都有两个标记(备份数角标 + 启用绿点).
-        expected = page._palette.panel if game_id == "outer-wilds" else "transparent"
-        markers = _poster_markers(card)
-        assert len(markers) == 2, f"{game_id} 应当有备份角标与启用标记: {markers}"
-        for marker in markers:
-            backing = marker.cget("fg_color")
-            assert backing == expected, f"{game_id} 的底衬不对: {backing} != {expected}"
+# 删掉的那条用例: "海报标记的底衬只在真封面图上加"(2026-09-25)。
+# 它需要真的建一张封面图, 而建窗口这一步在 CI 上稳定抛
+# `TclError: image "pyimage1" does not exist` —— 于是两个平台都以
+# "tk 环境不可用" 跳过, 一年也跑不到一次(还不让任何东西变红)。规则本身已抽成
+# `ui.home_page.poster_backing` 并由不建窗口的单测钉住
+# (tests/unit/test_ui_widgets.py::test_poster_backing_uses_the_panel_colour_only_over_a_real_cover);
+# 标记的位置与颜色仍由上面那条"无封面"的用例覆盖。

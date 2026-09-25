@@ -275,6 +275,143 @@ def test_demo_theme_cancel_and_shutdown_are_harmless(
     assert service.set_theme("莫名其妙") == "light"
 
 
+def test_demo_storage_folder_is_remembered_only_once(
+    service: DemoArchiveService,
+) -> None:
+    """备份目录名在首次备份时确定: 第二次备份不该把它算成新目录."""
+    service.run_backup_now("outer-wilds")
+    first = service.get_detail("outer-wilds").storage_folder
+    service.run_backup_now("outer-wilds")
+
+    assert service.get_detail("outer-wilds").storage_folder == first
+
+
+def test_demo_enable_is_refused_for_an_archived_game(
+    service: DemoArchiveService,
+) -> None:
+    """归档会连带停用: 想再启用必须先取消归档(与真实后端同一口径)."""
+    service.set_game_archived("outer-wilds", True)
+
+    with pytest.raises(ArchiveManagementError):
+        service.set_game_enabled("outer-wilds", True)
+
+
+def test_demo_update_location_keeps_the_path_when_only_the_kind_changes(
+    service: DemoArchiveService,
+) -> None:
+    """不传 ``path`` 时保持原路径(不能把 None 当成"新路径"去比重复)."""
+    location = service.add_location(
+        "outer-wilds", path="C:/demo/keep", kind="directory"
+    )
+
+    updated = service.update_location(location.location_id, kind="file")
+
+    assert updated.path == location.path
+    assert updated.path_kind == "file"
+
+
+def test_demo_update_location_rejects_a_path_used_by_another_location(
+    service: DemoArchiveService,
+) -> None:
+    """改成另一个位置已经在用的路径要被拦下, 否则两个位置指向同一份存档."""
+    taken = service.list_locations("outer-wilds")[0]
+    second = service.add_location(
+        "outer-wilds", path="C:/demo/second", kind="directory"
+    )
+
+    with pytest.raises(ArchiveManagementError):
+        service.update_location(second.location_id, path=taken.path)
+
+
+def test_demo_removing_the_primary_location_promotes_the_next_one(
+    service: DemoArchiveService,
+) -> None:
+    """删掉主位置后主标记交给下一个位置, 不能留下"没有主位置"的状态."""
+    primary = service.list_locations("outer-wilds")[0]
+    service.add_location("outer-wilds", path="C:/demo/promoted", kind="directory")
+    assert primary.is_primary is True
+
+    service.remove_location(primary.location_id)
+
+    remaining = service.list_locations("outer-wilds")
+    assert [item.is_primary for item in remaining] == [True]
+
+
+def test_demo_deleting_the_primary_location_promotes_the_next_one(
+    service: DemoArchiveService,
+) -> None:
+    """删除存档位置(移入回收站)这条路径同样要交接主标记."""
+    primary = service.list_locations("outer-wilds")[0]
+    service.add_location("outer-wilds", path="C:/demo/after-delete", kind="directory")
+
+    service.delete_save_location(primary.location_id, confirm_name="星际拓荒")
+
+    remaining = service.list_locations("outer-wilds")
+    assert remaining[0].is_primary is True
+
+
+def test_demo_primary_location_must_belong_to_the_game(
+    service: DemoArchiveService,
+) -> None:
+    """把别的游戏的位置设成本游戏的主位置: 必须拒绝(否则会串改两款游戏)."""
+    foreign = service.list_locations("shanhai")[0]
+
+    with pytest.raises(ArchiveManagementError):
+        service.set_primary_location("outer-wilds", foreign.location_id)
+
+
+def test_demo_location_operations_reject_unknown_ids(
+    service: DemoArchiveService,
+) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.remove_location("missing-loc")
+
+    with pytest.raises(ArchiveManagementError):
+        service.delete_save_location("missing-loc", confirm_name="x")
+
+
+def test_demo_delete_of_a_leaf_keeps_the_rest_of_the_tree(
+    service: DemoArchiveService,
+) -> None:
+    """叶子节点没有"被顶替的子分支": 删除走到提前返回, 其余节点原样保留."""
+    items = service.list_backups("outer-wilds")
+    parents = {item.parent_id for item in items}
+    leaf = next(item for item in items if item.backup_id not in parents)
+
+    service.run_delete_backup("outer-wilds", leaf.backup_id)
+
+    remaining = service.list_backups("outer-wilds")
+    assert leaf.backup_id not in {item.backup_id for item in remaining}
+    assert len(remaining) == len(items) - 1
+
+
+def test_demo_restore_rejects_an_unknown_node(service: DemoArchiveService) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.run_restore("outer-wilds", "nope")
+
+
+def test_demo_monitored_directory_must_be_unique_and_non_empty(
+    service: DemoArchiveService,
+) -> None:
+    service.add_monitored_directory("C:/demo/monitored")
+
+    with pytest.raises(ArchiveManagementError):
+        service.add_monitored_directory("C:/demo/monitored")
+
+    with pytest.raises(ArchiveManagementError):
+        service.add_monitored_directory("   ")
+
+
+def test_demo_candidate_operations_reject_unknown_ids(
+    service: DemoArchiveService,
+) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.set_candidate_ignored("missing-candidate", True)
+
+    with pytest.raises(ArchiveManagementError):
+        service.relocate_candidate("missing-candidate", "C:/demo/nope")
+
+
 def test_demo_update_game_renames(service: DemoArchiveService) -> None:
     game_id = service.add_game("旧名").game_id
     assert service.update_game(game_id, "新名").name == "新名"

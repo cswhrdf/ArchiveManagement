@@ -58,6 +58,10 @@ QUALITY_CATEGORY = "quality"
 # 性能/安全汇总项的严重等级: 它们不验证行为, 只承载原始结论与附件, 但不打等级
 # 会让报告里多出一个 no_severity 桶(和覆盖摘要项保持一致)。
 SUMMARY_SEVERITY = "trivial"
+# 安全用例在 Allure 结果里的层次标签(tests/conftest.py 按目录推断): 用它认出安全用例。
+SECURITY_LAYER = "security"
+# “没通过”的状态: broken 是夹具/环境炸了, 同样不能算通过。
+FAILING_STATUSES = ("failed", "broken")
 # 覆盖率门槛与 pytest 配置保持一致(低于该值 pytest 已经失败, 这里只作记录).
 COVERAGE_THRESHOLD = "80"
 
@@ -354,14 +358,77 @@ def performance_note(performance: dict[str, Any] | None) -> str:
     return f"平台 {platform_of(performance)}: **{verdict}**"
 
 
-def security_rows(payloads: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
-    """安全结论: (平台, 结论数, 未拦截数) —— 每个平台各一行."""
+def security_test_failures(results_dir: Path, platform: str) -> list[tuple[str, str]]:
+    """列出某个平台**失败的安全用例** ``(名字, 原因第一行)``.
+
+    安全用例只在 security 作业里跑(不在 pytest 分片里), 它的成败原本只体现在那个作业
+    的状态上, 而汇总结论项总是写 passed —— 于是报告里完全看不出“有一条安全用例红了”
+    (2026-09-25 的 Linux: 2641 条结果里有 1 条 failed, `Security findings` 却是绿的)。
+    """
+    failures: list[tuple[str, str]] = []
+    for payload in result_payloads(results_dir):
+        labels = labels_of(payload)
+        if labels.get("layer") != SECURITY_LAYER or labels.get("env") != platform:
+            continue
+        if str(payload.get("status")) not in FAILING_STATUSES:
+            continue
+        error = payload.get("statusDetails") or payload.get("error") or {}
+        first_line = str(error.get("message") or "").strip().splitlines()
+        failures.append(
+            (str(payload.get("name") or "?"), first_line[0] if first_line else "")
+        )
+    return failures
+
+
+def security_verdict(
+    results_dir: Path, platform: str, findings: list[dict[str, Any]]
+) -> tuple[str, list[str]]:
+    """某个平台的安全结论 ``(状态, 失败原因列表)``.
+
+    两条判据: ① 期望被拦下、实际没拦住的结论(``blocked`` 非真); ② 真的失败的安全用例。
+    任一条命中就写 ``failed`` —— 报告里那条结论项会显示为失败, 原生质量门也会跟着红,
+    不会出现“用例红了而汇总结论还是绿的”。
+    """
+    failures = [
+        f"未拦截: {item.get('scenario') or item.get('category') or '未命名场景'}"
+        for item in findings
+        if not item.get("blocked")
+    ]
+    failures += [
+        f"用例失败: {name}" + (f" —— {reason}" if reason else "")
+        for name, reason in security_test_failures(results_dir, platform)
+    ]
+    return ("failed" if failures else "passed"), failures
+
+
+def security_digest(status: str, failures: list[str]) -> str:
+    """安全结论项开头的“结论”段: 一眼看出这次安全测试到底过没过."""
+    if status == "passed":
+        return "## 结论\n\n**通过** —— 没有未拦截的结论, 也没有失败的安全用例。\n"
+    lines = ["## 结论", "", f"**未通过**({len(failures)} 条):", ""]
+    lines += [f"- {_cell(item)}" for item in failures]
+    return "\n".join(lines) + "\n"
+
+
+def security_rows(
+    results_dir: Path, payloads: list[dict[str, Any]]
+) -> list[tuple[str, str, str, str, str]]:
+    """安全结论: (平台, 结论数, 未拦截数, 失败用例数, 结论) —— 每个平台各一行."""
     rows = []
     for payload in payloads:
         findings = list(payload.get("findings", []))
         blocked = sum(1 for item in findings if item.get("blocked"))
+        platform = platform_of(payload)
+        status, failures = security_verdict(results_dir, platform, findings)
+        failed_cases = [item for item in failures if item.startswith("用例失败")]
         rows.append(
-            (platform_of(payload), str(len(findings)), str(len(findings) - blocked))
+            (
+                platform,
+                str(len(findings)),
+                str(len(findings) - blocked),
+                str(len(failed_cases)),
+                "**未通过**" if status == "failed" else "通过",
+            )
         )
     return sorted(rows)
 
@@ -490,21 +557,24 @@ def run_ledger(
         "## 安全测试",
         "",
     ]
-    security = security_rows(security_payloads)
+    security = security_rows(results_dir, security_payloads)
     if security:
         lines += [
-            "| 平台 | 结论条数 | 未拦截条数 | 原始结论 |",
-            "| --- | ---: | ---: | --- |",
+            "| 平台 | 结论条数 | 未拦截条数 | 失败用例 | 结论 | 原始结论 |",
+            "| --- | ---: | ---: | ---: | --- | --- |",
         ]
         lines += [
-            f"| {_cell(env)} | {_cell(total)} | {_cell(not_blocked)} | "
-            "`security-results.json`(见结论项 `Security findings`) |"
-            for env, total, not_blocked in security
+            f"| {_cell(env)} | {_cell(total)} | {_cell(not_blocked)} | {_cell(failed)} "
+            f"| {_cell(verdict)} "
+            "| `security-results.json`(见结论项 `Security findings`) |"
+            for env, total, not_blocked, failed, verdict in security
         ]
         lines += [
             "",
             "- 「结论条数」是安全用例给出的结论总数; 「未拦截条数」是期望被拦下、"
             "实际没拦住的条数(应为 **0**; 非 0 说明存在安全问题, 详情见对应结论项)。",
+            "- 「失败用例」是该平台上真的失败的安全用例数(broken 也算) —— "
+            "它本来只体现在 security 作业的状态上, 这里一起摆出来。",
         ]
     else:
         lines.append("本次运行没有安全结论文件。")
@@ -604,8 +674,13 @@ def write_result(
     description: str,
     attachments: list[dict[str, str]],
     platform: str,
+    status: str = "passed",
+    status_message: str = "",
 ) -> None:
-    """写入一条 passed 状态的 Allure 结果(承载该类测试的汇总信息).
+    """写入一条 Allure 结果(承载该类测试的汇总信息).
+
+    ``status`` 默认 ``passed``: 但汇总项必须能**体现失败** —— 例如安全用例红了一条,
+    ``Security findings`` 却写 passed, 报告里就完全看不出问题(2026-09-25 的 Linux)。
 
     身份**不带平台**: 三个平台的同一类汇总(覆盖率/性能/安全)是"同一份摘要、分属三个环境",
     与报告里用例结果的写法一致 —— 平台由 ``env`` 标签(配合仓库根的 ``allurerc.mjs``)
@@ -623,7 +698,7 @@ def write_result(
         ),
         "fullName": f"archive-management.{category}",
         "name": title,
-        "status": "passed",
+        "status": status,
         "stage": "finished",
         "start": timestamp,
         "stop": timestamp,
@@ -644,6 +719,9 @@ def write_result(
         "description": description,
         "attachments": attachments,
     }
+    if status != "passed" and status_message:
+        # 报告里结论项会直接显示这条消息(Allure 的失败项靠 statusDetails 讲原因)。
+        result["statusDetails"] = {"message": status_message, "trace": ""}
     (results_dir / f"{result_id}-result.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -706,6 +784,7 @@ def main() -> int:
         findings = list(payload.get("findings", []))
         platform = platform_of(payload)
         result_id = str(uuid.uuid4())
+        status, failures = security_verdict(results_dir, platform, findings)
         attachments = [
             item
             for item in (write_attachment(results_dir, source, result_id),)
@@ -716,12 +795,17 @@ def main() -> int:
             result_id=result_id,
             category="security",
             title="Security findings",
-            description=security_table(findings),
+            description=security_digest(status, failures)
+            + "\n"
+            + security_table(findings),
             attachments=attachments,
             platform=platform,
+            status=status,
+            status_message="; ".join(failures),
         )
         print(
-            f"安全结论已写入 Allure: {len(findings)} 条结论({platform}, 来源 {source})"
+            f"安全结论已写入 Allure: {len(findings)} 条结论({platform}, "
+            f"{status}, 来源 {source})"
         )
 
     if performance is None:

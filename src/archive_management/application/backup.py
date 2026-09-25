@@ -327,7 +327,7 @@ class BackupService:
         self, node: BackupNode, *, game_id: int, keep_auto: int, kind: NodeKind
     ) -> list[int]:
         """把新节点设为"当前节点", 自动备份再按保留份数清理更早的节点."""
-        if node.id is None:
+        if node.id is None:  # pragma: no cover - 查询总是带 id
             return []
         # 新备份成为"当前节点": 后续的向下保存都会接在它后面.
         self._games.set_current_backup(game_id, node.id)
@@ -374,7 +374,7 @@ class BackupService:
             raise ArchiveManagementError(f"备份描述不能超过 {MAX_NOTE_LENGTH} 个字符")
         if len(clean_title) > MAX_TITLE_LENGTH:
             raise ArchiveManagementError(f"备份名称不能超过 {MAX_TITLE_LENGTH} 个字符")
-        if node.id is None:
+        if node.id is None:  # pragma: no cover - 刚写入的行必然可读
             raise ArchiveManagementError(f"未知的备份节点: {backup_id}")
         updated = self._backups.update_meta(node.id, title=clean_title, note=clean_note)
         if updated is None:
@@ -512,7 +512,7 @@ class BackupService:
         不变: 改名或增删存档位置都不会搬动已有备份。
         """
         game = self._games.get(game_id)
-        if game is None:
+        if game is None:  # pragma: no cover - 调用前刚从库里取出这款游戏
             raise ArchiveManagementError(f"未知游戏: {game_id}")
         key = game.storage_key.strip()
         if key:
@@ -521,7 +521,7 @@ class BackupService:
 
     def _freeze_storage_key(self, game: Game) -> str:
         """按当前名称与存档位置推导目录名并写入 ``games.storage_key``."""
-        if game.id is None:
+        if game.id is None:  # pragma: no cover - 查询总是带 id
             raise ArchiveManagementError("游戏缺少 id, 无法确定备份目录")
         locations: Sequence[SaveLocation] = self._locations.list_for_game(game.id)
         paths = [location.path for location in locations]

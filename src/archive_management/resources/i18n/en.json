@@ -133,7 +133,7 @@
   "settings.appearance_hint": "Switch between the light and dark theme; applied immediately.",
   "settings.current_theme": "Current theme: {theme}",
   "settings.language": "Language",
-  "settings.language_hint": "Switching rebuilds the whole UI in the new language and re-probes localized game names (names without a translation keep the detected one).",
+  "settings.language_hint": "Switching rebuilds the whole UI in the new language and re-probes localized game names (names already fetched for that language are reused from the cache; names without a translation keep the detected one).",
   "settings.current_language": "Current language: {language}",
   "settings.language_switched": "Language switched to {language}",
   "settings.language_failed": "Could not switch language: {reason}",

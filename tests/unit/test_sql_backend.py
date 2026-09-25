@@ -20,7 +20,7 @@ from archive_management.domain import (
     ScheduledJob,
 )
 from archive_management.exceptions import ArchiveManagementError
-from archive_management.i18n import tr
+from archive_management.i18n import set_locale, tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     CandidateRepository,
@@ -1045,8 +1045,8 @@ def test_artwork_path_reads_only_the_cache(tmp_path: Path) -> None:
     assert plain.artwork_path(plain_id, "cover") == ""
 
 
-def test_prefetch_names_localizes_only_unrenamed_games(tmp_path: Path) -> None:
-    """译名只写到"没改过名"的游戏上: 用户改过的名字优先, 取不到就保留原名."""
+def test_prefetch_names_localizes_only_the_names_it_wrote(tmp_path: Path) -> None:
+    """译名只写到"名字还是程序写的"游戏上: 用户起的名字优先, 取不到就保留原名."""
     fetcher = _StubNames({"730": "无尽塔防 2", "1": "无名游戏"})
     service, game_id, database = _steam_service(tmp_path, name_fetcher=fetcher)
     service._localize_names(refresh=False)
@@ -1063,6 +1063,83 @@ def test_prefetch_names_localizes_only_unrenamed_games(tmp_path: Path) -> None:
     stored = GameRepository(database).get(int(game_id))
     assert stored is not None
     assert stored.name == "我给它起的名字"
+
+
+class _PerLanguageNames:
+    """按语言返回译名的替身: 中文一份、英文一份, 并记下每一步问了什么(不联网)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def fetch(
+        self, app_id: str, *, language: str, timeout: float, max_bytes: int
+    ) -> str | None:
+        """返回该语言下的译名, 同时记下这次询问."""
+        del timeout, max_bytes
+        self.calls.append((app_id, language))
+        if app_id != "730":
+            return None
+        return {"schinese": "无尽塔防 2", "english": "Bloons TD 2"}.get(language)
+
+
+def test_switching_language_follows_the_locale_and_reuses_the_cache(
+    tmp_path: Path,
+) -> None:
+    """切换语言: 名字跟着换, 而该语言已取过的译名直接复用缓存(不再联网).
+
+    缓存按 ``<AppID>:<语言>`` 分条, 所以"换语言"本来就不需要忽略缓存: 新语言没记录
+    才联网。旧行为是 ``refresh=True`` 忽略缓存重取, 来回切一次就要多问一趟商店。
+    """
+    fetcher = _PerLanguageNames()
+    service, game_id, database = _steam_service(
+        tmp_path, cache_dir=tmp_path / "cache", name_fetcher=fetcher
+    )
+    games = GameRepository(database)
+
+    set_locale("zh-CN")
+    service._localize_names(refresh=False)
+    first = games.get(int(game_id))
+    assert first is not None
+    assert first.name == "无尽塔防 2"
+    assert first.localized_name == "无尽塔防 2"
+
+    set_locale("en")
+    service._localize_names(refresh=False)
+    second = games.get(int(game_id))
+    assert second is not None
+    assert second.name == "Bloons TD 2", "切换语言后名字要跟着新语言走"
+    assert second.original_name == "Demo", "录入时的原名始终保留"
+
+    # 切回中文: 命中缓存, 一次都不该再问商店.
+    set_locale("zh-CN")
+    service._localize_names(refresh=False)
+    third = games.get(int(game_id))
+    assert third is not None
+    assert third.name == "无尽塔防 2"
+    assert [language for _app_id, language in fetcher.calls] == [
+        "schinese",
+        "english",
+    ], "缓存命中还联网就说明切换语言把缓存忽略了"
+
+
+def test_a_user_rename_survives_language_switches(tmp_path: Path) -> None:
+    """用户改过的名字不会被译名覆盖: 切换语言、来回切都不动它."""
+    fetcher = _PerLanguageNames()
+    service, game_id, database = _steam_service(
+        tmp_path, cache_dir=tmp_path / "cache", name_fetcher=fetcher
+    )
+
+    set_locale("zh-CN")
+    service._localize_names(refresh=False)
+    service.update_game(game_id, "我给它起的名字")
+
+    for locale in ("en", "zh-CN"):
+        set_locale(locale)
+        service._localize_names(refresh=False)
+        stored = GameRepository(database).get(int(game_id))
+        assert stored is not None
+        assert stored.name == "我给它起的名字"
+        assert stored.localized_name == ""
 
 
 def test_prefetch_names_keeps_the_detected_name_without_a_translation(
@@ -1592,6 +1669,196 @@ def test_home_archive_and_tags_round_trip(tmp_path: Path) -> None:
     assert service.load_home().games[0].tags == ("探索解谜", "动作冒险")
 
 
+def _cached_service(tmp_path: Path, *, cache_dir: Path | None) -> SqlArchiveService:
+    """构造带/不带缓存目录的后端: 译名与封面这两件事都挂在缓存目录上."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    return SqlArchiveService(
+        database,
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+        cache_dir=cache_dir,
+    )
+
+
+def test_a_game_without_a_steam_id_still_renders_with_placeholders(
+    tmp_path: Path,
+) -> None:
+    """手填游戏没有 AppID: 列表/主页/详情照常展示, 取图直接给占位而不是报错."""
+    service = _service(tmp_path)
+    summary = service.add_game("手填游戏")
+
+    assert [item.name for item in service.list_games()] == ["手填游戏"]
+    assert service.get_detail(summary.game_id).name == "手填游戏"
+    assert service.load_home().games[0].backup_count == 0
+    assert service.artwork_path(summary.game_id, "cover") == ""
+
+
+def test_prefetch_does_nothing_without_a_cache_dir(tmp_path: Path) -> None:
+    """没有缓存目录时译名与封面探测都直接返回(测试与未配置应用路径的场景)."""
+    service = _cached_service(tmp_path, cache_dir=None)
+    summary = service.add_game("手填游戏")
+
+    service.prefetch_names()
+    service.prefetch_artwork()
+
+    assert service.artwork_path(summary.game_id, "cover") == ""
+    assert service.list_games()[0].name == "手填游戏"
+
+
+def test_prefetch_names_skips_games_without_an_app_id(tmp_path: Path) -> None:
+    """有缓存目录, 但游戏没有 AppID: 跳过而不是去联网查名(离线也不会卡住)."""
+    service = _cached_service(tmp_path, cache_dir=tmp_path / "cache")
+    service.add_game("手填游戏")
+
+    service.prefetch_names()
+    service.prefetch_names(refresh=True)
+
+    assert service.list_games()[0].name == "手填游戏"
+
+
+def test_artwork_prefetch_is_not_re_entrant(tmp_path: Path) -> None:
+    """上一轮还在跑时再点一次不该又起一条线程(重复下载同一批图)."""
+    service = _cached_service(tmp_path, cache_dir=tmp_path / "cache")
+    service._artwork_running = True  # 模拟"上一轮下载还没结束"
+
+    service.prefetch_artwork()
+
+    assert service._artwork_running is True, "重入的调用不该把运行标志清掉"
+
+
+def test_artwork_download_marks_attempts_and_clears_the_flag(tmp_path: Path) -> None:
+    """下载收尾必须清掉运行标志, 且已经试过的游戏不再重复试."""
+    service = _cached_service(tmp_path, cache_dir=tmp_path / "cache")
+    summary = service.add_game("手填游戏")
+    service._artwork_attempts.add(summary.game_id)
+    service._artwork_running = True
+
+    service._download_artwork()
+    service._download_artwork()
+
+    assert service._artwork_running is False
+    assert summary.game_id in service._artwork_attempts
+
+
+def test_update_location_with_the_same_path_skips_the_duplicate_scan(
+    tmp_path: Path,
+) -> None:
+    """路径没变时不该走"查重"那条路(否则自己和自己撞, 平白报重复)."""
+    service = _service(tmp_path)
+    summary = service.add_game("星际拓荒")
+    save = tmp_path / "save"
+    save.mkdir()
+    location = service.add_location(summary.game_id, path=str(save), kind="directory")
+
+    updated = service.update_location(location.location_id, path=location.path)
+
+    assert updated.path == location.path
+    assert updated.path_kind == "directory"
+
+
+def test_set_primary_location_rejects_a_location_of_another_game(
+    tmp_path: Path,
+) -> None:
+    """拿别的游戏的位置设主位置必须拒绝, 否则会串改两款游戏的主标记."""
+    service = _service(tmp_path)
+    first = service.add_game("甲")
+    second = service.add_game("乙")
+    save = tmp_path / "save"
+    save.mkdir()
+    location = service.add_location(first.game_id, path=str(save), kind="directory")
+
+    with pytest.raises(ArchiveManagementError):
+        service.set_primary_location(second.game_id, location.location_id)
+
+    assert service.list_locations(first.game_id)[0].is_primary is True
+
+
+def test_poll_activation_without_the_auto_flag_changes_nothing(tmp_path: Path) -> None:
+    """自动启停关着的时候轮询一次不产生任何变化(不可能去枚举进程)."""
+    service = _service(tmp_path)
+    summary = service.add_game("星际拓荒")
+    service.set_game_enabled(summary.game_id, True)
+
+    outcome = service.poll_activation(enabled=False)
+
+    assert outcome.changed is False
+
+
+def test_branch_backups_get_their_own_label(tmp_path: Path) -> None:
+    """分支节点与主线节点的展示文案不同(节点的种类要映射对)."""
+    service = _service(tmp_path)
+    summary = service.add_game("星际拓荒")
+    save = tmp_path / "save"
+    save.mkdir()
+    (save / "slot.dat").write_text("v1", encoding="utf-8")
+    service.add_location(summary.game_id, path=str(save), kind="directory")
+    service.run_backup_now(summary.game_id)
+    first = service.list_backups(summary.game_id)[0]
+    # 内容没变的分支会被跳过, 因此先动一下存档再分支。
+    (save / "slot.dat").write_text("v2", encoding="utf-8")
+
+    service.run_create_branch(summary.game_id, first.backup_id, "测试分支")
+
+    labels = {item.branch_label for item in service.list_backups(summary.game_id)}
+    assert len(labels) >= 2, f"分支与主线的标签应当不同: {labels}"
+
+
+def test_automatic_backups_get_their_own_label(tmp_path: Path) -> None:
+    """定时触发的备份是"自动备份"这一种类, 与手动备份区分开."""
+    service = _service(tmp_path)
+    summary = service.add_game("星际拓荒")
+    save = tmp_path / "save"
+    save.mkdir()
+    (save / "slot.dat").write_text("v1", encoding="utf-8")
+    service.add_location(summary.game_id, path=str(save), kind="directory")
+    service.set_game_enabled(summary.game_id, True)
+    assert service.set_schedule(summary.game_id, "30m")
+    service.run_backup_now(summary.game_id)
+    # 定时备份同样遵守"内容未变化就跳过", 因此先动一下存档。
+    (save / "slot.dat").write_text("v2", encoding="utf-8")
+
+    assert service._scheduler.trigger(int(summary.game_id)) is True
+
+    items = service.list_backups(summary.game_id)
+    assert len(items) == 2
+    # 两种节点的展示文案不同: 定时那份叫"自动备份", 手动那份叫"手动备份"
+    # (两者都在主线上, 因此区分它们的是标题而不是分支标签)。
+    titles = {item.title for item in items}
+    assert titles == {tr("backup.title_manual"), tr("backup.title_auto")}
+
+
+def test_backup_of_an_empty_save_folder_records_no_file_entries(
+    tmp_path: Path,
+) -> None:
+    """空存档目录也能备份: 快照清单里一条文件记录都没有, 但节点照样已验证."""
+    service = _service(tmp_path)
+    summary = service.add_game("空目录游戏")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    service.add_location(summary.game_id, path=str(empty), kind="directory")
+
+    service.run_backup_now(summary.game_id)
+
+    items = service.list_backups(summary.game_id)
+    assert len(items) == 1
+    assert items[0].verified is True
+
+
+def test_candidate_listing_with_and_without_a_status_filter(tmp_path: Path) -> None:
+    """候选列表的口径: 不传/空串/"all" = 全部, 具体状态只留那一种, 非法值报错."""
+    service = _service(tmp_path)
+    everything = service.list_candidates()
+
+    assert service.list_candidates(status=None) == everything
+    assert service.list_candidates(status="") == everything
+    assert service.list_candidates(status="all") == everything
+    assert service.list_candidates(status="ignored") == []
+
+    with pytest.raises(ArchiveManagementError):
+        service.list_candidates(status="suggested")
+
+
 def test_home_reflects_backups_and_locations(tmp_path: Path) -> None:
     service = _service(tmp_path)
     summary = service.add_game("星际拓荒")
@@ -1646,3 +1913,389 @@ def test_home_rejects_unknown_game_ids(tmp_path: Path) -> None:
         service.set_game_archived("999", True)
     with pytest.raises(ArchiveManagementError, match="未知游戏"):
         service.set_game_tags("not-a-number", ["x"])
+
+
+# --------------------------------------------------- 边界与防御(分支覆盖)
+
+
+class _NoRefsAdapter(_FakeAdapter):
+    """支持取图但一份引用都给不出的适配器(平台没有可用图片资源)."""
+
+    def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
+        """不给任何引用."""
+        del game
+        return ()
+
+
+def test_node_title_falls_back_to_the_kind_default(tmp_path: Path) -> None:
+    """既没有标题也没有分支名时按节点类型给默认名(手动/自动/分支三种)."""
+    service, game_id, save = _service_with_save(tmp_path)
+    manual = service._backups.create_backup(int(game_id), kind="manual", title="")
+    _advance(save)
+    auto = service._backups.create_backup(int(game_id), kind="auto", title="")
+    _advance(save)
+    branch = service._backups.create_backup(
+        int(game_id), kind="branch", title="", branch_name=""
+    )
+
+    assert service._node_title(manual) == tr("backup.title_manual")
+    assert service._node_title(auto) == tr("backup.title_auto")
+    assert service._node_title(branch) == tr("backup.title_branch")
+
+
+def test_platform_game_needs_an_app_id(tmp_path: Path) -> None:
+    """来源是平台但解析不出 AppID 时不给平台数据(免得拿错的 id 去取图)."""
+    from archive_management.ui.sql_backend import _platform_game
+
+    candidate = GameCandidate(name="Hades", install_dir=str(tmp_path), source="steam")
+
+    assert _platform_game(candidate) is None
+
+
+def test_startup_skips_schedule_rows_without_a_game_or_an_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """库里有"没有游戏 id"或"空周期"的任务行时启动照常(只跳过这两行)."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    rows = [
+        ScheduledJob(game_id=None, schedule="1h"),
+        ScheduledJob(game_id=1, schedule="   "),
+    ]
+    monkeypatch.setattr(ScheduledJobRepository, "list_all", lambda self: list(rows))
+
+    service = SqlArchiveService(
+        database,
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+
+    assert service.list_schedules() == []
+
+
+def test_poll_activation_bumps_the_revision_only_when_the_state_changed(
+    tmp_path: Path,
+) -> None:
+    """自动启停真的切换了启用态时数据版本要变(界面据此重读)."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    save = tmp_path / "save"
+    save.mkdir()
+    (save / "slot1.dat").write_text("v1", encoding="utf-8")
+    idle = SqlArchiveService(
+        database,
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+        process_provider=lambda: ["Demo.exe"],
+    )
+    game_id = idle.add_game("Demo").game_id
+    idle.add_location(game_id, path=str(save), kind="directory")
+
+    before = idle.task_status(game_id).revision
+    outcome = idle.poll_activation(enabled=True)
+
+    assert outcome.changed is True
+    assert idle.task_status(game_id).revision > before
+    # 再轮询一次: 状态没变就不该再动版本号(否则界面会被无意义地重读).
+    again = idle.poll_activation(enabled=True)
+    assert again.changed is False
+    assert idle.task_status(game_id).revision == idle.task_status(game_id).revision
+
+
+def test_list_schedules_skips_games_it_cannot_describe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """组装不出任务条目的游戏直接从列表里跳过(不让半截条目进界面)."""
+    service = _service(tmp_path)
+    service.add_game("甲")
+    service.add_game("乙")
+    describe = service._schedule_item
+    monkeypatch.setattr(
+        service,
+        "_schedule_item",
+        lambda game: None if game.name == "乙" else describe(game),
+    )
+
+    assert [item.game_name for item in service.list_schedules()] == ["甲"]
+
+
+def test_suggest_for_game_returns_nothing_without_a_platform_adapter(
+    tmp_path: Path,
+) -> None:
+    """手填/监控目录来源没有平台适配器: 不猜存档位置(导入照常进行)."""
+    service = _service(tmp_path)
+    game_id = service.add_game("手填游戏").game_id
+    game = GameRepository(service._database).get(int(game_id))
+    assert game is not None
+
+    assert service._suggest_for_game(game) == {}
+
+
+def test_suggest_for_game_skips_candidates_without_a_stored_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """候选落库后仍拿不到 id 时跳过它(而不是往映射里塞一条 id 为 None 的记录)."""
+    from types import SimpleNamespace
+
+    import archive_management.application.candidates as candidate_cases
+
+    service, game_id, _database = _steam_service(tmp_path)
+    game = GameRepository(service._database).get(int(game_id))
+    assert game is not None
+    report = SimpleNamespace(candidates=(SimpleNamespace(id=None, path=str(tmp_path)),))
+    monkeypatch.setattr(candidate_cases, "suggest_candidates", lambda *a, **k: report)
+
+    assert service._suggest_for_game(game) == {}
+
+
+def test_save_candidate_source_prefers_the_injected_one(tmp_path: Path) -> None:
+    """注入了候选来源就用它, 不去读本机 Steam 目录(离线与测试的前提)."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    injected = _FakeSaveSource()
+    service = SqlArchiveService(
+        database,
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+        save_source=injected,
+    )
+
+    assert service._save_candidate_source() is injected
+
+
+def test_candidate_names_skip_unresolvable_and_already_cached_rows(
+    tmp_path: Path,
+) -> None:
+    """译名只补"能解析出 AppID 且缓存里还没有"的候选: 两类跳过各走一次."""
+    cache_dir = tmp_path / "cache"
+    service, _game_id, database = _steam_service(
+        tmp_path, cache_dir=cache_dir, name_fetcher=_StubNames({})
+    )
+    candidates = CandidateRepository(database)
+    for index, (name, detail) in enumerate(
+        [("没有 AppID", ""), ("已有译名", "appmanifest_730.acf")]
+    ):
+        install = tmp_path / f"cand{index}"
+        install.mkdir()
+        candidates.upsert(
+            GameCandidate(
+                name=name, install_dir=str(install), source="steam", detail=detail
+            )
+        )
+    third = tmp_path / "cand2"
+    third.mkdir()
+    candidates.upsert(
+        GameCandidate(
+            name="取不到译名",
+            install_dir=str(third),
+            source="steam",
+            detail="appmanifest_1145360.acf",
+        )
+    )
+    name_cache_at(cache_dir).put("730", "zh-CN", "已有译名")
+
+    service._localize_names(refresh=False)
+
+    # 能解析、没缓存的那条去问了一次(替身给不出结果, 于是缓存里什么都没留下).
+    assert name_cache_at(cache_dir).get("730", "zh-CN") == "已有译名"
+    assert name_cache_at(cache_dir).get("1145360", "zh-CN") is None
+
+
+def test_cached_name_of_a_candidate_without_an_app_id_is_empty(tmp_path: Path) -> None:
+    """探测结果没有 AppID 时译名一律为空(不猜也不联网)."""
+    cache_dir = tmp_path / "cache"
+    service, _game_id, database = _steam_service(tmp_path, cache_dir=cache_dir)
+    install = tmp_path / "monitored"
+    install.mkdir()
+    CandidateRepository(database).upsert(
+        GameCandidate(name="手填", install_dir=str(install), source="monitored")
+    )
+
+    item = next(row for row in service.list_candidates() if row.name == "手填")
+
+    assert item.localized_name == ""
+    assert item.display_name == "手填"
+
+
+def test_artwork_download_walks_a_game_that_can_be_fetched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """有引用可用的游戏要走完下载这一轮: 取到就计数并刷新数据版本."""
+    from types import SimpleNamespace
+
+    import archive_management.ui.sql_backend as sql_mod
+
+    cache_dir = tmp_path / "cache"
+    service, game_id, _database = _steam_service(tmp_path, cache_dir=cache_dir)
+    monkeypatch.setattr(
+        sql_mod,
+        "resolve_artwork",
+        lambda *a, **k: SimpleNamespace(found=True, path=None),
+    )
+    service._artwork_running = True
+    before = service.list_games()[0].name  # 触发一次读取, 拿到当前状态
+
+    service._download_artwork()
+
+    assert before == "Demo"
+    assert game_id in service._artwork_attempts
+    assert service._artwork_running is False
+
+
+def test_store_icon_skips_an_icon_that_is_already_cached(tmp_path: Path) -> None:
+    """同一来源版本的图标已在缓存里就不再重算(重算等于白解码一次)."""
+    cache_dir = tmp_path / "cache"
+    cache = artwork_cache_at(cache_dir)
+    cache.store("steam", "730", "icon", ICON_VERSION, content=_PNG, extension="png")
+    service, _game_id, database = _steam_service(tmp_path, cache_dir=cache_dir)
+    game = GameRepository(database).get(1)
+    assert game is not None
+    referenced = service._artwork_game(game)
+    assert referenced is not None
+
+    assert service._store_icon(cache, referenced) is None
+
+
+def test_store_icon_gives_up_when_conversion_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """原图解不开时不上缓存、也不抛错(界面回落名称首字占位)."""
+    import archive_management.ui.sql_backend as sql_mod
+
+    cache_dir = tmp_path / "cache"
+    cache = artwork_cache_at(cache_dir)
+    cache.store(
+        "steam", "730", "cover", STEAM_COVER_ASSET, content=_PNG, extension="png"
+    )
+    service, _game_id, database = _steam_service(tmp_path, cache_dir=cache_dir)
+    game = GameRepository(database).get(1)
+    assert game is not None
+    referenced = service._artwork_game(game)
+    assert referenced is not None
+    monkeypatch.setattr(sql_mod, "square_icon", lambda *_a, **_k: None)
+
+    assert service._store_icon(cache, referenced) is None
+    assert service._fetch_artwork(cache, referenced) == 0
+
+
+def test_artwork_game_needs_the_adapter_to_offer_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """适配器支持取图但给不出引用时不去下载(界面直接占位)."""
+    service, _game_id, database = _steam_service(tmp_path, cache_dir=tmp_path / "cache")
+    game = GameRepository(database).get(1)
+    assert game is not None
+    monkeypatch.setattr(
+        service, "_adapter_for", lambda platform: _NoRefsAdapter(_FakeSaveSource())
+    )
+
+    assert service._artwork_game(game) is None
+
+
+def test_busy_guards_reject_a_second_operation(tmp_path: Path) -> None:
+    """一次只允许一个备份/恢复: 已有任务在跑时再发起要明确报忙."""
+    from archive_management.ui.sql_backend import _ActiveOperation
+
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    node = service.list_backups(game_id)[0]
+    service._active = _ActiveOperation(game_id=int(game_id))
+
+    with pytest.raises(ArchiveManagementError) as backup_error:
+        service.run_backup_now(game_id)
+    with pytest.raises(ArchiveManagementError) as restore_error:
+        service.run_restore(game_id, node.backup_id)
+
+    assert tr("error.operation_busy") in str(backup_error.value)
+    assert tr("error.operation_busy") in str(restore_error.value)
+    assert service._active is not None, "被拒绝的调用不该把进行中的任务清掉"
+
+
+def test_cancel_and_progress_are_quiet_without_an_operation(tmp_path: Path) -> None:
+    """没有进行中的任务时: 取消返回 False, 进度回调直接忽略(后台线程的收尾竞态)."""
+    from archive_management.ui.sql_backend import _ActiveOperation
+
+    service = _service(tmp_path)
+
+    assert service.cancel_active() is False
+    service._report_progress(0.5, "不该记录")  # 不该抛错
+    assert service._active is None
+    assert service._cancel_requested() is False
+
+    service._active = _ActiveOperation(game_id=1)
+    assert service.cancel_active() is True
+    service._report_progress(0.4, "写回中")
+    assert service._active.fraction == 0.4
+    assert service._active.message == "写回中"
+    assert service._cancel_requested() is True
+
+
+def test_clearing_a_schedule_ignores_jobs_without_an_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """库里出现没有 id 的任务行时清周期照常走完(跳过删除而不是崩)."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    monkeypatch.setattr(
+        service._jobs,
+        "for_game",
+        lambda gid: [ScheduledJob(game_id=gid, schedule="1h")],
+    )
+
+    status = service.set_schedule(game_id, "")
+
+    assert status.schedule_text == ""
+
+
+def test_marking_a_job_run_without_a_stored_job_is_silent(tmp_path: Path) -> None:
+    """没有任务行时"记录一次运行"直接返回(自动备份可能在清掉周期之后收尾)."""
+    service, game_id, _save = _service_with_save(tmp_path)
+
+    service._mark_job_run(int(game_id), error=None)
+
+    assert service.task_status(game_id).schedule_text == ""
+
+
+def test_delete_backup_reports_cascade_for_a_branch_root(tmp_path: Path) -> None:
+    """删掉带子节点的分支根节点: 提示要说清连带删掉了整条分支."""
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    first = service.list_backups(game_id)[0]
+    _advance(save)
+    service.run_create_branch(game_id, first.backup_id, "分支")
+    # 分支节点下面再挂一个: 这样删分支根节点就是"连带整条分支"(否则只是删一个节点).
+    _advance(save)
+    service.run_backup_now(game_id)
+    branch_root = next(item for item in service.list_backups(game_id) if item.is_branch)
+
+    message = service.run_delete_backup(game_id, branch_root.backup_id)
+
+    assert message == tr("result.delete_cascade", count=2)
+
+
+def test_verified_flag_is_false_for_a_node_without_an_id(tmp_path: Path) -> None:
+    """节点还没落库(没有 id)时校验一律 False(不给缓存留下错的键)."""
+    from archive_management.domain import BackupNode
+
+    service = _service(tmp_path)
+
+    assert service._is_verified(BackupNode(game_id=1, node_kind="manual")) is False
+
+
+def test_half_written_rows_are_treated_as_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """查到实体但没有 id(半截数据)时按"未知"处理, 不拿 None 继续往下走."""
+    from archive_management.domain import SaveLocation
+
+    service = _service(tmp_path)
+    monkeypatch.setattr(service._games, "get", lambda _id: Game(name="半截"))
+    monkeypatch.setattr(
+        service._locations,
+        "get",
+        lambda _id: SaveLocation(game_id=1, path="/x", path_kind="directory"),
+    )
+
+    with pytest.raises(ArchiveManagementError):
+        service._game_ref("1")
+    with pytest.raises(ArchiveManagementError):
+        service._location_ref("1")

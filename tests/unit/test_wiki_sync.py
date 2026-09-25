@@ -27,6 +27,18 @@ _WIKI = _REPO_ROOT / "wiki"
 _PLACEHOLDER = "{{REPO_URL}}"
 # "多推一次"的守卫下限: 章节数少于此值说明手册被拆得太粗或被误删。
 _MIN_CHAPTERS = 8
+# 手册面向"不碰命令行的用户": 出现这些写法就说明内容跑偏了(该进 docs/ 或 README)。
+_COMMAND_LINE_PATTERNS = (
+    "uv run",
+    "uv sync",
+    "python -m",
+    "pip install",
+    "--root",
+    "--verbose",
+    "--smoke",
+    "命令行",
+    "子命令",
+)
 
 
 def _pages() -> list[Path]:
@@ -87,6 +99,20 @@ def test_pages_do_not_use_relative_links_to_the_repository() -> None:
 
         for bad in ("./docs/", "(docs/"):
             assert bad not in text, f"{page.name} 用了仓库相对链接: {bad}"
+
+
+def test_pages_stay_free_of_the_command_line() -> None:
+    """手册只讲窗口里的操作: 软件全平台编译发布, 用户拿到的是可执行包.
+
+    在手册里写 `uv run` / `python -m` / `--root` 这类内容, 会让用户以为"想用这个
+    软件得先装 Python、开命令行" —— 那是开发者的使用方式(属于 `docs/` 与 README)。
+    这条与"章节编号""侧边栏链接"一样是静默失效的: 没有任何一步会因此变红。
+    """
+    for page in _pages():
+        text = page.read_text(encoding="utf-8")
+
+        for bad in _COMMAND_LINE_PATTERNS:
+            assert bad not in text, f"{page.name} 里出现了命令行内容: {bad}"
 
 
 def test_repository_links_use_the_placeholder() -> None:

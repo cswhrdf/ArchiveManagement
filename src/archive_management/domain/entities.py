@@ -37,6 +37,9 @@ class Game(_RowModel):
     created_at: datetime | None = None
     # 录入时识别到的原始名称(重命名不会改写), 供界面作为额外信息展示.
     original_name: str = ""
+    # 上一次由程序写入的译名(用户改名时清空): 只有名称还等于它时才允许被新译名
+    # 覆盖 —— 否则切换语言后, 程序自己写的译名会被当成"用户改的名字"而不再更新。
+    localized_name: str = ""
     # 备份根目录下该游戏实际使用的目录名(首次备份时确定, 之后保持不变).
     storage_key: str = ""
     # 游戏来源平台: steam/epic/gog/ubisoft/monitored/manual(主页分类用).

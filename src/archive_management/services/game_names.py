@@ -212,8 +212,8 @@ def resolve_name(
 ) -> str | None:
     """取该 AppID 在给定语言下的名称; 取不到时返回 ``None``(调用方保留原名).
 
-    ``cache`` 命中就直接返回(不再联网); ``refresh`` 为 True 时忽略缓存重取一次
-    (切换语言要"重新探测", 而不是复用别的语言或旧结果)。
+    ``cache`` 命中就直接返回(不再联网) —— 缓存按语言分条, 所以切换语言只会命中
+    新语言自己的记录; 只有 ``refresh=True`` 才忽略缓存重取一次(诊断用)。
     """
     if cache is not None and not refresh:
         cached = cache.get(app_id, locale)

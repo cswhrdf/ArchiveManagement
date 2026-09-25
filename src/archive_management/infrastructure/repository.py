@@ -85,6 +85,7 @@ def _row_to_game(row: sqlite3.Row) -> Game:
         enabled=_as_bool(row["enabled"]),
         created_at=_parse_dt(row["created_at"]),
         original_name=str(row["original_name"] or "") or name,
+        localized_name=str(row["localized_name"] or ""),
         storage_key=str(row["storage_key"] or ""),
         origin=str(row["origin"] or "manual"),
         tags=_split_tags(row["tags"]),
@@ -158,7 +159,7 @@ class GameRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT id, name, steam_app_id, platform, enabled, created_at,"
-                " original_name, storage_key, origin, tags, archived,"
+                " original_name, localized_name, storage_key, origin, tags, archived,"
                 " last_activity_at FROM games ORDER BY created_at, id"
             ).fetchall()
         return [_row_to_game(row) for row in rows]
@@ -168,7 +169,7 @@ class GameRepository:
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT id, name, steam_app_id, platform, enabled, created_at,"
-                " original_name, storage_key, origin, tags, archived,"
+                " original_name, localized_name, storage_key, origin, tags, archived,"
                 " last_activity_at FROM games WHERE id = ?",
                 (game_id,),
             ).fetchone()
@@ -181,8 +182,8 @@ class GameRepository:
         with self._database.session() as connection:
             cursor = connection.execute(
                 "INSERT INTO games (name, steam_app_id, platform, enabled, created_at,"
-                " original_name, storage_key, origin, tags, archived,"
-                " last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " original_name, localized_name, storage_key, origin, tags, archived,"
+                " last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     game.name,
                     game.steam_app_id,
@@ -190,6 +191,7 @@ class GameRepository:
                     int(game.enabled),
                     created_at,
                     original_name,
+                    game.localized_name,
                     game.storage_key,
                     game.origin,
                     _join_tags(game.tags),
@@ -197,7 +199,7 @@ class GameRepository:
                     _dt_text(game.last_activity_at) or created_at,
                 ),
             )
-            if cursor.lastrowid is None:
+            if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
                 raise DatabaseError("插入游戏失败: 未返回行 id")
             game_id = int(cursor.lastrowid)
         return Game(
@@ -208,6 +210,7 @@ class GameRepository:
             enabled=game.enabled,
             created_at=_parse_dt(created_at),
             original_name=original_name,
+            localized_name=game.localized_name,
             storage_key=game.storage_key,
             origin=game.origin,
             tags=game.tags,
@@ -218,20 +221,23 @@ class GameRepository:
     def update(self, game: Game) -> Game:
         """按 id 更新可变字段; 缺少 id 时抛错.
 
-        只更新名称/Steam/平台/启用状态: ``original_name`` 与 ``storage_key``
-        记录的是"首次录入的名称"与"磁盘上实际使用的目录", 重命名不得改写。
+        只更新名称/Steam/平台/启用状态/译名记录: ``original_name`` 与
+        ``storage_key`` 记录的是"首次录入的名称"与"磁盘上实际使用的目录",
+        重命名不得改写; ``localized_name`` 跟着一起写, 让"名字是谁写的"能跟着
+        名字一起变(用户改名时调用方负责清空它)。
         """
         if game.id is None:
             raise ValueError("更新游戏需要 id")
         with self._database.session() as connection:
             connection.execute(
                 "UPDATE games SET name = ?, steam_app_id = ?, platform = ?,"
-                " enabled = ? WHERE id = ?",
+                " enabled = ?, localized_name = ? WHERE id = ?",
                 (
                     game.name,
                     game.steam_app_id,
                     game.platform,
                     int(game.enabled),
+                    game.localized_name,
                     game.id,
                 ),
             )
@@ -429,7 +435,7 @@ class SaveLocationRepository:
                     location.last_check_status,
                 ),
             )
-            if cursor.lastrowid is None:
+            if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
                 raise DatabaseError("插入存档位置失败: 未返回行 id")
             location_id = int(cursor.lastrowid)
         return SaveLocation(
@@ -637,7 +643,7 @@ class BackupRepository:
                     int(node.is_safety),
                 ),
             )
-            if cursor.lastrowid is None:
+            if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
                 raise DatabaseError("插入备份节点失败: 未返回行 id")
             backup_id = int(cursor.lastrowid)
             if entries:
@@ -746,7 +752,7 @@ class ScheduledJobRepository:
                         job.keep_auto,
                     ),
                 )
-                if cursor.lastrowid is None:
+                if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
                     raise DatabaseError("插入定时任务失败: 未返回行 id")
                 job_id = int(cursor.lastrowid)
         else:
@@ -920,7 +926,7 @@ class MonitoredDirectoryRepository:
                     directory.last_scan_status,
                 ),
             )
-            if cursor.lastrowid is None:
+            if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
                 raise DatabaseError("插入监控目录失败: 未返回行 id")
             directory_id = int(cursor.lastrowid)
         return MonitoredDirectory(
@@ -1097,7 +1103,7 @@ class CandidateRepository:
                     candidate.game_id,
                 ),
             )
-            if cursor.lastrowid is None:
+            if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
                 raise DatabaseError("插入候选游戏失败: 未返回行 id")
             candidate_id = int(cursor.lastrowid)
         return (
@@ -1390,8 +1396,8 @@ class HomeRepository:
                 _row_to_game(row)
                 for row in connection.execute(
                     "SELECT id, name, steam_app_id, platform, enabled, created_at,"
-                    " original_name, storage_key, origin, tags, archived,"
-                    " last_activity_at FROM games ORDER BY name, id"
+                    " original_name, localized_name, storage_key, origin, tags,"
+                    " archived, last_activity_at FROM games ORDER BY name, id"
                 ).fetchall()
             ]
             paths: dict[int, list[tuple[str, str]]] = {}

@@ -173,9 +173,11 @@ class SideEffectRecorder:
         original = getattr(module, name)
 
         def wrapper(path: Any, *args: Any, **kwargs: Any) -> Any:
-            self._record(kind, path)
+            self._record(kind, _resolve_dir_fd(kwargs.get("dir_fd"), str(path)))
             if args and isinstance(args[0], (str, os.PathLike)):
-                self._record(kind, args[0])
+                # 第二个位置参数常是目标(rename/replace): 它用的是 dst_dir_fd。
+                target = _resolve_dir_fd(kwargs.get("dst_dir_fd"), str(args[0]))
+                self._record(kind, target)
             return original(path, *args, **kwargs)
 
         monkeypatch.setattr(module, name, wrapper)
@@ -193,6 +195,37 @@ class SideEffectRecorder:
 
         wrapper.__doc__ = original.__doc__
         monkeypatch.setattr(module, function_name, wrapper)
+
+
+# “fd → 目录”的两条常见路径(Linux 用 /proc, macOS 用 /dev); 读到就接回绝对路径。
+_FD_PATH_TEMPLATES = ("/proc/self/fd/{fd}", "/dev/fd/{fd}")
+
+
+def _resolve_dir_fd(dir_fd: object, path: str) -> str:
+    """把 `dir_fd` 相对的路径还原成绝对路径.
+
+    `shutil.rmtree` 在支持 `dir_fd` 的平台上(POSIX)是**打开目录后按条目名**逐个删的
+    (`os.unlink(条目名, dir_fd=目录 fd)`), 于是记账看到的是一个裸文件名 —— 那不是越界,
+    只是相对基准没被一起记下来(Windows 不支持 `dir_fd`, 所以这一支只在 Linux/macOS 上
+    出现: 2026-09-25 的 CI 就是在这里红的)。
+
+    :data:`_FD_PATH_TEMPLATES` 能读回那个目录的真实路径; 全都读不到时**原样返回**
+    裸文件名 —— 于是它会被判成越界并响亮地失败, 而不是被悄悄当成“合法”.
+    """
+    if dir_fd is None:
+        return path
+    try:
+        fd = int(str(dir_fd))
+    except ValueError:
+        return path
+    for template in _FD_PATH_TEMPLATES:
+        try:
+            base = os.path.realpath(template.format(fd=fd))
+        except OSError:  # pragma: no cover - 读不到就退回裸文件名
+            continue
+        if base and Path(base).is_dir():
+            return str(Path(base) / path)
+    return path
 
 
 def _inside(root: Path, path: str) -> bool:
@@ -234,6 +267,63 @@ def test_the_recorder_notices_a_stray_write_outside_the_app_area(
         outside.write_text("x", encoding="utf-8")
 
     assert recorder.paths(kind="write") == [str(outside)]
+
+
+def test_the_recorder_resolves_paths_relative_to_a_directory_fd(
+    tmp_path: Path, recorder: SideEffectRecorder
+) -> None:
+    """自检: POSIX 上按 `dir_fd` 删条目时要还原成绝对路径, 不能记成越界.
+
+    `shutil.rmtree` 在支持 `dir_fd` 的平台上就是"打开目录 + `os.unlink(条目名, dir_fd=fd)`",
+    所以记账器必须把相对基准还原回来 —— 否则一次合法删除会被判成越界变更(2026-09-25 的
+    Linux CI 就是这样红的: `越界变更: [_Call(phase='restore', kind='delete', path='slot.dat')]`)。
+    本平台不支持 `dir_fd` 时这条自检没有可测的行为, 明确跳过而不是假装通过。
+    """
+    if os.unlink not in os.supports_dir_fd:
+        pytest.skip("本平台不支持 dir_fd(os.unlink 不接受 dir_fd)")
+    folder = tmp_path / "root"
+    folder.mkdir()
+    victim = folder / "child.dat"
+    victim.write_text("x", encoding="utf-8")
+
+    with recorder.phase("probe"):
+        fd = os.open(folder, os.O_RDONLY)
+        try:
+            os.unlink("child.dat", dir_fd=fd)
+        finally:
+            os.close(fd)
+
+    recorded = recorder.paths(phase="probe", kind="delete")
+
+    assert recorded, "删了文件却没记账"
+    assert str(victim) in recorded, f"没还原成绝对路径: {recorded}"
+    assert all(_inside(tmp_path, path) for path in recorded), f"记成了越界: {recorded}"
+
+
+def test_resolve_dir_fd_joins_the_directory_when_it_can_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """记账器还原 `dir_fd` 相对路径: 读得到那个目录就接回绝对路径, 读不到就原样返回.
+
+    真的 fd 那一支由 Linux/macOS 上的自检用例覆盖(Windows 不支持 `dir_fd`); 这里用
+    可控的“fd → 目录”映射把还原逻辑本身钉住 —— 读不到时**必须**原样返回, 否则一次
+    认不出来的相对删除会被当成合法操作而静默放行。
+    """
+    import sys
+
+    folder = tmp_path / "root"
+    folder.mkdir()
+    fake = folder / "fd-3"
+    fake.mkdir()
+    monkeypatch.setattr(
+        sys.modules[__name__], "_FD_PATH_TEMPLATES", (str(folder / "fd-{fd}"),)
+    )
+
+    assert _resolve_dir_fd(3, "child.dat") == str(fake / "child.dat")
+    assert _resolve_dir_fd("3", "child.dat") == str(fake / "child.dat")
+    assert _resolve_dir_fd(None, "child.dat") == "child.dat", "没有 dir_fd 就不动"
+    assert _resolve_dir_fd(99, "child.dat") == "child.dat", "读不到就原样(会被判越界)"
+    assert _resolve_dir_fd("不是数字", "child.dat") == "child.dat"
 
 
 def test_the_pipeline_only_changes_the_app_area_and_the_save_location(

@@ -138,6 +138,19 @@ def _cell_pad(index: int) -> tuple[int, int] | int:
     return (0, _COLUMN_GAP) if index < len(_COLUMNS) - 1 else 0
 
 
+def poster_backing(cover_image: object | None, palette: Palette) -> str:
+    """海报标记(备份数角标、启用绿点)的底衬色: 只有**真画了封面图**时才加底衬.
+
+    有图时用面板色: 封面图上是什么颜色都有可能, 标记没有底衬会看不清。回落成名称
+    占位时封面底色是纯色, 标记用 ``transparent`` 取到的正是这个底色(与父容器完全
+    一致), 于是底衬彻底看不见 —— 这才是真正的"没有背景色"。
+
+    单独抽成纯函数是为了能**不建窗口**就把这条规则钉住: 依赖"真封面图"的界面用例
+    在报告里一直是被跳过的那一类(见 tests/tk_guard.py 的说明)。
+    """
+    return "transparent" if cover_image is None else palette.panel
+
+
 @dataclass
 class _RowParts:
     """一行的关键部件: 表头对齐与名称重裁都要用到(不必再从控件树里找)."""
@@ -1072,7 +1085,7 @@ class HomePage:
         # 底衬只用在**真的有封面图**的时候: 图上是什么颜色都有可能, 绿点与备份数
         # 没有底衬会看不清; 而回落成名称占位时封面底色就是纯色, 标签的 transparent
         # 取到的正是这个底色(与父容器完全一致), 于是底衬彻底看不见。
-        backing = "transparent" if cover_image is None else palette.panel
+        backing = poster_backing(cover_image, palette)
         # 右下角角标: 没关联存档位置时这里没有"备份数"可言, 直接说明原因.
         badge = ctk.CTkLabel(
             cover,

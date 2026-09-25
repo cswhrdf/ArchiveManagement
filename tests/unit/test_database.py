@@ -85,6 +85,19 @@ def test_games_table_has_naming_columns(tmp_path: Path) -> None:
     assert database.schema_version() >= 4
 
 
+def test_games_table_remembers_which_name_the_program_wrote(tmp_path: Path) -> None:
+    """译名探测靠 localized_name 一列(版本 13 迁移), 否则切换语言时名字会"卡住"."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+
+    with database.connect() as connection:
+        rows = connection.execute("PRAGMA table_info(games)").fetchall()
+    columns = {str(row["name"]) for row in rows}
+
+    assert "localized_name" in columns
+    assert database.schema_version() >= 13
+
+
 def test_session_commits_changes(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     database.migrate()

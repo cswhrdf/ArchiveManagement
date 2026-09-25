@@ -174,7 +174,7 @@ def _lexical_parts(path: Path) -> tuple[str, ...]:
             if parts:
                 parts.pop()
             continue
-        if part != ".":
+        if part != ".":  # pragma: no branch - Path 会把 `.` 归一掉, 不会出现在 parts 里
             parts.append(part)
     return tuple(parts)
 

@@ -360,8 +360,9 @@ class ArchiveApp(ctk.CTk):
     def _on_language_change(self, locale: str) -> str | None:
         """切换界面语言: 按新语言重探译名 + 整体重建界面; 返回 None 表示成功.
 
-        译名重新探测在后台线程里跑(``refresh=True`` 忽略缓存), 探测完抬高的数据
-        版本会触发重绘, 所以这里不必等网络。
+        译名按 ``<AppID>:<语言>`` 分条缓存, 因此这里**不忽略缓存**: 新语言还没记录
+        的游戏才联网, 取过的直接用缓存。探测在后台线程里跑, 完成后抬高的数据版本
+        会触发重绘, 所以不必等网络。
         """
         try:
             set_locale(locale)
@@ -370,7 +371,7 @@ class ArchiveApp(ctk.CTk):
         self._language = locale
         self._save_language(locale)
         log_action("ui.switch_language", basic=True, language=locale)
-        self.backend.prefetch_names(refresh=True)
+        self.backend.prefetch_names()
         self._rebuild_ui()
         self._feedback(
             FeedbackKind.INFO,

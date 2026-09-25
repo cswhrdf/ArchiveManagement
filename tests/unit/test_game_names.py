@@ -194,6 +194,19 @@ def test_resolve_name_prefers_the_cache(tmp_path: Path) -> None:
     assert fetcher.calls == []
 
 
+def test_resolve_name_keeps_languages_apart(tmp_path: Path) -> None:
+    """缓存按语言分条: 中文的条目不能满足英文查询(否则切语言会拿到另一种语言的名字)."""
+    cache = name_cache_at(tmp_path)
+    cache.put(_APP_ID, "zh-CN", "无尽塔防 2")
+    fetcher = _StubFetcher("Bloons TD 2")
+
+    found = resolve_name(_APP_ID, "en", cache, fetcher=fetcher)
+
+    assert found == "Bloons TD 2"
+    assert fetcher.calls == [(_APP_ID, "english")]
+    assert cache.get(_APP_ID, "zh-CN") == "无尽塔防 2", "取英文不该动中文的条目"
+
+
 def test_resolve_name_fetches_and_caches(tmp_path: Path) -> None:
     """没缓存时问一次商店, 拿到就写进缓存(下次不再联网)."""
     cache = name_cache_at(tmp_path)
@@ -207,7 +220,7 @@ def test_resolve_name_fetches_and_caches(tmp_path: Path) -> None:
 
 
 def test_resolve_name_refresh_ignores_the_cache(tmp_path: Path) -> None:
-    """``refresh=True`` 时忽略缓存重取一次(切换语言就是靠它)."""
+    """``refresh=True`` 时才忽略缓存重取一次(诊断用的口子: 切换语言走缓存)."""
     cache = name_cache_at(tmp_path)
     cache.put(_APP_ID, "zh-CN", "旧译名")
     fetcher = _StubFetcher("新译名")

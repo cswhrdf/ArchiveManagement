@@ -384,8 +384,9 @@ class SqlArchiveService:
         """重命名游戏, 返回其摘要."""
         clean = self._clean_name(name)
         game = self._game(game_id)
-        # 只改名称: 首次录入的原始名称与磁盘目录名保持不变.
-        updated = game.model_copy(update={"name": clean})
+        # 只改名称: 首次录入的原始名称与磁盘目录名保持不变. 同时清掉"程序写入的
+        # 译名"记录: 从这一刻起这个名字是用户起的, 译名探测不得再覆盖它。
+        updated = game.model_copy(update={"name": clean, "localized_name": ""})
         self._games.update(updated)
         log_action("game.rename", game_id=game.id, name=clean)
         return self._summary(updated)
@@ -656,7 +657,7 @@ class SqlArchiveService:
 
     def _schedule_item(self, game: Game) -> ScheduleItem | None:
         """把一款游戏组装成任务条目(还没有落到库里的游戏返回 None)."""
-        if game.id is None:
+        if game.id is None:  # pragma: no cover - 查询总是带 id
             return None
         entry = self._scheduler.get(game.id)
         jobs = self._jobs.for_game(game.id)
@@ -810,7 +811,7 @@ class SqlArchiveService:
         落库是为了保留"这条路径来自哪个平台的哪份清单"的来源信息; 平台不支持
         存档探测(或没有可信来源)时返回空字典, 导入照常进行。
         """
-        if game.id is None:
+        if game.id is None:  # pragma: no cover - 查询总是带 id
             return {}
         adapter = self._adapter_for(game.origin)
         if adapter is None or not adapter.supports_save_paths:
@@ -923,7 +924,9 @@ class SqlArchiveService:
         """后台按当前界面语言补齐译名(取不到就保留探测到的原名).
 
         同一个实例同时只跑一个线程; 译名会直接改写到游戏记录里, 因此完成后抬高
-        数据版本, 界面重读就能看到新名字。
+        数据版本, 界面重读就能看到新名字。缓存按 ``<AppID>:<语言>`` 分条, 因此
+        切换语言**不需要**忽略缓存: 新语言没记录才联网, 已有记录直接复用。
+        ``refresh`` 只是诊断用的口子(强制重取一次), 界面里没有入口。
         """
         if self._cache_dir is None:
             return
@@ -938,8 +941,8 @@ class SqlArchiveService:
     def _localize_names(self, refresh: bool) -> None:
         """在工作线程里补译名: 游戏改写记录, 探测结果只填缓存.
 
-        改过名的游戏跳过(用户起的名字优先), 没有平台标识的也跳过 —— 拿不到 AppID
-        就没有可信的译文来源。
+        用户改过名的游戏跳过(见 :meth:`_name_is_ours`), 没有平台标识的也跳过 ——
+        拿不到 AppID 就没有可信的译文来源。
         """
         try:
             # 没有缓存目录时仍可以改写游戏译名(候选译名必须落缓存, 那种情况跳过).
@@ -955,12 +958,12 @@ class SqlArchiveService:
                 self._names_running = False
 
     def _rename_games(self, cache: NameCache | None, locale: str, refresh: bool) -> int:
-        """把"没改过名"的游戏换成当前语言的名称, 返回改写条数."""
+        """把"名字还是程序写的"游戏换成当前语言的名称, 返回改写条数."""
         renamed = 0
         for game in self._games.list():
             if game.id is None or game.steam_app_id is None:
                 continue
-            if game.name != game.original_name:
+            if not self._name_is_ours(game):
                 continue
             found = resolve_name(
                 str(game.steam_app_id),
@@ -971,10 +974,22 @@ class SqlArchiveService:
             )
             if found is None or found == game.name:
                 continue
-            self._games.update(game.model_copy(update={"name": found}))
+            self._games.update(
+                game.model_copy(update={"name": found, "localized_name": found})
+            )
             log_action("game.localize_name", game_id=game.id, locale=locale, name=found)
             renamed += 1
         return renamed
+
+    @staticmethod
+    def _name_is_ours(game: Game) -> bool:
+        """判断当前名称是"程序写上去的译名"还是"用户自己起的名字".
+
+        名称等于录入时的原名(还没探测过)或上次程序写入的译名(``localized_name``)
+        时都算我们的, 切换语言时应该跟着换; 用户改过名之后 ``update_game`` 会清空
+        ``localized_name``, 从此这个名字不再被译名覆盖。
+        """
+        return game.name == game.original_name or game.name == game.localized_name
 
     def _name_candidates(self, cache: NameCache, locale: str, refresh: bool) -> int:
         """给"待处理"的探测结果补一次译名(只填缓存, 不写游戏库), 返回新取的条数.
@@ -1241,7 +1256,7 @@ class SqlArchiveService:
         """
         game, gid = self._game_ref(game_id)
         node = self._require_backup(gid, backup_id)
-        if node.id is None:
+        if node.id is None:  # pragma: no cover - 查询总是带 id
             raise ArchiveManagementError(
                 tr("error.unknown_backup", backup_id=backup_id)
             )

@@ -615,7 +615,7 @@ def _target_problem(
 
 def _staging_path(target: Path) -> Path:
     """返回与目标同盘的暂存路径(保证改名替换是同一卷内的操作)."""
-    if target.parent == target:
+    if target.parent == target:  # pragma: no cover - 盘符根目标在恢复预检阶段已被拒
         raise SnapshotError(f"拒绝在磁盘根目录下创建暂存目录: {target}")
     return target.parent / f".{target.name}.restore-{uuid4().hex[:8]}"
 

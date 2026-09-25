@@ -65,6 +65,7 @@ import pytest
 
 import crash_capture
 import sharding
+import tk_guard
 from archive_management.i18n import DEFAULT_LOCALE, set_locale
 from archive_management.services.audit import AUDIT_LOGGER_NAME
 from archive_management.services.platforms import current_platform, platform_label
@@ -377,6 +378,16 @@ def pytest_runtest_makereport(
             depth=int(item.config.getoption("--crash-dump-depth")),
             apps=live_apps(),
         )
+    elif report.skipped:
+        # "跳过了"不等于"没事": GUI 守卫把建窗口期的任何 TclError 都写成跳过, 于是
+        # 一条永远不跑的用例在报告里只是一次 skip。只有已知环境问题才允许跳过, 其它
+        # 一律改成失败(见 tests/tk_guard.py)。
+        message = tk_guard.unknown_tk_skip_message(
+            tk_guard.skip_reason(report.longrepr)
+        )
+        if message is not None:
+            report.outcome = "failed"
+            report.longrepr = message
     return report
 
 

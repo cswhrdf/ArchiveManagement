@@ -108,6 +108,27 @@ def test_game_add_keeps_original_name(tmp_path: Path) -> None:
     assert fetched.original_name == "Outer Wilds"
 
 
+def test_game_keeps_the_name_the_program_wrote(tmp_path: Path) -> None:
+    """``localized_name`` 能存能读能清空: 译名探测靠它区分"程序写的译名"与"用户起的名字"."""
+    repo = GameRepository(_database(tmp_path))
+    game = repo.add(Game(name="哈迪斯", original_name="Hades", localized_name="哈迪斯"))
+
+    assert game.localized_name == "哈迪斯"
+    fetched = repo.get(game.id or 0)
+    assert fetched is not None
+    assert fetched.localized_name == "哈迪斯"
+
+    # 用户改名时调用方会把它一起清掉(见 SqlArchiveService.update_game).
+    repo.update(
+        fetched.model_copy(update={"name": "我给它起的名字", "localized_name": ""})
+    )
+
+    after = repo.get(game.id or 0)
+    assert after is not None
+    assert after.localized_name == ""
+    assert after.original_name == "Hades", "清译名记录不能连带抹掉录入时的原名"
+
+
 def test_game_rename_keeps_original_name_and_storage_key(tmp_path: Path) -> None:
     repo = GameRepository(_database(tmp_path))
     game = _add_game(repo, name="旧名字")

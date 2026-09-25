@@ -183,3 +183,15 @@ def test_apply_skips_repaint_raising_tcl_error(kit: widgets.UiKit) -> None:
     kit.register(lambda p: painted.append("after"))
     kit.apply(DARK)
     assert painted == ["before", "after"]
+
+
+def test_poster_backing_uses_the_panel_colour_only_over_a_real_cover() -> None:
+    """海报标记的底衬: 有封面图才加底衬, 回落名称占位时必须是彻底透明.
+
+    这条规则原先只在"真有一张封面图"的界面用例里验过, 而那条用例在 CI 上一直被
+    跳过(见 tests/tk_guard.py) —— 抽成纯函数后不建窗口也能钉住两个方向。
+    """
+    from archive_management.ui.home_page import poster_backing
+
+    assert poster_backing(None, DARK) == "transparent", "没有封面时不该有背景色"
+    assert poster_backing(object(), DARK) == DARK.panel, "有封面时用面板色做底衬"

@@ -34,7 +34,7 @@ from archive_management.infrastructure.repository import (
     SaveLocationRepository,
 )
 from archive_management.services.processes import ProcessNameProvider
-from archive_management.services.snapshot import MANIFEST_FILENAME
+from archive_management.services.snapshot import MANIFEST_FILENAME, SnapshotEntry
 
 pytestmark = [
     pytest.mark.integration,
@@ -435,4 +435,204 @@ def test_restore_wraps_callback_errors_without_failing(tmp_path: Path) -> None:
         env.game_id, _node_id(node), safety_point=False, progress=broken
     )
 
+    assert _slot(env.save) == "v1"
+
+
+# --------------------------------------------------- 边界与清理(分支覆盖)
+
+
+def test_plan_marks_a_missing_manifest_as_unusable(tmp_path: Path) -> None:
+    """清单读不出来时预检照常返回, 只是快照被判不可用且没有任何写回目标."""
+    env = _setup(tmp_path)
+    node = env.backup()
+    (env.backups.snapshot_root(node) / MANIFEST_FILENAME).unlink()
+
+    plan = env.restore.plan(env.game_id, _node_id(node))
+
+    assert plan.snapshot_ok is False
+    assert plan.snapshot_reason
+    assert plan.targets == ()
+    with pytest.raises(SnapshotError):
+        env.restore.restore(env.game_id, _node_id(node), safety_point=False)
+
+
+def test_restore_recreates_a_target_directory_that_disappeared(tmp_path: Path) -> None:
+    """存档目录被整个删掉时恢复负责建回来(写回走"目标还不存在"那条路)."""
+    import shutil
+
+    env = _setup(tmp_path)
+    node = env.backup()
+    shutil.rmtree(env.save)
+    assert not env.save.exists()
+
+    result = env.restore.restore(env.game_id, _node_id(node), safety_point=False)
+
+    assert result.restored_files == 1
+    assert _slot(env.save) == "v1"
+
+
+def test_helper_relative_of_keeps_foreign_entries_untouched() -> None:
+    """不属于该来源目录的清单条目原样返回(前缀不符时不做任何切割)."""
+    from archive_management.application.restore import _relative_of
+
+    assert _relative_of("loc-0/slot1.dat", 0) == "slot1.dat"
+    assert _relative_of("loc-1/slot1.dat", 0) == "loc-1/slot1.dat"
+
+
+def test_helper_target_for_reports_an_unknown_source_index(tmp_path: Path) -> None:
+    """按来源序号找不到目标时返回 None(不抛错, 也不误用别的目标)."""
+    from archive_management.application.restore import _target_for
+
+    env = _setup(tmp_path)
+    node = env.backup()
+    plan = env.restore.plan(env.game_id, _node_id(node))
+
+    assert _target_for(plan, plan.targets[0].index) is plan.targets[0]
+    assert _target_for(plan, 99) is None
+
+
+def test_helper_target_problem_accepts_a_path_that_does_not_exist_yet(
+    tmp_path: Path,
+) -> None:
+    """目标还不存在不算问题: 恢复会自己创建它(预检只拦危险/不可写/类型不符)."""
+    target = tmp_path / "not-yet"
+
+    assert _target_problem(str(target), "directory", True, tmp_path / "backups") is None
+    assert (
+        _target_problem(str(target), "directory", False, tmp_path / "backups")
+        == PROBLEM_UNWRITABLE
+    )
+
+
+def _manifest_entries(env: _Env, node: BackupNode) -> tuple[SnapshotEntry, ...]:
+    """读取真实快照清单里的条目(用于直接驱动暂存阶段的私有函数)."""
+    from archive_management.services.snapshot import read_manifest
+
+    return read_manifest(env.backups.snapshot_root(node)).entries
+
+
+def test_helper_stage_file_requires_exactly_one_file(tmp_path: Path) -> None:
+    """文件来源的清单里不是恰好一个文件时直接取消(不写半个文件)."""
+    from archive_management.application.restore import _stage_file
+
+    with pytest.raises(SnapshotError, match="清单异常"):
+        _stage_file(
+            entries=(),
+            snapshot_root=tmp_path,
+            staging=tmp_path / "stage",
+            cancelled=None,
+        )
+
+
+def test_helper_stage_file_and_directory_stop_when_already_cancelled(
+    tmp_path: Path,
+) -> None:
+    """开工前就被取消时立刻报取消: 文件来源与目录来源两条路各拦一次."""
+    from archive_management.application.restore import _stage_directory, _stage_file
+
+    env = _setup(tmp_path)
+    node = env.backup()
+    entries = _manifest_entries(env, node)
+
+    def cancelled() -> bool:
+        return True
+
+    with pytest.raises(OperationCancelledError):
+        _stage_file(
+            entries=entries,
+            snapshot_root=tmp_path,
+            staging=tmp_path / "stage-file",
+            cancelled=cancelled,
+        )
+    with pytest.raises(OperationCancelledError):
+        _stage_directory(
+            entries=entries,
+            source_index=0,
+            snapshot_root=tmp_path,
+            staging=tmp_path / "stage-dir",
+            progress=None,
+            cancelled=cancelled,
+        )
+    assert not (tmp_path / "stage-file").exists()
+    assert not (tmp_path / "stage-dir").exists()
+
+
+def test_helper_write_file_rejects_content_that_does_not_match_the_hash(
+    tmp_path: Path,
+) -> None:
+    """复制完还要复核哈希: 对不上就按快照损坏处理, 不把错的数据写回存档."""
+    from archive_management.application.restore import _write_file
+
+    origin = tmp_path / "slot1.dat"
+    origin.write_text("v1", encoding="utf-8")
+
+    with pytest.raises(SnapshotError, match="哈希不一致"):
+        _write_file(origin, tmp_path / "copy.dat", "0" * 64)
+
+
+def test_helper_discard_removes_files_directories_and_is_quiet(
+    tmp_path: Path,
+) -> None:
+    """暂存清理三种情况: 空路径静默、文件删除、目录整棵删掉."""
+    from archive_management.application.restore import _discard
+
+    staging = tmp_path / "stage"
+    (staging / "inner").mkdir(parents=True)
+    (staging / "inner" / "slot1.dat").write_text("v1", encoding="utf-8")
+    solo = tmp_path / "solo.dat"
+    solo.write_text("v1", encoding="utf-8")
+
+    _discard(tmp_path / "never-existed")
+    _discard(solo)
+    _discard(staging)
+
+    assert not solo.exists()
+    assert not staging.exists()
+
+
+def test_helper_safe_path_keeps_lexical_guard_as_a_second_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """词法检查之外还有一道 is_within: 归一化后仍越界就拒绝(纵深防御)."""
+    import archive_management.application.restore as restore_mod
+
+    monkeypatch.setattr(restore_mod, "is_within", lambda candidate, root: False)
+
+    with pytest.raises(SnapshotError, match="越界"):
+        _safe_path(tmp_path, "loc-0/slot1.dat")
+
+
+def test_helper_copy_tree_recreates_existing_symlinks(tmp_path: Path) -> None:
+    """已有内容里的符号链接按链接重建, 不跟随复制(否则会多留一份真实数据)."""
+    from archive_management.application.restore import _copy_tree
+
+    existing = tmp_path / "save"
+    existing.mkdir()
+    (existing / "slot1.dat").write_text("v1", encoding="utf-8")
+    link = existing / "linked.dat"
+    try:
+        link.symlink_to(existing / "slot1.dat")
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+    staging = tmp_path / "stage"
+    staging.mkdir()
+
+    _copy_tree(existing, staging)
+
+    assert (staging / "linked.dat").is_symlink()
+    assert (staging / "slot1.dat").read_text(encoding="utf-8") == "v1"
+
+
+def test_restore_replaces_a_directory_with_a_file_of_the_same_name(
+    tmp_path: Path,
+) -> None:
+    """类型变了(快照里是文件, 存档目录里成了同名目录)时先清掉旧目录再写."""
+    env = _setup(tmp_path, files={"slot1.dat": "v1"})
+    node = env.backup()
+    (env.save / "slot1.dat").unlink()
+    (env.save / "slot1.dat").mkdir()
+
+    result = env.restore.restore(env.game_id, _node_id(node), safety_point=False)
+
+    assert result.restored_files == 1
     assert _slot(env.save) == "v1"

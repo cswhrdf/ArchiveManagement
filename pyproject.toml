@@ -203,6 +203,7 @@ known_first_party = [
   "sharding",
   "crash_capture",
   "ci_workflow",
+  "tk_guard",
 ]
 exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
 

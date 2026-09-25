@@ -133,7 +133,7 @@
   "settings.appearance_hint": "在浅色与深色主题之间切换, 立即生效。",
   "settings.current_theme": "当前主题:{theme}",
   "settings.language": "界面语言",
-  "settings.language_hint": "切换后界面会立即用新语言重建, 并按新语言重新探测游戏译名(探测不到的保留探测到的原名)。",
+  "settings.language_hint": "切换后界面会立即用新语言重建, 并按新语言重新探测游戏译名(该语言已取过的直接复用缓存, 探测不到的保留探测到的原名)。",
   "settings.current_language": "当前语言:{language}",
   "settings.language_switched": "已切换语言: {language}",
   "settings.language_failed": "切换语言失败: {reason}",

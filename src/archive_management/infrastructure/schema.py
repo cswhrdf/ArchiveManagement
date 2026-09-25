@@ -379,6 +379,22 @@ _V12_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 13: 记住"程序自己写上去的译名".
+#
+# 译名会直接改写 ``games.name``, 而"用户改过名"原本只能靠 ``name != original_name``
+# 判断 —— 那会把自己刚写进去的译名当成用户改的名, 于是切换语言后名字再也跟不上
+# (中英来回切只有第一次生效)。因此多记一列"上一次由程序写入的译名": 名字等于它时
+# 才允许被新译名覆盖, 用户改名时由 ``GameRepository.update`` 一并清空。
+#
+# 迁移是**保守方向**: 旧库里已经被改写过的名字(``name != original_name``)在升级后
+# 一律按"用户改的名"看待 —— 它们分不出是谁写的, 宁可少改一次, 也不要把用户起的
+# 名字覆盖掉。
+_V13_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE games ADD COLUMN localized_name TEXT NOT NULL DEFAULT ''
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
@@ -392,6 +408,7 @@ SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (10, _V10_STATEMENTS),
     (11, _V11_STATEMENTS),
     (12, _V12_STATEMENTS),
+    (13, _V13_STATEMENTS),
 )
 
 

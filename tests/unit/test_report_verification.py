@@ -1044,12 +1044,165 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
     assert "91.82%" in ledger, "覆盖率数字要取自原始 XML"
     assert "75.00%" in ledger, "分支覆盖率也要写出来"
     assert "?" not in ledger.split("## 覆盖率")[1].split("##")[0], "覆盖率不该是问号"
-    assert "| 平台 | 结论条数 | 未拦截条数 | 原始结论 |" in ledger, "表头要说清两列含义"
+    assert "| 平台 | 结论条数 | 未拦截条数 | 失败用例 | 结论 | 原始结论 |" in ledger, (
+        "表头要说清每一列的含义"
+    )
     assert "已收录" in ledger, "产物清单的状态列要用能看懂的词"
     assert "| Windows |" in ledger, "覆盖率按平台各一行"
     assert "全部达标(1 项)" in ledger, "性能基准给一行结论"
-    assert "| Linux | 1 | 0 |" in ledger, "安全那一行要给出结论数与未拦截数"
+    assert "| Linux | 1 | 0 | 0 | 通过 |" in ledger, (
+        "安全那一行要给出结论数、未拦截数、失败用例与结论"
+    )
     assert "**缺失**" in ledger, "声明了却找不到的原始文件必须被标出来"
+
+
+def _write_security_case(
+    results: Path, *, status: str, platform: str = "Linux", name: str = "某条安全用例"
+) -> None:
+    """写一条安全用例的结果(layer=security): 汇总侧靠这两个标签认出它."""
+    payload = {
+        "uuid": "sec-case",
+        "name": name,
+        "status": status,
+        "labels": [
+            {"name": "layer", "value": "security"},
+            {"name": "env", "value": platform},
+        ],
+        "statusDetails": {"message": "AssertionError: 越界变更"},
+    }
+    (results / "sec-case-result.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_security_summary_reflects_a_failed_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """安全用例红了, 汇总结论项就必须跟着红(2026-09-25 的 Linux 就是这样漏掉的).
+
+    安全用例只在 security 作业里跑(不在 pytest 分片里), 它的成败原本只体现在那个作业
+    的状态上 —— 报告里 2641 条结果有 1 条 failed, 而 `Security findings` 那条结论项
+    仍然写 passed, 于是“哪一条挂了”在报告里完全查不到。
+    """
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    findings = tmp_path / "security-findings" / "Linux"
+    findings.mkdir(parents=True)
+    (findings / "security-results.json").write_text(
+        json.dumps(
+            {
+                "environment": {"os_family": "Linux"},
+                "findings": [
+                    {
+                        "category": "side_effects",
+                        "scenario": "真实流水线只改两处",
+                        "input_summary": "备份+恢复+删除存档位置",
+                        "expected": "只动应用区域与存档位置",
+                        "actual": "恢复时越界删了 slot.dat",
+                        "blocked": False,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_security_case(
+        results, status="failed", name="The pipeline only changes the app area"
+    )
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "SECURITY_JSON", tmp_path / "security-results.json")
+    monkeypatch.setattr(
+        module, "SECURITY_FINDINGS_DIRECTORY", tmp_path / "security-findings"
+    )
+    monkeypatch.setattr(
+        module, "PERFORMANCE_JSON", tmp_path / "performance-results.json"
+    )
+    monkeypatch.setattr(
+        module, "QUALITY_GATE_REPORT", tmp_path / "allure-run-ledger.md"
+    )
+    monkeypatch.setattr(module, "NATIVE_GATE_LOG", tmp_path / "allure-quality-gate.txt")
+
+    assert module.main() == 0
+
+    written = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in results.glob("*-result.json")
+    ]
+    item = next(
+        payload for payload in written if payload["name"] == "Security findings"
+    )
+
+    assert item["status"] == "failed", "有安全用例红了, 汇总项不能还是绿的"
+    assert "**未通过**" in item["description"], "描述开头就要给出结论"
+    assert "The pipeline only changes the app area" in item["description"]
+    assert "越界删了 slot.dat" in item["description"], "未拦截的结论也要摆出来"
+    assert "越界变更" in item["statusDetails"]["message"], "原因要能直接看到"
+
+
+def test_security_summary_stays_green_when_everything_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全部拦下且用例都通过时仍然是绿的(别把结论项写成永远失败)."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    findings = tmp_path / "security-findings" / "Linux"
+    findings.mkdir(parents=True)
+    (findings / "security-results.json").write_text(
+        json.dumps(
+            {
+                "environment": {"os_family": "Linux"},
+                "findings": [{"scenario": "路径越界", "blocked": True}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_security_case(results, status="passed", name="某条安全用例")
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "SECURITY_JSON", tmp_path / "security-results.json")
+    monkeypatch.setattr(
+        module, "SECURITY_FINDINGS_DIRECTORY", tmp_path / "security-findings"
+    )
+    monkeypatch.setattr(
+        module, "PERFORMANCE_JSON", tmp_path / "performance-results.json"
+    )
+    monkeypatch.setattr(
+        module, "QUALITY_GATE_REPORT", tmp_path / "allure-run-ledger.md"
+    )
+    monkeypatch.setattr(module, "NATIVE_GATE_LOG", tmp_path / "allure-quality-gate.txt")
+
+    assert module.main() == 0
+
+    written = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in results.glob("*-result.json")
+    ]
+    item = next(
+        payload for payload in written if payload["name"] == "Security findings"
+    )
+
+    assert item["status"] == "passed"
+    assert "**通过**" in item["description"]
+    assert "statusDetails" not in item
+
+
+def test_security_ledger_row_carries_the_verdict(tmp_path: Path) -> None:
+    """总账里的安全行要说清: 几条结论、几条没拦住、几个用例失败、到底过没过."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_security_case(results, status="broken")
+    payloads = module.result_payloads(results)
+    security = [
+        {"environment": {"os_family": "Linux"}, "findings": [{"blocked": True}]}
+    ]
+
+    ledger = module.run_ledger(results, payloads, None, security)
+
+    assert "| Linux | 1 | 0 | 1 | **未通过** |" in ledger
 
 
 def test_quality_items_use_the_declared_common_environment(
