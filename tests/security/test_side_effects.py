@@ -1,0 +1,355 @@
+"""副作用边界: 除"删除存档位置"外, 软件只能**读**自己目录之外的数据.
+
+用户要求(2026-09-25): 软件会保存大量用户数据, 因此安全测试必须禁止它对自己目录之外
+的任何区域做**写 / 执行 / 删除**(只读可以); 唯一的例外是"删除原始存档位置"这个由用户
+显式触发、且需要输入游戏名确认的功能 —— 它也只允许删除。
+
+做法: 把进程内的**变更入口全部换成记账版本**(内置 ``open`` 的写模式、``os`` 的创建/删除/
+改名、``shutil`` 的复制删除、``subprocess``/``os.system`` 之类的执行入口), 语义不变、原函数
+照常执行, 然后跑一遍**真实流水线**(建库 → 加游戏与存档位置 → 备份 → 恢复 → 删除位置),
+用记录下来的路径断言上面那条规则。
+
+三个阶段分开记账, 因此除了"写到哪"还能锁住两条更强的规则: **备份阶段对原始存档目录
+只读**、**删除阶段对存档目录只做"移入回收站"这一件事**。
+"""
+
+from __future__ import annotations
+
+import builtins
+import io
+import os
+import shutil
+import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import archive_management.application.locations as locations_mod
+from archive_management.infrastructure.database import Database
+from archive_management.services.scheduler import BackupScheduler, ManualBackend
+from archive_management.ui.sql_backend import SqlArchiveService
+
+pytestmark = [
+    pytest.mark.security,
+    pytest.mark.critical,
+    pytest.mark.epic("工程与发布"),
+    pytest.mark.feature("不可信输入防护"),
+    pytest.mark.story("只动自己的目录与用户指定的存档位置"),
+    pytest.mark.layer("security"),
+    pytest.mark.timeout(120),
+]
+
+_CATEGORY = "side_effects"
+# 打开文件的写模式字符: 命中任一个就是"会产生变更"。
+_WRITING_MODES = frozenset("wax+")
+# os 上"创建 / 删除 / 改名"这一族函数的记账种类。
+_OS_MUTATIONS = {
+    "mkdir": "create",
+    "makedirs": "create",
+    "remove": "delete",
+    "unlink": "delete",
+    "rmdir": "delete",
+    "rename": "rename",
+    "replace": "rename",
+    "truncate": "write",
+    "chmod": "write",
+    "symlink": "create",
+    "link": "create",
+}
+# shutil 上会产生变更的函数(源与目标都记账)。
+_SHUTIL_MUTATIONS = {
+    "rmtree": "delete",
+    "move": "rename",
+    "copytree": "create",
+    "copy": "create",
+    "copy2": "create",
+    "copyfile": "create",
+}
+# "执行外部程序"的入口: 命中即失败(软件不需要执行任何外部命令)。
+_EXECUTION_ENTRY_POINTS = (
+    "subprocess.run",
+    "subprocess.Popen",
+    "subprocess.call",
+    "subprocess.check_call",
+    "subprocess.check_output",
+    "os.system",
+    "os.popen",
+    "os.execv",
+    "os.execve",
+    "os.execvp",
+    "os.spawnv",
+    "os.spawnve",
+)
+
+
+class ExecutedError(AssertionError):
+    """软件试图执行外部程序(不允许): 记账后立即抛出, 避免真的执行."""
+
+
+@dataclass(frozen=True)
+class _Call:
+    """一次被记录下来的变更入口."""
+
+    phase: str
+    kind: str
+    path: str
+
+
+class SideEffectRecorder:
+    """把变更入口换成记账版本(不改语义), 并提供分阶段记账."""
+
+    def __init__(self) -> None:
+        """建立一张空账."""
+        self.calls: list[_Call] = []
+        self.executions: list[str] = []
+        self._phase: str | None = None
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        """给这一段代码打上阶段名(没进阶段时的变更不记账 —— 那是用例自己的准备工作)."""
+        previous = self._phase
+        self._phase = name
+        try:
+            yield
+        finally:
+            self._phase = previous
+
+    def note(self, kind: str, path: object) -> None:
+        """手工记一笔(用于外部后端, 例如被替换掉的"回收站")."""
+        self._record(kind, path)
+
+    def _record(self, kind: str, path: object) -> None:
+        if self._phase is not None:
+            self.calls.append(_Call(self._phase, kind, str(path)))
+
+    def paths(self, *, phase: str | None = None, kind: str | None = None) -> list[str]:
+        """按阶段/种类过滤出被记下的路径."""
+        return [
+            call.path
+            for call in self.calls
+            if (phase is None or call.phase == phase)
+            and (kind is None or call.kind == kind)
+        ]
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """替换内置 ``open``、``os``、``shutil`` 与执行入口."""
+        self._install_open(monkeypatch)
+        for name, kind in _OS_MUTATIONS.items():
+            self._install_pair(monkeypatch, os, name, kind)
+        for name, kind in _SHUTIL_MUTATIONS.items():
+            self._install_pair(monkeypatch, shutil, name, kind)
+        for dotted in _EXECUTION_ENTRY_POINTS:
+            self._install_execution(monkeypatch, dotted)
+
+    def _install_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """只拦"写模式"的 open(读模式属于允许的只读操作).
+
+        ``Path.write_text`` / ``write_bytes`` 走的是 ``io.open`` 而不是 ``builtins.open``,
+        两个入口都要装 —— 只装一个会让记账漏掉最常见的写入路径(漏掉的后果是
+        "因为没有记录而通过", 正是这类用例最危险的失效方式)。
+        """
+        original = builtins.open
+
+        def wrapper(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+            if any(char in mode for char in _WRITING_MODES):
+                self._record("write", file)
+            return original(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", wrapper)
+        monkeypatch.setattr(io, "open", wrapper)
+
+    def _install_pair(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        module: Any,
+        name: str,
+        kind: str,
+    ) -> None:
+        """给模块级函数装上记账外壳(源与目标都记, 例如 rename 的两端)."""
+        original = getattr(module, name)
+
+        def wrapper(path: Any, *args: Any, **kwargs: Any) -> Any:
+            self._record(kind, path)
+            if args and isinstance(args[0], (str, os.PathLike)):
+                self._record(kind, args[0])
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(module, name, wrapper)
+
+    def _install_execution(self, monkeypatch: pytest.MonkeyPatch, dotted: str) -> None:
+        """执行入口: 记下来然后抛错(不真的执行)."""
+        module_name, function_name = dotted.rsplit(".", 1)
+        module = {"os": os, "subprocess": subprocess}[module_name]
+        original = getattr(module, function_name)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            self.executions.append(dotted)
+            self._record("execute", args[0] if args else dotted)
+            raise ExecutedError(f"软件不应执行外部程序: {dotted}")
+
+        wrapper.__doc__ = original.__doc__
+        monkeypatch.setattr(module, function_name, wrapper)
+
+
+def _inside(root: Path, path: str) -> bool:
+    """判断路径是否落在某个根目录里(按解析后的绝对路径比较)."""
+    try:
+        Path(path).resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+@pytest.fixture
+def recorder(monkeypatch: pytest.MonkeyPatch) -> SideEffectRecorder:
+    """装上记账版本的变更入口."""
+    instance = SideEffectRecorder()
+    instance.install(monkeypatch)
+    return instance
+
+
+def _service(app_root: Path) -> SqlArchiveService:
+    """构造真实后端; 应用自己的数据(库与备份)全部收敛在 ``app_root`` 下."""
+    database = Database(app_root / "data" / "archive-management.db")
+    database.migrate()
+    return SqlArchiveService(
+        database,
+        backup_root=app_root / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+
+
+def test_the_recorder_notices_a_stray_write_outside_the_app_area(
+    tmp_path: Path, recorder: SideEffectRecorder
+) -> None:
+    """自检: 记账器真的看得见越界写入(否则下面的用例会"因为没有记录而通过")."""
+    outside = tmp_path / "outside" / "stray.txt"
+    (tmp_path / "outside").mkdir()
+
+    with recorder.phase("probe"):
+        outside.write_text("x", encoding="utf-8")
+
+    assert recorder.paths(kind="write") == [str(outside)]
+
+
+def test_the_pipeline_only_changes_the_app_area_and_the_save_location(
+    tmp_path: Path, recorder: SideEffectRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实流水线的变更只落在两处: 应用自己的目录、用户指定的存档位置."""
+    app_root = tmp_path / "app"
+    save_root = tmp_path / "user-save"
+    save = save_root / "slot"
+    save.mkdir(parents=True)
+    (save / "slot.dat").write_text("state-v1", encoding="utf-8")
+
+    service = _service(app_root)
+    game_id = service.add_game("边界游戏").game_id
+    location = service.add_location(game_id, path=str(save), kind="directory")
+
+    with recorder.phase("backup"):
+        service.run_backup_now(game_id)
+    backup_id = service.list_backups(game_id)[0].backup_id
+
+    # 制造"尚未备份的新进度", 否则恢复会按"内容未变化"跳过。
+    (save / "slot.dat").write_text("state-v2", encoding="utf-8")
+    with recorder.phase("restore"):
+        service.run_restore(game_id, backup_id, safety_point=False, force=True)
+
+    # "回收站"用替身: 记账 + 真的把目录移进应用区域内(不污染开发者机器的回收站)。
+    moved: list[str] = []
+    trash_root = app_root / "trash"
+
+    def fake_trash(path: str) -> None:
+        recorder.note("trash", path)
+        moved.append(path)
+        target = trash_root / Path(path).name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Path(path).rename(target)
+
+    monkeypatch.setattr(locations_mod, "send_to_trash", fake_trash)
+    with recorder.phase("delete"):
+        service.delete_save_location(location.location_id, confirm_name="边界游戏")
+
+    # ① 一次都没有执行外部程序(软件不需要, 也绝不允许)。
+    assert recorder.executions == [], "软件执行了外部程序"
+
+    # ② 任何变更都必须在"应用自己的目录"或"用户指定的存档位置"里。
+    stray = [
+        call
+        for call in recorder.calls
+        if not _inside(app_root, call.path) and not _inside(save_root, call.path)
+    ]
+    assert stray == [], f"越界变更: {stray}"
+
+    # ③ 备份阶段对原始存档目录**只读** —— 一次都不写、不删、不改名。
+    assert recorder.paths(phase="backup") == [
+        path for path in recorder.paths(phase="backup") if _inside(app_root, path)
+    ], "备份过程动了原始存档目录之外/之内不该动的东西"
+
+    # ④ 删除阶段对存档目录只做"移入回收站"这一件事(应用区域内的落地不算越界)。
+    # 同一个路径会被记两笔: 回收站后端的那一笔, 以及真的改名时源路径的那一笔。
+    assert moved == [str(save)], "删除功能没有把存档目录交给回收站后端"
+    assert {
+        path for path in recorder.paths(phase="delete") if _inside(save_root, path)
+    } == {str(save)}, "删除阶段还动了存档目录里的别的东西"
+
+    # ⑤ 恢复只写回原始存档位置, 不动应用自己的备份内容。
+    assert all(
+        _inside(save_root, path)
+        for path in recorder.paths(phase="restore")
+        if not _inside(app_root, path)
+    ), "恢复写到了存档位置之外的地方"
+
+
+def test_backup_never_writes_into_the_save_location(
+    tmp_path: Path, recorder: SideEffectRecorder
+) -> None:
+    """备份是"读存档、写自己的快照": 存档目录里不该出现任何新东西."""
+    app_root = tmp_path / "app"
+    save = tmp_path / "user-save" / "slot"
+    save.mkdir(parents=True)
+    (save / "slot.dat").write_text("state-v1", encoding="utf-8")
+
+    service = _service(app_root)
+    game_id = service.add_game("只读游戏").game_id
+    service.add_location(game_id, path=str(save), kind="directory")
+
+    with recorder.phase("backup"):
+        service.run_backup_now(game_id)
+
+    touched = [
+        call for call in recorder.calls if _inside(tmp_path / "user-save", call.path)
+    ]
+    assert touched == [], f"备份动了原始存档目录: {touched}"
+
+
+def test_no_external_program_is_executed_in_the_source_tree() -> None:
+    """静态兜底: 源码里不出现"执行外部程序"的入口.
+
+    动态用例只覆盖它跑到的那条路径; 这条扫描保证**整棵树**里没有这类调用,
+    将来有人加一个 `subprocess.run` 也会在这里被拦下。
+    """
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    banned = (
+        "subprocess.",
+        "os.system(",
+        "os.popen(",
+        "os.execv",
+        "os.execp",
+        "os.spawn",
+        "shell=True",
+    )
+    offenders: list[str] = []
+    for module in sorted(source_root.rglob("*.py")):
+        text = module.read_text(encoding="utf-8")
+        offenders.extend(
+            f"{module.relative_to(source_root)}: {token}"
+            for token in banned
+            if token in text
+        )
+
+    assert offenders == [], f"源码里出现执行外部程序的入口: {offenders}"

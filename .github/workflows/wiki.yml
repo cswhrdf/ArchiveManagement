@@ -1,0 +1,78 @@
+name: wiki
+
+# 把仓库里的 wiki/ 目录同步到 GitHub Wiki（远端 `<owner>/<repo>.wiki.git`）。
+#
+# 前置条件（只需做一次，必须先在网页上做，否则 Git 上根本没有这个远端）：
+#   1. 仓库 Settings → Features，勾选 Wikis；
+#   2. 在 Wiki 里随便保存一页（例如 Home）—— GitHub 是在"第一次保存页面"时才创建
+#      `<repo>.wiki` 仓库的，之前 clone 会失败。
+#
+# 之后每次 push 到 dev/master 且 wiki/ 有变化时自动同步，也可以在 Actions 页手动触发。
+# 同步是**镜像语义**：先清掉 Wiki 里的页面文件再整体复制，因此改名与删除也会同步过去。
+#
+# 为什么用 git 直推而不是别的办法：Wiki 本身就是个 git 仓库，只有这一条官方支持的写入路径；
+# 内容以仓库里的 wiki/ 为准（可评审、可回退、和代码同一个 PR），Wiki 只作为渲染前端。
+
+on:
+    push:
+        branches: [dev, master]
+        paths:
+            - "wiki/**"
+            - ".github/workflows/wiki.yml"
+    workflow_dispatch:
+
+# 连续 push 时旧的一轮没人看，却和新的一轮一样贵（这里只有一次 clone + push）。
+concurrency:
+    group: wiki-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: write
+
+env:
+    # Wiki 页脚/侧边栏里的仓库链接统一由这一个变量算出，避免把 owner/repo 写死在文档里。
+    REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+    WIKI_REMOTE: ${{ github.server_url }}/${{ github.repository }}.wiki.git
+
+jobs:
+    publish:
+        name: Publish wiki pages
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Clone the wiki repository
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -eu
+                  remote="${WIKI_REMOTE/https:\/\//https://x-access-token:${GITHUB_TOKEN}@}"
+                  if ! git clone --depth 1 "$remote" wiki-target; then
+                    echo "::error::无法克隆 <repo>.wiki.git —— 请先启用 Wikis 功能并在 Wiki 界面保存过至少一页（说明见 .github/workflows/wiki.yml 顶部）。"
+                    exit 1
+                  fi
+
+            - name: Mirror wiki/ into the wiki repository
+              run: |
+                  set -eu
+                  # 镜像语义: 先删掉旧页面再整体复制, 因此改名/删除都会同步(只增不减会留下僵尸页面)。
+                  find wiki-target -maxdepth 1 -name '*.md' -delete
+                  cp wiki/*.md wiki-target/
+                  # 侧边栏等页面里的 {{REPO_URL}} 占位符替换成真实仓库地址。
+                  sed -i "s|{{REPO_URL}}|${REPO_URL}|g" wiki-target/*.md
+                  ls -1 wiki-target
+
+            - name: Push when something changed
+              run: |
+                  set -eu
+                  cd wiki-target
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add -A
+                  if git diff --cached --quiet; then
+                    echo "Wiki 已是最新内容, 无需推送。"
+                    exit 0
+                  fi
+                  git commit -m "docs(wiki): 同步 wiki/ (${GITHUB_SHA})"
+                  git push

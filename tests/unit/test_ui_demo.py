@@ -212,6 +212,69 @@ def test_demo_add_game_rejects_blank_name(service: DemoArchiveService) -> None:
         service.add_game("   ")
 
 
+def test_demo_schedule_on_archived_game_is_refused(service: DemoArchiveService) -> None:
+    """归档等价于"不再配置备份": 连定时周期都不许设(与真实后端同一口径)."""
+    service.set_game_archived("outer-wilds", True)
+
+    with pytest.raises(ArchiveManagementError):
+        service.set_schedule("outer-wilds", "1h")
+
+
+def test_demo_schedule_on_a_disabled_game_stays_paused(
+    service: DemoArchiveService,
+) -> None:
+    """停用中的游戏可以先把周期配好, 但任务只能是暂停状态."""
+    # 演示数据里这款游戏本来就配了定时任务(已存在的任务不允许被"继续"), 先清掉。
+    service.set_schedule("outer-wilds", "")
+    service.set_game_enabled("outer-wilds", False)
+
+    status = service.set_schedule("outer-wilds", "1h")
+
+    assert status.schedule_text == "1h"
+    assert status.schedule_enabled is False
+    # 已经有任务时再"配置"一次就等于要它跑起来 —— 停用中的游戏不允许, 必须明确拒绝.
+    with pytest.raises(ArchiveManagementError):
+        service.set_schedule("outer-wilds", "1h")
+
+
+def test_demo_empty_schedule_removes_the_task(service: DemoArchiveService) -> None:
+    """周期留空 = 删除任务(不只是暂停)."""
+    service.set_schedule("outer-wilds", "1h")
+
+    status = service.set_schedule("outer-wilds", "   ")
+
+    assert status.schedule_text == ""
+
+
+def test_demo_rename_backup_rejects_unknown_and_long_note(
+    service: DemoArchiveService,
+) -> None:
+    """改备份信息: 未知节点与超长描述都要明确报错, 而不是静默写库."""
+    with pytest.raises(ArchiveManagementError):
+        service.rename_backup("outer-wilds", "nope", title="x", note="")
+
+    with pytest.raises(ArchiveManagementError):
+        service.rename_backup("outer-wilds", "b1", title="x", note="字" * 400)
+
+
+def test_demo_preview_restore_rejects_unknown_backup(
+    service: DemoArchiveService,
+) -> None:
+    with pytest.raises(ArchiveManagementError):
+        service.preview_restore("outer-wilds", "nope")
+
+
+def test_demo_theme_cancel_and_shutdown_are_harmless(
+    service: DemoArchiveService,
+) -> None:
+    """演示后端没有后台任务: 取消与释放都不做事, 主题只归一到深/浅两档."""
+    assert service.cancel_active() is False
+    service.shutdown()
+    assert service.set_theme("dark") == "dark"
+    assert service.set_theme("light") == "light"
+    assert service.set_theme("莫名其妙") == "light"
+
+
 def test_demo_update_game_renames(service: DemoArchiveService) -> None:
     game_id = service.add_game("旧名").game_id
     assert service.update_game(game_id, "新名").name == "新名"

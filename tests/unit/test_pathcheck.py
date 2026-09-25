@@ -143,6 +143,64 @@ def test_is_within_compares_lexically(tmp_path: Path) -> None:
     assert is_within(tmp_path / "a", tmp_path / "a" / "b") is False
 
 
+def test_is_within_ignores_leading_parent_references(tmp_path: Path) -> None:
+    """前导 ``..`` 没有可回退的层级: 忽略它而不是报错(词法比较, 不碰文件系统)."""
+    assert is_within(Path("..") / "a" / "b", Path("a")) is True
+    assert is_within(Path(".."), Path("..")) is True
+
+
+def test_summarize_path_survives_a_file_that_vanishes_between_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """竞态: ``is_file()`` 说在、紧接着 ``stat()`` 失败 —— 仍要报"1 个文件"而不是崩.
+
+    真实场景是备份前的预览: 统计与用户点确认之间, 存档文件正好被游戏改写/删除。
+    用"判定之后就删掉它"来复现, 比数调用次数更稳、也更贴近真实时序。
+    """
+    target = tmp_path / "save.dat"
+    target.write_text("abcd", encoding="utf-8")
+    real_is_file = Path.is_file
+
+    def vanish_after_is_file(self: Path) -> bool:
+        result = real_is_file(self)
+        if self == target and result:
+            target.unlink()
+        return result
+
+    monkeypatch.setattr(Path, "is_file", vanish_after_is_file)
+
+    summary = summarize_path(str(target))
+
+    assert summary.files == 1
+    assert summary.total_size == 0
+
+
+def test_summarize_path_survives_an_entry_that_vanishes_mid_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """遍历目录时某个条目读不出大小: 计数照旧, 只是不计入字节数."""
+    root = tmp_path / "loc"
+    root.mkdir()
+    (root / "keep.dat").write_text("ab", encoding="utf-8")
+    (root / "gone.dat").write_text("xyz", encoding="utf-8")
+    real_stat = Path.stat
+    calls = {"count": 0}
+
+    def flaky_stat(self: Path, **kwargs: bool) -> object:
+        if self.name == "gone.dat":
+            calls["count"] += 1
+            if calls["count"] > 1:
+                raise FileNotFoundError(2, "条目在遍历过程中消失了")
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    summary = summarize_path(str(root))
+
+    assert summary.files == 2
+    assert summary.total_size == 2
+
+
 @pytest.mark.blocker  # 危险目标判定是"写回用户目录"之前的最后一道闸
 def test_dangerous_target_reason_covers_protected_and_roots(tmp_path: Path) -> None:
     backup_root = tmp_path / "backups"

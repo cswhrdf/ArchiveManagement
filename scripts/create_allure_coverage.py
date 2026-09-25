@@ -112,21 +112,21 @@ def package_line_counts(package: ET.Element) -> str:
 
 
 def build_description(root: ET.Element) -> str:
-    """构建展示在 Allure 中的可读覆盖率摘要."""
+    """构建展示在 Allure 中的可读覆盖率摘要(中文, 与仓库其它文档口径一致)."""
     attributes = root.attrib
     lines = [
-        "## Coverage summary",
+        "## 覆盖率摘要",
         "",
-        "| Metric | Result |",
+        "| 指标 | 结果 |",
         "| --- | ---: |",
-        f"| Line coverage | {percentage(attributes.get('line-rate'))} |",
-        f"| Branch coverage | {percentage(attributes.get('branch-rate'))} |",
-        f"| Lines covered | {count_text(attributes, 'lines-covered', 'lines-valid')} |",
-        f"| Branches covered | {count_text(attributes, 'branches-covered', 'branches-valid')} |",
+        f"| 行覆盖率 | {percentage(attributes.get('line-rate'))} |",
+        f"| 分支覆盖率 | {percentage(attributes.get('branch-rate'))} |",
+        f"| 已覆盖行数 | {count_text(attributes, 'lines-covered', 'lines-valid')} |",
+        f"| 已覆盖分支数 | {count_text(attributes, 'branches-covered', 'branches-valid')} |",
         "",
-        "## Coverage by package",
+        "## 按包统计",
         "",
-        "| Package | Line coverage | Lines covered | Branch coverage |",
+        "| 包 | 行覆盖率 | 已覆盖行数 | 分支覆盖率 |",
         "| --- | ---: | ---: | ---: |",
     ]
 
@@ -147,7 +147,7 @@ def build_description(root: ET.Element) -> str:
         )
 
     if not packages:
-        lines.append("| No package data | - | - | - |")
+        lines.append("| 没有包数据 | - | - | - |")
     return "\n".join(lines)
 
 
@@ -186,9 +186,9 @@ def with_raw_report_note(description: str, attachments: list[dict[str, str]]) ->
     names = ", ".join(f"`{item['name']}`" for item in attachments)
     return (
         f"{description}\n\n"
-        "## Raw report\n\n"
-        f"- Attached to this item: {names}.\n"
-        "- The HTML coverage report is published as the `coverage-<os>` CI artifact.\n"
+        "## 原始报告\n\n"
+        f"- 本条附带: {names}。\n"
+        "- HTML 报告作为 CI 产物 `coverage-<os>` 发布。\n"
     )
 
 
@@ -227,12 +227,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     }
     if not COVERAGE_XML.exists():
         result["status"] = "broken"
-        result["statusDetails"] = {
-            "message": f"Coverage file not found: {COVERAGE_XML}"
-        }
+        result["statusDetails"] = {"message": f"覆盖率文件不存在: {COVERAGE_XML}"}
         result["description"] = with_raw_report_note(
-            "## Coverage unavailable\n\n"
-            f"The coverage command did not produce `{COVERAGE_XML}`.",
+            f"## 覆盖率不可用\n\n覆盖率命令没有产出 `{COVERAGE_XML}`。",
             attachments,
         )
         write_result(result, result_id)
@@ -242,9 +239,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         root = ET.parse(COVERAGE_XML).getroot()  # noqa: S314
     except (ET.ParseError, OSError) as exc:
         result["status"] = "broken"
-        result["statusDetails"] = {"message": f"Unable to read coverage XML: {exc}"}
+        result["statusDetails"] = {"message": f"无法读取覆盖率 XML: {exc}"}
         result["description"] = with_raw_report_note(
-            f"## Coverage unavailable\n\nThe coverage file could not be parsed: `{exc}`",
+            f"## 覆盖率不可用\n\n覆盖率文件无法解析: `{exc}`",
             attachments,
         )
         write_result(result, result_id)

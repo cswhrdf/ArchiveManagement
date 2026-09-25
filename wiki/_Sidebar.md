@@ -1,0 +1,21 @@
+**使用手册**
+
+- [[Home]]
+- [[01 安装与首次运行]]
+- [[02 游戏与存档位置]]
+- [[03 备份-分支与时间线]]
+- [[04 恢复与删除原始目录]]
+- [[05 定时任务与全局快捷键]]
+- [[06 游戏库与分类筛选]]
+- [[07 游戏发现与平台支持]]
+- [[08 自动启停与监控队列]]
+- [[09 配置文件与命令行]]
+- [[10 常见问题与故障排查]]
+
+**开发文档**（源码仓 `docs/`）
+
+- [界面与功能]({{REPO_URL}}/blob/dev/docs/features.md)
+- [游戏库]({{REPO_URL}}/blob/dev/docs/library.md)
+- [平台支持]({{REPO_URL}}/blob/dev/docs/platforms.md)
+- [测试体系]({{REPO_URL}}/blob/dev/docs/testing.md)
+- [打包发布]({{REPO_URL}}/blob/dev/docs/development.md)

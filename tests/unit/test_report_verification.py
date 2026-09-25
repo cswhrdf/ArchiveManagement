@@ -637,7 +637,7 @@ def test_coverage_item_lands_in_the_platform_environment(
     assert payload["parameters"] == [{"name": "Platform", "value": platform}]
     assert platform not in payload["fullName"]
     assert platform not in payload["historyId"]
-    assert "Coverage by package" in payload["description"]
+    assert "按包统计" in payload["description"]
 
 
 def test_coverage_item_platform_comes_from_the_flag(
@@ -687,7 +687,7 @@ def test_coverage_item_carries_the_raw_report_as_an_attachment(
     assert [item["name"] for item in attachment] == ["coverage.xml"]
     assert attachment[0]["type"] == "application/xml"
     assert (results / attachment[0]["source"]).read_bytes() == coverage_xml.read_bytes()
-    assert "## Raw report" in payload["description"]
+    assert "## 原始报告" in payload["description"]
 
 
 def test_coverage_item_attaches_only_the_raw_reports_that_exist(
@@ -736,7 +736,7 @@ def test_coverage_item_without_the_raw_file_has_no_attachment(
     payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
     assert payload["status"] == "broken"
     assert payload["attachments"] == []
-    assert "Raw report" not in payload["description"]
+    assert "原始报告" not in payload["description"]
 
 
 def test_quality_items_record_pass_and_fail(

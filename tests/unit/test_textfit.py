@@ -92,6 +92,18 @@ def test_empty_text_stays_empty() -> None:
     assert fit_text("", _FakeFont(), 10) == ""
 
 
+def test_container_too_narrow_for_one_character_yields_nothing() -> None:
+    """多行时限宽连一个字符都放不下: 直接结束, 不硬塞字符、也不崩."""
+    assert fit_text("abcdefgh", _FakeFont(), 5, max_lines=2) == ""
+
+
+def test_cut_lands_on_the_space_when_the_next_character_is_itself_a_space() -> None:
+    """切点正好停在空格边界时直接切, 不为了"保持单词完整"回退丢掉后面的内容."""
+    fitted = fit_text("abc def", _FakeFont(), 30, max_lines=2)
+
+    assert fitted == "abc\ndef"
+
+
 def test_truncated_text_leaves_at_most_two_character_widths_unused() -> None:
     """截断后剩下的缝隙不超过"两个字符宽(取整 + 省略号 + 断字处裁掉的一个空格)".
 

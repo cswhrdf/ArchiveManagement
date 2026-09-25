@@ -79,12 +79,16 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
 ## 文档
 
-| 文档                                    | 内容                                                       |
-| --------------------------------------- | ---------------------------------------------------------- |
-| [features.md](./docs/features.md)       | 界面结构、备份/分支/定时任务、恢复、原始目录管理、操作日志 |
-| [library.md](./docs/library.md)         | 统一游戏主页、列表与海报、分类筛选、本地游戏发现           |
-| [hotkeys.md](./docs/hotkeys.md)         | 全局快捷键的默认键位、自定义流程与实现约定                 |
-| [platforms.md](./docs/platforms.md)     | Windows / macOS / Linux 支持矩阵与平台注意事项             |
-| [development.md](./docs/development.md) | 开发环境、命令行、配置文件、质量门禁、打包与发布           |
-| [testing.md](./docs/testing.md)         | 测试分类、性能基准与安全测试、Allure 报告汇总              |
-| [ui-notes.md](./docs/ui-notes.md)       | 从界面移出的说明文案（备用：待并入 wiki）                  |
+**使用手册（面向用户，按章节拆分）**：[`wiki/`](./wiki/) 是手册的唯一内容源，合并到 `dev`/`master` 后由 [`.github/workflows/wiki.yml`](./.github/workflows/wiki.yml) 自动镜像到 GitHub Wiki（首次需要在仓库设置里启用 Wikis 并在 Wiki 界面保存过一页，详见该工作流顶部的说明）。共 10 章：安装与首次运行、游戏与存档位置、备份/分支/时间线、恢复与删除原始目录、定时任务与全局快捷键、游戏库与分类筛选、游戏发现与平台支持、自动启停与监控队列、配置文件与命令行、常见问题与故障排查。
+
+**开发文档**：
+
+| 文档                                    | 内容                                                         |
+| --------------------------------------- | ------------------------------------------------------------ |
+| [features.md](./docs/features.md)       | 界面结构、备份/分支/定时任务、恢复、原始目录管理、操作日志   |
+| [library.md](./docs/library.md)         | 统一游戏主页、列表与海报、分类筛选、本地游戏发现、封面与图标 |
+| [hotkeys.md](./docs/hotkeys.md)         | 全局快捷键的默认键位、自定义流程与实现约定                   |
+| [platforms.md](./docs/platforms.md)     | Windows / macOS / Linux 支持矩阵、可信存档来源与平台注意事项 |
+| [development.md](./docs/development.md) | 开发环境、命令行、配置文件、质量门禁、打包与发布             |
+| [testing.md](./docs/testing.md)         | 测试分类、性能基准与安全测试、Allure 报告汇总                |
+| [ui-notes.md](./docs/ui-notes.md)       | 从界面移出的说明文案（备查）                                 |
