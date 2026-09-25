@@ -13,7 +13,7 @@ from pathlib import Path
 
 from archive_management.config import (
     ConfigLoad,
-    load_or_reset_config,
+    load_or_repair_config,
     save_config,
 )
 from archive_management.infrastructure.database import Database
@@ -116,13 +116,19 @@ def _start_logging(paths: ApplicationPaths, *, verbose: bool) -> ConfigLoad:
     """读取配置并按其中的 ``logging`` 段启用日志, 返回这次读取的结果.
 
     顺序很关键: 日志文件上限、保留份数与是否打印到控制台都来自用户配置, 因此
-    先读配置再装配日志。配置内容非法时会先还原为默认值, 还原记录就能落进刚刚
-    启用的日志里, 而不是在日志装配前丢失。
+    先读配置再装配日志。配置内容有问题时会先剔除非法部分(整份读不出来才全体
+    还原), 处理记录就能落进刚刚启用的日志里, 而不是在日志装配前丢失。
     """
-    loaded = load_or_reset_config(paths.config_path)
+    loaded = load_or_repair_config(paths.config_path)
     configure_from_settings(paths.log_dir, loaded.config.logging, verbose=verbose)
     if loaded.reset:
         logger.warning("配置文件内容非法, 已还原为默认值: %s", paths.config_path)
+    elif loaded.repaired:
+        logger.warning(
+            "配置文件有 %d 处内容非法, 已剔除并还原为默认值: %s",
+            len(loaded.repaired),
+            ", ".join(loaded.repaired),
+        )
     return loaded
 
 
@@ -137,6 +143,10 @@ def _run_init(paths: ApplicationPaths, *, verbose: bool) -> int:
     if loaded.reset:
         # 不静默吞掉: 明确告诉用户配置被还原过, 以及原文件留在哪里。
         lines.append(f"配置还原 : 内容非法, 已还原为默认值(原文件: {loaded.backup})")
+    elif loaded.repaired:
+        # 只重写被修复的字段, 其余自定义配置原样保留。
+        fields = ", ".join(loaded.repaired)
+        lines.append(f"配置修复 : {len(loaded.repaired)} 处非法, 已剔除({fields})")
     lines.extend(
         [
             f"配置目录 : {paths.config_dir}",

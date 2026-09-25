@@ -13,10 +13,12 @@ from datetime import UTC, datetime
 
 from archive_management.application import home as home_cases
 from archive_management.application.backup import MAX_NOTE_LENGTH
+from archive_management.application.games import ActivationOutcome
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan, RestoreTarget
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
+    ActivationState,
     ArtworkKind,
     BackupNode,
     DeletionMode,
@@ -26,6 +28,7 @@ from archive_management.domain import (
     normalize_tags,
     plan_deletion,
 )
+from archive_management.domain.activation import REASON_UNAVAILABLE
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import current_locale, tr
 from archive_management.services.naming import game_folder
@@ -870,6 +873,10 @@ class DemoArchiveService:
         self._revision += 1
         return self._live_summary(game_id)
 
+    def poll_activation(self, *, enabled: bool = True) -> ActivationOutcome:
+        """演示后端不做自动启停: 内存数据没有可落库的跟踪状态."""
+        return ActivationOutcome(state=ActivationState(), reason=REASON_UNAVAILABLE)
+
     def list_locations(self, game_id: str) -> list[LocationItem]:
         """返回某游戏的全部存档位置."""
         self._require_game(game_id)
@@ -1207,7 +1214,7 @@ class DemoArchiveService:
         return self._board()
 
     def _home_facts(self) -> list[GameFacts]:
-        """把演示数据换算为主页事实(备份时间/存档位置/探测关联)."""
+        """把演示数据换算为主页事实(备份时间/存档位置/风险)."""
         facts: list[GameFacts] = []
         for game_id, summary in self._meta.items():
             items = self._items.get(game_id, [])
@@ -1223,9 +1230,6 @@ class DemoArchiveService:
                     last_backup_at=max(moments) if moments else None,
                     last_activity_at=max(moments) if moments else None,
                     risk=any(not item.ok for item in locations),
-                    monitored=any(
-                        item.game_id == game_id for item in self._candidates.values()
-                    ),
                     archived=self._archived.get(game_id, False),
                     enabled=summary.enabled,
                     tags=self._tags.get(game_id, ()),

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import archive_management.config as config_module
 from archive_management.config import (
+    BASE_FONT_CHOICES,
+    ActivationSettings,
     AppConfig,
     HotkeySettings,
     LoggingSettings,
     load_config,
-    load_or_reset_config,
+    load_or_repair_config,
     parse_config,
     save_config,
 )
@@ -141,6 +144,40 @@ def test_debug_logging_defaults_to_off() -> None:
     assert AppConfig().logging.debug is False
 
 
+def test_auto_activation_defaults_to_off() -> None:
+    """按进程自动启停默认关闭: 启用态决定快捷键与定时备份落到哪一款游戏上."""
+    assert ActivationSettings().auto is False
+    assert AppConfig().activation.auto is False
+
+
+def test_activation_switch_round_trips(tmp_path: Path) -> None:
+    """开关能写回文件并原样读回."""
+    path = tmp_path / "config.json"
+    config = AppConfig()
+    config.activation.auto = True
+
+    save_config(config, path)
+
+    assert load_config(path).activation.auto is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"watch_processes": True}, {"auto_activation": True}, {"auto": True, "x": 1}],
+)
+def test_parse_rejects_unknown_activation_fields(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    """严格校验同样适用于新加的这一段: 拼错的字段要被拒绝, 而不是静默忽略."""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"version": 1, "activation": payload}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError):
+        load_config(path)
+
+
 @pytest.mark.parametrize(
     "payload",
     [{"level": "DEBUG"}, {"level": "ERROR"}, {"verbose": True}],
@@ -180,7 +217,7 @@ def test_parse_config_returns_valid_config() -> None:
     assert config.theme == "light"
 
 
-# ------------------------------------------------------------ 非法配置自动还原
+# ---------------------------------------------------- 非法配置逐字段修复与整份还原
 
 
 @pytest.mark.parametrize(
@@ -188,22 +225,20 @@ def test_parse_config_returns_valid_config() -> None:
     [
         "{",
         json.dumps({"version": 99}),
-        json.dumps({"version": 1, "theme": "neon"}),
-        json.dumps({"version": 1, "unexpected": True}),
-        json.dumps({"version": 1, "hotkeys": {"save": "1"}}),
         json.dumps([1, 2, 3]),
     ],
 )
-def test_load_or_reset_restores_defaults_for_invalid_content(
+def test_load_or_repair_resets_when_the_whole_file_is_unusable(
     tmp_path: Path, payload: str
 ) -> None:
-    """内容非法时: 返回默认配置、把文件写回默认值, 并保留原文件备查."""
+    """整份文件都读不出来(JSON 坏了 / 顶层不是对象 / 版本不认识)时: 还原为默认值."""
     path = tmp_path / "config.json"
     path.write_text(payload, encoding="utf-8")
 
-    loaded = load_or_reset_config(path)
+    loaded = load_or_repair_config(path)
 
     assert loaded.reset is True
+    assert loaded.repaired == ()
     assert loaded.config == AppConfig()
     assert loaded.backup == tmp_path / "config.json.invalid"
     assert loaded.backup.read_text(encoding="utf-8") == payload
@@ -218,19 +253,55 @@ def test_load_or_reset_keeps_a_valid_config_untouched(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     save_config(AppConfig(theme="dark"), path)
 
-    loaded = load_or_reset_config(path)
+    loaded = load_or_repair_config(path)
 
     assert loaded.reset is False
+    assert loaded.repaired == ()
     assert loaded.backup is None
     assert loaded.config.theme == "dark"
     assert not (tmp_path / "config.json.invalid").exists()
+
+
+@pytest.mark.parametrize(
+    ("payload", "notes"),
+    [
+        ({"theme": "neon"}, ("theme",)),
+        ({"unexpected": True}, ("unexpected",)),
+        ({"logging": {"evil": 1}}, ("logging.evil",)),
+        ({"logging": {"debug": "maybe"}}, ("logging.debug",)),
+        ({"hotkeys": {"save": "1"}}, ("hotkeys.save",)),
+        ({"ui": {"base_font_px": 99}}, ("ui.base_font_px",)),
+        ({"ui": "big"}, ("ui",)),
+    ],
+)
+def test_load_or_repair_keeps_valid_fields_and_drops_only_bad_ones(
+    tmp_path: Path, payload: dict[str, Any], notes: tuple[str, ...]
+) -> None:
+    """只写坏一项时: 非法项剔除并落回默认值, 其余自定义配置原样保留."""
+    path = tmp_path / "config.json"
+    raw = {"version": 1, "theme": "dark", "language": "en", **payload}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = load_or_repair_config(path)
+
+    assert loaded.reset is False
+    assert loaded.repaired == notes
+    # 合法的自定义配置一点没丢(language 一定还在), 非法项落回默认值而不是原样带着走
+    assert loaded.config.theme == ("system" if "theme" in payload else "dark")
+    assert loaded.config.language == "en"
+    assert loaded.config.ui.base_font_px in BASE_FONT_CHOICES
+    assert loaded.config.logging.max_bytes == LoggingSettings().max_bytes
+    assert loaded.backup == tmp_path / "config.json.invalid"
+    # 清理后的内容已写回文件: 文件里不再有不认识的键
+    assert "unexpected" not in load_config(path).model_dump()
+    assert load_config(path) == loaded.config
 
 
 def test_load_or_reset_does_not_create_a_missing_file(tmp_path: Path) -> None:
     """首次运行(没有配置文件)只返回默认值, 不凭空建文件."""
     path = tmp_path / "config.json"
 
-    loaded = load_or_reset_config(path)
+    loaded = load_or_repair_config(path)
 
     assert loaded.reset is False
     assert loaded.config == AppConfig()
@@ -247,9 +318,9 @@ def test_load_or_reset_survives_a_write_failure(
 
     monkeypatch.setattr(config_module, "save_config", _boom)
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"version": 1, "theme": "neon"}), encoding="utf-8")
+    path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
 
-    loaded = load_or_reset_config(path)
+    loaded = load_or_repair_config(path)
 
     assert loaded.reset is True
     assert loaded.config == AppConfig()

@@ -261,7 +261,6 @@ def test_imported_candidate_carries_platform_origin(tmp_path: Path) -> None:
     facts = load_facts(database)
     assert facts[0].game_id == str(game.id)
     assert facts[0].origin == "monitored"
-    assert facts[0].monitored is True
 
 
 def test_recent_window_uses_backup_time(tmp_path: Path) -> None:

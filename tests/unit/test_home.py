@@ -18,6 +18,7 @@ from archive_management.domain.home import (
     MAX_TAGS,
     RECENT_DAYS,
     STALE_DAYS,
+    TAG_SEPARATORS,
     CategoryKind,
     GameCategory,
     GameFacts,
@@ -53,7 +54,6 @@ def _facts(
     last_backup: datetime | None = None,
     activity: datetime | None = None,
     risk: bool = False,
-    monitored: bool = False,
     archived: bool = False,
     tags: tuple[str, ...] = (),
 ) -> GameFacts:
@@ -69,7 +69,6 @@ def _facts(
         ),
         last_activity_at=activity if activity is not None else _NOW,
         risk=risk,
-        monitored=monitored,
         archived=archived,
         tags=tags,
     )
@@ -103,7 +102,6 @@ def test_category_labels_are_translated_except_tags() -> None:
     for kind, key in (
         (CategoryKind.ORIGIN, "steam"),
         (CategoryKind.BACKUP, "done"),
-        (CategoryKind.MONITOR, "off"),
         (CategoryKind.ACTIVITY, "stale"),
         (CategoryKind.RISK, "yes"),
     ):
@@ -119,6 +117,14 @@ def test_normalize_tags_cleans_and_limits() -> None:
     assert len(tags) == MAX_TAGS
     assert len(tags[2]) == MAX_TAG_LENGTH
     assert len(set(tags)) == len(tags)
+
+
+def test_normalize_tags_strips_both_comma_forms() -> None:
+    """中英文逗号一视同仁: 全角逗号同样被剔除, 不会留在标签里."""
+    tags = normalize_tags(["动，作", "策,略", "   ，  "])  # noqa: RUF001 - 全角逗号正是被测输入
+
+    assert tags == ("动作", "策略")
+    assert all(not set(tag) & set(TAG_SEPARATORS) for tag in tags)
 
 
 def test_pending_only_covers_missing_or_broken_locations() -> None:
@@ -222,7 +228,7 @@ def test_home_sort_key_is_stable_for_same_activity() -> None:
 
 def test_home_stats_skips_archived_games() -> None:
     games = [
-        _facts("a", backups=2, monitored=True),
+        _facts("a", backups=2),
         _facts("b", locations=0),
         _facts("c", risk=True, backups=0, last_backup=None),
         _facts("d", archived=True),
@@ -252,8 +258,9 @@ def test_category_counts_ignores_the_category_filter_itself() -> None:
 def test_category_counts_respects_view_and_search() -> None:
     games = [_facts("a", name="Alpha"), _facts("b", name="Beta", archived=True)]
     counts = dict(category_counts(games, HomeFilter(view=HomeView.ALL), now=_NOW))
-    assert GameCategory(kind=CategoryKind.MONITOR, key="on") not in counts
-    assert counts[GameCategory(kind=CategoryKind.MONITOR, key="off")] == 1
+    # 归档的游戏不进统计: 只剩一款未归档游戏的分类。
+    assert counts[GameCategory(kind=CategoryKind.BACKUP, key="done")] == 1
+    assert counts[GameCategory(kind=CategoryKind.RISK, key="no")] == 1
 
 
 def test_origin_counts_ignores_the_origin_filter_itself() -> None:

@@ -69,7 +69,6 @@ class CategoryKind(StrEnum):
 
     ORIGIN = "origin"
     BACKUP = "backup"
-    MONITOR = "monitor"
     ACTIVITY = "activity"
     RISK = "risk"
     TAG = "tag"
@@ -107,15 +106,23 @@ def parse_category(raw: str) -> GameCategory | None:
     return GameCategory(kind=parsed, key=key)
 
 
-def normalize_tags(tags: Iterable[str]) -> tuple[str, ...]:
-    """清理用户输入的标签: 去空白、去重, 并限制数量与单个长度.
+# 标签里不允许出现的字符: 数据库按逗号拼接保存, 允许逗号会让一个标签在往返之后
+# 变成两个。中英文逗号一视同仁 —— 全角逗号同样会被剔除, 否则同一个标签用哪种逗号
+# 写会得到两种结果。
+TAG_SEPARATORS: tuple[str, ...] = (",", "\uff0c")
 
-    标签里不允许出现逗号: 数据库按逗号拼接保存, 允许逗号会让一个标签在往返
-    之后变成两个。
+
+def normalize_tags(tags: Iterable[str]) -> tuple[str, ...]:
+    """清理用户输入的标签: 去空白、去逗号、去重, 并限制数量与单个长度.
+
+    标签里不允许出现逗号(见 :data:`TAG_SEPARATORS`, 中英文都算): 数据库按逗号
+    拼接保存, 允许逗号会让一个标签在往返之后变成两个。
     """
     cleaned: list[str] = []
     for raw in tags:
-        tag = raw.strip().replace(",", "")
+        tag = raw.strip()
+        for separator in TAG_SEPARATORS:
+            tag = tag.replace(separator, "")
         if not tag or tag in cleaned:
             continue
         cleaned.append(tag[:MAX_TAG_LENGTH])
@@ -137,7 +144,6 @@ class GameFacts:
     last_backup_at: datetime | None = None
     last_activity_at: datetime | None = None
     risk: bool = False
-    monitored: bool = False
     archived: bool = False
     enabled: bool = True
     tags: tuple[str, ...] = ()
@@ -173,11 +179,10 @@ class GameFacts:
         return moment is None or now - moment > timedelta(days=STALE_DAYS)
 
     def categories(self, now: datetime) -> tuple[GameCategory, ...]:
-        """返回该游戏命中的全部分类(平台/备份/监控/活跃度/风险/标签)."""
+        """返回该游戏命中的全部分类(平台/备份/活跃度/风险/标签)."""
         items = [
             GameCategory(CategoryKind.ORIGIN, self.origin),
             GameCategory(CategoryKind.BACKUP, "done" if self.backup_count else "none"),
-            GameCategory(CategoryKind.MONITOR, "on" if self.monitored else "off"),
             GameCategory(
                 CategoryKind.ACTIVITY, "stale" if self.is_stale(now) else "recent"
             ),

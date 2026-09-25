@@ -12,6 +12,7 @@ import logging
 import queue
 import sqlite3
 import threading
+import time
 import tkinter as tk
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -21,15 +22,24 @@ import customtkinter as ctk
 from PIL import Image
 
 from archive_management.application.backup import MAX_NOTE_LENGTH
+from archive_management.application.games import ActivationOutcome
 from archive_management.application.restore import RestorePlan
 from archive_management.config import (
     AppConfig,
     ConfigLoad,
     HotkeySettings,
-    load_or_reset_config,
+    load_or_repair_config,
     save_config,
 )
-from archive_management.domain import GameAction, action_allowed
+from archive_management.domain import (
+    ACTIVATION_DELAY_LADDER,
+    REASON_DISABLED,
+    REASON_ENABLED,
+    REASON_FALLBACK,
+    GameAction,
+    action_allowed,
+    activation_delay,
+)
 from archive_management.exceptions import (
     ArchiveManagementError,
     ContentUnchangedError,
@@ -77,6 +87,7 @@ from archive_management.ui.palette import DEFAULT_THEME, Palette
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
 from archive_management.ui.textfit import fit_text
+from archive_management.ui.typography import install_font_scaling, set_base_font_px
 from archive_management.ui.widgets import UiKit
 
 logger = logging.getLogger(__name__)
@@ -106,6 +117,9 @@ _RAIL_WIDTH = 350
 _BRANCH_MARK = "└ "
 # 当前节点标记: 后续备份/分支都从这个节点继续.
 _CURRENT_MARK = "●"
+# 自动启停的轮询间隔(见 domain.activation.activation_delay): 队列为空时用最快档
+# (尽快发现"游戏启动了"), 有游戏在运行时逐档放慢到上限。
+_ACTIVATION_FAST_SECONDS = ACTIVATION_DELAY_LADDER[0]
 
 
 def _schedule_state(task: TaskStatus) -> str:
@@ -190,7 +204,7 @@ class ArchiveApp(ctk.CTk):
         self._poll_job: str | None = None
 
         self._messages: queue.Queue[
-            tuple[Literal["ok", "err", "unchanged", "hotkey"], str]
+            tuple[Literal["ok", "err", "unchanged", "hotkey", "activation"], str]
         ] = queue.Queue()
         self._pending_ok: Callable[[str], None] | None = None
         self._last_feedback: tuple[FeedbackKind, str] = (
@@ -208,6 +222,18 @@ class ArchiveApp(ctk.CTk):
         self._shortcuts = self._shortcuts_from(loaded)
         # 调试日志开关来自同一份配置(默认关闭): 设置窗口展示的与生效的要是同一个值.
         self._debug = loaded.config.logging.debug
+        # 界面字号(px 口径的基准字号, 1rem): 要在建界面**之前**生效, 因此先把缩放
+        # 装到 CTkFont 上 —— 之后所有字体都按它换算。
+        install_font_scaling()
+        self._base_font_px = set_base_font_px(loaded.config.ui.base_font_px).base_px
+        # 自动启停开关同样取自这份配置(默认关闭); 轮询结果、"是否忙"、队列是否非空
+        # 与已经连续跑了几档(自适应间隔)都在下面维护。
+        self._activation = loaded.config.activation.auto
+        self._activation_busy = False
+        self._activation_due = 0.0
+        self._activation_run: ActivationOutcome | None = None
+        self._activation_running = False
+        self._activation_steps = 0
         self.title(title)
         self.minsize(*WINDOW_MIN_SIZE)
         self.geometry("1360x860")
@@ -251,15 +277,28 @@ class ArchiveApp(ctk.CTk):
     def _load_config(self) -> ConfigLoad:
         """读一次配置(没有配置路径时用默认值).
 
-        内容非法时 ``load_or_reset_config`` 已经把文件还原为默认值, 这里再把这件事反馈
+        内容有问题时 ``load_or_repair_config`` 已经处理过: 非法值与不认识的键被剔除并
+        还原为默认值(合法的部分保留), 整份读不出来时才会全体还原。这里把这件事反馈
         到界面与审计日志, 避免用户以为自己改的语言/快捷键"没生效"。
         """
         if self._paths is None:
             return ConfigLoad(config=AppConfig())
-        loaded = load_or_reset_config(self._paths.config_path)
+        loaded = load_or_repair_config(self._paths.config_path)
         if loaded.reset:
             log_action("config.reset", basic=True, backup=str(loaded.backup or ""))
             self._last_feedback = (FeedbackKind.INFO, tr("config.reset"))
+        elif loaded.repaired:
+            fields = ", ".join(loaded.repaired)
+            log_action(
+                "config.repaired",
+                basic=True,
+                fields=fields,
+                backup=str(loaded.backup or ""),
+            )
+            self._last_feedback = (
+                FeedbackKind.INFO,
+                tr("config.repaired", count=len(loaded.repaired), fields=fields),
+            )
         return loaded
 
     @staticmethod
@@ -284,12 +323,39 @@ class ArchiveApp(ctk.CTk):
         """把界面语言写回配置文件(没有配置路径时只保存在内存里)."""
         if self._paths is None:
             return
-        config = load_or_reset_config(self._paths.config_path).config
+        config = load_or_repair_config(self._paths.config_path).config
         config.language = locale
         try:
             save_config(config, self._paths.config_path)
         except (OSError, ValueError) as exc:
             logger.warning("保存语言失败: %s", exc)
+
+    def _save_font_size(self, size: int) -> None:
+        """把界面字号写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        config.ui.base_font_px = size
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存界面字号失败: %s", exc)
+
+    def _on_font_size_change(self, size: int) -> str | None:
+        """调整界面字号: 立即生效 + 写回配置; 返回 None 表示成功.
+
+        字号在构造界面时就已用上(见 :mod:`archive_management.ui.typography`),
+        因此和切语言一样只能重建整个窗口。
+        """
+        self._base_font_px = set_base_font_px(size).base_px
+        self._save_font_size(self._base_font_px)
+        log_action("ui.switch_font_size", basic=True, size=self._base_font_px)
+        self._rebuild_ui()
+        self._feedback(
+            FeedbackKind.INFO,
+            tr("settings.font_switched", size=self._base_font_px),
+        )
+        return None
 
     def _on_language_change(self, locale: str) -> str | None:
         """切换界面语言: 按新语言重探译名 + 整体重建界面; 返回 None 表示成功.
@@ -316,8 +382,8 @@ class ArchiveApp(ctk.CTk):
         """把调试开关写回配置文件(没有配置路径时只保存在内存里)."""
         if self._paths is None:
             return
-        # 内容非法时 load_or_reset_config 已经还原过, 因此这里总能拿到一份可用配置。
-        config = load_or_reset_config(self._paths.config_path).config
+        # 内容有问题时 load_or_repair_config 已经剔除过非法部分, 这里总能拿到可用配置。
+        config = load_or_repair_config(self._paths.config_path).config
         config.logging.debug = enabled
         try:
             save_config(config, self._paths.config_path)
@@ -344,6 +410,64 @@ class ArchiveApp(ctk.CTk):
         )
         return None
 
+    def _save_activation(self, enabled: bool) -> None:
+        """把自动启停开关写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        config.activation.auto = enabled
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存自动启停开关失败: %s", exc)
+
+    def _on_activation_change(self, enabled: bool) -> str | None:
+        """开关自动启停: 立即生效 + 写回配置; 返回 None 表示成功.
+
+        开启时把下一次轮询提前到当下, 否则用户要等一整个轮询间隔才看得到效果
+        (而"刚打开开关却没反应"看起来就像坏了)。开关变化也算人工动作, 因此把
+        自适应间隔退回最快档。
+        """
+        self._activation = enabled
+        self._reset_activation_ladder()
+        self._save_activation(enabled)
+        log_action("ui.switch_activation", enabled=enabled)
+        self._home_page.refresh_activation(enabled=enabled)
+        self._feedback(
+            FeedbackKind.INFO,
+            tr(
+                "settings.activation_switched_on"
+                if enabled
+                else "settings.activation_switched_off"
+            ),
+        )
+        return None
+
+    def _reset_activation_ladder(self) -> None:
+        """人工动作后把轮询退回最快档并立即探测一次."""
+        self._activation_steps = 0
+        self._activation_due = 0.0
+
+    def _poll_activation_now(self) -> None:
+        """启停分页的"刷新"与"进入分页": 立即再探一次(人工动作)."""
+        if not self._activation:
+            self._home_page.refresh_activation(enabled=False)
+            return
+        self._reset_activation_ladder()
+
+    def _on_set_monitor(self, game_id: str) -> None:
+        """把分页里选中的那一款设为监控对象(等同于手动启用它)."""
+        try:
+            summary = self.backend.set_game_enabled(game_id, True)
+        except ArchiveManagementError as exc:
+            self._notice(tr("activation.monitor_failed", reason=str(exc)))
+            return
+        log_action("ui.activation_monitor", game_id=game_id)
+        self._reset_activation_ladder()
+        self._notice(tr("activation.monitor_set", name=summary.name))
+        self._refresh_after_manage()
+        self._home_page.refresh_activation(enabled=self._activation)
+
     def _rebuild_ui(self) -> None:
         """按当前语言重建整个窗口(文案在构建时就已定稿, 只能重建).
 
@@ -367,8 +491,8 @@ class ArchiveApp(ctk.CTk):
         """把当前快捷键写回配置文件(没有配置路径时只保存在内存里)."""
         if self._paths is None:
             return
-        # 内容非法时 load_or_reset_config 已经还原过, 因此这里总能拿到一份可用配置。
-        config = load_or_reset_config(self._paths.config_path).config
+        # 内容有问题时 load_or_repair_config 已经剔除过非法部分, 这里总能拿到可用配置。
+        config = load_or_repair_config(self._paths.config_path).config
         config.hotkeys = HotkeySettings(
             save=self._shortcuts[ACTION_SAVE_NOW],
             branch=self._shortcuts[ACTION_CREATE_BRANCH],
@@ -418,9 +542,13 @@ class ArchiveApp(ctk.CTk):
             on_change=self._refresh_after_manage,
             on_open_detail=self._open_game_detail,
             on_notice=self._notice,
+            on_activation_monitor=self._on_set_monitor,
+            on_activation_refresh=self._poll_activation_now,
         )
         self._home_page.frame.grid(row=0, column=0, sticky="nsew")
         self._home_page.frame.grid_remove()
+        # 分页在第一次轮询之前就要显示开关状态(否则会先把"关闭"写出来再改口).
+        self._home_page.refresh_activation(enabled=self._activation)
 
     def _show_page(self, page: AppPage) -> None:
         """切换主窗口内的页面: 游戏主页(默认)与游戏详情页.
@@ -2036,7 +2164,11 @@ class ArchiveApp(ctk.CTk):
 
         侧边栏已经去掉, 游戏列表由游戏主页承载, 因此这里只维护"当前游戏"与详情页;
         主页可见时顺手刷新它(不可见时进入页面会重新读取, 无需在这里重算)。
+        界面上的任何一次启用/停用都会走到这里, 所以顺便把自动启停的轮询间隔退回
+        最快档: "刚手动改完"是最值得立即再探一次的时刻。
         """
+        if self._activation:
+            self._reset_activation_ladder()
         games = self.backend.list_games()
         if self._page is AppPage.HOME:
             self._home_page.reload()
@@ -2062,11 +2194,15 @@ class ArchiveApp(ctk.CTk):
             palette=self.p,
             theme=self._theme,
             language=self._language,
+            base_font_px=self._base_font_px,
             debug=self._debug,
+            activation=self._activation,
             shortcuts=self._shortcuts,
             on_toggle_theme=self._on_toggle_theme,
             on_apply_language=self._on_language_change,
+            on_apply_font_size=self._on_font_size_change,
             on_apply_debug=self._on_debug_change,
+            on_apply_activation=self._on_activation_change,
             on_apply_shortcut=self._apply_shortcut,
             on_capture_start=self._hotkeys.suspend,
             on_capture_end=self._hotkeys.resume,
@@ -2191,8 +2327,12 @@ class ArchiveApp(ctk.CTk):
             if kind == "hotkey":
                 self._run_hotkey(payload)
                 continue
+            if kind == "activation":
+                self._finish_activation()
+                continue
             self._finish_message(kind, payload)
         self._refresh_task()
+        self._maybe_poll_activation()
         self._poll_job = self.after(100, self._poll_messages)
 
     def _run_hotkey(self, payload: str) -> None:
@@ -2208,6 +2348,78 @@ class ArchiveApp(ctk.CTk):
             self._on_branch(quick=True)
         else:
             self._on_backup()
+
+    def _maybe_poll_activation(self) -> None:
+        """到达当前间隔就在后台跑一次自动启停判断.
+
+        开关关闭、上一次还没回来、还没到点都直接跳过 —— 关掉就该完全没有开销
+        (一次进程表都不枚举)。间隔由队列是否非空决定(见 activation_delay)。
+        """
+        if not self._activation or self._activation_busy:
+            return
+        now = time.monotonic()
+        if now < self._activation_due:
+            return
+        self._activation_busy = True
+        self._activation_due = now + activation_delay(
+            self._activation_steps, running=self._activation_running
+        )
+        threading.Thread(target=self._run_activation_poll, daemon=True).start()
+
+    def _run_activation_poll(self) -> None:
+        """后台线程: 跑一次自动启停判断, 结果经消息队列交回主线程."""
+        try:
+            self._activation_run = self.backend.poll_activation(enabled=True)
+        except Exception as exc:
+            # 探测失败在服务层已经降级成"无法确认", 走到这里说明是数据层的问题:
+            # 记下来但不要让后台线程死掉, 也不要弹窗打断用户。
+            logger.warning("自动启停轮询失败: %s", exc)
+        finally:
+            self._messages.put(("activation", ""))
+
+    def _finish_activation(self) -> None:
+        """处理自动启停的轮询结果(主线程): 记账、回填分页, 只在真切换时提示.
+
+        列表与详情不用在这里重读: 切换会抬高后端的数据版本号, 下一次
+        :meth:`_refresh_task` 自己会重载。
+        """
+        outcome, self._activation_run = self._activation_run, None
+        self._activation_busy = False
+        if outcome is None:
+            return
+        self._track_activation_interval(outcome)
+        self._home_page.refresh_activation(outcome, enabled=self._activation)
+        self._report_activation(outcome)
+
+    def _track_activation_interval(self, outcome: ActivationOutcome) -> None:
+        """队列是否非空决定下一轮的间隔档位(空队列回最快档; 见 activation_delay)."""
+        self._activation_running = bool(outcome.queue)
+        self._activation_steps = (
+            self._activation_steps + 1 if self._activation_running else 0
+        )
+
+    def _report_activation(self, outcome: ActivationOutcome) -> None:
+        """只在真的改了启用态时给状态栏提示(接管 / 回落 / 收回)."""
+        if not outcome.changed:
+            return
+        if outcome.reason == REASON_FALLBACK and outcome.enabled is not None:
+            self._feedback(
+                FeedbackKind.INFO,
+                tr(
+                    "activation.auto_fallback",
+                    name="" if outcome.disabled is None else outcome.disabled.name,
+                    next=outcome.enabled.name,
+                ),
+            )
+            return
+        game = outcome.enabled if outcome.enabled is not None else outcome.disabled
+        name = "" if game is None else game.name
+        if outcome.reason == REASON_ENABLED:
+            self._feedback(
+                FeedbackKind.SUCCESS, tr("activation.auto_enabled", name=name)
+            )
+        elif outcome.reason == REASON_DISABLED:
+            self._feedback(FeedbackKind.INFO, tr("activation.auto_disabled", name=name))
 
     def _finish_message(
         self, kind: Literal["ok", "err", "unchanged", "hotkey"], payload: str
@@ -2274,16 +2486,22 @@ def run_gui(
     ``verbose=True`` 或配置里的“启用调试日志”打开时才把 DEBUG 也记进去;
     单文件上限与保留份数取自配置里的 ``logging`` 段。
     """
-    from archive_management.config import load_or_reset_config
+    from archive_management.config import load_or_repair_config
     from archive_management.infrastructure.database import Database
     from archive_management.logging_config import configure_from_settings
     from archive_management.ui.sql_backend import SqlArchiveService
 
     paths = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
-    loaded = load_or_reset_config(paths.config_path)
+    loaded = load_or_repair_config(paths.config_path)
     configure_from_settings(paths.log_dir, loaded.config.logging, verbose=verbose)
     if loaded.reset:
         logger.warning("配置文件内容非法, 已还原为默认值: %s", loaded.backup)
+    elif loaded.repaired:
+        logger.warning(
+            "配置文件有 %d 处内容非法, 已剔除并还原为默认值: %s",
+            len(loaded.repaired),
+            ", ".join(loaded.repaired),
+        )
     logger.info("界面启动(verbose=%s)", verbose)
     database = Database(paths.database_path)
     database.migrate()

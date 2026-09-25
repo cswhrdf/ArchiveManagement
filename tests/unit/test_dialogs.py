@@ -36,6 +36,7 @@ class _FakeWidget:
         self.text = kwargs.get("text")
         self.command: Callable[[], None] | None = kwargs.get("command")
         self._value: str = kwargs.get("text", "")
+        self.destroyed = False
         # 测试用 harness 预置过内容时, 对话框自身的 initial 回填不再覆盖它.
         self._preset = False
 
@@ -70,6 +71,10 @@ class _FakeWidget:
     def click(self) -> None:
         if self.command is not None:
             self.command()
+
+    def destroy(self) -> None:
+        """假控件的销毁接口(标签对话框删行时会用到)."""
+        self.destroyed = True
 
 
 class _FakeTextbox(_FakeWidget):
@@ -427,6 +432,77 @@ def test_import_game_dialog_without_browse_has_no_browse_button(
     )
 
     assert tr("dialog.browse") not in {button.text for button in harness.buttons}
+
+
+def test_edit_tags_dialog_collects_rows(harness: _FakeParent) -> None:
+    """标签对话框按行收集: 空白被清掉、重复项合并、空行丢弃."""
+
+    def fill_and_add() -> None:
+        add = next(b for b in harness.buttons if b.text == tr("dialog.tags_add"))
+        harness.entries[0]._value = "  探索  "
+        add.click()
+        harness.entries[1]._value = "探索"
+        add.click()
+        harness.entries[2]._value = ""
+        next(b for b in harness.buttons if b.text == tr("dialog.tags_save")).click()
+
+    harness.on_wait = fill_and_add
+    result = dialogs.edit_tags_dialog(harness, DARK, tags=())
+
+    assert result == ("探索",)
+
+
+def test_edit_tags_dialog_drops_both_comma_forms(harness: _FakeParent) -> None:
+    """中英文逗号一视同仁: 保存时两种逗号都被剔除, 不会被当成两个标签."""
+
+    def fill_and_add() -> None:
+        add = next(b for b in harness.buttons if b.text == tr("dialog.tags_add"))
+        harness.entries[0]._value = "探索,解谜"
+        add.click()
+        harness.entries[1]._value = "动作，冒险"  # noqa: RUF001 - 全角逗号正是被测输入
+        next(b for b in harness.buttons if b.text == tr("dialog.tags_save")).click()
+
+    harness.on_wait = fill_and_add
+    result = dialogs.edit_tags_dialog(harness, DARK, tags=())
+
+    assert result == ("探索解谜", "动作冒险")
+
+
+def test_edit_tags_dialog_starts_from_existing_tags(harness: _FakeParent) -> None:
+
+    def drop_the_first_row() -> None:
+        next(b for b in harness.buttons if b.text == tr("dialog.tags_remove")).click()
+        next(b for b in harness.buttons if b.text == tr("dialog.tags_save")).click()
+
+    harness.on_wait = drop_the_first_row
+    result = dialogs.edit_tags_dialog(harness, DARK, tags=("探索", "解谜"))
+
+    assert result == ("解谜",)
+
+
+def test_edit_tags_dialog_stops_adding_at_the_limit(harness: _FakeParent) -> None:
+    """行数到达上限后"添加标签"不可用, 再点也长不出新行."""
+
+    def add_many() -> None:
+        add = next(b for b in harness.buttons if b.text == tr("dialog.tags_add"))
+        for _index in range(4):
+            add.click()
+        next(b for b in harness.buttons if b.text == tr("dialog.tags_save")).click()
+
+    harness.on_wait = add_many
+    dialogs.edit_tags_dialog(harness, DARK, tags=("a", "b"), max_tags=3)
+
+    add = next(b for b in harness.buttons if b.text == tr("dialog.tags_add"))
+    assert add.kwargs["state"] == "disabled"
+    # 已有 2 行 + 自动补的 1 行 = 3 行(上限)。
+    assert len(harness.entries) == 3
+
+
+def test_edit_tags_dialog_cancel_returns_none(harness: _FakeParent) -> None:
+    """取消时不返回任何东西, 调用方据此不改动标签."""
+    harness.click_text = tr("dialog.cancel")
+
+    assert dialogs.edit_tags_dialog(harness, DARK, tags=("探索",)) is None
 
 
 def test_ask_branch_name_returns_stripped(harness: _FakeParent) -> None:

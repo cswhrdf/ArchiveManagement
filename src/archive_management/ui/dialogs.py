@@ -11,6 +11,11 @@ from collections.abc import Callable, Sequence
 
 import customtkinter as ctk
 
+from archive_management.domain import (
+    MAX_TAG_LENGTH,
+    MAX_TAGS,
+    normalize_tags,
+)
 from archive_management.i18n import tr
 from archive_management.ui.palette import Palette
 
@@ -389,6 +394,153 @@ def import_game_dialog(
         command=submit,
     )
     ok.pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None
+
+
+def edit_tags_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    tags: Sequence[str] = (),
+    max_tags: int = MAX_TAGS,
+    max_length: int = MAX_TAG_LENGTH,
+) -> tuple[str, ...] | None:
+    """编辑一款游戏的自定义标签: 一行一个, 与导入时调整存档路径同一个样式.
+
+    每行一个输入框加一个"删除", 底部是"添加标签 / 取消 / 保存"; 行数达到上限后
+    "添加标签"不可用(与 :func:`~archive_management.domain.home.normalize_tags` 的
+    上限一致)。回车等同于保存; 空行与重复项直接丢掉, 中英文逗号都会被剔除。返回
+    清理后的标签, 取消时返回 ``None``。
+    """
+    window = ctk.CTkToplevel(parent)
+    window.title(tr("dialog.home_tags_title"))
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    label = ctk.CTkLabel(
+        window,
+        text=tr("dialog.tags_label", max=max_tags, length=max_length),
+        justify="left",
+        font=ctk.CTkFont(size=13),
+        text_color=palette.text_body,
+    )
+    label.pack(padx=24, pady=(22, 2), anchor="w")
+    hint = ctk.CTkLabel(
+        window,
+        text=tr("dialog.tags_hint"),
+        justify="left",
+        wraplength=440,
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_muted,
+    )
+    hint.pack(padx=24, anchor="w")
+
+    # 按钮先建好(回调里要按行数切"添加标签"的可用状态), 打包留到最后 —— Tk 的布局
+    # 按 pack 的顺序, 与创建顺序无关。
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    add = ctk.CTkButton(
+        buttons,
+        text=tr("dialog.tags_add"),
+        width=116,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=lambda: add_row(""),
+    )
+    add.pack(side="left", padx=(0, 10))
+    cancel = ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    )
+    cancel.pack(side="left", padx=(0, 10))
+    ok = ctk.CTkButton(
+        buttons,
+        text=tr("dialog.tags_save"),
+        width=96,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=lambda: submit(),
+    )
+    ok.pack(side="left")
+
+    rows = ctk.CTkScrollableFrame(
+        window, width=440, height=150, fg_color=palette.well, corner_radius=8
+    )
+    entries: list[ctk.CTkEntry] = []
+    result: list[tuple[str, ...]] = []
+
+    def refresh_add_state() -> None:
+        """行数到上限后不允许再加(上限与 normalize_tags 一致)."""
+        add.configure(state="normal" if len(entries) < max_tags else "disabled")
+
+    def remove_row(row: ctk.CTkFrame, entry: ctk.CTkEntry) -> None:
+        """删掉一行; 删空了补一个空行, 窗户里总有一个输入框可用."""
+        if entry in entries:
+            entries.remove(entry)
+        row.destroy()
+        if not entries:
+            add_row("")
+        refresh_add_state()
+
+    def add_row(value: str) -> None:
+        """追加一行(输入框 + "删除"); 到达上限就什么也不做.
+
+        "添加标签"按钮那时已经是禁用状态, 这里再加一道兜底: 行的数量永远不会
+        超过 ``normalize_tags`` 能保留下来的上限。
+        """
+        if len(entries) >= max_tags:
+            return
+        row = ctk.CTkFrame(rows, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+        entry = ctk.CTkEntry(
+            row,
+            fg_color=palette.input_bg,
+            border_color=palette.border,
+            text_color=palette.text_body,
+        )
+        entry.insert(0, value)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        entry.bind("<Return>", lambda _event: submit())
+        remove = ctk.CTkButton(
+            row,
+            text=tr("dialog.tags_remove"),
+            width=64,
+            height=28,
+            fg_color=palette.raised,
+            hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            command=lambda: remove_row(row, entry),
+        )
+        remove.pack(side="left")
+        entries.append(entry)
+        refresh_add_state()
+
+    def submit() -> None:
+        """收集非空行, 清理(去空白/去重/截断)后交给调用方."""
+        result.append(normalize_tags([entry.get() for entry in entries]))
+        window.destroy()
+
+    for tag in tags[:max_tags]:
+        add_row(tag)
+    if len(entries) < max_tags:
+        add_row("")
+
+    rows.pack(padx=24, pady=(6, 4), fill="x")
+    buttons.pack(padx=24, pady=(6, 18))
 
     _center(parent, window)
     parent.wait_window(window)

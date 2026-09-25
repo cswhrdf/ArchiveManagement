@@ -75,7 +75,6 @@ def load_facts(database: Database) -> list[GameFacts]:
                 last_backup_at=row.last_backup_at,
                 last_activity_at=game.last_activity_at,
                 risk=risk,
-                monitored=row.monitored,
                 archived=game.archived,
                 enabled=game.enabled,
                 tags=game.tags,

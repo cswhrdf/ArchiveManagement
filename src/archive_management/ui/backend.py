@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
+from archive_management.application.games import ActivationOutcome
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan
 from archive_management.domain import (
@@ -108,6 +109,14 @@ class ArchiveService(Protocol):
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
         """启用/停用一个游戏, 返回其摘要."""
+        ...
+
+    def poll_activation(self, *, enabled: bool = True) -> ActivationOutcome:
+        """低频轮询一次按进程自动启停, 返回本次的判断结果.
+
+        ``enabled`` 就是设置里的开关: 关闭时**一次进程表都不枚举**。只有真实后端
+        实现自动启停, 演示后端固定返回"无变化"。
+        """
         ...
 
     def list_locations(self, game_id: str) -> list[LocationItem]:

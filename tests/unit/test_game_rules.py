@@ -45,7 +45,6 @@ def _home_item(*, archived: bool, enabled: bool) -> HomeGameItem:
         last_backup_label="",
         activity_label="",
         risk=False,
-        monitored=False,
         archived=archived,
         enabled=enabled,
     )

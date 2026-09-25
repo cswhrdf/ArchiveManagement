@@ -5,7 +5,7 @@ on:
     branches: [main, dev]
     # 纯文档改动不值得跑整套 CI(一轮约 21 个作业)。**只加在 push 上**: pull_request 若被
     # 路径过滤跳过, 分支保护里的必需检查会永远停在 pending, PR 反而合不了 —— 需要给 PR
-    # 也省额度就改用"轻量作业 + 条件跳过重量级作业", 而不是让整个工作流不触发。
+    # 也省额度就改用"轻量作业 + 条件跳过重量级作业", 而不是让整个工作流不触发。你m
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -16,6 +16,9 @@ on:
 
 # 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(21 个作业)。
 # 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。
+# 注意 `always()` 的语义是“即使被取消也返回 true”: 取消后就不该再启动的作业要用
+# `always() && !cancelled()` 表达(见 pytest-report / allure-summary 的作业条件),
+# 否则被取代的那一轮照样会把报告合并、生成、上传跑一遍。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -297,7 +300,10 @@ jobs:
     name: 合并测试报告 (${{ matrix.platform }})
     needs: [pytest]
     # 分片作业失败也要出报告: 报告正是用来看"哪一片挂了"的。
-    if: always()
+    # 但**被取代的运行不必再出报告**: 这一条要用 `!cancelled()` 表达, 不能只写 `always()`
+    # —— `always()` 连“整轮被取消”也返回 true, 那样旧的那一轮会在取消后照样启动本作业
+    # (合并/生成/上传白跑一遍, 而且被取消的作业按已用时长计费)。
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -569,7 +575,8 @@ jobs:
     # 不再有 quality-platform / analysis / performance: 它们要出的产物都由这两个作业上传,
     # 等它们跑完即可。
     needs: [quality, pytest-report, security]
-    if: always()
+    # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
+    if: always() && !cancelled()
     steps:
       - name: Check out repository
         uses: actions/checkout@v7

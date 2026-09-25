@@ -20,7 +20,7 @@ from pydantic import ValidationError
 
 from archive_management.config import (
     CONFIG_FILENAME,
-    load_or_reset_config,
+    load_or_repair_config,
     parse_config,
 )
 from archive_management.domain.steam_data import SteamDataFile
@@ -95,7 +95,7 @@ def test_non_object_config_file_is_reset_not_used(tmp_path: Path) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(["evil"]), encoding="utf-8")
 
-    result = load_or_reset_config(config_path)
+    result = load_or_repair_config(config_path)
 
     assert result.reset is True
     assert result.backup is not None

@@ -3,18 +3,22 @@
 配置以 JSON 保存在应用配置目录, 使用 pydantic 严格校验: 未知字段直接拒绝,
 防止不完整或恶意字段进入后续文件操作.
 
-校验失败有两种处理方式, 由调用方选择:
+校验失败有三种处理方式, 由调用方选择:
 
 - :func:`load_config` 直接把错误抛给调用方(测试与需要严格语义的场景);
-- :func:`load_or_reset_config` 把文件**还原为默认值**并返回默认配置——手改配置
-  写坏了不应该让应用起不来, 但也不能静默丢掉用户的改动, 因此原文件会先改名成
-  ``config.json.invalid`` 保留下来。
+- :func:`repair_config` 逐字段修复: 非法值落回默认值、不认识的键(非设置相关的
+  内容)直接删除, 其余自定义配置原样保留;
+- :func:`load_or_repair_config` 在读取时直接改用上面的修复逻辑——手改配置写坏了
+  不应该让应用起不来, 但也不能静默丢掉用户的改动, 因此原文件会先改名成
+  ``config.json.invalid`` 保留下来; 只有整份文件都读不出来(JSON 坏了 / 顶层不是
+  对象 / 版本不认识)时才整份还原为默认值。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -44,6 +48,12 @@ CONFIG_FORMAT_VERSION = 1
 CONFIG_FILENAME = "config.json"
 # 内容非法时原配置文件的保留后缀(与 config.json 同目录).
 INVALID_CONFIG_SUFFIX = ".invalid"
+# 基准字号(px 口径, 1rem 的默认值): 界面上所有字号都按它等比缩放, 取值由
+# ``ui.base_font_px`` 控制。放在这里是为了让"默认值"只有一个来源: 配置模型与
+# 界面层都引用它(见 ui.typography)。
+DEFAULT_BASE_FONT_PX = 16
+# 允许用户选择的基准字号(设置窗口的下拉项).
+BASE_FONT_CHOICES = (12, 14, 16, 18, 20, 24, 28)
 # 日志滚动文件的上限(默认 100 MB): 单个日志文件写满后就轮转, 保留 backup_count 份。
 # 开发调试时会写入大量 DEBUG 级基础操作, 上限太小会导致刚发生的问题很快被轮转掉。
 DEFAULT_LOG_MAX_BYTES = 100 * 1024 * 1024
@@ -83,6 +93,27 @@ class HotkeySettings(BaseModel):
         return value
 
 
+class ActivationSettings(BaseModel):
+    """游戏启停配置."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 按进程自动启停(默认关闭): 开启后监控全部已导入(且有存档位置)的游戏, 按启动
+    # 顺序接管/回落(见 PLAN 的阶段 G-8)。启用态决定快捷键与定时备份落到哪一款
+    # 游戏上, 因此自动接管必须由用户明确打开。
+    auto: bool = False
+
+
+class UiSettings(BaseModel):
+    """界面外观配置."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 基准字号(px 口径, 1rem): 界面里所有字号都按它等比缩放(见 ui.typography)。
+    # 下限 11 保证正文仍然可读, 上限 28 避免固定宽度的行被撑破。
+    base_font_px: int = Field(default=DEFAULT_BASE_FONT_PX, ge=11, le=28)
+
+
 class AppConfig(BaseModel):
     """应用级配置."""
 
@@ -94,6 +125,8 @@ class AppConfig(BaseModel):
     language: str = DEFAULT_LOCALE
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     hotkeys: HotkeySettings = Field(default_factory=HotkeySettings)
+    activation: ActivationSettings = Field(default_factory=ActivationSettings)
+    ui: UiSettings = Field(default_factory=UiSettings)
 
     @field_validator("language")
     @classmethod
@@ -140,33 +173,108 @@ def save_config(config: AppConfig, path: Path) -> None:
 
 @dataclass(frozen=True)
 class ConfigLoad:
-    """一次配置读取的结果(含是否因内容非法而还原过)."""
+    """一次配置读取的结果(含被修复或还原过的字段)."""
 
     config: AppConfig
-    # 内容非法时被还原为默认值; 界面据此提示用户, 而不是让他以为改动"没生效"。
+    # 整份文件读不出来(JSON 坏了 / 顶层不是对象 / 版本不认识)而整份还原为默认值。
     reset: bool = False
-    # 被保留下来的非法配置文件(没有还原时为空)。
+    # 逐字段修复时被删掉或还原为默认值的字段路径(含不认识的键)。
+    repaired: tuple[str, ...] = ()
+    # 被保留下来的原配置文件(没修复/没还原时为空)。
     backup: Path | None = None
 
 
-def load_or_reset_config(path: Path) -> ConfigLoad:
-    """读取配置; 内容非法时把文件还原为默认值并返回默认配置.
+def repair_config(
+    raw: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """逐字段修复一份配置字典: 合法值原样保留, 非法值与陌生键剔除.
 
-    非法内容不会被静默丢掉: 原文件先改名成 ``config.json.invalid`` 保留下来, 方便用户
-    对照自己改错了什么。文件不存在时只返回默认值(不创建文件); 写回失败也只记录日志
-    ——配置读取必须始终能交回一份可用配置, 绝不能让应用起不来。
+    返回(修复后的字典, 问题字段路径)。与 :func:`parse_config` 的"要么全对要么全错"
+    不同: 手改配置只写错一项时不该把整份配置都丢掉, 因此每个字段单独校验一次,
+    失败就落回默认值; 不认识的键(非设置相关的内容)直接删除。嵌套段递归下去。
     """
-    try:
-        return ConfigLoad(config=load_config(path))
-    except ConfigurationError as exc:
-        logger.warning("配置文件内容非法, 已还原为默认值: %s", exc)
-        backup = _preserve_invalid(path)
-        config = AppConfig()
+    notes: list[str] = []
+    cleaned = _repair_model(AppConfig, dict(raw), "", notes)
+    return cleaned, tuple(dict.fromkeys(notes))
+
+
+def _repair_model(
+    model: type[BaseModel], raw: dict[str, Any], prefix: str, notes: list[str]
+) -> dict[str, Any]:
+    """按字段清洗一段配置: 只保留认识的键, 每个叶子单独校验."""
+    fields = model.model_fields
+    result: dict[str, Any] = {}
+    notes.extend(f"{prefix}{name}" for name in raw if name not in fields)
+    # 只替换一个字段、其余取默认值: 这样验的就是这一个字段本身。
+    defaults = model().model_dump(mode="json")
+    for name, field in fields.items():
+        if name not in raw:
+            continue
+        value = raw[name]
+        annotation = field.annotation
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            if not isinstance(value, dict):
+                notes.append(f"{prefix}{name}")
+                continue
+            result[name] = _repair_model(annotation, value, f"{prefix}{name}.", notes)
+            continue
         try:
-            save_config(config, path)
-        except OSError as write_exc:  # pragma: no cover - 取决于文件系统
-            logger.warning("写回默认配置失败, 本次仅使用内存中的默认值: %s", write_exc)
-        return ConfigLoad(config=config, reset=True, backup=backup)
+            model.model_validate({**defaults, name: value})
+        except ValidationError:
+            notes.append(f"{prefix}{name}")
+            continue
+        result[name] = value
+    return result
+
+
+def load_or_repair_config(path: Path) -> ConfigLoad:
+    """读取配置; 非法内容**逐个字段**修复, 合法的部分原样保留.
+
+    - 文件不存在 → 默认值(不创建文件);
+    - 整份读不出来(JSON 坏了 / 顶层不是对象 / 版本不认识) → 整份还原为默认值,
+      原文件先改名成 ``config.json.invalid`` 保留(:attr:`ConfigLoad.reset`);
+    - 能读出对象 → 逐字段修复: 不认识的键(非设置相关的内容)与非法值被剔除并落回
+      默认值, 其余保留; 修复过就把清理后的内容写回文件, 同样留一份 ``.invalid``
+      备份, 并把问题字段列在 :attr:`ConfigLoad.repaired` 里给界面提示用。
+
+    配置读取必须始终能交回一份可用配置, 绝不能让应用起不来; 写回失败也只记录日志。
+    """
+    if not path.exists():
+        return ConfigLoad(config=AppConfig())
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _reset_to_defaults(path, reason=f"无法读取: {exc}")
+    if not isinstance(raw, dict):
+        return _reset_to_defaults(path, reason="顶层不是对象")
+    cleaned, notes = repair_config(raw)
+    try:
+        config = AppConfig.model_validate(cleaned)
+    except ValidationError as exc:  # pragma: no cover - 逐字段修复后不该再有非法值
+        return _reset_to_defaults(path, reason=f"修复后仍不合法: {exc}")
+    if config.version != CONFIG_FORMAT_VERSION:
+        return _reset_to_defaults(path, reason=f"不支持的文件版本 {config.version}")
+    if not notes:
+        return ConfigLoad(config=config)
+    logger.warning("配置文件有 %d 项需要修复: %s", len(notes), ", ".join(notes))
+    backup = _preserve_invalid(path)
+    try:
+        save_config(config, path)
+    except OSError as exc:  # pragma: no cover - 取决于文件系统
+        logger.warning("写回修复后的配置失败, 本次仅使用内存中的取值: %s", exc)
+    return ConfigLoad(config=config, repaired=notes, backup=backup)
+
+
+def _reset_to_defaults(path: Path, *, reason: str) -> ConfigLoad:
+    """整份还原为默认值, 原文件改名保留."""
+    logger.warning("配置文件无法使用(%s), 已还原为默认值", reason)
+    backup = _preserve_invalid(path)
+    config = AppConfig()
+    try:
+        save_config(config, path)
+    except OSError as exc:  # pragma: no cover - 取决于文件系统
+        logger.warning("写回默认配置失败, 本次仅使用内存中的默认值: %s", exc)
+    return ConfigLoad(config=config, reset=True, backup=backup)
 
 
 def _preserve_invalid(path: Path) -> Path | None:

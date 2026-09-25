@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from archive_management.domain import (
+    ACTIVATION_STATE_VERSION,
     HOME_STATE_VERSION,
+    TAG_SEPARATORS,
+    ActivationState,
     BackupFileEntry,
     BackupNode,
     CandidateStatus,
@@ -24,6 +27,7 @@ from archive_management.domain import (
     HomeView,
     MonitoredDirectory,
     PathHealth,
+    RunEntry,
     SaveCandidate,
     SaveCandidateStatus,
     SaveLocation,
@@ -53,9 +57,17 @@ def _dt_text(value: datetime | None) -> str | None:
 
 
 def _split_tags(raw: object) -> tuple[str, ...]:
-    """把数据库中逗号拼接的标签文本还原为元组."""
+    """把数据库中逗号拼接的标签文本还原为元组(中英文逗号都算分隔符)."""
     text = str(raw or "")
-    return tuple(tag for tag in (part.strip() for part in text.split(",")) if tag)
+    for separator in TAG_SEPARATORS[1:]:
+        text = text.replace(separator, TAG_SEPARATORS[0])
+    parts = (part.strip() for part in text.split(TAG_SEPARATORS[0]))
+    return tuple(tag for tag in parts if tag)
+
+
+def _optional_int(value: object) -> int | None:
+    """把可空的外键列读成 int; 为空时返回 ``None``."""
+    return None if value is None else int(str(value))
 
 
 def _join_tags(tags: Sequence[str]) -> str:
@@ -376,6 +388,18 @@ class SaveLocationRepository:
                 (game_id,),
             ).fetchall()
         return [_row_to_location(row) for row in rows]
+
+    def game_ids_with_locations(self) -> set[int]:
+        """返回至少关联了一个存档位置的游戏 id(自动启停的监控范围).
+
+        没有存档位置的游戏是"待处理"状态: 它没有可备份的内容, 接管它既不能定时
+        备份也没有意义。这里用一条聚合查询一次取完, 与启停轮询的开销无关。
+        """
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT game_id FROM save_locations"
+            ).fetchall()
+        return {int(row["game_id"]) for row in rows}
 
     def get(self, location_id: int) -> SaveLocation | None:
         """按 id 返回单个存档位置; 不存在返回 None."""
@@ -1347,7 +1371,6 @@ class HomeRow:
     locations: tuple[tuple[str, str], ...]
     backup_count: int
     last_backup_at: datetime | None
-    monitored: bool
 
 
 class HomeRepository:
@@ -1360,7 +1383,7 @@ class HomeRepository:
     def list_rows(self) -> list[HomeRow]:
         """一次性取出全部游戏及其计数, 避免按游戏逐个查询.
 
-        共 4 条查询(游戏、存档位置、备份计数、探测关联), 与游戏数量无关。
+        共 3 条查询(游戏、存档位置、备份计数), 与游戏数量无关。
         """
         with self._database.connect() as connection:
             games = [
@@ -1387,13 +1410,6 @@ class HomeRepository:
                     int(row["total"]),
                     _parse_dt(row["latest"]),
                 )
-            monitored = {
-                int(row["game_id"])
-                for row in connection.execute(
-                    "SELECT DISTINCT game_id FROM game_candidates"
-                    " WHERE game_id IS NOT NULL"
-                ).fetchall()
-            }
         rows: list[HomeRow] = []
         for game in games:
             if game.id is None:  # pragma: no cover - 查询总是带 id
@@ -1405,7 +1421,6 @@ class HomeRepository:
                     locations=tuple(paths.get(game.id, ())),
                     backup_count=total,
                     last_backup_at=latest,
-                    monitored=game.id in monitored,
                 )
             )
         return rows
@@ -1456,5 +1471,108 @@ class HomeRepository:
                     clean.version,
                     iso_utc_now(),
                 ),
+            )
+        return clean
+
+
+class ActivationStateRepository:
+    """自动启停状态(单行表 ``activation_state``).
+
+    读不到记录或版本不符时返回默认状态而不是报错: 这份状态只是"自动启停的观察
+    记录", 丢了顶多让它重新等一次"游戏在运行"的观察, 不该阻断任何操作。
+    """
+
+    def __init__(self, database: Database) -> None:
+        """绑定数据库."""
+        self._database = database
+
+    def load(self) -> ActivationState:
+        """读取状态; 没有记录或版本不符时返回默认状态(不建行)."""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT monitor_game_id, armed, paused, version"
+                " FROM activation_state WHERE id = 1"
+            ).fetchone()
+        if row is None or int(row["version"]) != ACTIVATION_STATE_VERSION:
+            return ActivationState()
+        return ActivationState(
+            monitor_game_id=_optional_int(row["monitor_game_id"]),
+            armed=_as_bool(row["armed"]),
+            paused=_as_bool(row["paused"]),
+            version=ACTIVATION_STATE_VERSION,
+        )
+
+    def save(self, state: ActivationState) -> ActivationState:
+        """写入状态(单行表), 返回落库后的取值."""
+        clean = replace(state, version=ACTIVATION_STATE_VERSION)
+        with self._database.session() as connection:
+            connection.execute(
+                "INSERT INTO activation_state (id, monitor_game_id, armed,"
+                " paused, version, updated_at)"
+                " VALUES (1, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (id) DO UPDATE SET"
+                " monitor_game_id = excluded.monitor_game_id,"
+                " armed = excluded.armed,"
+                " paused = excluded.paused,"
+                " version = excluded.version, updated_at = excluded.updated_at",
+                (
+                    clean.monitor_game_id,
+                    int(clean.armed),
+                    int(clean.paused),
+                    clean.version,
+                    iso_utc_now(),
+                ),
+            )
+        return clean
+
+
+class ActivationQueueRepository:
+    """启动顺序队列(表 ``activation_runs``).
+
+    这里存的是"上一次探测看到的运行集合 + 顺序", 因此每次变化都整表重写:
+    ``position`` 必须连续, 而删一条、插一条很容易把位置号写乱。整表重写在一次
+    事务里完成, 不会出现"删完了还没插入"的中间状态。
+    """
+
+    def __init__(self, database: Database) -> None:
+        """绑定数据库."""
+        self._database = database
+
+    def load(self) -> tuple[RunEntry, ...]:
+        """按位置顺序读取队列(表不存在或为空时返回空队列)."""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT game_id, position, suppressed, first_seen_at, last_seen_at"
+                " FROM activation_runs ORDER BY position, game_id"
+            ).fetchall()
+        return tuple(
+            RunEntry(
+                game_id=int(row["game_id"]),
+                position=int(row["position"]),
+                suppressed=_as_bool(row["suppressed"]),
+                first_seen_at=str(row["first_seen_at"]),
+                last_seen_at=str(row["last_seen_at"]),
+            )
+            for row in rows
+        )
+
+    def save(self, entries: Sequence[RunEntry]) -> tuple[RunEntry, ...]:
+        """整表重写队列, 返回落库后的取值."""
+        clean = tuple(entries)
+        with self._database.session() as connection:
+            connection.execute("DELETE FROM activation_runs")
+            connection.executemany(
+                "INSERT INTO activation_runs (game_id, position, suppressed,"
+                " first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        entry.game_id,
+                        entry.position,
+                        int(entry.suppressed),
+                        entry.first_seen_at,
+                        entry.last_seen_at,
+                    )
+                    for entry in clean
+                ],
             )
         return clean

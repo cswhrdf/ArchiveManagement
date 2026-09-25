@@ -1560,7 +1560,6 @@ def test_home_filter_options_carry_counts(tmp_path: Path) -> None:
     categories = {option.key: option.count for option in board.categories}
     assert categories["origin:manual"] == 1
     assert categories["backup:none"] == 1
-    assert categories["monitor:off"] == 1
 
     narrowed = service.apply_home_filter(HomeFilter(origin="manual"))
     assert narrowed.origin_text == f"{tr('discovery.source_manual')} (1)"
@@ -1583,6 +1582,14 @@ def test_home_archive_and_tags_round_trip(tmp_path: Path) -> None:
     tagged = service.set_game_tags(summary.game_id, [" 探索 ", "探索", "解谜"])
     assert tagged.games[0].tags == ("探索", "解谜")
     assert "探索" in tagged.games[0].chips
+
+    # 中英文逗号一视同仁: 两种逗号都不会留在标签里, 也不会在往返后被拆成两个
+    comma_ed = service.set_game_tags(
+        summary.game_id,
+        ["探索,解谜", "动作，冒险"],  # noqa: RUF001 - 全角逗号正是被测输入
+    )
+    assert comma_ed.games[0].tags == ("探索解谜", "动作冒险")
+    assert service.load_home().games[0].tags == ("探索解谜", "动作冒险")
 
 
 def test_home_reflects_backups_and_locations(tmp_path: Path) -> None:

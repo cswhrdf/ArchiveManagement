@@ -6,6 +6,8 @@
 - **界面语言**: 切换后界面整体重建, 并按新语言重探游戏译名;
 - **日志**: “启用调试日志”开关(默认关闭)。关闭时日志里只保留 INFO 及以上的
   操作, 开启后 DEBUG 级基础操作也会写进日志 —— 排查问题时才需要;
+- **游戏启停**: “按进程自动启停”开关(默认关闭)。开启后低频探测当前启用的那一款
+  游戏, 观察到它运行就保持启用、观察到它退出就停用; 手动调整始终优先;
 - **快捷键**: 全局保存与创建分支的组合键, 点击按键区域即可现场录制新组合;
 - 后续计划中的设置项说明。
 
@@ -36,6 +38,7 @@ from archive_management.services.hotkeys import (
 )
 from archive_management.ui.dialogs import _center
 from archive_management.ui.palette import Palette
+from archive_management.ui.typography import FONT_CHOICES
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +54,9 @@ _WINDOW_MIN_HEIGHT = 500
 _ApplyShortcut = Callable[[str, str], "str | None"]
 # 切换界面语言; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyLanguage = Callable[[str], "str | None"]
-# 切换调试日志开关; 返回 None 表示成功, 否则返回可直接展示的失败说明.
-_ApplyDebug = Callable[[bool], "str | None"]
+_ApplyFontSize = Callable[[int], "str | None"]
+# 切换布尔开关(调试日志/自动启停); 返回 None 表示成功, 否则返回可直接展示的失败说明.
+_ApplyToggle = Callable[[bool], "str | None"]
 # 录制开始/结束的钩子(主窗口据此暂停与恢复全局快捷键).
 _CaptureHook = Callable[[], None]
 
@@ -78,25 +82,33 @@ class SettingsWindow:
         palette: Palette,
         theme: str,
         language: str,
+        base_font_px: int,
+        on_apply_font_size: _ApplyFontSize,
         debug: bool,
+        activation: bool,
         shortcuts: Mapping[str, str],
         on_toggle_theme: _ToggleTheme,
         on_apply_language: _ApplyLanguage,
-        on_apply_debug: _ApplyDebug,
+        on_apply_debug: _ApplyToggle,
+        on_apply_activation: _ApplyToggle,
         on_apply_shortcut: _ApplyShortcut,
         on_capture_start: _CaptureHook,
         on_capture_end: _CaptureHook,
     ) -> None:
-        """构造设置窗口并绑定主题、语言、调试开关与快捷键回调."""
+        """构造设置窗口并绑定主题、语言、两个开关与快捷键回调."""
         self._parent = parent
         self._palette = palette
         self._theme = theme
         self._language = language
+        self._base_font_px = base_font_px
+        self._on_apply_font_size = on_apply_font_size
         self._debug = debug
+        self._activation = activation
         self._shortcuts: dict[str, str] = dict(shortcuts)
         self._on_toggle_theme = on_toggle_theme
         self._on_apply_language = on_apply_language
         self._on_apply_debug = on_apply_debug
+        self._on_apply_activation = on_apply_activation
         self._on_apply_shortcut = on_apply_shortcut
         self._on_capture_start = on_capture_start
         self._on_capture_end = on_capture_end
@@ -189,8 +201,36 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._theme_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 6), sticky="w"
         )
+        # 界面字号: 1rem = 这个值(默认 16px), 界面里所有字号等比缩放。
+        self._font_label = ctk.CTkLabel(
+            self._appearance_panel,
+            text=tr("settings.font_size"),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        self._font_label.grid(row=3, column=0, padx=16, pady=(0, 14), sticky="w")
+        self._font_box = ctk.CTkComboBox(
+            self._appearance_panel,
+            values=[self._font_label_of(size) for size in FONT_CHOICES],
+            width=140,
+            height=30,
+            corner_radius=8,
+            fg_color=palette.input_bg,
+            border_color=palette.border,
+            button_color=palette.raised,
+            button_hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            dropdown_fg_color=palette.panel,
+            dropdown_text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+            dropdown_font=ctk.CTkFont(size=12),
+            command=self._on_font_selected,
+        )
+        self._font_box.set(self._font_label_of(self._base_font_px))
+        self._font_box.grid(row=3, column=1, padx=16, pady=(0, 14))
 
         self._language_panel = ctk.CTkFrame(
             self._container,
@@ -307,6 +347,60 @@ class SettingsWindow:
             row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
         )
 
+        self._activation_panel = ctk.CTkFrame(
+            self._container,
+            fg_color=palette.panel,
+            corner_radius=10,
+            border_width=1,
+            border_color=palette.border,
+        )
+        self._activation_panel.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self._activation_panel.grid_columnconfigure(0, weight=1)
+        self._activation_title = ctk.CTkLabel(
+            self._activation_panel,
+            text=tr("settings.activation"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        self._activation_title.grid(row=0, column=0, padx=16, pady=(14, 2), sticky="w")
+        self._activation_hint = ctk.CTkLabel(
+            self._activation_panel,
+            text=tr("settings.activation_hint"),
+            anchor="w",
+            justify="left",
+            wraplength=240,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
+        )
+        self._activation_hint.grid(row=1, column=0, padx=16, sticky="w")
+        self._activation_switch = ctk.CTkSwitch(
+            self._activation_panel,
+            text=tr("settings.activation_auto"),
+            command=self._on_activation_toggled,
+            width=120,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+            progress_color=palette.accent,
+            button_color=palette.text_muted,
+            button_hover_color=palette.item_hover,
+            fg_color=palette.input_bg,
+        )
+        self._set_activation_switch(self._activation)
+        self._activation_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=14)
+        self._activation_label = ctk.CTkLabel(
+            self._activation_panel,
+            text=self._activation_state_text(),
+            anchor="w",
+            justify="left",
+            wraplength=400,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._activation_label.grid(
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
+        )
+
         self._shortcut_panel = ctk.CTkFrame(
             self._container,
             fg_color=palette.panel,
@@ -314,7 +408,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._shortcut_panel.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self._shortcut_panel.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         self._shortcut_panel.grid_columnconfigure(0, weight=1)
         self._shortcut_title = ctk.CTkLabel(
             self._shortcut_panel,
@@ -391,7 +485,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._note_label.grid(row=5, column=0, sticky="w", pady=(12, 0))
+        self._note_label.grid(row=6, column=0, sticky="w", pady=(12, 0))
 
         self._close_btn = ctk.CTkButton(
             self._container,
@@ -407,7 +501,7 @@ class SettingsWindow:
             border_color=palette.border,
             font=ctk.CTkFont(size=12),
         )
-        self._close_btn.grid(row=6, column=0, sticky="e", pady=(14, 0))
+        self._close_btn.grid(row=7, column=0, sticky="e", pady=(14, 0))
 
         # 高度按**实际内容**算(说明文字会随语言换行): 固定高度会把底部裁掉,
         # 算完再居中 —— 这样"关闭"按钮与最后的说明一定在窗口里。
@@ -424,6 +518,26 @@ class SettingsWindow:
     def _locale_label(locale: str) -> str:
         """语言在列表里显示的名字(每种语言用自己那套写法)."""
         return tr(f"locale.{locale}")
+
+    def _font_label_of(self, size: int) -> str:
+        """字号下拉里的文案(带上 px 口径, 与「1rem = 基准字号」的说法一致)."""
+        return tr("settings.font_choice", size=size)
+
+    def _on_font_selected(self, value: str) -> None:
+        """下拉里选了一个基准字号: 交给主窗口应用(它会重建界面)."""
+        size = next(
+            (
+                candidate
+                for candidate in FONT_CHOICES
+                if self._font_label_of(candidate) == value
+            ),
+            None,
+        )
+        if size is None or size == self._base_font_px:
+            return
+        error = self._on_apply_font_size(size)
+        if error is not None:
+            self._font_box.set(self._font_label_of(self._base_font_px))
 
     def _on_language_selected(self, value: str) -> None:
         """切换语言: 交给主窗口处理, 成功后本窗口关闭(主窗口会整体重建).
@@ -472,6 +586,35 @@ class SettingsWindow:
         self._debug = wanted
         self._debug_label.configure(text=self._debug_state_text())
 
+    def _activation_state_text(self) -> str:
+        """自动启停开关当前状态的说明文字."""
+        state = tr(
+            "settings.activation_on" if self._activation else "settings.activation_off"
+        )
+        return tr("settings.activation_state", state=state)
+
+    def _set_activation_switch(self, enabled: bool) -> None:
+        """把开关拨到指定状态(不触发 ``command``, 所以失败回滚不会递归)."""
+        if enabled:
+            self._activation_switch.select()
+        else:
+            self._activation_switch.deselect()
+
+    def _on_activation_toggled(self) -> None:
+        """切换自动启停: 交给主窗口应用; 失败时说明原因并把开关拨回去."""
+        wanted = bool(self._activation_switch.get())
+        if wanted == self._activation:
+            return
+        error = self._on_apply_activation(wanted)
+        if error is not None:
+            self._activation_label.configure(
+                text=tr("settings.activation_failed", reason=error)
+            )
+            self._set_activation_switch(self._activation)
+            return
+        self._activation = wanted
+        self._activation_label.configure(text=self._activation_state_text())
+
     # -- 交互 ---------------------------------------------------------------
 
     def _toggle_theme(self) -> None:
@@ -488,6 +631,7 @@ class SettingsWindow:
             self._appearance_panel,
             self._language_panel,
             self._logging_panel,
+            self._activation_panel,
             self._shortcut_panel,
         ):
             panel.configure(fg_color=palette.panel, border_color=palette.border)
@@ -496,12 +640,16 @@ class SettingsWindow:
             (self._appearance_title, palette.text_primary),
             (self._language_title, palette.text_primary),
             (self._logging_title, palette.text_primary),
+            (self._activation_title, palette.text_primary),
             (self._shortcut_title, palette.text_primary),
             (self._appearance_hint, palette.text_hint),
             (self._language_hint, palette.text_hint),
             (self._language_label, palette.text_muted),
+            (self._font_label, palette.text_body),
             (self._logging_hint, palette.text_hint),
             (self._debug_label, palette.text_muted),
+            (self._activation_hint, palette.text_hint),
+            (self._activation_label, palette.text_muted),
             (self._shortcut_hint, palette.text_hint),
             (self._shortcut_error, palette.danger),
             (self._note_label, palette.text_hint),
@@ -514,13 +662,14 @@ class SettingsWindow:
             hover_color=palette.accent,
             text_color=palette.accent_text,
         )
-        self._debug_switch.configure(
-            text_color=palette.text_body,
-            progress_color=palette.accent,
-            button_color=palette.text_muted,
-            button_hover_color=palette.item_hover,
-            fg_color=palette.input_bg,
-        )
+        for switch in (self._debug_switch, self._activation_switch):
+            switch.configure(
+                text_color=palette.text_body,
+                progress_color=palette.accent,
+                button_color=palette.text_muted,
+                button_hover_color=palette.item_hover,
+                fg_color=palette.input_bg,
+            )
         self._theme_label.configure(
             text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}"))
         )

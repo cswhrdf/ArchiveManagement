@@ -53,11 +53,13 @@ class HomeSection(StrEnum):
     """游戏主页内部的分区(成员顺序即页签顺序).
 
     游戏发现原本是独立窗口, 后来合并成主页的一个分区: 两者都在回答"游戏库里有
-    什么", 放在同一个页面里切换比开两个窗口更顺手。
+    什么", 放在同一个页面里切换比开两个窗口更顺手。游戏启停同样讲的是库里的
+    游戏(谁在运行、谁在监控), 因此也放在这里而不是另开一个页面。
     """
 
     LIBRARY = "library"
     DISCOVERY = "discovery"
+    ACTIVATION = "activation"
 
     @property
     def label(self) -> str:
@@ -720,7 +722,6 @@ class HomeGameItem:
     last_backup_label: str  # 已格式化时间; 从未备份时为空串
     activity_label: str  # 最近活动时间; 无记录时为空串
     risk: bool
-    monitored: bool
     archived: bool
     enabled: bool = True
     tags: tuple[str, ...] = ()
@@ -733,7 +734,9 @@ class HomeGameItem:
 
     @property
     def backup_label(self) -> str:
-        """是否已备份的文案."""
+        """备份状态文案: 没有存档位置时说明原因, 而不是笼统地说"未备份"."""
+        if self.location_count == 0:
+            return tr("home.no_save_paths")
         return (
             tr("home.cat_backup_done")
             if self.backup_count
@@ -774,11 +777,10 @@ class HomeGameItem:
 
     @property
     def chips(self) -> tuple[str, ...]:
-        """列表行的分类标签: 平台、备份、监控、风险、归档/停用与自定义标签."""
+        """列表行的分类标签: 平台、备份、风险、归档/停用与自定义标签."""
         parts = [
             self.platform_label,
             self.backup_label,
-            tr("home.cat_monitor_on") if self.monitored else tr("home.cat_monitor_off"),
         ]
         if self.risk:
             parts.append(tr("home.chip_risk"))
@@ -926,7 +928,6 @@ def _home_item(facts: GameFacts, *, stamp: Callable[[datetime], str]) -> HomeGam
         ),
         activity_label=stamp(activity) if activity is not None else "",
         risk=facts.risk,
-        monitored=facts.monitored,
         archived=facts.archived,
         enabled=facts.enabled,
         tags=facts.tags,

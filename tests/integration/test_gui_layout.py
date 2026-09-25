@@ -21,6 +21,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import replace
 from math import ceil
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,7 +37,7 @@ try:
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
-from archive_management.domain import HomeFilter, HomeLayout
+from archive_management.domain import ArtworkKind, HomeFilter, HomeLayout
 from archive_management.services.hotkeys import (
     GlobalHotkeyService,
     UnavailableBackend,
@@ -884,3 +885,103 @@ def test_poster_layout_is_reflowed_after_the_first_render() -> None:
     placed = sorted({int(card.grid_info()["row"]) for card in page._rows.values()})
     expected = list(range(ceil(len(page._rows) / columns)))
     assert placed == expected, f"卡片行列不对: {placed} != {expected}"
+
+
+def _descendants(widget: Any) -> list[Any]:
+    """递归收集控件树里的全部子孙控件."""
+    found: list[Any] = []
+    for child in widget.winfo_children():
+        found.append(child)
+        found.extend(_descendants(child))
+    return found
+
+
+def _poster_marks(card: Any) -> list[Any]:
+    """海报卡片里的状态标记(封面左下角的启用绿点, 显示文本就是一个圆点)."""
+    return [
+        child
+        for child in _descendants(card)
+        if isinstance(child, ctk.CTkLabel) and str(child.cget("text")) == "●"
+    ]
+
+
+def test_poster_shows_a_green_dot_only_for_the_enabled_game() -> None:
+    """海报模式: 只有启用的那一款在封面左下角有绿点, 停用状态不加任何标记.
+
+    停用是常态(新建游戏默认停用), 所以"没有标记"必须是**真的没有那个控件** ——
+    否则一屏海报会挂满灰点, 看起来像整页都在报状态。
+    """
+    app = gui_app(_poster_start_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    # 演示后端种子里三款游戏都是启用的, 这里先停用一款当作对照。
+    app.backend.set_game_enabled("endless-space", False)
+    page.reload()
+    _settle_layout(app)
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+
+    marks = {game_id: _poster_marks(card) for game_id, card in page._rows.items()}
+
+    assert marks["endless-space"] == [], "停用的游戏不该有任何状态标记"
+    for game_id, dots in marks.items():
+        if game_id == "endless-space":
+            continue
+        assert len(dots) == 1, f"{game_id} 应当正好一个启用标记: {dots}"
+        dot = dots[0]
+        assert dot.cget("text_color") == page._palette.success, "启用标记要是绿色的"
+        assert dot.grid_info()["sticky"] == "sw", "启用标记要贴在封面左下角"
+
+
+def _poster_markers(card: Any) -> list[Any]:
+    """卡片封面上的标记控件(封面框的子控件里, 第一个是封面/占位标签)."""
+    cover = card.winfo_children()[0]
+    return list(cover.winfo_children()[1:])
+
+
+def _one_cover_app(cover: str) -> ArchiveApp:
+    """只有第一款游戏有封面图的演示窗口(其余回落名称占位)."""
+
+    class _OneCoverService(DemoArchiveService):
+        """演示后端 + 只给一款游戏提供封面路径(省去真实下载)."""
+
+        def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+            """只有 outer-wilds 有图; 其余返回空串, 界面回落文字占位."""
+            return cover if game_id == "outer-wilds" else ""
+
+    app = ArchiveApp(
+        _OneCoverService(delay=0),
+        title="海报底衬测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+def test_poster_markers_only_get_a_backing_over_a_real_cover(tmp_path: Path) -> None:
+    """底衬按“这张卡片有没有封面图”给: 真封面才有底衬, 没有封面时彻底看不见背景.
+
+    图上是什么颜色都有可能, 绿点与备份数没有底衬会看不清; 而回落成名称占位时封面
+    底色是纯色, 标签的 ``transparent`` 取到的正是这个底色 —— 这才真的“没有背景色”。
+    """
+    from PIL import Image
+
+    cover = tmp_path / "cover.png"
+    Image.new("RGB", (10, 10), (0, 0, 0)).save(cover)
+
+    app = gui_app(_one_cover_app, str(cover))
+    assert _wait_mapped(app)
+    page = app._home_page
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _settle_layout(app)
+
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+    assert "cover:outer-wilds" in page._artwork_images, "封面没走缓存就测不到底衬分支"
+    for game_id, card in page._rows.items():
+        # 只有真的画了封面图的那张卡片才要底衬. 演示后端种子三款游戏都是启用的,
+        # 所以每张卡片都有两个标记(备份数角标 + 启用绿点).
+        expected = page._palette.panel if game_id == "outer-wilds" else "transparent"
+        markers = _poster_markers(card)
+        assert len(markers) == 2, f"{game_id} 应当有备份角标与启用标记: {markers}"
+        for marker in markers:
+            backing = marker.cget("fg_color")
+            assert backing == expected, f"{game_id} 的底衬不对: {backing} != {expected}"

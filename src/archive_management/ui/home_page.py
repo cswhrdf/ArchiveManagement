@@ -33,7 +33,10 @@ from math import ceil
 import customtkinter as ctk
 from PIL import Image
 
+from archive_management.application.games import ActivationOutcome
 from archive_management.domain import (
+    MAX_TAG_LENGTH,
+    MAX_TAGS,
     PAGE_SIZES,
     ArtworkKind,
     HomeFilter,
@@ -43,8 +46,9 @@ from archive_management.domain import (
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.services.audit import log_action
+from archive_management.ui.activation_page import ActivationPanel
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.dialogs import ask_text, info_dialog
+from archive_management.ui.dialogs import ask_text, edit_tags_dialog, info_dialog
 from archive_management.ui.discovery_page import DiscoveryPanel
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
@@ -60,6 +64,7 @@ from archive_management.ui.textfit import fit_text
 _ChangeCallback = Callable[[], None]
 _DetailCallback = Callable[[str], None]
 _NoticeCallback = Callable[[str], None]
+_MonitorCallback = Callable[[str], None]
 
 logger = logging.getLogger(__name__)
 
@@ -160,14 +165,21 @@ class HomePage:
         on_change: _ChangeCallback | None = None,
         on_open_detail: _DetailCallback | None = None,
         on_notice: _NoticeCallback | None = None,
+        on_activation_monitor: _MonitorCallback | None = None,
+        on_activation_refresh: _ChangeCallback | None = None,
     ) -> None:
-        """在 ``parent`` 内构造主页(含游戏发现分区)."""
+        """在 ``parent`` 内构造主页(含游戏发现与游戏启停分区)."""
         self._parent = parent
         self._backend = backend
         self._palette = palette
         self._on_change = on_change
         self._on_open_detail = on_open_detail
         self._on_notice = on_notice
+        self._on_activation_monitor = on_activation_monitor
+        self._on_activation_refresh = on_activation_refresh
+        # 最近一次自动启停结果与开关状态: 主题切换会重建整个页面, 重建后要能回填。
+        self._last_activation: ActivationOutcome | None = None
+        self._activation_enabled = False
         self._board: HomeBoard | None = None
         self._rows: dict[str, ctk.CTkFrame] = {}
         # 封面/图标: CTkImage 必须被持有引用, 否则会被垃圾回收成空白.
@@ -232,6 +244,18 @@ class HomePage:
             row=1, column=0, sticky="nsew", padx=24, pady=(0, 14)
         )
         self._discovery.frame.grid_remove()
+
+        self._activation = ActivationPanel(
+            self.frame,
+            palette=self._palette,
+            on_monitor=self._on_activation_monitor,
+            on_open_detail=self._on_open_detail,
+            on_refresh=self._on_activation_refresh,
+        )
+        self._activation.frame.grid(
+            row=1, column=0, sticky="nsew", padx=24, pady=(0, 14)
+        )
+        self._activation.frame.grid_remove()
         self._paint_section_tabs()
 
     def _build_sections(self) -> None:
@@ -587,19 +611,45 @@ class HomePage:
     # -- 分区切换 -----------------------------------------------------------
 
     def _show_section(self, section: HomeSection) -> None:
-        """切换主页内部的分区(游戏库 / 游戏发现)."""
+        """切换主页内部的分区(游戏库 / 游戏发现 / 游戏启停)."""
         self._section = section
         if section is HomeSection.LIBRARY:
             self._library.grid()
             self._discovery.frame.grid_remove()
-        else:
+            self._activation.frame.grid_remove()
+        elif section is HomeSection.DISCOVERY:
             # 发现分区的数据可能被别处改过(例如手动添加游戏后同名候选会被自动
             # 标记为已入库), 因此每次进入都重新读取一次.
             self._discovery.reload()
             self._discovery.frame.grid()
             self._library.grid_remove()
+            self._activation.frame.grid_remove()
+        else:
+            # 进入启停分页: 页面只展示最近一次轮询结果, 因此进来就立即再探一次
+            # (人工动作, 顺带把轮询间隔退回最快档), 结果由主窗口回填。
+            self._activation.render(
+                self._last_activation, enabled=self._activation_enabled
+            )
+            self._activation.frame.grid()
+            self._library.grid_remove()
+            self._discovery.frame.grid_remove()
+            if self._on_activation_refresh is not None:
+                self._on_activation_refresh()
         self._paint_section_tabs()
         log_action("ui.home_section", basic=True, section=section.value)
+
+    def refresh_activation(
+        self,
+        outcome: ActivationOutcome | None = None,
+        *,
+        enabled: bool | None = None,
+    ) -> None:
+        """把最近一次自动启停结果交给启停分页(由主窗口在轮询结束后调用)."""
+        if outcome is not None:
+            self._last_activation = outcome
+        if enabled is not None:
+            self._activation_enabled = enabled
+        self._activation.render(self._last_activation, enabled=self._activation_enabled)
 
     def _paint_section_tabs(self) -> None:
         """选中分区用强调淡底, 其余用普通按钮配色."""
@@ -647,6 +697,7 @@ class HomePage:
         self._artwork_images = {}
         self._build()
         self.reload()
+        self._activation.render(self._last_activation, enabled=self._activation_enabled)
         self._selected = selected
         self._page_index = min(page_index, self._page_count() - 1)
         self._show_section(section)
@@ -987,7 +1038,7 @@ class HomePage:
         self._schedule_list_sync()
 
     def _build_poster(self, item: HomeGameItem) -> ctk.CTkFrame:
-        """一张海报卡片: 竖屏封面(文字占位 + 右下角备份数) + 名称 + 最近活动时间."""
+        """一张海报卡片: 竖屏封面(右下角备份数 + 左下角启用标记) + 名称 + 最近活动."""
         palette = self._palette
         card = ctk.CTkFrame(
             self._list_box,
@@ -1018,13 +1069,25 @@ class HomePage:
             font=ctk.CTkFont(size=34, weight="bold"),
         )
         placeholder.grid(row=0, column=0, sticky="nsew")
-        # 右下角的备份数量角标(与封面同格叠放, 靠右下角).
+        # 底衬只用在**真的有封面图**的时候: 图上是什么颜色都有可能, 绿点与备份数
+        # 没有底衬会看不清; 而回落成名称占位时封面底色就是纯色, 标签的 transparent
+        # 取到的正是这个底色(与父容器完全一致), 于是底衬彻底看不见。
+        backing = "transparent" if cover_image is None else palette.panel
+        # 右下角角标: 没关联存档位置时这里没有"备份数"可言, 直接说明原因.
         badge = ctk.CTkLabel(
             cover,
-            text=tr("home.poster_backups", count=item.backup_count),
+            text=(
+                tr("home.poster_backups", count=item.backup_count)
+                if item.location_count
+                else tr("home.no_save_paths")
+            ),
             corner_radius=6,
-            fg_color=palette.panel,
-            text_color=(palette.text_body if item.backup_count else palette.text_muted),
+            fg_color=backing,
+            text_color=(
+                palette.text_body
+                if item.location_count and item.backup_count
+                else palette.text_muted
+            ),
             font=ctk.CTkFont(size=10, weight="bold"),
         )
         badge.grid(row=0, column=0, sticky="se", padx=6, pady=6)
@@ -1054,7 +1117,19 @@ class HomePage:
             text_color=palette.text_muted,
         )
         activity.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 10))
-        for widget in (card, cover, placeholder, badge, name, activity):
+        widgets: list[ctk.CTkBaseClass] = [
+            card,
+            cover,
+            placeholder,
+            badge,
+            name,
+            activity,
+        ]
+        if item.enabled:
+            # 左下角的启用标记: 只有启用的那一款才画点 —— 停用是常态(新建游戏默认
+            # 停用), 画一片灰点反而让整屏海报都在“报告状态”。
+            widgets.append(self._poster_status(cover, backing))
+        for widget in widgets:
             widget.bind(
                 "<Button-1>", lambda _event, key=item.game_id: self._select(key)
             )
@@ -1062,6 +1137,24 @@ class HomePage:
                 "<Double-Button-1>", lambda _event, key=item.game_id: self._open(key)
             )
         return card
+
+    def _poster_status(self, cover: ctk.CTkFrame, backing: str) -> ctk.CTkLabel:
+        """封面左下角的“启用中”绿点(调用方只在启用时创建它).
+
+        ``backing`` 由调用方按“这一张卡片有没有封面图”给: 有图时用面板色做底衬,
+        没有图时给 ``"transparent"``(取到封面自己的底色, 看不见底衬)。
+        """
+        status = ctk.CTkLabel(
+            cover,
+            text="●",
+            corner_radius=6,
+            fg_color=backing,
+            text_color=self._palette.success,
+            font=ctk.CTkFont(size=10, weight="bold"),
+        )
+        # 与右下角的备份数角标同一套内缩, 一左一右同高。
+        status.grid(row=0, column=0, sticky="sw", padx=6, pady=6)
+        return status
 
     def _artwork_image(
         self, item: HomeGameItem, kind: ArtworkKind, size: tuple[int, int]
@@ -1455,7 +1548,7 @@ class HomePage:
         )
 
     def _on_edit_tags(self) -> None:
-        """编辑选中游戏的自定义标签(逗号分隔)."""
+        """编辑选中游戏的自定义标签(一行一个, 与导入时调整存档路径同一个样式)."""
         item = self._item()
         if item is None:
             self._summary_label.configure(text=tr("home.require_game"))
@@ -1463,20 +1556,17 @@ class HomePage:
         if not item.allow("tags"):
             self._report_archived(item)
             return
-        value = ask_text(
+        tags = edit_tags_dialog(
             self.frame,
             self._palette,
-            title=tr("dialog.home_tags_title"),
-            text=tr("dialog.home_tags_prompt"),
-            initial=", ".join(item.tags),
-            allow_empty=True,
+            tags=item.tags,
+            max_tags=MAX_TAGS,
+            max_length=MAX_TAG_LENGTH,
         )
-        if value is None:
+        if tags is None:
             return
         try:
-            self._backend.set_game_tags(
-                item.game_id, [part for part in value.split(",")]
-            )
+            self._backend.set_game_tags(item.game_id, list(tags))
         except ArchiveManagementError as exc:
             self._show_error(exc)
             return

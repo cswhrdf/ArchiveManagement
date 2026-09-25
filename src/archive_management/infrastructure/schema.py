@@ -319,6 +319,66 @@ _V10_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 11: 自动启停的状态.
+#
+# 自动启停要回答"现在该不该把启用态收回去", 判断依据是"被跟踪的那一款有没有运行过"
+# (armed)与"用户最后手动停用的是哪一款"(suppressed)。两件事都必须落库: 重启软件后
+# 丢掉 armed 会把"游戏还没启动"误当成"已经退出"。单行表, 与 home_state 同一套做法;
+# 跟踪对象随游戏删除由外键置空, version 不符时旧记录按"没有状态"处理。
+_V11_STATEMENTS: Sequence[str] = (
+    """
+    CREATE TABLE IF NOT EXISTS activation_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        tracked_game_id INTEGER REFERENCES games(id) ON DELETE SET NULL,
+        armed INTEGER NOT NULL DEFAULT 0,
+        suppressed_game_id INTEGER REFERENCES games(id) ON DELETE SET NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    )
+    """,
+)
+
+# 版本 12: 全库监控与"启动顺序队列".
+#
+# 监控范围从"当前启用的那一款"扩到"当前导入的全部游戏"(见 PLAN 的 G-8), 因此
+# 多出两样东西:
+#
+# - ``activation_runs``: 按"先后被观察到启动"的顺序登记正在运行的游戏 —— 顺序
+#   就是回落依据, 必须跨重启保留; ``suppressed`` 记录"用户手动停用过它", 只要它
+#   还在运行就不会被自动接管, 该行随它退出一起消失(抑制随之解除)。
+# - ``activation_state`` 换成 ``monitor_game_id`` / ``armed`` / ``paused``: 监控
+#   对象不能再从"哪一款启用"推出来(手动启用一款还没运行的游戏时, 队列里没有任何
+#   可接的项, 得先把它记下来)。v11 的两列已无任何读取方, 直接重建该表; 旧记录
+#   随之丢失 —— 与"版本不符按没有状态处理"一致。
+_V12_STATEMENTS: Sequence[str] = (
+    """
+    DROP TABLE IF EXISTS activation_state
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS activation_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        monitor_game_id INTEGER REFERENCES games(id) ON DELETE SET NULL,
+        armed INTEGER NOT NULL DEFAULT 0,
+        paused INTEGER NOT NULL DEFAULT 0,
+        version INTEGER NOT NULL DEFAULT 2,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS activation_runs (
+        game_id INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        suppressed INTEGER NOT NULL DEFAULT 0,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_activation_runs_position
+        ON activation_runs (position)
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
@@ -330,6 +390,8 @@ SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (8, _V8_STATEMENTS),
     (9, _V9_STATEMENTS),
     (10, _V10_STATEMENTS),
+    (11, _V11_STATEMENTS),
+    (12, _V12_STATEMENTS),
 )
 
 

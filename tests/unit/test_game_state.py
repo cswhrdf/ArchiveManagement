@@ -1,7 +1,8 @@
-"""游戏生命周期用例(删除释放候选、启用互斥、自动启停接缝).
+"""游戏生命周期用例(删除释放候选、启用互斥、默认的自动启停策略).
 
 这些约束都是"数据一致性"级别的: 删除游戏后探测候选不能卡在已导入, 启用第二款
-游戏必须把第一款停用, 自动启停策略在没实现之前不能改变任何状态。
+游戏必须把第一款停用, 默认的自动启停策略不能改变任何状态。真实策略(按进程
+自动启停)的状态机用例在 ``tests/unit/test_activation.py``。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from archive_management.application import discovery as discovery_cases
 from archive_management.application import games as games_cases
 from archive_management.application.home import set_archived
 from archive_management.domain import Game, GameCandidate
+from archive_management.domain.activation import REASON_MANUAL
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
@@ -122,51 +124,15 @@ def test_enabling_an_archived_game_is_rejected(tmp_path: Path) -> None:
 
 
 def test_manual_activation_never_changes_anything(tmp_path: Path) -> None:
-    """自动启停尚未实现: 默认策略必须保持用户手动设置的状态."""
+    """默认策略不改变任何状态: 自动启停要由设置里的开关明确打开."""
     database = _database(tmp_path)
     repository = GameRepository(database)
     game = repository.add(Game(name="Demo", enabled=True))
     assert game.id is not None
     policy = games_cases.ManualActivation()
 
-    assert games_cases.apply_activation(database, policy, running=["game.exe"]) is None
+    outcome = games_cases.apply_activation(database, policy)
+
+    assert outcome.changed is False
+    assert outcome.reason == REASON_MANUAL
     assert repository.enabled_game_id() == game.id
-
-
-def test_activation_switches_to_the_policy_target(tmp_path: Path) -> None:
-    """策略给出目标时复用 set_enabled: 切换同时把原来的那款停用."""
-    database = _database(tmp_path)
-    repository = GameRepository(database)
-    current = repository.add(Game(name="旧目标", enabled=True))
-    target = repository.add(Game(name="新目标"))
-    assert current.id is not None
-    assert target.id is not None
-
-    class _FakePolicy:
-        """固定返回目标游戏 id 的假策略."""
-
-        def target_game(self, games: object, *, running: object) -> int | None:
-            return target.id
-
-    result = games_cases.apply_activation(database, _FakePolicy(), running=[])
-
-    assert result is not None
-    assert result.game.id == target.id
-    assert result.replaced is not None
-    assert result.replaced.id == current.id
-    assert repository.enabled_game_id() == target.id
-
-
-def test_activation_rejects_an_unknown_target(tmp_path: Path) -> None:
-    database = _database(tmp_path)
-    repository = GameRepository(database)
-    repository.add(Game(name="Demo", enabled=True))
-
-    class _BadPolicy:
-        """返回不存在游戏的策略."""
-
-        def target_game(self, games: object, *, running: object) -> int | None:
-            return 999
-
-    with pytest.raises(ArchiveManagementError):
-        games_cases.apply_activation(database, _BadPolicy())

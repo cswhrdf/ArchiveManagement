@@ -108,3 +108,13 @@ def needs_of(text: str, job: str) -> set[str]:
     matched = _NEEDS.search(job_block(text, job))
     assert matched is not None, f"{job} 没有声明 needs"
     return {name.strip() for name in matched.group(1).split(",") if name.strip()}
+
+
+def job_condition(text: str, job: str) -> str:
+    """取出作业级 ``if:`` 的条件文本; 作业没写 ``if:`` 时返回空串.
+
+    作业内部的键是四空格缩进, 步骤是六空格以上(其键更深), 所以只认四空格那一行 ——
+    否则 ``if: always()`` 这类条件会把步骤级的一起数进来。
+    """
+    matched = re.search(r"^ {4}if:\s*(.+)$", job_block(text, job), re.MULTILINE)
+    return "" if matched is None else matched.group(1).strip()

@@ -1309,6 +1309,22 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_pushes() -> None:
     assert "paths-ignore" not in pull_block, "PR 不能用路径过滤: 必需检查会停在 pending"
 
 
+def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
+    """被取代的运行别再花时间做报告: 两个报告作业的条件都要排除“整轮被取消”.
+
+    ``always()`` 的语义是“即使被取消也返回 true”, 所以只写 ``always()`` 会让已经被
+    取代的那一轮照样启动合并/汇总作业 —— 那正是“取消了却还在跑报告”的来源。这里同时
+    钉住两件事: ``always()`` 必须在(依赖作业失败时仍要出报告, 这是原有意图), 只是得
+    配上 ``!cancelled()``。
+    """
+    text = ci_workflow.workflow_text()
+
+    for job in ("pytest-report", "allure-summary"):
+        condition = ci_workflow.job_condition(text, job)
+        assert "always()" in condition, f"{job} 少了 always(): 依赖作业失败时也要出报告"
+        assert "!cancelled()" in condition, f"{job} 在整轮被取消后仍会启动"
+
+
 def test_tkinter_check_still_fails_the_job_when_tcl_is_broken() -> None:
     """Tkinter 自检要保留"修不好就红"的语义(只是从"每次重装"改成"失败才重装").
 

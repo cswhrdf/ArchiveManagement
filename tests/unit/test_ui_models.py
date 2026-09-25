@@ -586,7 +586,6 @@ def _home_facts(
     locations: int = 1,
     backups: int = 1,
     risk: bool = False,
-    monitored: bool = False,
     archived: bool = False,
     tags: tuple[str, ...] = (),
 ) -> GameFacts:
@@ -600,7 +599,6 @@ def _home_facts(
         last_backup_at=_HOME_NOW if backups else None,
         last_activity_at=_HOME_NOW,
         risk=risk,
-        monitored=monitored,
         archived=archived,
         tags=tags,
     )
@@ -622,7 +620,6 @@ def test_home_game_item_labels_and_summary() -> None:
         last_backup_label="09-12 08:00",
         activity_label="09-13 09:00",
         risk=False,
-        monitored=True,
         archived=False,
         tags=("探索",),
     )
@@ -637,7 +634,6 @@ def test_home_game_item_labels_and_summary() -> None:
     assert item.backup_enabled is True
     chips = item.chips
     assert tr("discovery.source_steam") in chips
-    assert tr("home.cat_monitor_on") in chips
     assert "探索" in chips
     assert tr("home.chip_risk") not in chips
 
@@ -652,11 +648,11 @@ def test_home_game_item_marks_risk_archive_and_missing_backup() -> None:
         last_backup_label="",
         activity_label="",
         risk=True,
-        monitored=False,
         archived=True,
     )
 
-    assert item.backup_label == tr("home.cat_backup_none")
+    # 没有关联存档位置时说的是原因, 而不是笼统的"未备份"。
+    assert item.backup_label == tr("home.no_save_paths")
     assert item.risk_label == tr("home.risk_bad")
     assert item.state_label == tr("home.chip_archived")
     assert tr("home.last_backup_none") in item.summary
@@ -782,7 +778,7 @@ def test_home_labels_are_all_translated() -> None:
         assert tr(key) != key
     for view in HomeView:
         assert not view.label.startswith("home.")
-    for key in ("backup_done", "backup_none", "monitor_on", "monitor_off"):
+    for key in ("backup_done", "backup_none"):
         assert tr(f"home.cat_{key}") != f"home.cat_{key}"
 
 
@@ -793,8 +789,12 @@ def test_app_page_defaults_to_home_first() -> None:
 
 
 def test_home_section_order_and_labels() -> None:
-    """主页内部分区: 游戏库在前(默认), 游戏发现作为第二个分区."""
-    assert [section.value for section in HomeSection] == ["library", "discovery"]
+    """主页内部分区: 游戏库在前(默认), 游戏发现与游戏启停依次排在后面."""
+    assert [section.value for section in HomeSection] == [
+        "library",
+        "discovery",
+        "activation",
+    ]
     assert HomeSection.LIBRARY is next(iter(HomeSection))
     for section in HomeSection:
         assert section.label == tr(f"page.{section.value}")

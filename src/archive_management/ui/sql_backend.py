@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+from archive_management.application import activation as activation_cases
 from archive_management.application import candidates as candidate_cases
 from archive_management.application import discovery as discovery_cases
 from archive_management.application import games as games_cases
@@ -92,6 +93,7 @@ from archive_management.services.platform_adapters import (
     default_adapters,
 )
 from archive_management.services.platform_scan import default_roots, path_health
+from archive_management.services.processes import ProcessNameProvider
 from archive_management.services.scheduler import (
     BackupScheduler,
     ScheduledEntry,
@@ -224,11 +226,13 @@ class SqlArchiveService:
         save_source: SaveCandidateSource | None = None,
         adapters: Mapping[PlatformId, PlatformAdapter] | None = None,
         name_fetcher: NameFetcher | None = None,
+        process_provider: ProcessNameProvider | None = None,
     ) -> None:
         """绑定数据库、备份根目录、调度器与缓存目录(后两者默认惰性创建).
 
         ``cache_dir`` 为空时封面接口一律返回空: 测试与未配置应用路径的场景直接走
-        占位图, 不去碰真实用户缓存目录。
+        占位图, 不去碰真实用户缓存目录。``process_provider`` 是自动启停用的进程名
+        提供者, 省略时用 psutil(测试注入假进程表)。
         """
         self._database = database
         self._backup_root = backup_root
@@ -252,6 +256,7 @@ class SqlArchiveService:
         self._save_source = save_source
         self._adapters = adapters
         self._name_fetcher = name_fetcher
+        self._process_provider = process_provider
         self._names_lock = threading.Lock()
         self._names_running = False
         self._artwork_lock = threading.Lock()
@@ -415,14 +420,30 @@ class SqlArchiveService:
         name_cache_at(self._cache_dir).forget(str(game.steam_app_id))
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
-        """启用或停用一个游戏(启用时会自动停用其它启用中的游戏)."""
+        """启用或停用一个游戏(启用时会自动停用其它启用中的游戏).
+
+        这是用户自己的选择, 因此带 ``manual=True``: 自动启停据此让手动决定优先
+        (见 :func:`~archive_management.application.games.set_enabled`)。
+        """
         _game, gid = self._game_ref(game_id)
-        result = games_cases.set_enabled(self._database, gid, enabled)
+        result = games_cases.set_enabled(self._database, gid, enabled, manual=True)
         if not enabled:
             # 停用后定时备份不允许启用: 先把它置为暂停, 界面才能如实展示状态.
             self._pause_schedule(gid)
         self._touch()
         return self._summary(result.game)
+
+    def poll_activation(self, *, enabled: bool = True) -> games_cases.ActivationOutcome:
+        """低频轮询一次自动启停: 按被跟踪游戏的进程决定启用态.
+
+        由界面定时器在后台线程调用; 开关关闭时什么都不做(连状态都不读)。
+        """
+        outcome = activation_cases.poll_activation(
+            self._database, enabled=enabled, provider=self._process_provider
+        )
+        if outcome.changed:
+            self._touch()
+        return outcome
 
     # -- 存档位置管理 ------------------------------------------------------
 

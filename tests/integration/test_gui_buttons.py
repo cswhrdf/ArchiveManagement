@@ -35,7 +35,7 @@ import archive_management.ui.manage_window as mgr_mod
 import archive_management.ui.schedule_window as sched_mod
 from archive_management.domain import HomeView
 from archive_management.exceptions import HotkeyError
-from archive_management.i18n import tr
+from archive_management.i18n import current_locale, set_locale, tr
 from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.services.hotkeys import (
     ACTION_CREATE_BRANCH,
@@ -77,6 +77,7 @@ def _patch_dialogs(
     schedule_result: tuple[str, str] | None = ("", "3"),
     restore_result: bool | None = True,
     import_result: tuple[str, tuple[str, ...]] | None = ("导入名", ()),
+    tags_result: tuple[str, ...] | None = ("解谜",),
 ) -> None:
     """把模态对话框替换为自动应答, 避免 wait_window 阻塞测试线程.
 
@@ -113,8 +114,11 @@ def _patch_dialogs(
     monkeypatch.setattr(disc_mod, "info_dialog", lambda *_a, **_k: None)
     # 导入对话框返回 (名称, 存档路径): 用它可以检查"确认的路径才会写库".
     monkeypatch.setattr(disc_mod, "import_game_dialog", lambda *_a, **_k: import_result)
-    # 游戏主页窗口需要文本输入(存档位置/标签)与错误提示的自动应答.
+    # 游戏主页窗口需要文本输入(存档位置)、标签编辑对话框与错误提示的自动应答.
     monkeypatch.setattr(home_page_mod, "ask_text", next_text)
+    monkeypatch.setattr(
+        home_page_mod, "edit_tags_dialog", lambda *_a, **_k: tags_result
+    )
     monkeypatch.setattr(home_page_mod, "info_dialog", lambda *_a, **_k: None)
 
 
@@ -1462,6 +1466,99 @@ def test_settings_window_reverts_the_switch_when_applying_fails() -> None:
     assert "写配置失败" in window._debug_label.cget("text")
 
 
+def test_settings_window_toggles_auto_activation() -> None:
+    """设置窗口里拨自动启停开关: 交给主窗口应用, 并就地更新状态说明."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+    assert window._activation is False
+
+    window._activation_switch.select()
+    window._on_activation_toggled()
+    _pump(app)
+
+    assert app._activation is True
+    assert window._activation is True
+    assert window._activation_label.cget("text") == tr(
+        "settings.activation_state", state=tr("settings.activation_on")
+    )
+
+
+def test_settings_window_reverts_the_activation_switch_when_applying_fails() -> None:
+    """应用失败时把自动启停开关拨回实际生效的状态, 并说明原因."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+
+    window._on_apply_activation = lambda enabled: "写配置失败"
+    window._activation_switch.select()
+    window._on_activation_toggled()
+    _pump(app)
+
+    assert window._activation is False
+    assert bool(window._activation_switch.get()) is False
+    assert "写配置失败" in window._activation_label.cget("text")
+
+
+def test_auto_activation_polls_only_when_switched_on(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """自动启停只在开关打开时轮询: 关着时一次进程表都不枚举, 打开后后台轮询启动.
+
+    用真实的 SQL 后端(注入可数的假进程表), 因此覆盖"界面定时器 → 后台线程 →
+    服务层判断"这整条接线, 而不是只测策略本身。
+    """
+    from archive_management.domain import Game, SaveLocation
+    from archive_management.infrastructure.database import Database
+    from archive_management.infrastructure.repository import (
+        GameRepository,
+        SaveLocationRepository,
+    )
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    _patch_dialogs(monkeypatch)
+    calls: list[str] = []
+
+    def provider() -> list[str]:
+        calls.append("probe")
+        return []
+
+    db = Database(tmp_path / "activation.db")
+    db.migrate()
+    game = GameRepository(db).add(Game(name="Demo", enabled=True))
+    assert game.id is not None
+    # 没有存档位置的游戏不参与监控(见 PLAN 的 G-8), 这里必须给上一条路径。
+    SaveLocationRepository(db).add(SaveLocation(game_id=game.id, path="C:/Saves/Demo"))
+    service = SqlArchiveService(
+        db, backup_root=tmp_path / "backups", process_provider=provider
+    )
+    try:
+        app = _new_app(service)
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        assert app._activation is False
+        # 关着的时候多跑几轮定时器: 一次都不该探测. 开关打开后立刻轮询一次
+        # (不用等满一个间隔), 否则"刚打开却没反应"看起来就像坏了.
+        for _index in range(6):
+            app._poll_messages()
+            _pump(app)
+            time.sleep(0.02)
+        assert calls == []
+
+        app._on_activation_change(True)
+        assert _wait_for(app, lambda: bool(calls), seconds=3.0)
+        assert _wait_for(app, lambda: not app._activation_busy, seconds=3.0)
+    finally:
+        app.destroy()
+
+
 def test_discovery_rows_show_the_localized_name() -> None:
     """探测结果行直接显示当前语言的译名, 并把探测到的原名放在括号里."""
     from archive_management.ui.demo_backend import DemoArchiveService
@@ -1874,11 +1971,15 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         palette=app.p,
         theme=app._theme,
         language=app._language,
+        base_font_px=app._base_font_px,
         debug=app._debug,
+        activation=app._activation,
         shortcuts=app._shortcuts,
         on_toggle_theme=app._on_toggle_theme,
         on_apply_language=app._on_language_change,
+        on_apply_font_size=app._on_font_size_change,
         on_apply_debug=app._on_debug_change,
+        on_apply_activation=app._on_activation_change,
         on_apply_shortcut=apply,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
@@ -2069,13 +2170,16 @@ def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
     assert reloaded._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
 
 
-def test_invalid_config_is_reset_to_defaults_on_startup(tmp_path: Path) -> None:
-    """启动时发现配置内容非法: 还原为默认值并提示用户, 而不是静默回落."""
+def test_invalid_config_entries_are_repaired_on_startup(tmp_path: Path) -> None:
+    """启动时只写坏一项: 剔除那一项并提示用户, 而不是把整份配置都冲掉."""
     from archive_management.config import load_config
     from archive_management.ui.demo_backend import DemoArchiveService
 
     paths = ApplicationPaths.default(override_root=tmp_path).ensure()
-    paths.config_path.write_text('{"version": 1, "theme": "neon"}', encoding="utf-8")
+    paths.config_path.write_text(
+        '{"version": 1, "theme": "neon", "language": "en"}', encoding="utf-8"
+    )
+    before = current_locale()
     app = gui_app(
         _new_app,
         DemoArchiveService(delay=0),
@@ -2084,9 +2188,33 @@ def test_invalid_config_is_reset_to_defaults_on_startup(tmp_path: Path) -> None:
     )
     assert app._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
     assert app._shortcuts[ACTION_CREATE_BRANCH] == DEFAULT_BRANCH_ACCELERATOR
+    # 提示是按"读配置那一刻"的语言渲染的(之后才切到配置里的语言)
+    set_locale(before)
+    assert app._last_feedback[1] == tr("config.repaired", count=1, fields="theme")
+    assert (paths.config_dir / "config.json.invalid").is_file()
+    repaired = load_config(paths.config_path)
+    assert repaired.theme == "system"
+    assert repaired.language == "en"
+
+
+def test_unreadable_config_is_reset_to_defaults_on_startup(tmp_path: Path) -> None:
+    """整份文件都读不出来时: 还原为默认值并提示用户, 而不是静默回落."""
+    from archive_management.config import AppConfig, load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    paths.config_path.write_text("{", encoding="utf-8")
+    before = current_locale()
+    app = gui_app(
+        _new_app,
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        paths=paths,
+    )
+    set_locale(before)
     assert app._last_feedback[1] == tr("config.reset")
     assert (paths.config_dir / "config.json.invalid").is_file()
-    assert load_config(paths.config_path).hotkeys.save == DEFAULT_SAVE_ACCELERATOR
+    assert load_config(paths.config_path) == AppConfig()
 
 
 def test_failed_hotkey_registration_keeps_the_previous_combination(
@@ -2421,6 +2549,176 @@ def test_manage_window_delete_game_removes_and_closes(
     manager._on_delete_game()
     ids = {game.game_id for game in app.backend.list_games()}
     assert game_id not in ids
+
+
+# -- 游戏启停分页(PLAN 阶段 G-8) ----------------------------------------------
+
+
+def _button_named(widget: Any, text: str) -> list[Any]:
+    """递归找出文案匹配的按钮(便于检查与点击某一行的动作)."""
+    found: list[Any] = []
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkButton) and str(child.cget("text")) == text:
+            found.append(child)
+        found.extend(_button_named(child, text))
+    return found
+
+
+def _queue_outcome(*games: tuple[int, str], paused: bool = False) -> Any:
+    """构造一个"队列里有这些游戏"的轮询结果(界面用例不必走真实探测)."""
+    from archive_management.application.games import ActivationOutcome, QueueItem
+    from archive_management.domain import ActivationState, Game
+
+    items = tuple(
+        QueueItem(
+            game=Game(id=game_id, name=name),
+            position=index + 1,
+            running=True,
+            monitor=index == 0,
+            first_seen_at="2026-09-25T10:00:00.000Z",
+            last_seen_at="2026-09-25T10:00:05.000Z",
+        )
+        for index, (game_id, name) in enumerate(games)
+    )
+    monitor = items[0].game if items else None
+    return ActivationOutcome(
+        state=ActivationState(
+            monitor_game_id=None if monitor is None else monitor.id,
+            armed=bool(items),
+            paused=paused,
+        ),
+        monitor=monitor,
+        queue=items,
+    )
+
+
+def test_the_activation_page_lists_the_queue_and_picks_the_monitor() -> None:
+    """启停分页: 按启动顺序列出队列, 监控中的那款按钮禁用, 其余可点."""
+    from archive_management.ui.activation_page import ActivationPanel
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+
+    picked: list[str] = []
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    panel = ActivationPanel(
+        ctk.CTkFrame(app),
+        palette=Palette.for_theme(app._theme),
+        on_monitor=picked.append,
+    )
+    try:
+        panel.render(_queue_outcome((3, "First"), (7, "Second")), enabled=True)
+        _pump(app)
+
+        texts = _label_texts(panel.frame)
+        assert "First" in texts
+        assert "Second" in texts
+        assert tr("activation.row_monitor") in texts
+        assert tr("activation.row_running") in texts
+        assert tr("activation.column_order") in texts
+        assert tr("activation.summary", monitor="First", count=2) in texts
+
+        buttons = _button_named(panel.frame, tr("activation.action_monitor"))
+        assert len(buttons) == 2
+        assert str(buttons[0].cget("state")) == "disabled"
+        buttons[1].invoke()
+        _pump(app)
+        assert picked == ["7"]
+    finally:
+        panel.frame.destroy()
+        app.destroy()
+
+
+def test_the_activation_page_points_at_the_setting_when_off() -> None:
+    """开关关闭时不摆空表: 直接告诉用户去哪里打开."""
+    from archive_management.ui.activation_page import ActivationPanel
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    panel = ActivationPanel(ctk.CTkFrame(app), palette=Palette.for_theme(app._theme))
+    try:
+        panel.render(enabled=False)
+        _pump(app)
+
+        texts = _label_texts(panel.frame)
+        assert tr("activation.state_off") in texts
+        assert tr("activation.summary_off") in texts
+        assert tr("activation.row_monitor") not in texts
+        assert _button_named(panel.frame, tr("activation.action_monitor")) == []
+    finally:
+        panel.frame.destroy()
+        app.destroy()
+
+
+def test_setting_the_monitor_switches_the_game_and_resets_the_interval() -> None:
+    """点「设为监控对象」= 手动启用它, 并把轮询间隔退回最快档(马上再探一次)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    try:
+        target = app.backend.list_games()[1].game_id
+        app._activation_steps = 3
+        app._activation_due = time.monotonic() + 99.0
+
+        app._on_set_monitor(target)
+        _pump(app)
+
+        enabled = [game.game_id for game in app.backend.list_games() if game.enabled]
+        assert enabled == [target]
+        assert app._activation_steps == 0
+        assert app._activation_due == 0.0
+    finally:
+        app.destroy()
+
+
+def test_the_probe_interval_grows_while_a_game_is_running() -> None:
+    """队列非空则轮询逐档放慢; 队列清空回到最快档(由 _finish_activation 记账)."""
+    from archive_management.domain.activation import activation_delay
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    try:
+        app._activation_run = _queue_outcome((1, "First"))
+        app._finish_activation()
+        assert app._activation_running is True
+        assert app._activation_steps == 1
+        assert activation_delay(app._activation_steps, running=True) > activation_delay(
+            0, running=False
+        )
+
+        app._activation_run = _queue_outcome()
+        app._finish_activation()
+        assert app._activation_running is False
+        assert app._activation_steps == 0
+    finally:
+        app.destroy()
+
+
+def test_opening_the_activation_section_probes_immediately() -> None:
+    """进入启停分页是人工动作: 间隔清零并立刻再探一次(开关开时)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import HomeSection
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    try:
+        app._activation = True
+        app._activation_steps = 2
+        app._activation_due = time.monotonic() + 99.0
+
+        app._home_page._show_section(HomeSection.ACTIVATION)
+
+        assert app._home_page._section is HomeSection.ACTIVATION
+        assert app._activation_steps == 0
+        assert app._activation_due == 0.0
+        # 下一次事件循环就会真的探测一次: 到期时间被推到将来(不必等满一个间隔).
+        assert _wait_for(app, lambda: app._activation_due > 0.0)
+    finally:
+        app.destroy()
 
 
 def test_deleting_last_game_clears_hero_panel(
