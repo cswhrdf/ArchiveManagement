@@ -74,3 +74,7 @@ class SaveCandidateError(ArchiveManagementError):
 
 class ArtworkError(ArchiveManagementError):
     """封面/图标的下载、内容校验或缓存写入失败."""
+
+
+class PackageError(StorageError):
+    """导出包的读写失败(格式非法、内容与清单不一致、解包越界或超限)."""

@@ -1,4 +1,8 @@
-"""删除原始存档位置的用例.
+"""存档位置的用例: 新增与删除原始位置.
+
+新增位置是**把路径写进 save_locations 的唯一入口**(界面手动新增与导入归档包都
+走它): 规范化 -> 判重 -> 可访问性校验 -> 落库 + 审计。判重比的是字符串相等,
+因此这里保证"落库即规范化" —— 少了这一步, 同一个文件夹会被登记成两条位置。
 
 "删除原始存档位置"默认进入系统回收站, 删除前要求再次确认并显示
 目标路径与文件数量. 这里把流程拆成两个可独立调用的步骤:
@@ -18,10 +22,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
-from archive_management.domain import PathKind, SaveLocation
+from archive_management.domain import PathKind, SaveLocation, SaveSource
 from archive_management.exceptions import ArchiveManagementError
+from archive_management.i18n import tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     GameRepository,
@@ -31,12 +37,58 @@ from archive_management.services.audit import log_action, log_failure, redacted_
 from archive_management.services.pathcheck import (
     PathSummary,
     dangerous_target_reason,
+    normalize_path,
+    probe_path,
     summarize_path,
 )
 from archive_management.services.trash import TrashBackend, send_to_trash
 
 # 预检被拒绝的原因代码(UI 用 i18n 映射为文案).
 REMOVAL_MISSING = "missing"
+
+
+def add_save_location(
+    database: Database,
+    game_id: int,
+    *,
+    path: str,
+    kind: PathKind,
+    source: SaveSource = "manual",
+) -> SaveLocation:
+    """新增一个存档位置, 返回落库后的记录(带审计).
+
+    三条检查依次是: 路径规范化、同游戏内不重复、目标可访问(存在且类型相符).
+    第一个位置自动成为主位置 —— 主标记的唯一来源就是这里。
+    """
+    locations = SaveLocationRepository(database)
+    normalized = normalize_path(path)
+    if locations.duplicate_of(game_id, normalized) is not None:
+        raise ArchiveManagementError(tr("error.duplicate_location", path=normalized))
+    probe = probe_path(normalized, kind)
+    if not probe.ok:
+        raise ArchiveManagementError(
+            tr(f"error.loc_{probe.reason_code}", path=normalized)
+        )
+    location = locations.add(
+        SaveLocation(
+            game_id=game_id,
+            path=normalized,
+            path_kind=kind,
+            source=source,
+            is_primary=not locations.list_for_game(game_id),
+            last_checked_at=datetime.now(UTC),
+            last_check_status="ok",
+        )
+    )
+    log_action(
+        "location.add",
+        game_id=game_id,
+        location_id=location.id,
+        kind=kind,
+        source=source,
+        path=redacted_path(normalized),
+    )
+    return location
 
 
 @dataclass(frozen=True)

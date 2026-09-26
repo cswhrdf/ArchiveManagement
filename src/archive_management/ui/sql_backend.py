@@ -2,8 +2,8 @@
 
 把 :mod:`archive_management.domain` 实体与仓库映射为 UI 展示模型,
 实现 :class:`~archive_management.ui.backend.ArchiveService`. 本后端是
-GUI 的默认数据来源; 备份、分支、恢复与删除原始存档目录都接入真实服务层,
-导入导出目前会给出明确的"尚未提供"提示, 不会静默忽略.
+GUI 的默认数据来源; 备份、分支、恢复、导出与删除原始存档目录都接入真实
+服务层, 导入也是: 先只读体检, 再按用户选的策略真的写入。
 """
 
 from __future__ import annotations
@@ -21,7 +21,18 @@ from archive_management.application import candidates as candidate_cases
 from archive_management.application import discovery as discovery_cases
 from archive_management.application import games as games_cases
 from archive_management.application import home as home_cases
+from archive_management.application import locations as locations_cases
 from archive_management.application.backup import BackupService
+from archive_management.application.export import ExportService
+from archive_management.application.imports import (
+    STRATEGY_SKIP,
+    BatchImportChoice,
+    BatchImportResult,
+    BatchInspection,
+    ImportInspection,
+    ImportResult,
+    ImportService,
+)
 from archive_management.application.locations import (
     LocationRemovalPlan,
     plan_location_removal,
@@ -75,12 +86,14 @@ from archive_management.services.artwork import (
 )
 from archive_management.services.audit import log_action, redacted_path
 from archive_management.services.exclusions import load_exclusions
+from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.services.game_names import (
     NameCache,
     NameFetcher,
     name_cache_at,
     resolve_name,
 )
+from archive_management.services.naming import game_slug
 from archive_management.services.pathcheck import (
     normalize_path,
     probe_path,
@@ -108,6 +121,7 @@ from archive_management.ui.models import (
     GameDetail,
     GameSummary,
     HomeBoard,
+    ImportChoice,
     LocationItem,
     MonitoredDirItem,
     SavePathSuggestion,
@@ -177,6 +191,54 @@ def _interval_label(minutes: int) -> str:
     return format_interval(minutes)
 
 
+def _import_message(result: ImportResult) -> str:
+    """导入结果提示: 计数一律取服务层返回的导入结果, 不另算一遍.
+
+    “跳过”策略什么都没写, 所以它的提示与真的导入了多少份是两回事; 真的导入时
+    如果碰上包里已有同名的节点目录(重复导入同一个包), 也要把跳过数说出来。
+    """
+    if result.strategy == STRATEGY_SKIP:
+        return tr(
+            "result.import_skipped",
+            name=result.game_name,
+            skipped=result.skipped_nodes,
+        )
+    fields = {
+        "name": result.game_name,
+        "nodes": result.nodes,
+        "files": result.files,
+        "size": size_label(result.total_bytes),
+    }
+    if result.skipped_nodes:
+        return tr("result.import_done_skipped", skipped=result.skipped_nodes, **fields)
+    return tr("result.import_done", **fields)
+
+
+def _batch_import_message(result: BatchImportResult) -> str:
+    """批量导入提示: 逐游戏计数一律取服务层的结果, 界面不另算一遍.
+
+    "跳过"在批量导入里有两层含义, 因此分开说: **整款跳过**(用户选了"跳过", 那款的
+    备份一份都没试)与**跳过已存在的备份**(重复导入时那个节点目录已经在位)。服务层的
+    ``skipped_nodes`` 把两者算在一起, 所以这里只从**没被跳过**的那些游戏上取后者 ——
+    否则"跳过已存在的 0 份"会变成"1 份", 用户去找一个并不存在的旧节点。全批都跳过时
+    给一句更直白的说明。
+    """
+    if result.games and result.skipped_games == result.games:
+        return tr("result.import_batch_all_skipped", games=result.games)
+    existing = sum(
+        item.skipped_nodes for item in result.results if item.strategy != STRATEGY_SKIP
+    )
+    return tr(
+        "result.import_batch_done",
+        games=result.games,
+        nodes=result.nodes,
+        files=result.files,
+        size=size_label(result.total_bytes),
+        skipped=existing,
+        skipped_games=result.skipped_games,
+    )
+
+
 def _platform_game(candidate: GameCandidate) -> PlatformGame | None:
     """把探测结果包装成平台数据模型(解析不出平台游戏标识时返回 ``None``)."""
     if candidate.source not in PLATFORM_IDS:
@@ -203,6 +265,20 @@ def _library_game(game: Game) -> PlatformGame | None:
     )
 
 
+def _free_destination(directory: Path, stem: str) -> Path:
+    """在 ``directory`` 里挑一个还没被占用的归档包名(同名已存在时追加 -2/-3…).
+
+    自动导出**绝不覆盖**已有的包: 时间戳只精确到秒, 同一秒里连着删第二款游戏时
+    必须落到不同的名字上, 否则后一款会把前一款的告别包顶掉。
+    """
+    candidate = directory / f"{stem}{ARCHIVE_SUFFIX}"
+    counter = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}-{counter}{ARCHIVE_SUFFIX}"
+        counter += 1
+    return candidate
+
+
 @dataclass
 class _ActiveOperation:
     """一次正在进行中的备份(用于进度展示与取消请求)."""
@@ -221,6 +297,7 @@ class SqlArchiveService:
         database: Database,
         *,
         backup_root: Path,
+        exports_dir: Path | None = None,
         scheduler: BackupScheduler | None = None,
         cache_dir: Path | None = None,
         save_source: SaveCandidateSource | None = None,
@@ -232,10 +309,15 @@ class SqlArchiveService:
 
         ``cache_dir`` 为空时封面接口一律返回空: 测试与未配置应用路径的场景直接走
         占位图, 不去碰真实用户缓存目录。``process_provider`` 是自动启停用的进程名
-        提供者, 省略时用 psutil(测试注入假进程表)。
+        提供者, 省略时用 psutil(测试注入假进程表)。``exports_dir`` 是自动导出的
+        落点, 省略时取备份目录旁边(生产里就是 :attr:`ApplicationPaths.exports_dir`);
+        它**不在这里创建**, 只在真的要写出告别包时创建。
         """
         self._database = database
         self._backup_root = backup_root
+        self._exports_dir = (
+            exports_dir if exports_dir is not None else backup_root.parent / "exports"
+        )
         self._games = GameRepository(database)
         self._locations = SaveLocationRepository(database)
         self._nodes = BackupRepository(database)
@@ -246,6 +328,8 @@ class SqlArchiveService:
         self._restore = RestoreService(
             database, backup_root=backup_root, backups=self._backups
         )
+        self._export = ExportService(database, backup_root=backup_root)
+        self._import = ImportService(database, backup_root=backup_root)
         self._scheduler = scheduler if scheduler is not None else BackupScheduler()
         self._theme = _DEFAULT_THEME
         self._revision = 0
@@ -391,13 +475,41 @@ class SqlArchiveService:
         log_action("game.rename", game_id=game.id, name=clean)
         return self._summary(updated)
 
-    def delete_game(self, game_id: str) -> None:
-        """删除游戏记录、它带来的探测候选, 以及它的封面/图标缓存.
+    def delete_export_path(self, game_id: str) -> str:
+        """算出这款游戏"告别包"的默认落点(**只计算路径, 不创建任何东西**).
 
-        缓存是可再生的派生数据, 留着既不体面也会让同名游戏误用旧图 —— 删游戏时一起
-        清掉。
+        默认落在备份目录旁边的 ``exports`` 目录, 文件名是
+        ``<游戏名 slug>-<YYYYMMDD-HHMMSS>.archive.zip``; 同一秒内已经有一份同名包时
+        追加 ``-2``/``-3``, 因此自动导出永远不会覆盖上一份。这里不建目录也不写文件,
+        真正落盘发生在 :meth:`delete_game` 里(失败就什么都不删)。
+        """
+        game, _gid = self._game_ref(game_id)
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        stem = f"{game_slug(game.name)}-{stamp}"
+        return str(_free_destination(self._exports_dir, stem))
+
+    def delete_game(self, game_id: str, destination: str) -> None:
+        """先把这款游戏(配置 + 全部备份)导出成告别包, 再删除它的记录.
+
+        顺序是这次改动的全部要点: **导出成功之前一个字段都不删**。导出用的是与
+        「导出游戏」按钮同一条服务路径, 因此包里是完整内容; 失败时异常原样抛出,
+        游戏记录、存档位置、探测候选记账与备份节点全部原样保留。导出成功后按原有
+        行为删除记录(其存档位置与候选记账随之清除), 并清掉封面/图标与译名缓存
+        这类可再生的派生数据 —— 备份目录里的备份文件始终保留。
         """
         game, gid = self._game_ref(game_id)
+        # 目录只在真的要写出告别包时才创建(界面里的确认框不该顺手建目录).
+        self._exports_dir.mkdir(parents=True, exist_ok=True)
+        result = self._export.export_game(gid, Path(destination))
+        # 与导出按钮同一套"路径脱敏"记法: 审计里能同时看到"导出过"与"删除过"。
+        log_action(
+            "game.delete_export",
+            game_id=game.id,
+            name=game.name,
+            backups=result.backups,
+            files=result.files,
+            path=redacted_path(str(destination)),
+        )
         games_cases.delete_game(self._database, gid)
         self._forget_artwork(game)
         self._forget_names(game)
@@ -459,31 +571,9 @@ class SqlArchiveService:
     def add_location(self, game_id: str, *, path: str, kind: PathKind) -> LocationItem:
         """新增并校验存档位置; 路径不可用或重复时抛出异常."""
         _game, gid = self._game_ref(game_id)
-        normalized = normalize_path(path)
-        if self._locations.duplicate_of(gid, normalized) is not None:
-            raise ArchiveManagementError(
-                tr("error.duplicate_location", path=normalized)
-            )
-        self._require_path(normalized, kind)
-        has_existing = bool(self._locations.list_for_game(gid))
-        now = datetime.now(UTC)
-        location = self._locations.add(
-            SaveLocation(
-                game_id=gid,
-                path=normalized,
-                path_kind=kind,
-                source="manual",
-                is_primary=not has_existing,
-                last_checked_at=now,
-                last_check_status="ok",
-            )
-        )
-        log_action(
-            "location.add",
-            game_id=gid,
-            location_id=location.id,
-            kind=kind,
-            path=redacted_path(normalized),
+        # 写入规则(规范化/判重/可访问性)在应用层: 导入归档包走的是同一个入口.
+        location = locations_cases.add_save_location(
+            self._database, gid, path=path, kind=kind
         )
         return self._location_item(location)
 
@@ -1326,11 +1416,190 @@ class SqlArchiveService:
             return tr("result.delete_shift")
         return tr("result.delete_single")
 
-    def run_export(self, game_id: str) -> str:
-        """导出游戏(尚未实现)."""
-        game, _gid = self._game_ref(game_id)
+    def run_export(self, game_id: str, destination: str) -> str:
+        """把这款游戏(含全部备份内容)导出到 ``destination``, 返回本地化提示.
+
+        提示里带真实的备份数/文件数与包大小; 失败时记审计并原样抛出, 由界面
+        提示原因(用户选定的路径不会留下半成品: 包由服务层原子写入).
+        """
+        game, gid = self._game_ref(game_id)
         log_action("export.start", basic=True, game_id=game.id, name=game.name)
-        raise ArchiveManagementError(tr("error.not_available"))
+        try:
+            result = self._export.export_game(gid, Path(destination))
+        except ArchiveManagementError as exc:
+            log_action(
+                "export.failed",
+                game_id=game.id,
+                name=game.name,
+                error=str(exc),
+            )
+            raise
+        return tr(
+            "result.export_done",
+            name=result.game_name,
+            file=Path(destination).name,
+            backups=result.backups,
+            files=result.files,
+            size=size_label(result.total_bytes),
+        )
+
+    def run_export_batch(self, game_ids: Sequence[str], destination: str) -> str:
+        """把若干款游戏导成一个批量包, 返回带真实计数的本地化提示.
+
+        与单包导出同一套口径: 空选择与未知游戏直接报错; 提示里的计数一律取服务层的
+        结果, 界面不另算一遍。**任何一款失败或取消都让整批失败**(目标路径不留文件, 由
+        服务层保证), 因此这里只补审计、不做回滚。导出期间占用"进行中操作"槽位, 用户
+        因此可以像备份那样请求取消(取消落在游戏之间与节点之间)。
+        """
+        selected = [self._game_ref(game_id)[1] for game_id in game_ids]
+        if not selected:
+            # 与用例层同一句话: 这里提前拦是为了给"进行中操作"留一个真实的游戏 id.
+            raise ArchiveManagementError("批量导出需要至少 1 款游戏")
+        log_action("export.batch_start", basic=True, games=len(selected))
+        with self._operation_lock:
+            if self._active is not None:
+                raise ArchiveManagementError(tr("error.operation_busy"))
+            self._active = _ActiveOperation(game_id=selected[0])
+        try:
+            result = self._export.export_games(
+                selected,
+                Path(destination),
+                progress=self._report_progress,
+                cancelled=self._cancel_requested,
+            )
+        except OperationCancelledError as exc:
+            raise ArchiveManagementError(tr("action.export_batch_canceled")) from exc
+        except ArchiveManagementError as exc:
+            log_action("export.batch_failed", games=len(selected), error=str(exc))
+            raise
+        finally:
+            with self._operation_lock:
+                self._active = None
+        return tr(
+            "result.export_batch_done",
+            games=result.games,
+            file=Path(destination).name,
+            backups=result.backups,
+            files=result.files,
+            size=size_label(result.total_bytes),
+        )
+
+    def inspect_import(self, path: str) -> ImportInspection | BatchInspection:
+        """只读体检一个导出包: 单游戏包或批量包, 由包清单里的类型决定.
+
+        不改数据库, 也不在备份根下写任何东西; 分派(读一眼清单的类型)在用例层, 界面不
+        自己拆 zip。失败(文件不存在/不是归档包/清单损坏)直接抛给界面提示: 体检没成功
+        就不存在"写了一半"的问题, 所以这里不写回滚日志, 只把体检结果记进审计。
+        """
+        inspection = self._import.inspect_any(Path(path))
+        self._log_inspection(inspection, path)
+        return inspection
+
+    def _log_inspection(
+        self, inspection: ImportInspection | BatchInspection, source: str
+    ) -> None:
+        """体检结果的审计: 两类包的字段口径不同, 因此各记一条动作."""
+        if isinstance(inspection, BatchInspection):
+            log_action(
+                "import.batch_inspected",
+                games=inspection.game_count,
+                backups=inspection.backup_count,
+                files=inspection.file_count,
+                source=redacted_path(source),
+            )
+            return
+        log_action(
+            "import.inspected",
+            game=inspection.game_name,
+            backups=inspection.backup_count,
+            files=inspection.file_count,
+            locations=len(inspection.locations),
+            source=redacted_path(source),
+        )
+
+    def run_import(
+        self,
+        inspection: ImportInspection,
+        *,
+        strategy: str,
+        target_game_id: str | None,
+        locations: Mapping[int, str],
+    ) -> str:
+        """按策略真的导入这个包, 返回带真实计数的本地化提示.
+
+        内容与数据库都由 :class:`ImportService` 处理(失败时它会回滚本次已建的节点);
+        这里只负责把界面的字符串 id 换成整型、记审计与拼提示。“跳过”策略什么都不
+        写, 因此提示里只说明跳过了多少份。
+        """
+        source = redacted_path(str(inspection.path))
+        log_action("import.start", basic=True, strategy=strategy, source=source)
+        try:
+            result = self._import.import_package(
+                inspection,
+                strategy=strategy,
+                target_game_id=self._import_target(target_game_id),
+                locations=locations,
+            )
+        except ArchiveManagementError as exc:
+            log_action(
+                "import.failed", strategy=strategy, error=str(exc), source=source
+            )
+            raise
+        self._touch()
+        return _import_message(result)
+
+    def run_import_batch(
+        self, batch: BatchInspection, choices: Mapping[str, ImportChoice]
+    ) -> str:
+        """按每款游戏各自的选择导入整批, 返回带真实计数的本地化提示.
+
+        ``choices`` 以**内层条目名**为键; 没给选择的那一款由服务层按默认值处理(新建,
+        且不导入任何存档位置)。目标游戏的字符串 id 在这里换成整型并顺带校验存在
+        (与 :meth:`run_import` 同一个 :meth:`_import_target`)。失败与取消的回滚边界都
+        由服务层决定: 当前这一款只回收自己, **已经导完的保留**。
+
+        用例层用同一个异常表达"失败"与"取消", 因此这里按真实请求过取消来区分: 只有
+        用户真的按了取消才把它换成"已取消"那句可展示的说明, 真正的失败照常上抛。
+        """
+        source = redacted_path(str(batch.path))
+        log_action(
+            "import.batch_start", basic=True, games=batch.game_count, source=source
+        )
+        with self._operation_lock:
+            if self._active is not None:
+                raise ArchiveManagementError(tr("error.operation_busy"))
+            # 整批一起导, 没有哪一款是"主角": 占位 id 只出现在取消审计里.
+            self._active = _ActiveOperation(game_id=0)
+        try:
+            result = self._import.import_batch(
+                batch,
+                self._batch_choices(choices),
+                progress=self._report_progress,
+                cancelled=self._cancel_requested,
+            )
+        except ArchiveManagementError as exc:
+            if not self._cancel_requested():
+                log_action("import.batch_failed", error=str(exc), source=source)
+                raise
+            raise OperationCancelledError(tr("result.import_batch_canceled")) from exc
+        finally:
+            with self._operation_lock:
+                self._active = None
+        self._touch()
+        return _batch_import_message(result)
+
+    def _batch_choices(
+        self, choices: Mapping[str, ImportChoice]
+    ) -> dict[str, BatchImportChoice]:
+        """把界面选择翻译成用例层的选择: 目标游戏顺带校验存在(未知目标报错)."""
+        return {
+            entry: BatchImportChoice(
+                strategy=choice.strategy,
+                target_game_id=self._import_target(choice.target_game_id),
+                locations=choice.locations,
+            )
+            for entry, choice in choices.items()
+        }
 
     # -- 调度与生命周期 ----------------------------------------------------
 
@@ -1667,6 +1936,17 @@ class SqlArchiveService:
         game, _id = self._game_ref(game_id)
         return game
 
+    def _import_target(self, game_id: str | None) -> int | None:
+        """合并导入的目标游戏 id(str -> int); 没有目标时是 ``None``.
+
+        顺带校验目标真的存在: 否则用户选中的游戏已经被删掉时, 错误会变成难懂的
+        数据库异常而不是"未知游戏"。
+        """
+        if game_id is None:
+            return None
+        _game, gid = self._game_ref(game_id)
+        return gid
+
     def _game_ref(self, game_id: str) -> tuple[Game, int]:
         """返回游戏实体与稳定的整型 id."""
         try:
@@ -1714,6 +1994,7 @@ class SqlArchiveService:
             tone=_tone(game.name),
             enabled=game.enabled,
             archived=game.archived,
+            original_name=game.original_name,
         )
 
     def _location_item(self, location: SaveLocation) -> LocationItem:

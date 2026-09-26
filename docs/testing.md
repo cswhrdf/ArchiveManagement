@@ -173,11 +173,32 @@ GUI 用例的环境守卫会把建窗口期的 `TclError` 写成 `pytest.skip("t
 
 现在的规矩（见 `tests/tk_guard.py`）：
 
-- **只有已知的环境症状**才允许跳过：解释器找不到 Tcl 库数据（`tcl_findLibrary` / `init.tcl`），或者根本没有显示环境（`no display name` 等）。
+- **只有已知的环境症状**才允许跳过：解释器加载不了 Tcl/Tk 库数据（`tcl_findLibrary` / `init.tcl` / `tk.tcl` / `Can't find a usable …`），或者根本没有显示环境（`no display name` 等）。前一组只可能由 **Tcl 自己**在装库时说出（即使用例完全不碰文件也可能撞上），与用例断言的东西无关；`tk.tcl` 这一条是 2026-09-26 补上的 —— 现场是 `test_gui_buttons.py` 整模块跑时偶有一条用例在建 Tk 根时报 `couldn't read file <...>/tk.tcl`，单跑必过，且把新增用例全部 deselect 后仍会复现。
+- **白名单只列 Tcl 自己的库数据文件名**：把 `couldn't read file` 或 `can't find a usable` 这类通用说法整个收进来，会把“应用自己要读的文件打不开”（例如某张封面图找不到）也归成环境问题 —— 那正是这一节开头记的那个错误。两种拼法都能被文件名本身命中（`Can't find a usable tk.tcl` 命中 `tk.tcl`），所以不必放宽。
 - 原因前缀是 `tk 环境不可用` 但症状不在清单里时，`tests/conftest.py` 的用例报告钩子**把它改成失败**并给出判定依据 —— 要么修掉，要么删掉那条用例，不留下永远不跑的用例。
 - `tests/gui_support.gui_app` 同理：非已知抖动的 `TclError` **不重试**，直接抛出（重试也修不好）。
 
-与 Tk 无关的跳过不受影响（例如"当前环境不允许创建符号链接""虚拟显示器太小"）。守卫：`tests/unit/test_gui_retry.py`。
+与 Tk 无关的跳过不受影响（例如"当前环境不允许创建符号链接""虚拟显示器太小"）。守卫：`tests/unit/test_gui_retry.py`（含一条反向守卫：`couldn't read file "cover.png"` 这类应用侧读文件失败**不许**被当成环境问题）。
+
+### 只在某个平台红的分片失败：先把那份平台差异搬回本地
+
+2026-09-25 实测：Linux 分片里 `test_demo_update_location_rejects_a_path_used_by_another_location` 报 `DID NOT RAISE`，同一条用例在 Windows 上是绿的。根因不是平台 bug，而是**判重只规范化了一侧**：演示数据里的位置路径是原样保存的展示字符串（`D:\Games\…`），而输入侧会过一遍 `normalize_path` —— POSIX 上这类字符串属于相对路径，会被拼上工作目录，两侧形态不同就永远比不出重复；Windows 上 `normpath` 对这类路径恰好幂等，于是"恰好"看不出来。修法是判重**两侧都规范化**（`add_location` / `update_location` 两处，与监控目录判重同一套做法）。
+
+补的守卫刻意不依赖平台：用例把 `normalize_path` 换成 **POSIX 风格的替身**（`posixpath.normpath` + 手写的工作目录前缀），于是 Windows 上也能复现 Linux 的形态差异（`tests/unit/test_ui_demo.py::test_demo_duplicate_locations_are_caught_for_unusual_path_forms`）。判据是"去掉修法后这条用例必须在**本机**就红"—— 实测在 Windows 上换回旧写法立刻复现了 CI 的那条 `DID NOT RAISE`。
+
+**通用做法**：遇到"只有某个平台红"的失败，先定位它依赖哪一种形态差异（路径分隔符与大小写、`normpath` 是否幂等、`dir_fd` 相对路径、显示服务、字体度量），再把那个差异做成替身搬进用例 —— 否则这条用例永远只在 CI 的一半平台上有效。
+
+### 同一路径只有一条位置：判重靠"落库即规范化"
+
+`SaveLocationRepository.duplicate_of` 比的是**字符串相等**（`LOWER(path) = LOWER(?)`），它自己不做任何路径规范化 —— 等价于"同一个文件夹"的前提是**两侧都已经是规范化形式**。这条不变式靠写入侧维持：手工新增、改路径、导入确认（`add_location` / `update_location` / `confirm_candidate`）都先过 `normalize_path`。
+
+它一旦被破坏，失败是**静默**的：`…/saves`、`…/saves/`、`…/saves/.` 会被当成三个不同路径，同一个目录登记成多条位置（备份拍两份、恢复写两次、删掉其中一个还会把另一个位置的目标一起带走）。演示后端就是这么漏判的（见上一节）。
+
+三条守卫：
+
+- `tests/unit/test_sql_backend.py::test_every_stored_save_location_path_is_normalized`：走完三条写入路径后，断言库里每行 `path == normalize_path(path)`；
+- `tests/unit/test_sql_backend.py::test_the_same_folder_in_another_spelling_is_rejected`：服务入口（新增/改路径）试"同一文件夹的另一种写法"；
+- `tests/unit/test_save_candidates.py::test_confirming_a_candidate_written_differently_keeps_one_location`：候选行里存的是另一种写法时，确认不得多出一条（去掉写入前的规范化就会红）。
 
 ### GUI 用例必须真的跑起来（skip 是有代价的）
 

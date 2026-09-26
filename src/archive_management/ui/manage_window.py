@@ -435,17 +435,28 @@ class ManageGameWindow:
         self._on_change()
 
     def _on_delete_game(self) -> None:
+        """删除游戏: 先把配置与全部备份导出到默认位置, 再删记录.
+
+        导出路径在弹确认框**之前**就算好并写进提示里 —— 用户要清楚告别包会落在哪里,
+        以及"先导出、后删除"的顺序。确认后按同一条路径真的导出; 导出失败时后端什么都
+        不删, 这里只负责把原因显示出来, 窗口保持打开。
+        """
+        try:
+            destination = self._backend.delete_export_path(self._game_id)
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
         confirmed = confirm_dialog(
             self._window,
             self._palette,
             title=tr("manage.delete_title"),
-            message=tr("manage.delete_message", name=self._name),
+            message=tr("manage.delete_message", name=self._name, file=destination),
             confirm_text=tr("manage.delete_confirm"),
         )
         if not confirmed:
             return
         try:
-            self._backend.delete_game(self._game_id)
+            self._backend.delete_game(self._game_id, destination)
         except ArchiveManagementError as exc:
             self._show_error(exc)
             return

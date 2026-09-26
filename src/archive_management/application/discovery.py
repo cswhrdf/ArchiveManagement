@@ -302,7 +302,7 @@ def _mark_scanned(
 ) -> None:
     """把每个监控目录的最近扫描时间与路径健康状态写回(路径失效也要留痕)."""
     for directory in directories:
-        if directory.id is not None:
+        if directory.id is not None:  # pragma: no branch - 目录行来自仓储, id 必然存在
             repository.mark_scan(
                 directory.id, status=path_health(directory.path), when=when
             )
@@ -428,7 +428,8 @@ def import_candidate(
     games = GameRepository(database)
     if candidate.status == "imported" and candidate.game_id is not None:
         existing = games.get(candidate.game_id)
-        if existing is not None:
+        # 删除游戏时外键会把候选退回待处理, 因此这条游戏行必然还在.
+        if existing is not None:  # pragma: no cover - 已导入的候选必然指向存在的游戏
             raise ArchiveManagementError(f"该探测结果已导入为游戏「{existing.name}」")
     final_name = (name if name is not None else candidate.name).strip()
     if not final_name:

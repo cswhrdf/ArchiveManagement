@@ -168,7 +168,7 @@ def test_gui_support_passes_the_reason_into_the_report() -> None:
 
 
 def test_only_the_known_tk_symptoms_count_as_an_environment_problem() -> None:
-    """已知症状(Tcl 库数据缺失 / 没有显示环境)才算环境问题; 其它一律不算.
+    """已知症状(Tcl 库数据加载不了 / 没有显示环境)才算环境问题; 其它一律不算.
 
     反例就是这次踩到的: `image "pyimage1" does not exist` 是**图像名失效**,
     与解释器找不到 Tcl 库毫无关系, 却被统一写成"tk 环境不可用"跳过了。
@@ -183,6 +183,35 @@ def test_only_the_known_tk_symptoms_count_as_an_environment_problem() -> None:
     assert tk_guard.is_known_tk_skip("couldn't connect to display ':99'")
     assert not tk_guard.is_known_tk_skip('image "pyimage1" does not exist')
     assert not tk_guard.is_known_tk_skip("bad window path name")
+
+
+def test_the_tk_library_data_flake_is_recognised_in_every_its_spellings() -> None:
+    """Tk 侧库数据读不出来(`tk.tcl`)也算已知环境抖动, 与 init.tcl 同等看待.
+
+    现场(2026-09-26): `test_gui_buttons.py` 整模块跑时偶有一条用例在建 Tk 根时报
+    `couldn't read file <...>/tk.tcl`, 单跑必过, 且与新增用例无关 —— 与
+    `tcl_findLibrary` / `init.tcl` 是同一件事(Tcl/Tk 库数据加载不了)。
+    """
+    assert tk_guard.is_known_tk_skip(
+        'couldn\'t read file "C:/x/tcl/tk8.6/tk.tcl": no such file or directory'
+    )
+    assert tk_guard.is_known_tk_skip("Can't find a usable tk.tcl in the following ...")
+
+
+def test_a_plain_file_read_failure_is_not_an_environment_problem() -> None:
+    """白名单**只认 Tcl 自己的库数据文件**: 应用侧读文件失败不许混进环境问题.
+
+    如果放宽成通用的"couldn't read file", 那么"某张封面图找不到"这类**被测代码
+    自己的问题**又会退化成静默跳过 —— 正是本模块 (tests/tk_guard.py) 开头记的那个错误。
+    """
+    assert not tk_guard.is_known_tk_skip('couldn\'t read file "cover.png"')
+    assert not tk_guard.is_known_tk_skip("Can't find a usable artwork for 42")
+    assert (
+        tk_guard.unknown_tk_skip_message(
+            'tk 环境不可用: couldn\'t read file "cover.png"'
+        )
+        is not None
+    ), "应用侧读文件失败必须被拦下(改成失败)"
 
 
 def test_an_unknown_tk_skip_reason_becomes_a_failure() -> None:

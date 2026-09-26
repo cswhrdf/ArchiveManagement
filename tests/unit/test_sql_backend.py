@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 import pytest
 
 import archive_management.application.locations as locations_mod
+import archive_management.ui.sql_backend as sql_mod
 import helpers
+from archive_management.application.imports import (
+    STRATEGY_MERGE,
+    STRATEGY_NEW,
+    STRATEGY_SKIP,
+    BatchInspection,
+    ImportInspection,
+)
 from archive_management.domain import (
     ArtworkRef,
+    BackupNode,
     Game,
     GameCandidate,
     HomeFilter,
@@ -23,8 +34,10 @@ from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import set_locale, tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
+    BackupRepository,
     CandidateRepository,
     GameRepository,
+    SaveLocationRepository,
     ScheduledJobRepository,
 )
 from archive_management.services.artwork import (
@@ -35,10 +48,22 @@ from archive_management.services.artwork import (
     steam_cover,
     steam_icon,
 )
+from archive_management.services.export_format import (
+    ARCHIVE_SUFFIX,
+    read_batch_package,
+    read_package,
+)
 from archive_management.services.game_names import NameFetcher, name_cache_at
+from archive_management.services.pathcheck import normalize_path
 from archive_management.services.platform_adapters import SaveCandidateSource
 from archive_management.services.scheduler import BackupScheduler, ManualBackend
-from archive_management.ui.models import visible_in_branch_view
+from archive_management.ui.models import (
+    ImportChoice,
+    export_batch_prompt,
+    filter_export_options,
+    size_label,
+    visible_in_branch_view,
+)
 from archive_management.ui.sql_backend import SqlArchiveService
 
 # 一张最小的 PNG 文件头(封面缓存只认文件头就能判定可用).
@@ -68,6 +93,19 @@ def _service(tmp_path: Path) -> SqlArchiveService:
         backup_root=tmp_path / "backups",
         scheduler=BackupScheduler(backend=ManualBackend()),
     )
+
+
+class _FrozenClock(datetime):
+    """固定到某一秒的 ``datetime`` 替身: 让"同一秒内两次调用"可复现.
+
+    自动导出的文件名只精确到秒, 撞名靠追加序号解决 —— 不把时钟钉死, 这条断言会在
+    秒边界上偶发失败(两次调用落在不同的秒里, 文件名本来就不一样)。
+    """
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> _FrozenClock:
+        """总是返回同一个时刻."""
+        return cls(2026, 9, 26, 12, 0, 0, tzinfo=UTC)
 
 
 def test_add_game_and_list(tmp_path: Path) -> None:
@@ -128,10 +166,133 @@ def test_delete_game_removes_locations(tmp_path: Path) -> None:
     save = tmp_path / "save"
     save.mkdir()
     service.add_location(game_id, path=str(save), kind="directory")
-    service.delete_game(game_id)
+    service.delete_game(game_id, str(tmp_path / "exports" / "demo.archive.zip"))
     assert service.list_games() == []
     with pytest.raises(ArchiveManagementError):
         service.list_locations(game_id)
+
+
+def test_game_summaries_carry_the_original_name_for_search(tmp_path: Path) -> None:
+    """摘要里带上**录入时的原名**: 批量导出的筛选靠它, 用户可能拿当初的名字来搜.
+
+    改名之后 ``name`` 是新的, ``original_name`` 仍是录入时那个 —— 两者都要能搜到,
+    这正是"筛选支持原名"那条改动成立的前提。
+    """
+    service = _service(tmp_path)
+    game_id = service.add_game("Outer Wilds").game_id
+
+    renamed = service.update_game(game_id, "星际拓荒")
+
+    assert renamed.name == "星际拓荒"
+    summaries = service.list_games()
+    assert [item.name for item in summaries] == ["星际拓荒"]
+    assert [item.original_name for item in summaries] == ["Outer Wilds"]
+    options = export_batch_prompt(summaries).options
+    assert [option.game_id for option in filter_export_options(options, "outer")] == [
+        str(game_id)
+    ]
+    assert [option.game_id for option in filter_export_options(options, "拓荒")] == [
+        str(game_id)
+    ]
+
+
+def test_delete_game_exports_the_game_before_removing_it(tmp_path: Path) -> None:
+    """删除前先写出完整告别包: 可回读(含哈希校验), 且含存档位置与全部备份节点.
+
+    顺序就是这次改动的全部意义 —— 包先落地、记录随后才删, 而且它与「导出游戏」
+    按钮产出的是同一种包(同一套读包校验能把它读回来)。
+    """
+    service, game_id, save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    # 第二次备份前先改存档内容, 否则会被判为"未变化"而跳过.
+    _advance(save)
+    service.run_backup_now(game_id)
+    database = Database(tmp_path / "app.db")
+    destination = Path(service.delete_export_path(game_id))
+
+    service.delete_game(game_id, str(destination))
+
+    contents = read_package(destination, verify_hashes=True)
+    assert [item["path"] for item in contents.config_list("locations")] == [str(save)]
+    assert len(contents.config_list("backups")) == 2
+    assert contents.member_paths("branches"), "包里的备份内容不该是空的"
+    # 删除真的发生了: 记录、存档位置与备份节点一条不剩.
+    assert GameRepository(database).get(int(game_id)) is None
+    assert SaveLocationRepository(database).list_for_game(int(game_id)) == []
+    assert BackupRepository(database).list_for_game(int(game_id)) == []
+
+
+def test_delete_game_reports_the_export_it_made(
+    tmp_path: Path, audit_log: list[str]
+) -> None:
+    """审计里两件事都要留痕: 先导出(``game.delete_export``)再删除(``game.delete``)."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    destination = Path(service.delete_export_path(game_id))
+
+    service.delete_game(game_id, str(destination))
+
+    exported = next(line for line in audit_log if "game.delete_export" in line)
+    assert destination.name in exported
+    assert str(tmp_path) not in exported, "审计里的路径必须脱敏"
+    assert any("game.delete" in line for line in audit_log)
+
+
+def test_delete_export_path_only_computes_and_never_reuses_a_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认落点在 exports 目录里且只算路径不写文件; 同一秒的第二份绝不覆盖第一份.
+
+    时钟钉死是关键: 文件名只精确到秒, 不钉死就会在秒边界上偶发失败(那样两次算出的
+    时间戳本来就不同, "追加了 -2"的断言会时灵时不灵)。
+    """
+    monkeypatch.setattr(sql_mod, "datetime", _FrozenClock)
+    service, game_id, _save = _service_with_save(tmp_path)
+
+    first = Path(service.delete_export_path(game_id))
+
+    assert first.parent == tmp_path / "exports"
+    assert first.name == f"Demo-20260926-120000{ARCHIVE_SUFFIX}"
+    assert not first.exists(), "只算路径的入口不该写出任何文件"
+    assert not first.parent.exists(), "确认框之前不该顺手建目录"
+
+    # 假装上一秒已经落过一份同名包: 再算一次必须换名字, 而且不许覆盖它.
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_bytes(b"earlier package")
+    second = Path(service.delete_export_path(game_id))
+
+    assert second.name == f"Demo-20260926-120000-2{ARCHIVE_SUFFIX}"
+
+    service.delete_game(game_id, str(second))
+
+    assert first.read_bytes() == b"earlier package", "自动导出覆盖了上一份包"
+    assert second.is_file()
+
+
+def test_a_failed_export_deletes_nothing_at_all(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """导出失败时一个字段都不删: 记录/位置/节点都在, 磁盘上也没有包.
+
+    宁可留下一个删不掉的游戏, 也不能让用户丢掉"连告别包都写不出来"的那一款。
+    """
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    database = Database(tmp_path / "app.db")
+    destination = Path(service.delete_export_path(game_id))
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise ArchiveManagementError("磁盘满了")
+
+    monkeypatch.setattr(service._export, "export_game", boom)
+    with pytest.raises(ArchiveManagementError):
+        service.delete_game(game_id, str(destination))
+
+    assert GameRepository(database).get(int(game_id)) is not None
+    assert len(SaveLocationRepository(database).list_for_game(int(game_id))) == 1
+    assert len(BackupRepository(database).list_for_game(int(game_id))) == 1
+    assert _tree_files(tmp_path / "exports") == []
 
 
 def test_add_location_marks_first_as_primary(tmp_path: Path) -> None:
@@ -206,6 +367,84 @@ def test_update_location_rejects_duplicate(tmp_path: Path) -> None:
         service.update_location(first.location_id, path=str(two))
 
 
+def test_the_same_folder_in_another_spelling_is_rejected(tmp_path: Path) -> None:
+    """同一个文件夹换一种写法(末尾多一个分隔符或 ``/.``)不能再登记一条位置.
+
+    判重比的是字符串相等, 而这三种写法会被 ``normpath`` 收敛成同一个路径 —— 只要有一侧
+    没规范化, 同一个目录就会静默变成两条位置(备份拍两份、恢复写两次、删掉其中一个还会把
+    另一个位置的目标一起带走)。
+    """
+    service = _service(tmp_path)
+    game_id = service.add_game("Demo").game_id
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    first = service.add_location(game_id, path=str(one), kind="directory")
+    service.add_location(game_id, path=str(two), kind="directory")
+
+    for spelling in (f"{one}{os.sep}.", f"{one}{os.sep}", f"{one}{os.sep}.{os.sep}"):
+        with pytest.raises(ArchiveManagementError):
+            service.add_location(game_id, path=spelling, kind="directory")
+
+    with pytest.raises(ArchiveManagementError):
+        service.update_location(first.location_id, path=f"{two}{os.sep}.")
+
+    # 被拒之后两条位置各归各位: 路径是规范化形式, 也没有多出第三条.
+    assert [item.path for item in service.list_locations(game_id)] == [
+        str(one),
+        str(two),
+    ]
+
+
+def test_every_stored_save_location_path_is_normalized(tmp_path: Path) -> None:
+    """落库的路径必须已经是规范化形式 —— 判重只比字符串, "同一目录只有一条位置"全靠它.
+
+    覆盖面是能写进 ``save_locations`` 的全部入口: 手动新增、改路径、导入时确认路径(含
+    "与平台候选一致"那一支走 ``confirm_candidate``), 三处都故意传另一种写法。谁将来新增
+    一条忘了规范化的写入路径, 这条用例会红(演示后端就是这条不变式被破坏后开始漏判的)。
+    """
+    save = tmp_path / "saves"
+    save.mkdir()
+    (save / "slot.dat").write_text("x", encoding="utf-8")
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    third = tmp_path / "third"
+    third.mkdir()
+    service, _game_id, database = _steam_service(tmp_path, str(save))
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    candidate, _created = CandidateRepository(database).upsert(
+        GameCandidate(
+            name="哈迪斯",
+            install_dir=str(install),
+            source="steam",
+            reason_code="steam_manifest",
+            detail="appmanifest_1145360.acf",
+        )
+    )
+    assert candidate.id is not None
+
+    # 导入时确认的两条路径都用另一种写法: 与平台候选一致的走 confirm_candidate,
+    # 新加的走 add_location.
+    summary = service.import_candidate(
+        str(candidate.id), save_paths=(f"{save}{os.sep}.", f"{extra}{os.sep}")
+    )
+    locations = service.list_locations(summary.game_id)
+    assert [item.path for item in locations] == [str(save), str(extra)]
+
+    service.update_location(locations[1].location_id, path=f"{third}{os.sep}.")
+
+    stored = [
+        row.path
+        for row in SaveLocationRepository(database).list_for_game(int(summary.game_id))
+    ]
+    assert stored == [str(save), str(third)]
+    assert all(path == normalize_path(path) for path in stored), (
+        "库里出现了没有规范化过的路径: 判重(字符串相等)从此对这一行失效"
+    )
+
+
 def test_verify_location_reports_status(tmp_path: Path) -> None:
     service = _service(tmp_path)
     game_id = service.add_game("Demo").game_id
@@ -216,14 +455,557 @@ def test_verify_location_reports_status(tmp_path: Path) -> None:
     assert refreshed.ok is True
 
 
-def test_no_backups_yet_and_unavailable_actions_raise(tmp_path: Path) -> None:
+def test_no_backups_yet_and_backup_without_locations_raise(tmp_path: Path) -> None:
     service = _service(tmp_path)
     game_id = service.add_game("Demo").game_id
     assert service.list_backups(game_id) == []
     with pytest.raises(ArchiveManagementError):
         service.run_backup_now(game_id)
+
+
+def test_run_export_writes_a_package_with_every_backup(tmp_path: Path) -> None:
+    """真实后端的导出: 包里有游戏与备份内容, 提示里的计数与回读的包一致."""
+    service = _service(tmp_path)
+    save = tmp_path / "save"
+    save.mkdir()
+    (save / "slot.dat").write_text("state-0", encoding="utf-8")
+    game_id = service.add_game("Demo").game_id
+    service.add_location(game_id, path=str(save), kind="directory")
+    service.run_backup_now(game_id)
+    destination = tmp_path / "Demo.archive.zip"
+
+    message = service.run_export(game_id, str(destination))
+
+    contents = read_package(destination, verify_hashes=True)
+    total = sum(entry.size for entry in contents.entries)
+    assert contents.game["name"] == "Demo"
+    assert [item["path"] for item in contents.config_list("locations")] == [
+        normalize_path(str(save))
+    ]
+    assert len(contents.config_list("backups")) == 1
+    # 手动备份进 branches/<节点>/, 而且内容真的搬了过去(不只是配置里记了一笔).
+    assert contents.member_paths("branches/") != ()
+    assert "备份 1 份" in message
+    assert f"文件 {len(contents.entries)} 个" in message
+    assert size_label(total) in message
+
+
+def test_run_export_without_backups_writes_a_config_only_package(
+    tmp_path: Path,
+) -> None:
+    """没有备份也能导出: 包里就没有节点内容, 提示里的备份数为 0."""
+    service = _service(tmp_path)
+    game_id = service.add_game("Demo").game_id
+    destination = tmp_path / "Demo.archive.zip"
+
+    message = service.run_export(game_id, str(destination))
+
+    contents = read_package(destination, verify_hashes=True)
+    assert contents.config_list("backups") == []
+    assert "备份 0 份" in message
+
+
+def test_run_export_of_an_unknown_game_leaves_no_file(tmp_path: Path) -> None:
+    """未知游戏: 抛错且用户选的路径上不会留下半成品."""
+    service = _service(tmp_path)
+    destination = tmp_path / "Demo.archive.zip"
+
     with pytest.raises(ArchiveManagementError):
-        service.run_export(game_id)
+        service.run_export("999", str(destination))
+
+    assert not destination.exists()
+
+
+# ----------------------------------------------------- 导入归档包
+
+
+def _exported_package(
+    tmp_path: Path, *, app_id: int | None = None
+) -> tuple[Path, Path]:
+    """造一台源机器并导出包, 返回包路径与源存档目录.
+
+    源游戏带 ``app_id`` 时导入体检才能匹配到"库里的同一款"; 存档目录留在
+    ``tmp_path`` 下, 因此体检时它是"本机已存在"的那一条。
+    """
+    root = tmp_path / "source"
+    database = Database(root / "app.db")
+    database.migrate()
+    service = SqlArchiveService(
+        database,
+        backup_root=root / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+    game = GameRepository(database).add(
+        Game(
+            name="Demo",
+            steam_app_id=app_id,
+            platform="windows",
+            origin="steam",
+            enabled=True,
+        )
+    )
+    assert game.id is not None
+    save = root / "save"
+    save.mkdir(parents=True)
+    (save / "slot.dat").write_text("state-0", encoding="utf-8")
+    service.add_location(str(game.id), path=str(save), kind="directory")
+    service.run_backup_now(str(game.id))
+    package = tmp_path / "Demo.archive.zip"
+    service.run_export(str(game.id), str(package))
+    return package, save
+
+
+def _single_inspection(service: SqlArchiveService, path: Path) -> ImportInspection:
+    """单游戏包的体检结果(把联合类型收窄: 这些用例测的都是单包那条路径)."""
+    inspection = service.inspect_import(str(path))
+    assert isinstance(inspection, ImportInspection)
+    return inspection
+
+
+def _target_service(tmp_path: Path) -> tuple[SqlArchiveService, Database, Path]:
+    """目标机器: 空数据库 + 独立备份根(导入的内容落在这里).
+
+    返回后端、数据库与**备份根** —— "什么都没写"要断言的是备份根(数据库文件
+    本来就在目标目录里, 不能拿整个目录当证据)。
+    """
+    root = tmp_path / "target"
+    backup_root = root / "backups"
+    database = Database(root / "app.db")
+    database.migrate()
+    service = SqlArchiveService(
+        database,
+        backup_root=backup_root,
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+    return service, database, backup_root
+
+
+def _tree_files(root: Path) -> list[Path]:
+    """``root`` 下的全部普通文件(断言"什么都没写"用)."""
+    if not root.exists():
+        return []
+    return [path for path in root.rglob("*") if path.is_file()]
+
+
+def _one_node(database: Database, game_id: int) -> BackupNode:
+    """该游戏的唯一备份节点(数量不对就直接失败, 免得后面断言看不出原因)."""
+    nodes = BackupRepository(database).list_for_game(game_id)
+    assert len(nodes) == 1, "预期恰好一个备份节点"
+    return nodes[0]
+
+
+def _node_id(node: BackupNode) -> int:
+    """仓储读出的节点必然带 id(收窄供后续查询使用)."""
+    assert node.id is not None
+    return node.id
+
+
+def test_inspect_import_reads_a_package_without_changing_anything(
+    tmp_path: Path,
+) -> None:
+    """体检: 读得出包内容与"本机已存在"的位置, 但数据库与备份根一点没动."""
+    package, save = _exported_package(tmp_path)
+    service, _database, backup_root = _target_service(tmp_path)
+    contents = read_package(package)
+
+    inspection = _single_inspection(service, package)
+
+    assert inspection.path == package
+    assert inspection.game_name == "Demo"
+    assert inspection.backup_count == 1
+    # 包内文件数 = 节点目录下的成员减去该节点自己的快照清单.
+    assert inspection.file_count == len(contents.member_paths("branches/")) - 1
+    assert inspection.matching_game_id is None
+    assert [item.path for item in inspection.locations] == [normalize_path(str(save))]
+    assert [item.exists_here for item in inspection.locations] == [True]
+    assert service.list_games() == []
+    assert _tree_files(backup_root) == []
+
+
+def test_inspect_import_matches_the_same_game_in_the_library(
+    tmp_path: Path,
+) -> None:
+    """同平台 + 同 AppID 才算"库里疑似同一款"."""
+    package, _save = _exported_package(tmp_path, app_id=730)
+    service, database, _backup_root = _target_service(tmp_path)
+    existing = GameRepository(database).add(
+        Game(
+            name="库里的 Demo",
+            steam_app_id=730,
+            platform="windows",
+            origin="steam",
+            enabled=True,
+        )
+    )
+    assert existing.id is not None
+
+    inspection = _single_inspection(service, package)
+
+    assert inspection.matching_game_id == existing.id
+
+
+def test_run_import_creates_the_game_nodes_and_locations(tmp_path: Path) -> None:
+    """新建策略: 真的建游戏/写节点/登记映射的位置, 提示里是真实的计数."""
+    package, _save = _exported_package(tmp_path)
+    service, database, backup_root = _target_service(tmp_path)
+    target_save = tmp_path / "target-save"
+    target_save.mkdir()
+    inspection = _single_inspection(service, package)
+
+    message = service.run_import(
+        inspection,
+        strategy=STRATEGY_NEW,
+        target_game_id=None,
+        locations={0: str(target_save)},
+    )
+
+    games = service.list_games()
+    assert [game.name for game in games] == ["Demo"]
+    game_id = int(games[0].game_id)
+    # 导入一律新建为停用: 启用态是本机的选择, 导入不该替用户启用任何东西.
+    assert games[0].enabled is False
+    node = _one_node(database, game_id)
+    entries = BackupRepository(database).list_files(_node_id(node))
+    assert message == tr(
+        "result.import_done",
+        name="Demo",
+        nodes=1,
+        files=len(entries),
+        size=size_label(sum(entry.size for entry in entries)),
+    )
+    # 映射到哪个目录就是哪个目录(不是包里那个), 且内容真的落到了备份根下.
+    assert [item.path for item in service.list_locations(str(game_id))] == [
+        normalize_path(str(target_save))
+    ]
+    copied = backup_root
+    assert node.storage_relpath is not None
+    assert (copied / node.storage_relpath / "loc-0" / "slot.dat").is_file()
+    assert service.list_backups(str(game_id))[0].verified is True
+
+
+def test_run_import_appends_to_the_matching_game_and_marks_the_target(
+    tmp_path: Path,
+) -> None:
+    """合并策略: 节点追加到目标游戏上, 而不是新建一款同名游戏."""
+    package, _save = _exported_package(tmp_path, app_id=730)
+    service, database, _backup_root = _target_service(tmp_path)
+    target_save = tmp_path / "target-save"
+    target_save.mkdir()
+    (target_save / "slot.dat").write_text("state-1", encoding="utf-8")
+    existing = GameRepository(database).add(
+        Game(
+            name="库里的 Demo",
+            steam_app_id=730,
+            platform="windows",
+            origin="steam",
+            enabled=True,
+        )
+    )
+    assert existing.id is not None
+    service.add_location(str(existing.id), path=str(target_save), kind="directory")
+    service.run_backup_now(str(existing.id))
+    inspection = _single_inspection(service, package)
+
+    message = service.run_import(
+        inspection,
+        strategy=STRATEGY_MERGE,
+        target_game_id=str(existing.id),
+        locations={0: str(target_save)},
+    )
+
+    assert [game.name for game in service.list_games()] == ["库里的 Demo"]
+    assert len(service.list_backups(str(existing.id))) == 2
+    assert "已导入" in message
+    # 映射到的路径与已有位置是同一个目录: 只记一条, 不重复添加.
+    assert len(service.list_locations(str(existing.id))) == 1
+
+
+def test_run_import_with_the_skip_strategy_writes_nothing(tmp_path: Path) -> None:
+    """跳过策略: 既不建游戏也不写节点, 只如实说明跳过了多少份."""
+    package, _save = _exported_package(tmp_path)
+    service, _database, backup_root = _target_service(tmp_path)
+    inspection = _single_inspection(service, package)
+
+    message = service.run_import(
+        inspection,
+        strategy=STRATEGY_SKIP,
+        target_game_id=None,
+        locations={},
+    )
+
+    assert message == tr("result.import_skipped", name="Demo", skipped=1)
+    assert service.list_games() == []
+    assert _tree_files(backup_root) == []
+
+
+def test_run_import_reports_the_nodes_it_skipped_on_a_repeat(
+    tmp_path: Path,
+) -> None:
+    """重复导入同一个包: 已存在的节点被跳过并计数, 不覆盖也不重复写."""
+    package, _save = _exported_package(tmp_path)
+    service, _database, _backup_root = _target_service(tmp_path)
+    inspection = _single_inspection(service, package)
+    service.run_import(
+        inspection,
+        strategy=STRATEGY_NEW,
+        target_game_id=None,
+        locations={},
+    )
+
+    message = service.run_import(
+        inspection,
+        strategy=STRATEGY_NEW,
+        target_game_id=None,
+        locations={},
+    )
+
+    assert message == tr(
+        "result.import_done_skipped",
+        name="Demo",
+        nodes=0,
+        files=0,
+        size=size_label(0),
+        skipped=1,
+    )
+    assert [game.name for game in service.list_games()] == ["Demo", "Demo"]
+
+
+def test_run_import_refuses_an_unknown_target_game(tmp_path: Path) -> None:
+    """合并到一个不存在的游戏: 直接报错, 什么都不写."""
+    package, _save = _exported_package(tmp_path)
+    service, _database, backup_root = _target_service(tmp_path)
+    inspection = _single_inspection(service, package)
+
+    with pytest.raises(ArchiveManagementError):
+        service.run_import(
+            inspection,
+            strategy=STRATEGY_MERGE,
+            target_game_id="999",
+            locations={},
+        )
+
+    assert service.list_games() == []
+    assert _tree_files(backup_root) == []
+
+
+def test_inspect_import_rejects_a_file_that_is_not_a_package(
+    tmp_path: Path,
+) -> None:
+    """不是归档包的文件: 报错而不是留下半截数据."""
+    service, _database, backup_root = _target_service(tmp_path)
+    broken = tmp_path / "not-a-package.zip"
+    broken.write_text("definitely not a zip", encoding="utf-8")
+
+    with pytest.raises(ArchiveManagementError):
+        service.inspect_import(str(broken))
+
+    assert service.list_games() == []
+    assert _tree_files(backup_root) == []
+
+
+# ---------------------------------------------------------------- 批量导出/导入
+
+
+def _source_service(
+    tmp_path: Path, *, count: int
+) -> tuple[SqlArchiveService, list[str]]:
+    """源机器: ``count`` 款游戏各带一个存档位置与一次备份."""
+    root = tmp_path / "batch-source"
+    database = Database(root / "app.db")
+    database.migrate()
+    service = SqlArchiveService(
+        database,
+        backup_root=root / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+    )
+    game_ids: list[str] = []
+    for index in range(count):
+        game_id = service.add_game(f"Batch{chr(ord('A') + index)}").game_id
+        save = root / f"save-{index}"
+        save.mkdir(parents=True)
+        (save / "slot.dat").write_text(f"state-{index}", encoding="utf-8")
+        service.add_location(game_id, path=str(save), kind="directory")
+        service.run_backup_now(game_id)
+        game_ids.append(game_id)
+    return service, game_ids
+
+
+def _exported_batch(tmp_path: Path, *, count: int = 2) -> Path:
+    """造一台源机器并导出一个批量包(批量导入用例的输入)."""
+    service, game_ids = _source_service(tmp_path, count=count)
+    package = tmp_path / "batch.archive.zip"
+    service.run_export_batch(game_ids, str(package))
+    return package
+
+
+def test_run_export_batch_writes_a_package_with_every_selected_game(
+    tmp_path: Path,
+) -> None:
+    """批量导出真的写出一个批量包: 回读的内层游戏与提示里的计数都对得上."""
+    service = _service(tmp_path)
+    game_ids: list[str] = []
+    for index in range(2):
+        game_id = service.add_game(f"批量游戏{index}").game_id
+        save = tmp_path / f"save-{index}"
+        save.mkdir()
+        (save / "slot.dat").write_text(f"state-{index}", encoding="utf-8")
+        service.add_location(game_id, path=str(save), kind="directory")
+        service.run_backup_now(game_id)
+        game_ids.append(game_id)
+    destination = tmp_path / "batch.archive.zip"
+
+    message = service.run_export_batch(game_ids, str(destination))
+
+    assert destination.is_file()
+    with read_batch_package(destination, verify_hashes=True) as contents:
+        names = [item.name for item in contents.games]
+        files = sum(len(item.package.entries) for item in contents.games)
+        size = sum(
+            entry.size for item in contents.games for entry in item.package.entries
+        )
+    assert names == ["批量游戏0", "批量游戏1"]
+    assert message == tr(
+        "result.export_batch_done",
+        games=2,
+        file=destination.name,
+        backups=2,
+        files=files,
+        size=size_label(size),
+    )
+    # 导出的顺序就是传入的顺序(界面按用户在对话框里勾选的顺序传进来).
+    assert not list(tmp_path.glob(".batch-*"))
+
+
+def test_run_export_batch_rejects_an_empty_selection_and_unknown_games(
+    tmp_path: Path,
+) -> None:
+    """空选择与不存在的游戏都直接报错, 目标路径一个文件都不留."""
+    service = _service(tmp_path)
+    game_id = service.add_game("真实游戏").game_id
+
+    with pytest.raises(ArchiveManagementError):
+        service.run_export_batch([], str(tmp_path / "empty.archive.zip"))
+    with pytest.raises(ArchiveManagementError):
+        service.run_export_batch(["999"], str(tmp_path / "unknown.archive.zip"))
+
+    assert game_id  # 游戏本身没被动过
+    assert list(tmp_path.glob("*.archive.zip")) == []
+    # 两次都在"进行中操作"之前就被拦下了: 槽位必须已经释放.
+    assert service.cancel_active() is False
+
+
+def test_run_export_batch_cancelled_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消批量导出: 目标不留文件、临时目录被清掉, 提示说明是取消(不是失败)."""
+    service, game_ids = _source_service(tmp_path, count=1)
+    monkeypatch.setattr(service, "_cancel_requested", lambda: True)
+    destination = tmp_path / "cancelled.archive.zip"
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.run_export_batch(game_ids, str(destination))
+
+    assert str(excinfo.value) == tr("action.export_batch_canceled")
+    assert destination.exists() is False
+    assert list(tmp_path.glob(".batch-*")) == []
+    assert service.cancel_active() is False
+
+
+def test_inspect_import_dispatches_on_the_package_kind(tmp_path: Path) -> None:
+    """体检按包清单里的类型分派: 单包给单包体检, 批量包给批量体检."""
+    single, _save = _exported_package(tmp_path)
+    batch_path = _exported_batch(tmp_path)
+    service, _database, _backup_root = _target_service(tmp_path)
+
+    single_inspection = service.inspect_import(str(single))
+    batch_inspection = service.inspect_import(str(batch_path))
+
+    assert isinstance(single_inspection, ImportInspection)
+    assert single_inspection.game_name == "Demo"
+    assert isinstance(batch_inspection, BatchInspection)
+    assert [item.entry for item in batch_inspection.games] == list(
+        _batch_entries(batch_path)
+    )
+    assert batch_inspection.game_count == 2
+    assert batch_inspection.backup_count == 2
+    # 体检仍然只读: 目标库与备份根都没被写过.
+    assert service.list_games() == []
+
+
+def _batch_entries(package: Path) -> tuple[str, ...]:
+    """批量包里的内层条目名(按清单顺序, 就是导出时的顺序)."""
+    with read_batch_package(package) as contents:
+        return tuple(item.entry for item in contents.games)
+
+
+def test_run_import_batch_imports_it_for_real_and_honours_every_choice(
+    tmp_path: Path,
+) -> None:
+    """批量导入: 游戏与备份真的出现, 选"跳过"的那一款不在库里, 提示里是真实计数."""
+    batch_path = _exported_batch(tmp_path)
+    service, database, backup_root = _target_service(tmp_path)
+    target_save = tmp_path / "target-save"
+    target_save.mkdir()
+    batch = service.inspect_import(str(batch_path))
+    assert isinstance(batch, BatchInspection)
+    entries = [item.entry for item in batch.games]
+
+    message = service.run_import_batch(
+        batch,
+        {
+            entries[0]: ImportChoice(
+                strategy=STRATEGY_NEW,
+                target_game_id=None,
+                locations={0: str(target_save)},
+            ),
+            entries[1]: ImportChoice(
+                strategy=STRATEGY_SKIP, target_game_id=None, locations={}
+            ),
+        },
+    )
+
+    games = service.list_games()
+    assert [game.name for game in games] == ["BatchA"]
+    game_id = int(games[0].game_id)
+    node = _one_node(database, game_id)
+    entry_files = BackupRepository(database).list_files(_node_id(node))
+    assert message == tr(
+        "result.import_batch_done",
+        games=2,
+        nodes=1,
+        files=len(entry_files),
+        size=size_label(sum(item.size for item in entry_files)),
+        skipped=0,
+        skipped_games=1,
+    )
+    # 映射到哪个目录就写哪个目录, 内容也真的落到了备份根下.
+    assert [item.path for item in service.list_locations(str(game_id))] == [
+        normalize_path(str(target_save))
+    ]
+    assert node.storage_relpath is not None
+    assert (backup_root / node.storage_relpath / "loc-0" / "slot.dat").is_file()
+
+
+def test_run_import_batch_reports_a_wholly_skipped_batch(tmp_path: Path) -> None:
+    """整批都选"跳过": 一句话说清什么都没导入, 而不是"已导入 N 款"."""
+    batch_path = _exported_batch(tmp_path)
+    service, _database, backup_root = _target_service(tmp_path)
+    batch = service.inspect_import(str(batch_path))
+    assert isinstance(batch, BatchInspection)
+
+    message = service.run_import_batch(
+        batch,
+        {
+            item.entry: ImportChoice(
+                strategy=STRATEGY_SKIP, target_game_id=None, locations={}
+            )
+            for item in batch.games
+        },
+    )
+
+    assert message == tr("result.import_batch_all_skipped", games=2)
+    assert service.list_games() == []
+    assert _tree_files(backup_root) == []
 
 
 def test_unknown_game_operations_raise(tmp_path: Path) -> None:
@@ -233,7 +1015,9 @@ def test_unknown_game_operations_raise(tmp_path: Path) -> None:
     with pytest.raises(ArchiveManagementError):
         service.add_location("abc", path="/x", kind="directory")
     with pytest.raises(ArchiveManagementError):
-        service.delete_game("missing")
+        service.delete_export_path("missing")
+    with pytest.raises(ArchiveManagementError):
+        service.delete_game("missing", "/nowhere/missing.archive.zip")
 
 
 def test_task_status_reports_backup_root(tmp_path: Path) -> None:
@@ -856,7 +1640,7 @@ def test_delete_game_returns_its_candidate_to_pending(tmp_path: Path) -> None:
     assert candidate.id is not None
     imported = service.import_candidate(str(candidate.id))
 
-    service.delete_game(imported.game_id)
+    service.delete_game(imported.game_id, str(tmp_path / "exports" / "imported.zip"))
 
     released = CandidateRepository(database).get(candidate.id)
     assert released is not None
@@ -1237,7 +2021,7 @@ def test_delete_game_removes_its_artwork_cache(tmp_path: Path) -> None:
     cache.store("steam", "730", "icon", ICON_VERSION, content=_PNG, extension="png")
     service, game_id, _database = _steam_service(tmp_path, cache_dir=cache_dir)
 
-    service.delete_game(game_id)
+    service.delete_game(game_id, str(tmp_path / "exports" / "steam.zip"))
 
     assert cache.lookup_any("steam", "730", "cover") is None
     assert cache.lookup_any("steam", "730", "icon") is None

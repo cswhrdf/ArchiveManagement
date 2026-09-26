@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -159,6 +160,47 @@ def test_update_toggle_and_remove_monitored_directory(tmp_path: Path) -> None:
     assert MonitoredDirectoryRepository(database).list_all() == []
     with pytest.raises(ArchiveManagementError, match="未知监控目录"):
         remove_monitored_directory(database, created.id)
+
+
+def test_a_monitored_directory_that_cannot_be_read_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录在但读不了时拒绝加入监控(而不是加一个永远扫不出东西的目录)."""
+    database = _database(tmp_path)
+    target = tmp_path / "Games"
+    target.mkdir()
+    real_access = os.access
+
+    def deny(path: str | Path, mode: int) -> bool:
+        return False if Path(path) == target else real_access(path, mode)
+
+    monkeypatch.setattr(os, "access", deny)
+
+    with pytest.raises(ArchiveManagementError, match="没有读取权限"):
+        add_monitored_directory(database, str(target))
+
+    assert MonitoredDirectoryRepository(database).list_all() == []
+
+
+def test_moving_a_monitored_directory_onto_another_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """把监控目录改到另一个已在列表里的路径时拒绝, 并保持原记录不变."""
+    database = _database(tmp_path)
+    first = tmp_path / "Games"
+    second = tmp_path / "More Games"
+    first.mkdir()
+    second.mkdir()
+    add_monitored_directory(database, str(first))
+    directory = add_monitored_directory(database, str(second))
+    assert directory.id is not None
+
+    with pytest.raises(ArchiveManagementError, match="已在监控列表中"):
+        update_monitored_directory(database, directory.id, path=str(first))
+
+    stored = MonitoredDirectoryRepository(database).get(directory.id)
+    assert stored is not None
+    assert stored.path == str(second)
 
 
 # ------------------------------------------------------------------ 扫描

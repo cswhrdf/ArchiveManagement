@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import posixpath
+from pathlib import Path, PurePosixPath
+
 import pytest
 
+import archive_management.ui.demo_backend as demo_mod
+from archive_management.application.imports import (
+    STRATEGY_MERGE,
+    STRATEGY_NEW,
+    STRATEGY_SKIP,
+    BatchGameInspection,
+    BatchInspection,
+    ImportInspection,
+)
 from archive_management.domain import HomeFilter, HomeView
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
+from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.ui.demo_backend import DemoArchiveService
+from archive_management.ui.models import ImportChoice
 
 pytestmark = [
     pytest.mark.backend,
@@ -124,9 +138,11 @@ def test_restore_unknown_game_raises(service: DemoArchiveService) -> None:
         service.run_restore("missing-game", "b1")
 
 
-def test_export_unknown_game_raises(service: DemoArchiveService) -> None:
+def test_export_unknown_game_raises(
+    service: DemoArchiveService, tmp_path: Path
+) -> None:
     with pytest.raises(ArchiveManagementError):
-        service.run_export("missing-game")
+        service.run_export("missing-game", str(tmp_path / "Demo.archive.zip"))
 
 
 def test_create_branch_message_contains_name(service: DemoArchiveService) -> None:
@@ -134,9 +150,16 @@ def test_create_branch_message_contains_name(service: DemoArchiveService) -> Non
     assert "分支X" in message
 
 
-def test_export_message_contains_game_name(service: DemoArchiveService) -> None:
-    message = service.run_export("outer-wilds")
+def test_export_message_admits_it_wrote_nothing(
+    service: DemoArchiveService, tmp_path: Path
+) -> None:
+    """演示后端不碰文件系统: 提示要说清楚没写文件, 而不是假装导出了包."""
+    destination = tmp_path / "Demo.archive.zip"
+
+    message = service.run_export("outer-wilds", str(destination))
+
     assert "星际拓荒" in message
+    assert not destination.exists(), "演示后端不该真的写出导出包"
 
 
 def test_home_board_lists_demo_games_with_filters(
@@ -323,6 +346,41 @@ def test_demo_update_location_rejects_a_path_used_by_another_location(
         service.update_location(second.location_id, path=taken.path)
 
 
+def _posix_normalize(raw: str) -> str:
+    """模拟 POSIX 上 ``normalize_path`` 的行为: ``C:/…`` 不是绝对路径, 会被拼上工作目录.
+
+    用它把"只规范化一侧"的漏判搬到 Windows 上重现 —— 不必等 Linux 分片去发现。
+    """
+    base = PurePosixPath(raw)
+    if not raw.startswith("/"):
+        base = PurePosixPath("/work/ArchiveManagement") / raw
+    return posixpath.normpath(str(base))
+
+
+def test_demo_duplicate_locations_are_caught_for_unusual_path_forms(
+    service: DemoArchiveService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """判重要按"两侧都规范化"比较: 只规范化输入侧会在 POSIX 上漏判(CI 实测过一次).
+
+    实测(CI 的 Linux 分片): ``test_demo_update_location_rejects_a_path_used_by_another_location``
+    报 ``DID NOT RAISE`` —— 演示数据里的路径是原样保存的展示字符串, 而输入侧会过一遍
+    ``normalize_path``: 在 POSIX 上 ``D:\\Games\\…`` 属于相对路径, 会被拼上工作目录,
+    两侧形态不同就永远比不出重复。Windows 上恰好因为 normpath 对这类路径幂等而看不出来,
+    所以这里换成 POSIX 风格的替身, 让同一条规则在每个平台都跑一遍。
+    """
+    monkeypatch.setattr(demo_mod, "normalize_path", _posix_normalize)
+    taken = service.list_locations("outer-wilds")[0]
+    second = service.add_location(
+        "outer-wilds", path="C:/demo/second", kind="directory"
+    )
+
+    # 新增与修改两条路径都要拦下: 否则两个位置会指向同一份存档.
+    with pytest.raises(ArchiveManagementError):
+        service.add_location("outer-wilds", path=taken.path, kind="directory")
+    with pytest.raises(ArchiveManagementError):
+        service.update_location(second.location_id, path=taken.path)
+
+
 def test_demo_removing_the_primary_location_promotes_the_next_one(
     service: DemoArchiveService,
 ) -> None:
@@ -418,12 +476,56 @@ def test_demo_update_game_renames(service: DemoArchiveService) -> None:
     assert service.get_detail(game_id).name == "新名"
 
 
-def test_demo_delete_game_removes(service: DemoArchiveService) -> None:
+def test_demo_delete_game_removes(service: DemoArchiveService, tmp_path: Path) -> None:
     game_id = service.add_game("临时").game_id
-    service.delete_game(game_id)
+    destination = tmp_path / "Demo.archive.zip"
+
+    service.delete_game(game_id, str(destination))
+
     assert game_id not in {game.game_id for game in service.list_games()}
     with pytest.raises(ArchiveManagementError):
         service.get_detail(game_id)
+    assert not destination.exists(), "演示后端不该真的写出告别包"
+
+
+def test_demo_delete_export_path_is_a_plausible_relative_path(
+    service: DemoArchiveService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """演示后端只算出一条像样的路径(游戏名 + 时间戳 + 包后缀), 不碰文件系统."""
+    monkeypatch.chdir(tmp_path)
+    game_id = service.add_game("临时").game_id
+
+    destination = Path(service.delete_export_path(game_id))
+
+    assert destination.parent == Path("exports")
+    assert destination.name.startswith("临时-")
+    assert destination.name.endswith(ARCHIVE_SUFFIX)
+    assert not destination.exists()
+    assert not Path("exports").exists(), "只算路径的入口不该建目录"
+
+    with pytest.raises(ArchiveManagementError):
+        service.delete_export_path("missing-game")
+
+
+def test_demo_delete_game_writes_nothing_to_disk(
+    service: DemoArchiveService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_log: list[str],
+) -> None:
+    """删除时演示后端如实记一条"模拟导出", 目标路径上什么都不写(与 run_export 同口径)."""
+    monkeypatch.chdir(tmp_path)
+    game_id = service.add_game("临时").game_id
+    destination = Path(service.delete_export_path(game_id))
+
+    service.delete_game(game_id, str(destination))
+
+    assert game_id not in {game.game_id for game in service.list_games()}
+    assert not destination.exists(), "演示后端不该真的写出告别包"
+    assert list(tmp_path.rglob("*")) == []
+    assert any("game.delete_export" in line for line in audit_log)
 
 
 def test_demo_set_game_enabled(service: DemoArchiveService) -> None:
@@ -568,3 +670,225 @@ def test_demo_delete_save_location_removes_location(
     assert location.path in message
     assert service.list_locations("outer-wilds") == []
     assert service.list_games()[0].has_locations is False
+
+
+# ---------------------------------------------------------------- 导入归档包
+
+
+def test_demo_inspect_import_marks_the_fabricated_package(
+    service: DemoArchiveService,
+    tmp_path: Path,
+) -> None:
+    """演示后端不读磁盘: 编出来的"包"没有存档位置与节点, 名字也标成演示包."""
+    inspection = service.inspect_import(str(tmp_path / "Demo.archive.zip"))
+
+    assert inspection.path == tmp_path / "Demo.archive.zip"
+    assert inspection.game_name == tr("demo.import_name", file="Demo.archive")
+    assert inspection.backup_count == 0
+    assert inspection.file_count == 0
+    assert inspection.locations == ()
+    assert inspection.matching_game_id is None
+
+
+def test_demo_run_import_admits_it_wrote_nothing(
+    service: DemoArchiveService,
+    tmp_path: Path,
+) -> None:
+    """演示后端不碰数据库: 提示要说清什么都没写, 游戏与备份也不许变多."""
+    inspection = service.inspect_import(str(tmp_path / "Demo.archive.zip"))
+    before_games = [game.game_id for game in service.list_games()]
+    before_backups = len(service.list_backups("outer-wilds"))
+
+    created = service.run_import(
+        inspection,
+        strategy=STRATEGY_NEW,
+        target_game_id=None,
+        locations={0: "D:/saves"},
+    )
+    merged = service.run_import(
+        inspection,
+        strategy=STRATEGY_MERGE,
+        target_game_id="outer-wilds",
+        locations={0: "D:/saves"},
+    )
+
+    assert created == tr("result.import_simulated", name=inspection.game_name)
+    assert merged == tr("result.import_simulated", name=inspection.game_name)
+    assert [game.game_id for game in service.list_games()] == before_games
+    assert len(service.list_backups("outer-wilds")) == before_backups
+
+
+def test_demo_run_import_skip_reports_nothing_imported(
+    service: DemoArchiveService,
+    tmp_path: Path,
+) -> None:
+    """跳过: 与真实后端同一句话(跳过了多少份), 而不是"已模拟导入"."""
+    inspection = service.inspect_import(str(tmp_path / "Demo.archive.zip"))
+
+    message = service.run_import(
+        inspection,
+        strategy=STRATEGY_SKIP,
+        target_game_id=None,
+        locations={},
+    )
+
+    assert message == tr("result.import_skipped", name=inspection.game_name, skipped=0)
+
+
+def test_demo_run_import_rejects_a_target_that_does_not_exist(
+    service: DemoArchiveService,
+    tmp_path: Path,
+) -> None:
+    """合并到一个不存在的游戏: 与真实后端一样报错, 不假装成功."""
+    inspection = service.inspect_import(str(tmp_path / "Demo.archive.zip"))
+
+    with pytest.raises(ArchiveManagementError):
+        service.run_import(
+            inspection,
+            strategy=STRATEGY_MERGE,
+            target_game_id="missing-game",
+            locations={},
+        )
+
+
+def test_demo_run_import_rejects_an_unknown_strategy(
+    service: DemoArchiveService,
+    tmp_path: Path,
+) -> None:
+    """未知策略: 报错而不是默默按"模拟导入"收场."""
+    inspection = service.inspect_import(str(tmp_path / "Demo.archive.zip"))
+
+    with pytest.raises(ArchiveManagementError):
+        service.run_import(
+            inspection,
+            strategy="nope",
+            target_game_id=None,
+            locations={},
+        )
+
+
+# ---------------------------------------------------------------- 批量导出/导入
+
+
+def _batch_inspection(*names: str) -> BatchInspection:
+    """一个演示用的批量体检结果(演示后端只用得上游戏数与条目名)."""
+    return BatchInspection(
+        path=Path("demo-batch.archive.zip"),
+        games=tuple(
+            BatchGameInspection(
+                entry=f"demo-{index}.archive.zip",
+                inspection=ImportInspection(
+                    path=Path(f"demo-{index}.archive.zip"),
+                    game_name=name,
+                    steam_app_id=None,
+                    platform="windows",
+                    origin="manual",
+                    tags=(),
+                    locations=(),
+                    nodes=(),
+                    schedule=None,
+                    matching_game_id=None,
+                ),
+            )
+            for index, name in enumerate(names)
+        ),
+    )
+
+
+def test_demo_run_export_batch_admits_it_wrote_nothing(
+    service: DemoArchiveService,
+    tmp_path: Path,
+) -> None:
+    """演示后端不写文件: 提示要说清这一批没有文件产生, 目标路径也不许出现."""
+    game_ids = [game.game_id for game in service.list_games()][:2]
+    destination = tmp_path / "batch.archive.zip"
+
+    message = service.run_export_batch(game_ids, str(destination))
+
+    assert message == tr("result.export_batch_simulated", count=2)
+    assert destination.exists() is False
+
+
+def test_demo_run_export_batch_rejects_an_empty_selection_and_unknown_games(
+    service: DemoArchiveService,
+    tmp_path: Path,
+) -> None:
+    """空选择与不存在的游戏: 与真实后端一样报错(不是"已模拟导出 0 款")."""
+    with pytest.raises(ArchiveManagementError):
+        service.run_export_batch([], str(tmp_path / "empty.archive.zip"))
+    with pytest.raises(ArchiveManagementError):
+        service.run_export_batch(
+            ["missing-game"], str(tmp_path / "unknown.archive.zip")
+        )
+
+
+def test_demo_run_import_batch_admits_it_wrote_nothing(
+    service: DemoArchiveService,
+) -> None:
+    """批量导入: 只数非跳过的款数, 游戏与备份一个都不许多."""
+    batch = _batch_inspection("演示甲", "演示乙")
+    before_games = [game.game_id for game in service.list_games()]
+    before_backups = len(service.list_backups("outer-wilds"))
+
+    message = service.run_import_batch(
+        batch,
+        {
+            "demo-0.archive.zip": ImportChoice(
+                strategy=STRATEGY_NEW, target_game_id=None, locations={0: "D:/saves"}
+            ),
+            "demo-1.archive.zip": ImportChoice(
+                strategy=STRATEGY_SKIP, target_game_id=None, locations={}
+            ),
+        },
+    )
+
+    assert message == tr("result.import_batch_simulated", count=1)
+    assert [game.game_id for game in service.list_games()] == before_games
+    assert len(service.list_backups("outer-wilds")) == before_backups
+
+
+def test_demo_run_import_batch_skip_reports_nothing_imported(
+    service: DemoArchiveService,
+) -> None:
+    """整批都选"跳过": 一句话说清什么都没导入, 而不是"已模拟导入 2 款"."""
+    batch = _batch_inspection("演示甲", "演示乙")
+    skips = {
+        item.entry: ImportChoice(
+            strategy=STRATEGY_SKIP, target_game_id=None, locations={}
+        )
+        for item in batch.games
+    }
+
+    message = service.run_import_batch(batch, skips)
+
+    assert message == tr("result.import_batch_all_skipped", games=2)
+
+
+def test_demo_run_import_batch_rejects_unknown_strategy_target_and_empty_batch(
+    service: DemoArchiveService,
+) -> None:
+    """未知策略/不存在的目标游戏/空包都要报错, 不假装成功."""
+    batch = _batch_inspection("演示甲")
+
+    with pytest.raises(ArchiveManagementError):
+        service.run_import_batch(
+            batch,
+            {
+                "demo-0.archive.zip": ImportChoice(
+                    strategy="nope", target_game_id=None, locations={}
+                )
+            },
+        )
+    with pytest.raises(ArchiveManagementError):
+        service.run_import_batch(
+            batch,
+            {
+                "demo-0.archive.zip": ImportChoice(
+                    strategy=STRATEGY_MERGE,
+                    target_game_id="missing-game",
+                    locations={},
+                )
+            },
+        )
+    with pytest.raises(ArchiveManagementError):
+        service.run_import_batch(_batch_inspection(), {})

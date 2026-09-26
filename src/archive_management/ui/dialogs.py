@@ -8,15 +8,34 @@ i18n 配置加载,弹窗一律居中显示在主窗口上。
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import customtkinter as ctk
 
+from archive_management.application.imports import STRATEGY_MERGE
 from archive_management.domain import (
     MAX_TAG_LENGTH,
     MAX_TAGS,
     normalize_tags,
 )
 from archive_management.i18n import tr
+from archive_management.ui.models import (
+    BatchExportChoice,
+    BatchExportOption,
+    BatchExportPrompt,
+    BatchImportPrompt,
+    BatchImportRow,
+    BatchImportSelection,
+    ImportChoice,
+    ImportLocationRow,
+    ImportPrompt,
+    ImportTargetOption,
+    batch_export_choice,
+    batch_row_choice,
+    filter_export_options,
+    target_game_id,
+    target_label_for,
+)
 from archive_management.ui.palette import Palette
 
 
@@ -1021,3 +1040,694 @@ def restore_dialog(
     _center(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
+
+
+def import_package_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    title: str,
+    prompt: ImportPrompt,
+    locations_label: str,
+    locations_hint: str,
+    strategy_label: str,
+    strategies: Sequence[tuple[str, str]],
+    target_label: str,
+    target_hint: str,
+    confirm_text: str | None = None,
+) -> ImportChoice | None:
+    """展示包内容与冲突项, 让用户选导入方式并映射存档位置; 取消返回 ``None``.
+
+    ``strategies`` 是 ``(策略键, 文案)`` 列表(调用方按"有没有可合并的游戏"决定
+    是否提供"合并"); ``prompt`` 里的每个存档位置一行输入框, **留空表示这一条不
+    导入**, 只有本就存在于本机的包内路径才会被预填。目标游戏只在"合并"时返回。
+
+    与其它对话框一致: 只在主线程调用, 窗口居中于主窗口, 用户点"取消"或直接关窗
+    都返回 ``None``(调用方据此什么都不做)。
+    """
+    ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
+    window = ctk.CTkToplevel(parent)
+    window.title(title)
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    ctk.CTkLabel(
+        window,
+        text=prompt.summary,
+        anchor="w",
+        justify="left",
+        wraplength=460,
+        font=ctk.CTkFont(size=13),
+        text_color=palette.text_body,
+    ).pack(padx=24, pady=(20, 6), anchor="w")
+
+    if prompt.match_text:
+        ctk.CTkLabel(
+            window,
+            text=prompt.match_text,
+            anchor="w",
+            justify="left",
+            wraplength=460,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
+        ).pack(padx=24, pady=(0, 6), anchor="w")
+
+    _dialog_section(window, palette, locations_label)
+    _dialog_hint(window, palette, locations_hint)
+    rows = ctk.CTkScrollableFrame(
+        window, width=460, height=120, fg_color=palette.well, corner_radius=8
+    )
+    rows.pack(padx=24, pady=(6, 10), fill="x")
+    entries: list[tuple[ImportLocationRow, ctk.CTkEntry]] = []
+    for row in prompt.locations:
+        frame = ctk.CTkFrame(rows, fg_color="transparent")
+        frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(
+            frame,
+            text=row.text,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        ).pack(fill="x")
+        entry = ctk.CTkEntry(
+            frame,
+            fg_color=palette.input_bg,
+            border_color=palette.border,
+            text_color=palette.text_body,
+        )
+        entry.insert(0, row.default)
+        entry.pack(fill="x", pady=(0, 2))
+        entries.append((row, entry))
+
+    _dialog_section(window, palette, strategy_label)
+    strategy_var = ctk.StringVar(value=strategies[0][0])
+    for key, text in strategies:
+        ctk.CTkRadioButton(
+            window,
+            text=text,
+            value=key,
+            variable=strategy_var,
+            command=lambda: _paint_targets(),
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+            fg_color=palette.accent,
+            hover_color=palette.accent_soft_border,
+            border_color=palette.border,
+        ).pack(padx=24, pady=(2, 0), anchor="w")
+
+    target_var = ctk.StringVar(value=_default_target(prompt.targets))
+    # 只登记"能接受 state 参数"的控件: 滚动容器的 configure 不吃 state(会报未知选项).
+    target_parts: list[ctk.CTkBaseClass] = []
+    if prompt.targets:
+        target_parts.append(_dialog_section(window, palette, target_label))
+        target_parts.append(_dialog_hint(window, palette, target_hint))
+        target_rows = ctk.CTkScrollableFrame(
+            window, width=460, height=110, fg_color=palette.well, corner_radius=8
+        )
+        target_rows.pack(padx=24, pady=(6, 10), fill="x")
+        for option in prompt.targets:
+            radio = ctk.CTkRadioButton(
+                target_rows,
+                text=option.label,
+                value=option.game_id,
+                variable=target_var,
+                font=ctk.CTkFont(size=12),
+                text_color=palette.text_body,
+                fg_color=palette.accent,
+                hover_color=palette.accent_soft_border,
+                border_color=palette.border,
+            )
+            radio.pack(padx=4, pady=2, anchor="w")
+            target_parts.append(radio)
+
+    def _paint_targets() -> None:
+        """只有"合并"才需要目标游戏: 其余方式把目标区置灰(避免误以为会合并)."""
+        state = "normal" if strategy_var.get() == STRATEGY_MERGE else "disabled"
+        for part in target_parts:
+            part.configure(state=state)
+
+    _paint_targets()
+
+    result: list[ImportChoice] = []
+
+    def submit() -> None:
+        strategy = strategy_var.get()
+        chosen = {row.index: entry.get().strip() for row, entry in entries}
+        result.append(
+            ImportChoice(
+                strategy=strategy,
+                target_game_id=_chosen_target(strategy, target_var.get()),
+                locations={index: path for index, path in chosen.items() if path},
+            )
+        )
+        window.destroy()
+
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        buttons,
+        text=ok_text,
+        width=96,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=submit,
+    ).pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None
+
+
+@dataclass(frozen=True)
+class _BatchTicks:
+    """批量导出对话框的勾选状态: 全选框 + 逐行变量(两者共用同一份变量表)."""
+
+    master: ctk.CTkCheckBox
+    variables: dict[str, ctk.BooleanVar]
+
+    def selected(self) -> dict[str, bool]:
+        """逐行取值(提交时用)."""
+        return {game_id: bool(var.get()) for game_id, var in self.variables.items()}
+
+
+def _build_batch_game_list(
+    window: ctk.CTk,
+    palette: Palette,
+    *,
+    prompt: BatchExportPrompt,
+    list_label: str,
+    select_all_label: str,
+    no_match_text: str,
+    filter_box: ctk.CTkEntry,
+) -> tuple[_BatchTicks, Callable[[object], None]]:
+    """建"全选框 + 可滚动勾选列表", 返回勾选状态与"按筛选刷新显示"的回调.
+
+    筛选只影响显示: 勾选状态存在按游戏 id 索引的变量里, 被筛掉的行不会丢掉用户做过的
+    选择。全选框作用于**当前筛选后的行**(筛掉的行保持用户原来的勾选), 自己的状态则始终
+    反映"可见行是否已全部勾上", 没有可见行时置灰。
+    """
+    _dialog_section(window, palette, list_label)
+    master_var = ctk.BooleanVar(value=all(option.selected for option in prompt.options))
+    master = ctk.CTkCheckBox(
+        window,
+        text=select_all_label,
+        variable=master_var,
+        font=ctk.CTkFont(size=12),
+        text_color=palette.text_body,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        border_color=palette.border,
+    )
+    master.pack(padx=24, pady=(6, 0), anchor="w")
+    rows = ctk.CTkScrollableFrame(
+        window, width=460, height=220, fg_color=palette.well, corner_radius=8
+    )
+    rows.pack(padx=24, pady=(6, 10), fill="x")
+    no_match = ctk.CTkLabel(
+        rows,
+        text=no_match_text,
+        anchor="w",
+        font=ctk.CTkFont(size=12),
+        text_color=palette.text_muted,
+    )
+    variables: dict[str, ctk.BooleanVar] = {}
+    lines: list[tuple[BatchExportOption, ctk.CTkFrame]] = []
+
+    def visible_ids() -> set[str]:
+        """当前筛选后仍然显示的游戏 id(筛选只影响显示)."""
+        return {
+            option.game_id
+            for option in filter_export_options(prompt.options, str(filter_box.get()))
+        }
+
+    def refresh_master() -> None:
+        """刷新全选框: 没有可见行时置灰, 否则反映"可见行是否已全部勾上"."""
+        visible = visible_ids()
+        master.configure(state="normal" if visible else "disabled")
+        master_var.set(bool(visible) and all(variables[gid].get() for gid in visible))
+
+    def toggle_all() -> None:
+        """点全选: 只改**当前筛选后的**行, 筛掉的行保持用户原来的勾选."""
+        wanted = bool(master_var.get())
+        for game_id in visible_ids():
+            variables[game_id].set(wanted)
+        refresh_master()
+
+    master.configure(command=toggle_all)
+
+    for option in prompt.options:
+        row = ctk.CTkFrame(rows, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+        variables[option.game_id] = ctk.BooleanVar(value=option.selected)
+        ctk.CTkCheckBox(
+            row,
+            text=option.name,
+            variable=variables[option.game_id],
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+            fg_color=palette.accent,
+            hover_color=palette.accent_soft_border,
+            border_color=palette.border,
+            command=refresh_master,
+        ).pack(side="left", padx=(6, 8), pady=2)
+        ctk.CTkLabel(
+            row,
+            text=option.detail,
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        ).pack(side="left")
+        lines.append((option, row))
+
+    def apply_filter(_event: object = None) -> None:
+        """按输入内容显示/隐藏行; 一条都不匹配时给出提示(勾选状态不受影响)."""
+        visible = visible_ids()
+        for option, row in lines:
+            if option.game_id in visible:
+                row.pack(fill="x", pady=2)
+            else:
+                row.pack_forget()
+        if visible:
+            no_match.pack_forget()
+        else:
+            no_match.pack(padx=6, pady=8, anchor="w")
+        refresh_master()
+
+    refresh_master()
+    return _BatchTicks(master=master, variables=variables), apply_filter
+
+
+def export_batch_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    title: str,
+    prompt: BatchExportPrompt,
+    filter_label: str,
+    list_label: str,
+    no_match_text: str,
+    select_all_label: str,
+    confirm_text: str | None = None,
+) -> BatchExportChoice | None:
+    """让用户勾选要批量导出的游戏; 取消返回 ``None``.
+
+    列表上方是一个**可输入的筛选框**(与定时任务窗口的选择框同一套做法: 输入即过滤),
+    但过滤只影响显示 —— 勾选状态存在按游戏 id 索引的变量里, 随后被筛掉的行不会丢掉
+    用户已经做过的选择(勾选是用户明确表达过的意思, 不该被一次输入悄悄丢掉)。
+
+    筛选框下面还有一个**全选框**: 它作用于**当前筛选后的行**(筛掉的行保持用户原来的
+    勾选 —— 与上面同一条语义), 自己的状态则始终反映"可见行是否已全部勾上", 没有
+    可见行时置灰。
+    """
+    ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
+    window = ctk.CTkToplevel(parent)
+    window.title(title)
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    ctk.CTkLabel(
+        window,
+        text=prompt.summary,
+        anchor="w",
+        justify="left",
+        wraplength=460,
+        font=ctk.CTkFont(size=13),
+        text_color=palette.text_body,
+    ).pack(padx=24, pady=(20, 6), anchor="w")
+
+    _dialog_section(window, palette, filter_label)
+    _dialog_hint(window, palette, prompt.filter_hint)
+    # 普通输入框(不是下拉选框): 这里用户要做的就是打字筛选, 下拉列表只会挡住下面的
+    # 勾选列表; 输入即筛选的接线与下面 apply_filter 一致。
+    filter_box = ctk.CTkEntry(
+        window,
+        width=460,
+        placeholder_text=filter_label,
+        fg_color=palette.input_bg,
+        border_color=palette.border,
+        text_color=palette.text_body,
+        font=ctk.CTkFont(size=13),
+    )
+    filter_box.pack(padx=24, pady=(6, 10))
+    ticks, apply_filter = _build_batch_game_list(
+        window,
+        palette,
+        prompt=prompt,
+        list_label=list_label,
+        select_all_label=select_all_label,
+        no_match_text=no_match_text,
+        filter_box=filter_box,
+    )
+    filter_box.bind("<KeyRelease>", apply_filter)
+
+    result: list[BatchExportChoice] = []
+
+    def submit() -> None:
+        result.append(batch_export_choice(ticks.selected(), prompt.options))
+        window.destroy()
+
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        buttons,
+        text=ok_text,
+        width=104,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=submit,
+    ).pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None
+
+
+@dataclass(frozen=True)
+class _BatchRowWidgets:
+    """批量导入对话框里一行的控件(提交时逐行取值)."""
+
+    row: BatchImportRow
+    strategy: ctk.StringVar
+    target: ctk.CTkComboBox
+    entries: tuple[tuple[ImportLocationRow, ctk.CTkEntry], ...]
+    target_parts: tuple[ctk.CTkBaseClass, ...]
+
+
+def _paint_batch_row(parts: _BatchRowWidgets) -> None:
+    """只有"合并"才启用目标选择(与单包对话框同一套语义)."""
+    state = "normal" if parts.strategy.get() == STRATEGY_MERGE else "disabled"
+    for part in parts.target_parts:
+        part.configure(state=state)
+
+
+def batch_import_dialog(
+    parent: ctk.CTk,
+    palette: Palette,
+    *,
+    title: str,
+    prompt: BatchImportPrompt,
+    locations_label: str,
+    locations_hint: str,
+    strategy_label: str,
+    target_label: str,
+    confirm_text: str | None = None,
+) -> BatchImportSelection | None:
+    """逐款确认批量导入的方式; 取消返回 ``None``.
+
+    一款游戏一张小卡片: 名称与标识、"疑似同一款"的提示、存档位置(留空 = 不导入)、
+    策略单选按钮与目标游戏下拉框。语义与单包 :func:`import_package_dialog` 完全一致;
+    这里的目标选择用下拉框而不是单选按钮, 因为一批里有好几款游戏, 每款铺一组单选按钮
+    排不下 —— 下拉框的取值是**去重后的文案**(重名时带游戏 id, 见
+    :func:`~archive_management.ui.models.unique_targets`)。
+    """
+    ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
+    window = ctk.CTkToplevel(parent)
+    window.title(title)
+    window.resizable(False, False)
+    window.transient(parent)
+    window.grab_set()
+    window.configure(fg_color=palette.background)
+
+    ctk.CTkLabel(
+        window,
+        text=prompt.summary,
+        anchor="w",
+        justify="left",
+        wraplength=460,
+        font=ctk.CTkFont(size=13),
+        text_color=palette.text_body,
+    ).pack(padx=24, pady=(20, 0), anchor="w")
+    _dialog_hint(window, palette, prompt.hint)
+
+    cards = ctk.CTkScrollableFrame(
+        window, width=460, height=320, fg_color=palette.well, corner_radius=8
+    )
+    cards.pack(padx=24, pady=(8, 10), fill="x")
+
+    def build_row(row: BatchImportRow) -> _BatchRowWidgets:
+        """一款游戏的一张卡片(控件在这里建, 显示顺序由 pack 决定)."""
+        card = ctk.CTkFrame(cards, fg_color=palette.card, corner_radius=8)
+        card.pack(fill="x", pady=4)
+        ctk.CTkLabel(
+            card,
+            text=row.name,
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_primary,
+        ).pack(padx=12, pady=(10, 0), anchor="w")
+        ctk.CTkLabel(
+            card,
+            text=row.meta,
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        ).pack(padx=12, anchor="w")
+        if row.match_text:
+            ctk.CTkLabel(
+                card,
+                text=row.match_text,
+                anchor="w",
+                font=ctk.CTkFont(size=11),
+                text_color=palette.text_hint,
+            ).pack(padx=12, anchor="w")
+        entries = _batch_location_entries(
+            card, palette, row, locations_label, locations_hint
+        )
+        strategy = ctk.StringVar(value=row.strategy)
+        target = ctk.CTkComboBox(
+            card,
+            values=[option.label for option in row.targets],
+            fg_color=palette.input_bg,
+            button_color=palette.raised,
+            button_hover_color=palette.raised,
+            border_color=palette.border,
+            text_color=palette.text_body,
+            dropdown_fg_color=palette.panel,
+            dropdown_text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+            dropdown_font=ctk.CTkFont(size=12),
+        )
+        heading = ctk.CTkLabel(
+            card,
+            text=target_label,
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        parts = _BatchRowWidgets(
+            row=row,
+            strategy=strategy,
+            target=target,
+            entries=entries,
+            target_parts=(heading, target),
+        )
+
+        def paint() -> None:
+            _paint_batch_row(parts)
+
+        radio_row = ctk.CTkFrame(card, fg_color="transparent")
+        radio_row.pack(padx=12, pady=(8, 0), anchor="w")
+        ctk.CTkLabel(
+            radio_row,
+            text=strategy_label,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        ).pack(side="left", padx=(0, 8))
+        for key, text in row.strategies:
+            ctk.CTkRadioButton(
+                radio_row,
+                text=text,
+                value=key,
+                variable=strategy,
+                command=paint,
+                font=ctk.CTkFont(size=12),
+                text_color=palette.text_body,
+                fg_color=palette.accent,
+                hover_color=palette.accent_soft_border,
+                border_color=palette.border,
+            ).pack(side="left", padx=(0, 8))
+        if row.targets:
+            heading.pack(padx=12, pady=(6, 0), anchor="w")
+            target.pack(padx=12, pady=(0, 10), fill="x")
+            target.set(target_label_for(row.targets, row.target_game_id))
+        paint()
+        return parts
+
+    built = [build_row(row) for row in prompt.rows]
+
+    result: list[BatchImportSelection] = []
+
+    def submit() -> None:
+        result.append(
+            BatchImportSelection(
+                choices={
+                    parts.row.entry: batch_row_choice(
+                        strategy=str(parts.strategy.get()),
+                        target=target_game_id(
+                            parts.row.targets, str(parts.target.get())
+                        ),
+                        locations={
+                            item.index: str(entry.get())
+                            for item, entry in parts.entries
+                        },
+                    )
+                    for parts in built
+                }
+            )
+        )
+        window.destroy()
+
+    buttons = ctk.CTkFrame(window, fg_color="transparent")
+    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    ctk.CTkButton(
+        buttons,
+        text=tr("dialog.cancel"),
+        width=96,
+        height=32,
+        fg_color=palette.raised,
+        hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        command=window.destroy,
+    ).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(
+        buttons,
+        text=ok_text,
+        width=104,
+        height=32,
+        fg_color=palette.accent,
+        hover_color=palette.accent_soft_border,
+        text_color=palette.accent_text,
+        command=submit,
+    ).pack(side="left")
+
+    _center(parent, window)
+    parent.wait_window(window)
+    return result[0] if result else None
+
+
+def _batch_location_entries(
+    card: ctk.CTkFrame,
+    palette: Palette,
+    row: BatchImportRow,
+    label: str,
+    hint: str,
+) -> tuple[tuple[ImportLocationRow, ctk.CTkEntry], ...]:
+    """一行游戏卡片里的存档位置区(没有位置时整块不显示)."""
+    if not row.locations:
+        return ()
+    ctk.CTkLabel(
+        card,
+        text=label,
+        anchor="w",
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_muted,
+    ).pack(padx=12, pady=(8, 0), anchor="w")
+    ctk.CTkLabel(
+        card,
+        text=hint,
+        anchor="w",
+        justify="left",
+        wraplength=420,
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_hint,
+    ).pack(padx=12, anchor="w")
+    entries: list[tuple[ImportLocationRow, ctk.CTkEntry]] = []
+    for item in row.locations:
+        ctk.CTkLabel(
+            card,
+            text=item.text,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        ).pack(padx=12, pady=(4, 0), anchor="w")
+        entry = ctk.CTkEntry(
+            card,
+            fg_color=palette.input_bg,
+            border_color=palette.border,
+            text_color=palette.text_body,
+        )
+        entry.insert(0, item.default)
+        entry.pack(padx=12, pady=(0, 2), fill="x")
+        entries.append((item, entry))
+    return tuple(entries)
+
+
+def _dialog_section(
+    window: ctk.CTkToplevel, palette: Palette, text: str
+) -> ctk.CTkBaseClass:
+    """对话框里的小节标题(返回控件, 便于按策略置灰整块)."""
+    label = ctk.CTkLabel(
+        window,
+        text=text,
+        anchor="w",
+        font=ctk.CTkFont(size=12),
+        text_color=palette.text_muted,
+    )
+    label.pack(padx=24, pady=(4, 0), anchor="w")
+    return label
+
+
+def _dialog_hint(
+    window: ctk.CTkToplevel, palette: Palette, text: str
+) -> ctk.CTkBaseClass:
+    """对话框里的补充说明(成段文字, 用更好读的 text_hint)."""
+    label = ctk.CTkLabel(
+        window,
+        text=text,
+        anchor="w",
+        justify="left",
+        wraplength=460,
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_hint,
+    )
+    label.pack(padx=24, pady=(0, 2), anchor="w")
+    return label
+
+
+def _default_target(targets: Sequence[ImportTargetOption]) -> str:
+    """目标游戏的默认选中项: "疑似同一款"(没有就是列表里的第一款)."""
+    for option in targets:
+        if option.selected:
+            return option.game_id
+    return targets[0].game_id if targets else ""
+
+
+def _chosen_target(strategy: str, selected: str) -> str | None:
+    """只有"合并"方式才返回目标游戏; 其余方式一律不带.
+
+    目标区在"合并"时一定有预选项(没有可选游戏时界面根本不提供合并), 所以这里
+    不做"没选中"的兜底判断: 界面不替用户猜要合并到哪一款。
+    """
+    return selected if strategy == STRATEGY_MERGE else None

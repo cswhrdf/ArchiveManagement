@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 import tkinter as tk
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
@@ -23,6 +23,7 @@ from PIL import Image
 
 from archive_management.application.backup import MAX_NOTE_LENGTH
 from archive_management.application.games import ActivationOutcome
+from archive_management.application.imports import BatchInspection, ImportInspection
 from archive_management.application.restore import RestorePlan
 from archive_management.config import (
     AppConfig,
@@ -43,6 +44,7 @@ from archive_management.domain import (
 from archive_management.exceptions import (
     ArchiveManagementError,
     ContentUnchangedError,
+    OperationCancelledError,
 )
 from archive_management.i18n import DEFAULT_LOCALE, set_locale, tr
 from archive_management.infrastructure.paths import ApplicationPaths
@@ -58,12 +60,16 @@ from archive_management.services.hotkeys import (
     format_accelerator,
     parse_accelerator,
 )
+from archive_management.services.naming import game_slug
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import (
     ask_branch_name,
     ask_text,
+    batch_import_dialog,
     confirm_dialog,
     edit_backup_dialog,
+    export_batch_dialog,
+    import_package_dialog,
     info_dialog,
     restore_dialog,
 )
@@ -72,18 +78,27 @@ from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
     AppPage,
     BackupItem,
+    BatchImportSelection,
     FeedbackKind,
     GameDetail,
     GameSummary,
+    ImportChoice,
     SourceFilter,
     TaskStatus,
     ViewKind,
+    batch_export_filename,
+    batch_import_prompt,
     branch_order,
+    export_batch_prompt,
+    exportable_games,
     filter_by_source_label,
+    import_prompt,
+    import_strategies,
     size_label,
     timeline_order,
 )
 from archive_management.ui.palette import DEFAULT_THEME, Palette
+from archive_management.ui.pickers import pick_file, pick_save_file
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
 from archive_management.ui.textfit import fit_text
@@ -117,6 +132,9 @@ _RAIL_WIDTH = 350
 _BRANCH_MARK = "└ "
 # 当前节点标记: 后续备份/分支都从这个节点继续.
 _CURRENT_MARK = "●"
+# 导出包默认的文件名后缀: 保存对话框里预填的名字由游戏名派生(`<slug>.archive.zip`),
+# 用户仍可改成别的名字或目录.
+EXPORT_FILE_SUFFIX = ".archive.zip"
 # 自动启停的轮询间隔(见 domain.activation.activation_delay): 队列为空时用最快档
 # (尽快发现"游戏启动了"), 有游戏在运行时逐档放慢到上限。
 _ACTIVATION_FAST_SECONDS = ACTIVATION_DELAY_LADDER[0]
@@ -192,6 +210,11 @@ class ArchiveApp(ctk.CTk):
         self._busy = False
         self._canceled = False
         self._task_running = False
+        # 体检完成的包(读包在后台线程, 结果先放这里再经消息队列通知主线程弹框);
+        # 单游戏包与批量包共用这一个位置, 弹框时按类型分派。
+        self._inspection: ImportInspection | BatchInspection | None = None
+        # 批量导入是不是因为用户取消而停下的(服务层用异常表达取消, 但这不是失败).
+        self._batch_cancelled = False
         self._task_ticks = 0
         self._cards: dict[str, ctk.CTkFrame] = {}
         self._card_painters: dict[str, Callable[[Palette], None]] = {}
@@ -204,7 +227,10 @@ class ArchiveApp(ctk.CTk):
         self._poll_job: str | None = None
 
         self._messages: queue.Queue[
-            tuple[Literal["ok", "err", "unchanged", "hotkey", "activation"], str]
+            tuple[
+                Literal["ok", "err", "unchanged", "hotkey", "activation", "inspected"],
+                str,
+            ]
         ] = queue.Queue()
         self._pending_ok: Callable[[str], None] | None = None
         self._last_feedback: tuple[FeedbackKind, str] = (
@@ -545,6 +571,7 @@ class ArchiveApp(ctk.CTk):
             on_notice=self._notice,
             on_activation_monitor=self._on_set_monitor,
             on_activation_refresh=self._poll_activation_now,
+            on_export_batch=self._on_export_batch,
         )
         self._home_page.frame.grid(row=0, column=0, sticky="nsew")
         self._home_page.frame.grid_remove()
@@ -614,6 +641,15 @@ class ArchiveApp(ctk.CTk):
             height=34,
         )
         self._add_game_btn.pack(side="left", padx=(0, 8))
+        self._import_btn = self.kit.button(
+            actions,
+            tr("topbar.import_package"),
+            style="ghost",
+            command=self._on_import_package,
+            width=124,
+            height=34,
+        )
+        self._import_btn.pack(side="left", padx=(0, 8))
         self._schedule_btn = self.kit.button(
             actions,
             tr("topbar.nav_scheduled"),
@@ -2025,8 +2061,26 @@ class ArchiveApp(ctk.CTk):
         )
 
     def _on_export(self) -> None:
+        """导出选中游戏: 先让用户选好保存位置, 再在后台线程打包.
+
+        选择文件这一步必须在主线程完成(会阻塞事件循环), 因此后台线程只负责真正
+        的打包; 用户取消时什么都不写, 只给一条提示并记审计。
+        """
         game = self._game
         if game is None or self._busy:
+            return
+        destination = pick_save_file(
+            title=tr("dialog.export_title"),
+            initialfile=f"{game_slug(game.name)}{EXPORT_FILE_SUFFIX}",
+        )
+        if not destination:
+            log_action(
+                "export.start",
+                basic=True,
+                game_id=game.game_id,
+                result="cancelled",
+            )
+            self._feedback(FeedbackKind.INFO, tr("action.export_canceled"))
             return
         self._set_busy(True)
         self._feedback(
@@ -2034,13 +2088,254 @@ class ArchiveApp(ctk.CTk):
         )
 
         def work() -> str:
-            return self.backend.run_export(game.game_id)
+            return self.backend.run_export(game.game_id, destination)
 
         def ok(message: str) -> None:
             self._set_busy(False)
             self._feedback(FeedbackKind.SUCCESS, message)
 
         self._submit(work, ok)
+
+    def _on_export_batch(self) -> None:
+        """批量导出: 多选对话框 → 保存位置 → 后台打包.
+
+        前两步都在主线程(都会阻塞事件循环), 后台线程只负责真正的打包。任何一步取消都
+        不写文件、不进忙碌态; 一份都没勾选时也不导出。候选里只有"未停用且未归档"的
+        游戏(规则在 :func:`exportable_games` 里, 库里一款都没有时连对话框都不弹)。
+        """
+        if self._busy:
+            return
+        candidates = exportable_games(self.backend.list_games())
+        if not candidates:
+            log_action("export.batch_start", basic=True, result="empty")
+            self._feedback(FeedbackKind.INFO, tr("action.export_batch_empty"))
+            return
+        choice = export_batch_dialog(
+            self,
+            self.p,
+            title=tr("dialog.export_batch_title"),
+            prompt=export_batch_prompt(candidates),
+            filter_label=tr("dialog.export_batch_filter"),
+            list_label=tr("dialog.export_batch_list"),
+            no_match_text=tr("dialog.export_batch_no_match"),
+            select_all_label=tr("dialog.export_batch_select_all"),
+            confirm_text=tr("dialog.export_batch_confirm"),
+        )
+        if choice is None:
+            self._cancel_batch_export()
+            return
+        if not choice.game_ids:
+            log_action("export.batch_start", basic=True, result="none_selected")
+            self._feedback(FeedbackKind.INFO, tr("action.export_batch_none"))
+            return
+        destination = pick_save_file(
+            title=tr("dialog.export_batch_save_title"),
+            initialfile=batch_export_filename(
+                len(choice.game_ids), moment=datetime.now(UTC)
+            ),
+        )
+        if not destination:
+            self._cancel_batch_export()
+            return
+        self._start_batch_export(choice.game_ids, destination)
+
+    def _cancel_batch_export(self) -> None:
+        """用户在对话框或保存框里取消: 记审计 + 提示, 不写文件也不进忙碌态."""
+        log_action("export.batch_start", basic=True, result="cancelled")
+        self._feedback(FeedbackKind.INFO, tr("action.export_batch_canceled"))
+
+    def _start_batch_export(self, game_ids: Sequence[str], destination: str) -> None:
+        """在后台线程里把这几款游戏打成一个批量包, 完成后给出带真实计数的提示."""
+        self._set_busy(True)
+        self._feedback(
+            FeedbackKind.PENDING,
+            tr("action.export_batch_pending", count=len(game_ids)),
+        )
+
+        def work() -> str:
+            return self.backend.run_export_batch(list(game_ids), destination)
+
+        def ok(message: str) -> None:
+            self._set_busy(False)
+            self._feedback(FeedbackKind.SUCCESS, message)
+
+        self._submit(work, ok)
+
+    def _on_import_package(self) -> None:
+        """导入归档包: 先选文件(主线程), 再后台体检, 最后在主线程让用户确认冲突项.
+
+        选文件与弹窗必须在主线程完成(前者会阻塞事件循环, 后者是模态窗口), 只有
+        "读包"这一步放到后台线程 —— 大包的清单解析不该卡住界面。用户没选文件就
+        什么都不做, 也不进忙碌态。
+        """
+        if self._busy:
+            return
+        path = pick_file(title=tr("dialog.import_pick_title"))
+        if not path:
+            log_action("import.start", basic=True, result="cancelled")
+            self._feedback(FeedbackKind.INFO, tr("action.import_canceled"))
+            return
+        self._set_busy(True)
+        self._feedback(FeedbackKind.PENDING, tr("action.import_pending"))
+
+        def runner() -> None:
+            try:
+                self._inspection = self.backend.inspect_import(path)
+            except Exception as exc:
+                self._messages.put(("err", str(exc)))
+            else:
+                self._messages.put(("inspected", ""))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _finish_inspection(self) -> None:
+        """体检完成: 按包的类型弹对应的冲突对话框(取消就什么都不做).
+
+        弹框前先解除忙碌状态: 模态窗口会一直占用主线程, 这期间状态栏不该还停在
+        "正在读取"上, 用户取消后也不会留下一个转不停的忙碌态。两类包的对话框差异很大
+        (批量包要逐款选方式与映射), 因此各自一个方法, 这里只分派。
+        """
+        inspection, self._inspection = self._inspection, None
+        self._set_busy(False)
+        if inspection is None:  # pragma: no cover - 只有体检成功才会投递该消息
+            return
+        if isinstance(inspection, BatchInspection):
+            self._finish_batch_inspection(inspection)
+            return
+        self._finish_single_inspection(inspection)
+
+    def _finish_single_inspection(self, inspection: ImportInspection) -> None:
+        """单游戏包: 原有的冲突对话框(语义一字未改)."""
+        prompt = import_prompt(inspection, self.backend.list_games())
+        choice = import_package_dialog(
+            self,
+            self.p,
+            title=tr("dialog.import_title"),
+            prompt=prompt,
+            locations_label=tr("dialog.import_locations"),
+            locations_hint=tr("dialog.import_locations_hint"),
+            strategy_label=tr("dialog.import_strategy"),
+            strategies=import_strategies(has_targets=bool(prompt.targets)),
+            target_label=tr("dialog.import_target"),
+            target_hint=tr("dialog.import_target_hint"),
+            confirm_text=tr("dialog.import_confirm"),
+        )
+        if choice is None:
+            log_action("import.start", basic=True, result="cancelled")
+            self._feedback(FeedbackKind.INFO, tr("action.import_canceled"))
+            return
+        self._run_import(inspection, choice)
+
+    def _finish_batch_inspection(self, batch: BatchInspection) -> None:
+        """批量包: 逐款选择导入方式与存档位置(整批取消就什么都不导入)."""
+        selection = batch_import_dialog(
+            self,
+            self.p,
+            title=tr("dialog.import_batch_title"),
+            prompt=batch_import_prompt(batch, self.backend.list_games()),
+            locations_label=tr("dialog.import_locations"),
+            locations_hint=tr("dialog.import_locations_hint"),
+            strategy_label=tr("dialog.import_strategy"),
+            target_label=tr("dialog.import_target"),
+            confirm_text=tr("dialog.import_confirm"),
+        )
+        if selection is None:
+            log_action("import.batch_start", basic=True, result="cancelled")
+            self._feedback(FeedbackKind.INFO, tr("action.import_canceled"))
+            return
+        self._run_batch_import(batch, selection)
+
+    def _run_batch_import(
+        self, batch: BatchInspection, selection: BatchImportSelection
+    ) -> None:
+        """按逐款选择真的导入整批(后台线程), 完成后刷新并尽量选中导入的那一款.
+
+        取消在服务层里表现为异常(整批停下, **已经导完的游戏保留**), 但那不是失败:
+        已经落库的游戏必须让用户看到, 因此这里按"完成"处理 —— 提示里说清边界, 并照样
+        刷新界面。判断依据是后端抛出的 ``OperationCancelledError``(它是**后台线程自己**
+        得到的事实), 而不是主线程上那个取消标志 —— 后者在"导入刚好结束时才按取消"这类
+        时序下可能与后台的实际结果不一致。
+        """
+        self._set_busy(True)
+        self._batch_cancelled = False
+        self._feedback(
+            FeedbackKind.PENDING,
+            tr("action.import_batch_pending", games=len(selection.choices)),
+        )
+        before = {game.game_id for game in self.backend.list_games()}
+
+        def work() -> str:
+            try:
+                return self.backend.run_import_batch(batch, selection.choices)
+            except OperationCancelledError as exc:
+                self._batch_cancelled = True
+                return str(exc)
+
+        def ok(message: str) -> None:
+            self._set_busy(False)
+            cancelled, self._batch_cancelled = self._batch_cancelled, False
+            self._canceled = False
+            self._feedback(
+                FeedbackKind.INFO if cancelled else FeedbackKind.SUCCESS, message
+            )
+            select = None if cancelled else self._batch_imported_game(before)
+            self._refresh_after_manage(select=select)
+
+        self._submit(work, ok)
+
+    def _batch_imported_game(self, before: set[str]) -> str | None:
+        """批量导入后该选中哪款游戏: 只新建了**一款**时选它, 否则保持原选中.
+
+        后端只回一条可展示的提示(没有回传游戏 id), 所以这里与单包导入一样用导入前后
+        游戏库的差集算。一次导入多款时"该看哪一款"没有依据, 因此不猜(返回 ``None``),
+        不按差集里的顺序替用户挑一款。
+        """
+        created = [
+            game.game_id
+            for game in self.backend.list_games()
+            if game.game_id not in before
+        ]
+        return created[0] if len(created) == 1 else None
+
+    def _run_import(self, inspection: ImportInspection, choice: ImportChoice) -> None:
+        """按用户选定的方式真导入(后台线程), 完成后刷新并选中相关游戏."""
+        self._set_busy(True)
+        self._feedback(
+            FeedbackKind.PENDING,
+            tr("action.import_running", name=inspection.game_name),
+        )
+        before = {game.game_id for game in self.backend.list_games()}
+
+        def work() -> str:
+            return self.backend.run_import(
+                inspection,
+                strategy=choice.strategy,
+                target_game_id=choice.target_game_id,
+                locations=choice.locations,
+            )
+
+        def ok(message: str) -> None:
+            self._set_busy(False)
+            self._feedback(FeedbackKind.SUCCESS, message)
+            self._refresh_after_manage(select=self._imported_game(before, choice))
+
+        self._submit(work, ok)
+
+    def _imported_game(self, before: set[str], choice: ImportChoice) -> str | None:
+        """导入后该选中哪款游戏: 新建的那一款, 否则就是合并的目标.
+
+        后端只回一条可展示的提示(没有回传游戏 id), 所以"新建的是哪一款"用导入
+        前后游戏库的差集算出来: 差集里有就选它, 没有(合并/跳过)就选合并目标,
+        两者都没有就返回 ``None``, 由调用方保持原选中。
+        """
+        created = [
+            game.game_id
+            for game in self.backend.list_games()
+            if game.game_id not in before
+        ]
+        if created:
+            return created[0]
+        return choice.target_game_id
 
     def _on_toggle_theme(self) -> str:
         """切换浅/深主题并返回生效主题名(供设置窗口刷新按钮文案)."""
@@ -2330,6 +2625,9 @@ class ArchiveApp(ctk.CTk):
                 continue
             if kind == "activation":
                 self._finish_activation()
+                continue
+            if kind == "inspected":
+                self._finish_inspection()
                 continue
             self._finish_message(kind, payload)
         self._refresh_task()

@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 import helpers
+from archive_management.services import steam_appinfo
 from archive_management.services.steam_appinfo import (
     APPINFO_RELATIVE,
     GAME_ICONS_RELATIVE,
@@ -164,3 +165,65 @@ def test_load_steam_icons_finds_local_files(tmp_path: Path) -> None:
 def test_load_steam_icons_without_steam_returns_nothing(tmp_path: Path) -> None:
     """本机没有 Steam 时返回空表, 界面回落封面裁剪."""
     assert load_steam_icons(helpers.scan_roots(tmp_path)) == {}
+
+
+# -- 多份 appinfo 与解析细节 ---------------------------------------------------
+
+
+def test_the_first_root_wins_for_the_same_app(tmp_path: Path) -> None:
+    """同一个 AppID 出现在两份 appinfo 里时先找到的那份生效(互为镜像)."""
+    first = helpers.steam_tree(tmp_path)
+    second = tmp_path / "Program Files" / "Steam"
+    (second / "steamapps").mkdir(parents=True)
+    helpers.write_steam_appinfo(first, {"730": {"clienticon": _ICON}}, keys=_KEYS)
+    helpers.write_steam_appinfo(second, {"730": {"clienticon": _OTHER}}, keys=_KEYS)
+
+    icons = load_steam_icons(helpers.scan_roots(tmp_path))
+
+    assert icons["730"].clienticon == _ICON
+
+
+def test_read_cached_does_not_cache_an_empty_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解析不出任何图标时不留下缓存条目(不把"空"当成结果记住)."""
+    monkeypatch.setattr(steam_appinfo, "_cache", {})
+    empty = _write(tmp_path, {"730": {"name": "No icon here"}})
+
+    assert steam_appinfo._read_cached(empty) == {}
+    assert steam_appinfo._cache == {}
+
+
+def test_read_cached_clears_the_cache_at_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缓存到上限时整体清空再写入(不无界增长)."""
+    monkeypatch.setattr(steam_appinfo, "_cache", {})
+    appinfo = _write(tmp_path, _entries())
+    for index in range(steam_appinfo._CACHE_LIMIT):
+        steam_appinfo._cache[(f"key-{index}", 0, 0)] = {}
+
+    table = steam_appinfo._read_cached(appinfo)
+
+    assert table["3273290"] == _ICON
+    assert len(steam_appinfo._cache) == 1
+
+
+def test_parse_rejects_data_shorter_than_the_header(tmp_path: Path) -> None:
+    """文件连文件头都不够时视为没有图标(不越界读)."""
+    assert steam_appinfo._parse(b"short", tmp_path / APPINFO_RELATIVE) == {}
+
+
+def test_string_table_requires_a_terminator() -> None:
+    """字符串表里的键名没有结束符时返回 None(整份数据不完整)."""
+    table = struct.pack("<I", 2) + b"name" + b"tail-without-a-terminator"
+    data = struct.pack("<IIQ", helpers.STEAM_APPINFO_MAGIC, 1, 16) + table
+
+    assert steam_appinfo._string_table(data, 16) is None
+
+
+def test_clienticon_requires_a_terminated_hash() -> None:
+    """匹配到的值后面没有结束符时不当成图标(宁可不给, 也不截半截哈希)."""
+    pattern = bytes([1]) + struct.pack("<I", 3)
+
+    assert steam_appinfo._clienticon(pattern + b"abc", pattern) is None

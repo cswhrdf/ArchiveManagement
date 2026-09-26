@@ -19,7 +19,7 @@ from archive_management.application.backup import (
     MAX_TITLE_LENGTH,
     BackupService,
 )
-from archive_management.domain import DeletionMode, Game, SaveLocation
+from archive_management.domain import BackupNode, DeletionMode, Game, SaveLocation
 from archive_management.exceptions import (
     ArchiveManagementError,
     ContentUnchangedError,
@@ -636,3 +636,194 @@ def test_auto_backup_becomes_current_node(tmp_path: Path) -> None:
     service, game_id = _service(tmp_path)
     auto = service.create_backup(game_id, kind="auto", keep_auto=3)
     assert service.current_node(game_id) == auto
+
+
+# -- "当前节点"指针的边界 ---------------------------------------------------
+
+
+def test_current_node_falls_back_when_the_pointer_dangles(tmp_path: Path) -> None:
+    """指针指向已被删掉的行时回退到最新节点(向下保存始终有父节点)."""
+    service, game_id = _service(tmp_path)
+    first = service.create_backup(game_id)
+    _touch_save(tmp_path)
+    second = service.create_backup(game_id)
+    assert first.id is not None
+    assert second.id is not None
+    # 绕过服务直接删行, 造出"指针悬空"的脏库现场.
+    service._backups.delete(second.id)
+
+    fallback = service.current_node(game_id)
+
+    assert fallback is not None
+    assert fallback.id == first.id
+
+
+def test_deleting_the_current_leaf_clears_the_pointer(tmp_path: Path) -> None:
+    """删掉当前节点(叶子)后指针不再悬空: 之后读到的是剩下最新的那一份."""
+    service, game_id = _service(tmp_path)
+    first = service.create_backup(game_id)
+    _touch_save(tmp_path)
+    second = service.create_backup(game_id)
+    assert first.id is not None
+    assert second.id is not None
+
+    plan = service.delete_node(game_id, second.id)
+
+    assert plan.mode is DeletionMode.SINGLE
+    current = service.current_node(game_id)
+    assert current is not None
+    assert current.id == first.id
+
+
+def test_deleting_the_current_root_keeps_the_child_as_the_current_node(
+    tmp_path: Path,
+) -> None:
+    """删掉当前的根节点后仍能向下保存: 当前节点落到上移的子节点."""
+    service, game_id = _service(tmp_path)
+    first = service.create_backup(game_id)
+    _touch_save(tmp_path)
+    second = service.create_backup(game_id)
+    assert first.id is not None
+    assert second.id is not None
+    service.set_current(game_id, first.id)
+
+    plan = service.delete_node(game_id, first.id)
+
+    assert plan.mode is DeletionMode.SHIFT
+    current = service.current_node(game_id)
+    assert current is not None
+    assert current.id == second.id
+
+
+def test_update_meta_reports_a_row_that_disappeared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """改名时那一行已经不在了: 给出可读错误, 而不是把 None 交给调用方."""
+    service, game_id = _service(tmp_path)
+    node = service.create_backup(game_id)
+    assert node.id is not None
+    monkeypatch.setattr(service._backups, "update_meta", lambda *args, **kwargs: None)
+
+    with pytest.raises(ArchiveManagementError, match="未知的备份节点"):
+        service.update_meta(game_id, node.id, title="新名字", note="")
+
+
+# -- 没有存储目录的节点(老库/手工导入的行) ---------------------------------
+
+
+def _node_without_a_directory(service: BackupService, game_id: int) -> BackupNode:
+    """直接写一行没有 storage_relpath 的节点(模拟没有快照目录的历史数据)."""
+    node = service._backups.add(
+        BackupNode(game_id=game_id, node_kind="manual", title="没有目录")
+    )
+    assert node.id is not None
+    assert node.storage_relpath is None
+    return node
+
+
+def test_deleting_a_node_without_a_directory_only_removes_the_row(
+    tmp_path: Path,
+) -> None:
+    """节点没有存储目录时只删行, 不去删一个不存在的快照目录."""
+    service, game_id = _service(tmp_path)
+    node = _node_without_a_directory(service, game_id)
+    assert node.id is not None
+
+    plan = service.delete_node(game_id, node.id)
+
+    assert plan.removed_count == 1
+    assert service._backups.get(node.id) is None
+
+
+def test_delete_skips_a_node_that_was_never_stored(tmp_path: Path) -> None:
+    """删除未落库的节点对象时不碰数据库(没有 id 与没有目录两条都要跳过)."""
+    service, game_id = _service(tmp_path)
+    unsaved = BackupNode(game_id=game_id, node_kind="manual")
+
+    service.delete(unsaved)
+
+    assert service.list_nodes(game_id) == []
+
+    stored = _node_without_a_directory(service, game_id)
+    assert stored.id is not None
+
+    service.delete(stored)
+
+    assert service._backups.get(stored.id) is None
+
+
+def test_pruning_auto_backups_without_directories_only_removes_rows(
+    tmp_path: Path,
+) -> None:
+    """剪除没有存储目录的自动备份时只删行, 不去删不存在的快照目录."""
+    service, game_id = _service(tmp_path)
+    for index in range(3):
+        service._backups.add(
+            BackupNode(
+                game_id=game_id,
+                node_kind="auto",
+                title=f"auto-{index}",
+                created_at=datetime(2024, 1, 1 + index, tzinfo=UTC),
+            )
+        )
+
+    service.create_backup(game_id, kind="auto", keep_auto=1)
+
+    autos = [node for node in service.list_nodes(game_id) if node.node_kind == "auto"]
+    assert len(autos) == 1
+    assert autos[0].storage_relpath is not None
+
+
+def _stale_pointer(service: BackupService, removed_id: int) -> None:
+    """让服务读到一次"还指着已被删掉的行"的指针(脏库现场).
+
+    正常库里外键(ON DELETE SET NULL)已经把指针清空了, 所以这里用替身把那种
+    状态递进去, 钉住 :meth:`BackupService.delete_node` 自带的修正逻辑.
+    """
+    real = service._games.current_backup
+    stale: list[int | None] = [removed_id]
+
+    def still_pointing_at_the_deleted_row(game_id: int) -> int | None:
+        if stale:
+            return stale.pop()
+        return real(game_id)
+
+    service._games.current_backup = still_pointing_at_the_deleted_row  # type: ignore[method-assign]
+
+
+def test_deleting_the_current_leaf_clears_a_stale_pointer(
+    tmp_path: Path,
+) -> None:
+    """指针还指着被删的行时(脏库)也要被修正, 不能留一个悬空指针."""
+    service, game_id = _service(tmp_path)
+    first = service.create_backup(game_id)
+    _touch_save(tmp_path)
+    second = service.create_backup(game_id)
+    assert first.id is not None
+    assert second.id is not None
+    service.set_current(game_id, second.id)
+    _stale_pointer(service, second.id)
+
+    plan = service.delete_node(game_id, second.id)
+
+    assert plan.mode is DeletionMode.SINGLE
+    assert service._games.current_backup(game_id) is None
+
+
+def test_deleting_the_current_root_moves_a_stale_pointer_to_the_child(
+    tmp_path: Path,
+) -> None:
+    """删掉根节点时悬空指针被移到上移的子节点(线路保持连续)."""
+    service, game_id = _service(tmp_path)
+    first = service.create_backup(game_id)
+    _touch_save(tmp_path)
+    second = service.create_backup(game_id)
+    assert first.id is not None
+    assert second.id is not None
+    service.set_current(game_id, first.id)
+    _stale_pointer(service, first.id)
+
+    plan = service.delete_node(game_id, first.id)
+
+    assert plan.mode is DeletionMode.SHIFT
+    assert service._games.current_backup(game_id) == second.id

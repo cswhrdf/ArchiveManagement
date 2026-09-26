@@ -7,13 +7,21 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
 from archive_management.application import home as home_cases
 from archive_management.application.backup import MAX_NOTE_LENGTH
 from archive_management.application.games import ActivationOutcome
+from archive_management.application.imports import (
+    STRATEGIES,
+    STRATEGY_NEW,
+    STRATEGY_SKIP,
+    BatchInspection,
+    ImportInspection,
+)
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan, RestoreTarget
 from archive_management.domain import (
@@ -31,7 +39,9 @@ from archive_management.domain import (
 from archive_management.domain.activation import REASON_UNAVAILABLE
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import current_locale, tr
-from archive_management.services.naming import game_folder
+from archive_management.services.audit import log_action
+from archive_management.services.export_format import ARCHIVE_SUFFIX
+from archive_management.services.naming import game_folder, game_slug
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.processes import ProcessProbe
 from archive_management.ui.models import (
@@ -40,6 +50,7 @@ from archive_management.ui.models import (
     GameDetail,
     GameSummary,
     HomeBoard,
+    ImportChoice,
     LocationItem,
     MonitoredDirItem,
     SavePathSuggestion,
@@ -51,6 +62,15 @@ from archive_management.ui.models import (
 
 # 刻意用于演示恢复失败的中断节点
 _FAIL_RESTORE_ID = "b2"
+
+
+def _chosen_strategy(choice: ImportChoice | None) -> str:
+    """这一款游戏的选择策略: 没有给选择的那一款按默认值(新建)处理.
+
+    与用例层 :meth:`ImportService.import_batch` 的默认值一致(缺项 = 新建, 且不导入
+    任何存档位置), 否则演示后端报出来的"跳过了几款"会和真实后端对不上。
+    """
+    return STRATEGY_NEW if choice is None else choice.strategy
 
 
 def _dt(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
@@ -349,6 +369,19 @@ def _delete_result_text(plan: DeletionPlan) -> str:
     if plan.mode is DeletionMode.SHIFT:
         return tr("result.delete_shift")
     return tr("result.delete_single")
+
+
+def _same_path(left: str, right: str) -> bool:
+    r"""两条存档位置是否指向同一个路径(大小写不敏感, **两侧都规范化**后再比).
+
+    演示数据里的位置路径是原样保存的展示字符串(如 ``D:\\Games\\OuterWilds\\save``),
+    而用户输入会过一遍 ``normalize_path`` —— 在 POSIX 上这类"相对路径"会被拼上
+    工作目录, 因此只规范化输入侧就永远比不出重复(实测 Linux 分片里漏判过一条用例:
+    ``test_demo_update_location_rejects_a_path_used_by_another_location`` 报
+    ``DID NOT RAISE``, 而 Windows 上恰好因为 normpath 对这类路径是幂等的而看不出来)。
+    监控目录的判重本来就是这么做的(见 :meth:`add_monitored_directory`)。
+    """
+    return normalize_path(left).lower() == normalize_path(right).lower()
 
 
 class DemoArchiveService:
@@ -777,11 +810,107 @@ class DemoArchiveService:
         self._revision += 1
         return tr("result.branch_done", backup_id=backup_id, branch_name=branch_name)
 
-    def run_export(self, game_id: str) -> str:
-        """导出选中游戏."""
+    def run_export(self, game_id: str, destination: str) -> str:
+        """模拟导出(演示后端不碰文件系统, 因此不会真的写出 ``destination``).
+
+        演示后端的内存数据没有真实快照内容可打包, 所以这里只走一遍"可阻塞的写
+        操作"流程, 并明确告诉用户没有文件产生 —— 不能假装写出了包。
+        """
         self._simulate()
         self._require_game(game_id)
-        return tr("result.export_done", name=self._name_of(game_id))
+        return tr("result.export_simulated", name=self._name_of(game_id))
+
+    def run_export_batch(self, game_ids: Sequence[str], destination: str) -> str:
+        """模拟批量导出(演示后端不碰文件系统, 因此不会真的写出 ``destination``).
+
+        与单游戏的 :meth:`run_export` 同一套"诚实"口径: 只走一遍"可阻塞的写操作"流程,
+        并明确说明没有文件产生。空选择与未知游戏仍然报错(与真实后端一致), 不假装
+        成功 —— 演示后端也不该让用户以为这一批归档好了。
+        """
+        self._simulate()
+        if not game_ids:
+            raise ArchiveManagementError("批量导出需要至少 1 款游戏")
+        for game_id in game_ids:
+            self._require_game(game_id)
+        return tr("result.export_batch_simulated", count=len(game_ids))
+
+    def inspect_import(self, path: str) -> ImportInspection:
+        """模拟体检一个导出包: 演示后端不读磁盘, 所以内容是按文件名编的.
+
+        编出来的"包"里**没有任何存档位置与备份节点**, 游戏名也写成演示包的名字 ——
+        用户在对话框里一眼就能看出这份体检不代表磁盘上的那个文件, 不会被哄着以为
+        这里真的有一份可导入的备份。
+        """
+        self._simulate()
+        return ImportInspection(
+            path=Path(path),
+            game_name=tr("demo.import_name", file=Path(path).stem),
+            steam_app_id=None,
+            platform="windows",
+            origin="manual",
+            tags=(),
+            locations=(),
+            nodes=(),
+            schedule=None,
+            matching_game_id=None,
+        )
+
+    def run_import(
+        self,
+        inspection: ImportInspection,
+        *,
+        strategy: str,
+        target_game_id: str | None,
+        locations: Mapping[int, str],
+    ) -> str:
+        """模拟导入(演示后端不会真的建游戏、写备份或登记存档位置).
+
+        与 :meth:`run_export` 一样只走一遍"可阻塞的写操作"流程并明确说明什么都没
+        写。目标游戏仍然要校验(合并到一个不存在的游戏与真实后端一样报错), "跳过"
+        也如实回报跳过了多少份 —— 只有真的导入了才会用"已模拟导入"那句话。
+        """
+        self._simulate()
+        if strategy not in STRATEGIES:
+            raise ArchiveManagementError(f"未知的导入策略: {strategy}")
+        if target_game_id is not None:
+            self._require_game(target_game_id)
+        if strategy == STRATEGY_SKIP:
+            return tr(
+                "result.import_skipped",
+                name=inspection.game_name,
+                skipped=inspection.backup_count,
+            )
+        return tr("result.import_simulated", name=inspection.game_name)
+
+    def run_import_batch(
+        self, batch: BatchInspection, choices: Mapping[str, ImportChoice]
+    ) -> str:
+        """模拟批量导入(演示后端不会真的建游戏、写备份或登记存档位置).
+
+        与 :meth:`run_import` 同一套口径: 只走一遍"可阻塞的写操作"流程并说清什么都
+        没写; 未知策略与不存在的目标游戏仍然报错; 整批都选了"跳过"时如实回报跳过了
+        多少款, 而不是拿"已模拟导入"糊过去。
+        """
+        self._simulate()
+        if not batch.games:
+            raise ArchiveManagementError("批量包是空的")
+        self._check_batch_choices(choices)
+        skipped = sum(
+            1
+            for item in batch.games
+            if _chosen_strategy(choices.get(item.entry)) == STRATEGY_SKIP
+        )
+        if skipped == batch.game_count:
+            return tr("result.import_batch_all_skipped", games=skipped)
+        return tr("result.import_batch_simulated", count=batch.game_count - skipped)
+
+    def _check_batch_choices(self, choices: Mapping[str, ImportChoice]) -> None:
+        """逐条校验用户的选择: 未知策略与不存在的目标游戏都要报错(不是静默跳过)."""
+        for choice in choices.values():
+            if choice.strategy not in STRATEGIES:
+                raise ArchiveManagementError(f"未知的导入策略: {choice.strategy}")
+            if choice.target_game_id is not None:
+                self._require_game(choice.target_game_id)
 
     # -- 游戏与存档位置管理 -------------------------------------------------
 
@@ -837,9 +966,32 @@ class DemoArchiveService:
             storage_folder=game_folder(detail.original_name or detail.name, paths),
         )
 
-    def delete_game(self, game_id: str) -> None:
-        """删除游戏记录及其存档位置, 并把它的探测候选退回待处理."""
+    def delete_export_path(self, game_id: str) -> str:
+        """算出"告别包"的默认落点(演示后端只给出一条像样的路径).
+
+        命名规则与真实后端一致(游戏名 + 时间戳 + 归档包后缀), 但演示后端全程不碰
+        文件系统: 这里**只计算**路径, 不建目录也不写文件。
+        """
         self._require_game(game_id)
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        stem = f"{game_slug(self._name_of(game_id))}-{stamp}"
+        return str(Path("exports") / f"{stem}{ARCHIVE_SUFFIX}")
+
+    def delete_game(self, game_id: str, destination: str) -> None:
+        """删除游戏记录及其存档位置, 并把它的探测候选退回待处理.
+
+        顺序与真实后端一致(**先导出, 后删除**), 但演示后端不碰文件系统:
+        ``destination`` 上不会出现任何文件, 所以这里只如实记一条"模拟导出"的审计,
+        不假装写出了告别包(与 :meth:`run_export` 同一套诚实口径)。删内存数据这一步
+        与原来相同。
+        """
+        self._require_game(game_id)
+        log_action(
+            "game.delete_export",
+            game_id=game_id,
+            result="simulated",
+            note=tr("result.delete_export_simulated", name=self._name_of(game_id)),
+        )
         self._meta.pop(game_id)
         self._details.pop(game_id)
         self._locations.pop(game_id, None)
@@ -887,7 +1039,7 @@ class DemoArchiveService:
         self._require_game(game_id)
         normalized = normalize_path(path)
         existing = self._locations[game_id]
-        if any(item.path.lower() == normalized.lower() for item in existing):
+        if any(_same_path(item.path, normalized) for item in existing):
             raise ArchiveManagementError(
                 tr("error.duplicate_location", path=normalized)
             )
@@ -918,9 +1070,7 @@ class DemoArchiveService:
         new_kind = location.path_kind if kind is None else kind
         if new_path != location.path:
             for item in self._locations[location.game_id]:
-                if item.location_id != location_id and item.path.lower() == (
-                    new_path.lower()
-                ):
+                if item.location_id != location_id and _same_path(item.path, new_path):
                     raise ArchiveManagementError(
                         tr("error.duplicate_location", path=new_path)
                     )
@@ -1312,6 +1462,7 @@ class DemoArchiveService:
             enabled=meta.enabled,
             archived=self._archived.get(game_id, False),
             saved_paths=meta.saved_paths,
+            original_name=meta.original_name,
         )
 
     def _find_location(self, location_id: str) -> LocationItem:

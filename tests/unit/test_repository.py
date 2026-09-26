@@ -560,3 +560,23 @@ def test_backup_delete_many(tmp_path: Path) -> None:
     assert removed == 2
     assert [node.id for node in repo.list_for_game(game_id)] == [ids[2]]
     assert repo.delete_many([]) == 0
+
+
+def test_a_node_without_a_file_list_is_still_written(tmp_path: Path) -> None:
+    """没有文件清单的节点也要写完(整块的快照目录项等没有逐文件记录)."""
+    database = _database(tmp_path)
+    game_id = _game_id(GameRepository(database))
+    repo = BackupRepository(database)
+
+    node = repo.add_with_files(BackupNode(game_id=game_id, title="空清单"), [])
+
+    assert node.id is not None
+    assert repo.list_files(node.id) == []
+    assert repo.describe(node.id) == (0, 0)
+
+
+def test_describe_of_a_missing_backup_is_zero(tmp_path: Path) -> None:
+    """问一个不存在的备份有多少文件时给 (0, 0), 而不是让调用方处理 None."""
+    database = _database(tmp_path)
+
+    assert BackupRepository(database).describe(999999) == (0, 0)

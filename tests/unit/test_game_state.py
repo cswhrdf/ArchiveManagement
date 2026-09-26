@@ -13,9 +13,13 @@ import pytest
 
 from archive_management.application import discovery as discovery_cases
 from archive_management.application import games as games_cases
+from archive_management.application.games import ActivationDecision
 from archive_management.application.home import set_archived
 from archive_management.domain import Game, GameCandidate
-from archive_management.domain.activation import REASON_MANUAL
+from archive_management.domain.activation import (
+    REASON_MANUAL,
+    ActivationState,
+)
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
@@ -136,3 +140,46 @@ def test_manual_activation_never_changes_anything(tmp_path: Path) -> None:
     assert outcome.changed is False
     assert outcome.reason == REASON_MANUAL
     assert repository.enabled_game_id() == game.id
+
+
+class _FixedPolicy:
+    """固定返回一个决定的策略替身(接缝允许注入自定义策略)."""
+
+    def __init__(self, decision: ActivationDecision) -> None:
+        self._decision = decision
+
+    def decide(self, *args: object, **kwargs: object) -> ActivationDecision:
+        """忽略全部输入, 直接返回预先给定的决定."""
+        return self._decision
+
+
+def test_the_seam_keeps_a_game_that_is_already_enabled(tmp_path: Path) -> None:
+    """策略要求启用的正是当前启用态: 结果不变, 也不当成一次切换."""
+    database = _database(tmp_path)
+    repository = GameRepository(database)
+    game = repository.add(Game(name="Demo", enabled=True))
+    assert game.id is not None
+    decision = ActivationDecision(state=ActivationState(), target_game_id=game.id)
+
+    outcome = games_cases.apply_activation(database, _FixedPolicy(decision))
+
+    assert repository.enabled_game_id() == game.id
+    assert outcome.disabled is None
+    assert outcome.enabled is not None
+    assert outcome.enabled.id == game.id
+
+
+def test_the_seam_can_take_the_enabled_state_back(tmp_path: Path) -> None:
+    """策略要求收回启用态: 当前启用的那一款被停用."""
+    database = _database(tmp_path)
+    repository = GameRepository(database)
+    game = repository.add(Game(name="Demo", enabled=True))
+    assert game.id is not None
+    decision = ActivationDecision(state=ActivationState(), deactivate=True)
+
+    outcome = games_cases.apply_activation(database, _FixedPolicy(decision))
+
+    assert repository.enabled_game_id() is None
+    assert outcome.enabled is None
+    assert outcome.disabled is not None
+    assert outcome.disabled.id == game.id

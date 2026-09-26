@@ -19,3 +19,13 @@ def pick_file(*, title: str) -> str | None:
     """弹出系统文件选择框; 用户取消时返回 None."""
     chosen = filedialog.askopenfilename(title=title)
     return chosen or None
+
+
+def pick_save_file(*, title: str, initialfile: str | None = None) -> str | None:
+    """弹出系统保存文件对话框; 用户取消时返回 None.
+
+    ``initialfile`` 是预填的文件名(通常是按游戏名派生的目录/文件名), 用户仍可
+    改成别的名字或目录; 传 None 或空串表示不预填。
+    """
+    chosen = filedialog.asksaveasfilename(title=title, initialfile=initialfile or "")
+    return chosen or None

@@ -133,12 +133,17 @@ def confirm_candidate(database: Database, candidate_id: int) -> SaveLocation:
             f"{candidate.path}"
         )
     locations = SaveLocationRepository(database)
-    location = locations.duplicate_of(candidate.game_id, candidate.path)
+    # 比对与落库前先规范化: 判重比的是**字符串相等**(见 duplicate_of), 只有两侧都是
+    # 规范化形式才等价于"同一个文件夹"。候选平时由 _build_candidate 规范化后写入,
+    # 但这里不能依赖上游 —— 历史数据或将来新增的写入方一旦漏了规范化, 这里会静默
+    # 多出一条指向同一目录的位置(而且多出来的那条也是非规范化形式)。
+    path = normalize_path(candidate.path)
+    location = locations.duplicate_of(candidate.game_id, path)
     if location is None:
         location = locations.add(
             SaveLocation(
                 game_id=candidate.game_id,
-                path=candidate.path,
+                path=path,
                 path_kind=candidate.path_kind,
                 source=_save_source(candidate.platform),
                 is_primary=not locations.list_for_game(candidate.game_id),

@@ -10,6 +10,7 @@ Windows, Steam/Epic 各平台的清单目录不同, 监控目录在所有平台�
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,6 +27,9 @@ from archive_management.services.platform_scan import (
     default_roots,
     parse_vdf_pairs,
     path_health,
+    read_steam_installs,
+    registry_paths,
+    steam_libraries,
     vdf_first,
 )
 from archive_management.services.platforms import PlatformFamily
@@ -517,3 +521,77 @@ def test_missing_install_directory_is_reported_as_missing(tmp_path: Path) -> Non
     candidates = LocalGameScanner(_roots(tmp_path)).scan()
 
     assert [item.health for item in candidates] == ["missing"]
+
+
+# ------------------------------------------------------- 健康判定与清单读取
+
+
+def test_path_health_reports_an_unreadable_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录在但读不了: 归到 unreadable(而不是 ok), 界面才能提示去改权限."""
+    target = tmp_path / "saves"
+    target.mkdir()
+    real_access = os.access
+
+    def deny(path: str | Path, mode: int) -> bool:
+        return False if Path(path) == target else real_access(path, mode)
+
+    monkeypatch.setattr(os, "access", deny)
+
+    assert path_health(str(target)) == "unreadable"
+
+
+def test_registry_paths_are_empty_off_windows(tmp_path: Path) -> None:
+    """注册表读取只在 Windows 生效: 其它平台显式返回空, 不假装查过."""
+    roots = _roots(tmp_path, platform="linux")
+
+    assert registry_paths(roots, HKCU, r"Software\Valve\Steam", ("SteamPath",)) == []
+
+
+def test_steam_libraries_skips_an_empty_registered_path(tmp_path: Path) -> None:
+    """libraryfolders.vdf 里登记的路径是空串时跳过(不产出一条不可用的库)."""
+    steam, _libraries = _steam_tree(tmp_path)
+    extra = tmp_path / "SteamLib"
+    (extra / "steamapps").mkdir(parents=True)
+    (steam / "steamapps" / "libraryfolders.vdf").write_text(
+        f'"path" ""\n"1" "{extra.as_posix()}"\n', encoding="utf-8"
+    )
+
+    assert steam_libraries(steam) == [steam, extra]
+
+
+def test_steam_installs_skip_a_manifest_that_cannot_be_read(tmp_path: Path) -> None:
+    """清单读不出内容(这里是同名目录)时跳过该条, 不影响其它游戏."""
+    steam, _libraries = _steam_tree(tmp_path)
+    _write_manifest(steam, "753640", "Outer Wilds", "OuterWilds")
+    (steam / "steamapps" / "appmanifest_000000.acf").mkdir()
+    registry = FakeRegistry(
+        values={(HKCU, r"Software\Valve\Steam"): {"SteamPath": str(steam)}}
+    )
+
+    installs = read_steam_installs(_roots(tmp_path, registry))
+
+    assert [item.name for item in installs] == ["Outer Wilds"]
+
+
+def test_read_json_returns_none_for_a_missing_or_non_object_file(
+    tmp_path: Path,
+) -> None:
+    """JSON 读不出来或顶层不是对象时返回 None(该来源整条跳过)."""
+    listed = tmp_path / "list.item"
+    listed.write_text("[1, 2]", encoding="utf-8")
+
+    assert LocalGameScanner._read_json(tmp_path / "gone.item") is None
+    assert LocalGameScanner._read_json(listed) is None
+
+
+def test_gog_entries_without_a_path_are_skipped(tmp_path: Path) -> None:
+    """GOG 子键缺安装路径时跳过(不产出一条没有目录的候选)."""
+    gog_root = r"SOFTWARE\WOW6432Node\GOG.com\Games"
+    registry = FakeRegistry(
+        values={(HKLM, f"{gog_root}\\42"): {"gameName": "Demo"}},
+        subkeys={(HKLM, gog_root): ["42"]},
+    )
+
+    assert LocalGameScanner(_roots(tmp_path, registry)).scan() == []

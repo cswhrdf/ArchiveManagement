@@ -389,6 +389,6 @@ def _first_game(repository: GameRepository, game_ids: Sequence[int]) -> Game | N
     """按 id 依次读取, 返回第一个存在的游戏(用于"被自动停用的那一款")."""
     for game_id in game_ids:
         game = repository.get(game_id)
-        if game is not None:
+        if game is not None:  # pragma: no branch - 最多一款被自动停用
             return game
     return None

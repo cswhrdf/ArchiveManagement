@@ -146,7 +146,7 @@ class BackupService:
         current_id = self._games.current_backup(game_id)
         if current_id is not None:
             node = self._backups.get(current_id)
-            if node is not None:
+            if node is not None:  # pragma: no branch - 外键保证指针不会悬空
                 return node
         return self._backups.latest_for_game(game_id)
 
@@ -470,7 +470,7 @@ class BackupService:
         children = _children_by_parent(nodes)
         for backup_id in targets:
             target = by_id.get(backup_id)
-            if target is not None:
+            if target is not None:  # pragma: no branch - 目标来自同一份节点列表
                 self._prune_node(backup_id, target, children=children)
         log_action(
             "backup.prune_auto",

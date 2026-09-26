@@ -10,6 +10,15 @@ from pathlib import Path
 import pytest
 
 from archive_management.application.home import build_report
+from archive_management.application.imports import (
+    STRATEGY_MERGE,
+    STRATEGY_NEW,
+    STRATEGY_SKIP,
+    BatchGameInspection,
+    BatchInspection,
+    ImportInspection,
+    PackageLocation,
+)
 from archive_management.domain import (
     DEFAULT_PAGE_SIZE,
     GameFacts,
@@ -31,19 +40,32 @@ from archive_management.ui.models import (
     HomeBoard,
     HomeGameItem,
     HomeSection,
+    ImportChoice,
     LocationItem,
     MonitoredDirItem,
     SavePathSuggestion,
     ScanSummary,
     SourceFilter,
     ViewKind,
+    batch_export_choice,
+    batch_export_filename,
+    batch_import_prompt,
+    batch_row_choice,
     branch_order,
     can_backup,
+    export_batch_prompt,
+    exportable_games,
     filter_by_source,
     filter_by_source_label,
+    filter_export_options,
     group_by_parent,
     home_board,
+    import_prompt,
+    import_strategies,
     poster_columns,
+    size_label,
+    target_game_id,
+    target_label_for,
     timeline_order,
     visible_in_branch_view,
 )
@@ -807,3 +829,326 @@ def test_poster_columns_scales_with_width() -> None:
     assert poster_columns(1000) == 4
     assert poster_columns(1600) == 7
     assert poster_columns(1400) > poster_columns(1000)
+
+
+# ---------------------------------------------------------------- 导入提示
+
+
+def _packaged_game(game_id: str, name: str, *, original_name: str = "") -> GameSummary:
+    """一条最小游戏摘要(导入对话框只用得上 id 与名称; 原名默认没有)."""
+    return GameSummary(
+        game_id=game_id,
+        name=name,
+        has_locations=True,
+        location_count=1,
+        backup_count=1,
+        original_name=original_name,
+    )
+
+
+def _inspection(*, app_id: int | None = 730) -> ImportInspection:
+    """一个最小的包体检结果: 两条存档位置(一条本机已存在)."""
+    return ImportInspection(
+        path=Path("Demo.archive.zip"),
+        game_name="Demo",
+        steam_app_id=app_id,
+        platform="windows",
+        origin="steam",
+        tags=("动作",),
+        locations=(
+            PackageLocation(
+                index=0,
+                path="D:/saves",
+                path_kind="directory",
+                source="steam",
+                is_primary=True,
+                exists_here=True,
+            ),
+            PackageLocation(
+                index=1,
+                path="E:/gone",
+                path_kind="directory",
+                source="manual",
+                is_primary=False,
+                exists_here=False,
+            ),
+        ),
+        nodes=(),
+        schedule=None,
+        matching_game_id=None,
+    )
+
+
+def test_import_prompt_prefills_only_paths_that_exist_here() -> None:
+    """只有本机真有的路径才预填; 不存在的那条留空(留空就不导入)."""
+    prompt = import_prompt(_inspection(), [])
+
+    assert "Demo" in prompt.summary
+    assert "AppID 730" in prompt.summary
+    assert "备份 0 份" in prompt.summary
+    assert prompt.match_text == ""
+    assert prompt.targets == ()
+    assert [row.index for row in prompt.locations] == [0, 1]
+    assert prompt.locations[0].default == "D:/saves"
+    assert prompt.locations[0].text == tr(
+        "dialog.import_location_exists", path="D:/saves"
+    )
+    assert prompt.locations[1].default == ""
+    assert prompt.locations[1].text == "E:/gone"
+
+
+def test_import_prompt_without_an_app_id_drops_that_part() -> None:
+    """手动录入的游戏没有 AppID: 摘要里就不提这一段."""
+    prompt = import_prompt(_inspection(app_id=None), [])
+
+    assert "AppID" not in prompt.summary
+    assert "Demo" in prompt.summary
+
+
+def test_import_prompt_preselects_the_matching_game() -> None:
+    """疑似同一款排在最前并预选上, 其余的保持库里的顺序."""
+    inspection = replace(_inspection(), matching_game_id=42)
+    games = [_packaged_game("7", "别的游戏"), _packaged_game("42", "库里的 Demo")]
+
+    prompt = import_prompt(inspection, games)
+
+    assert [option.game_id for option in prompt.targets] == ["42", "7"]
+    assert [option.selected for option in prompt.targets] == [True, False]
+    assert prompt.match_text == tr("dialog.import_match", name="库里的 Demo")
+
+
+def test_import_prompt_without_a_match_keeps_the_library_order() -> None:
+    """没有匹配时也预选第一款(用户可以直接改成别的)."""
+    games = [_packaged_game("7", "别的游戏"), _packaged_game("9", "山海旅人")]
+
+    prompt = import_prompt(_inspection(), games)
+
+    assert [option.game_id for option in prompt.targets] == ["7", "9"]
+    assert [option.selected for option in prompt.targets] == [True, False]
+    assert prompt.match_text == ""
+
+
+def test_import_strategies_offer_merge_only_with_a_target() -> None:
+    """没有可合并的游戏就不给"合并", 免得选了却没有目标."""
+    with_targets = import_strategies(has_targets=True)
+    without = import_strategies(has_targets=False)
+
+    assert [key for key, _text in with_targets] == [
+        STRATEGY_NEW,
+        STRATEGY_MERGE,
+        STRATEGY_SKIP,
+    ]
+    assert [key for key, _text in without] == [STRATEGY_NEW, STRATEGY_SKIP]
+    assert all(text and not text.startswith("dialog.") for _key, text in with_targets)
+
+
+# ---------------------------------------------------------------- 批量导出
+
+
+def _batch_export_games() -> list[GameSummary]:
+    """三款游戏: 已归档的那款不该出现在批量导出的候选里."""
+    return [
+        _packaged_game("1", "星际拓荒"),
+        replace(_packaged_game("2", "山海旅人"), enabled=False),
+        replace(_packaged_game("3", "无尽太空"), archived=True),
+    ]
+
+
+def test_export_batch_prompt_offers_every_unarchived_game_and_selects_none() -> None:
+    """候选里没有已归档的游戏(停用的照常给), 且默认一个都不勾(要用户明确表态)."""
+    games = _batch_export_games()
+
+    prompt = export_batch_prompt(games)
+
+    assert [option.game_id for option in prompt.options] == ["1", "2"]
+    assert [option.selected for option in prompt.options] == [False, False]
+    assert [option.original_name for option in prompt.options] == ["", ""]
+    assert prompt.options[0].detail == games[0].list_detail
+    assert prompt.summary == tr("dialog.export_batch_summary", count=2)
+    # 规则只有一处: 单独问"这款能不能批量导出"时给的是同一个答案.
+    assert [game.game_id for game in exportable_games(games)] == ["1", "2"]
+
+
+def test_filter_export_options_narrows_ignores_case_and_can_match_nothing() -> None:
+    """筛选只看名称: 空输入给全部, 大小写不敏感, 一条都不匹配就是空."""
+    options = export_batch_prompt(
+        [_packaged_game("1", "Outer Wilds"), _packaged_game("2", "星际拓荒")]
+    ).options
+
+    assert filter_export_options(options, "") == options
+    assert filter_export_options(options, "   ") == options
+    assert [option.name for option in filter_export_options(options, "OUTER")] == [
+        "Outer Wilds"
+    ]
+    assert [option.name for option in filter_export_options(options, "星")] == [
+        "星际拓荒"
+    ]
+    assert filter_export_options(options, "没有这一款") == ()
+
+
+def test_filter_export_options_also_matches_the_original_name() -> None:
+    """筛选也认**录入时的原名**: 库里的名字会被译名写回或用户改名换掉, 用户却可能
+    还拿着当初那个名字来搜(这正是这条改动要解决的问题).
+    """
+    options = export_batch_prompt(
+        [
+            _packaged_game("1", "星际拓荒", original_name="Outer Wilds"),
+            _packaged_game("2", "山海旅人"),
+        ]
+    ).options
+
+    assert [option.game_id for option in filter_export_options(options, "outer")] == [
+        "1"
+    ], "按原名(大小写不敏感)命中"
+    assert [option.game_id for option in filter_export_options(options, "WILDS")] == [
+        "1"
+    ]
+    assert [option.game_id for option in filter_export_options(options, "拓荒")] == [
+        "1"
+    ], "按界面上的名称照旧命中"
+    assert [option.game_id for option in filter_export_options(options, "山")] == ["2"]
+    assert filter_export_options(options, "Outer Wilds 2") == ()
+
+
+def test_the_batch_export_row_shows_the_original_name_only_when_it_differs() -> None:
+    """行尾说明里带原名, 但只在它跟界面名不同的时候带 —— 否则白占宽度.
+
+    带上它是因为"按原名搜得到"这件事得可解释: 搜出来的那行文字里否则看不出跟输入
+    有什么关系(而它确实命中了)。
+    """
+    renamed = _packaged_game("1", "星际拓荒", original_name="Outer Wilds")
+    same = _packaged_game("2", "山海旅人", original_name="山海旅人")
+    unknown = _packaged_game("3", "无尽太空")
+
+    options = export_batch_prompt([renamed, same, unknown]).options
+
+    assert options[0].original_name == "Outer Wilds"
+    assert tr("hero.original_name", name="Outer Wilds") in options[0].detail
+    assert renamed.list_detail in options[0].detail, "位置/备份摘要照旧带上"
+    assert options[1].detail == same.list_detail, "原名与界面名相同时不重复显示"
+    assert options[2].detail == unknown.list_detail, "没有原名时也不显示"
+
+
+def test_batch_export_choice_keeps_the_candidate_order() -> None:
+    """勾选结果按候选顺序(不是点击顺序)给出, 一个都没勾就是空选择."""
+    options = export_batch_prompt(
+        [_packaged_game("1", "甲"), _packaged_game("2", "乙")]
+    ).options
+
+    chosen = batch_export_choice({"2": True, "1": True}, options)
+
+    assert chosen.game_ids == ("1", "2")
+    assert batch_export_choice({"1": False, "2": False}, options).game_ids == ()
+    assert batch_export_choice({}, options).game_ids == ()
+
+
+def test_batch_export_filename_carries_the_count_and_the_stamp() -> None:
+    """默认文件名写明游戏数并带时间戳: 同一个库导出两次不会互相覆盖."""
+    moment = datetime(2026, 9, 26, 12, 34, 56, tzinfo=UTC)
+
+    name = batch_export_filename(3, moment=moment)
+
+    assert name == "batch-3games-20260926T123456.archive.zip"
+
+
+# ---------------------------------------------------------------- 批量导入
+
+
+def _batch_inspection(*, app_id: int | None = 730) -> BatchInspection:
+    """一个最小的批量包体检结果(单游戏, 用它复用单包的那两条存档位置)."""
+    return BatchInspection(
+        path=Path("batch.archive.zip"),
+        games=(
+            BatchGameInspection(
+                entry="Demo.archive.zip",
+                inspection=_inspection(app_id=app_id),
+            ),
+        ),
+    )
+
+
+def test_batch_import_prompt_defaults_every_row_to_new_with_a_prefilled_path() -> None:
+    """逐行默认值: 策略"新建"、目标预选库里的第一款、只预填本机已存在的位置."""
+    prompt = batch_import_prompt(_batch_inspection(), [_packaged_game("7", "别的游戏")])
+
+    row = prompt.rows[0]
+    assert row.entry == "Demo.archive.zip"
+    assert row.name == "Demo"
+    assert row.meta == tr(
+        "dialog.import_batch_row_meta",
+        platform="Windows",
+        app_id=730,
+        backups=0,
+        files=0,
+    )
+    assert row.strategy == STRATEGY_NEW
+    assert row.target_game_id == "7"
+    assert [key for key, _text in row.strategies] == [
+        STRATEGY_NEW,
+        STRATEGY_MERGE,
+        STRATEGY_SKIP,
+    ]
+    assert [item.default for item in row.locations] == ["D:/saves", ""]
+    assert prompt.summary == tr(
+        "dialog.import_batch_summary",
+        games=1,
+        backups=0,
+        files=0,
+        size=size_label(0),
+    )
+    assert prompt.hint
+
+
+def test_batch_import_prompt_without_app_id_or_library_games_offers_no_merge() -> None:
+    """包里没有 AppID / 库里一款游戏都没有: 这一行就不该提供"合并"."""
+    prompt = batch_import_prompt(_batch_inspection(app_id=None), [])
+
+    row = prompt.rows[0]
+    assert "AppID" not in row.meta
+    assert row.targets == ()
+    assert row.target_game_id is None
+    assert [key for key, _text in row.strategies] == [STRATEGY_NEW, STRATEGY_SKIP]
+
+
+def test_batch_import_prompt_disambiguates_twin_target_names() -> None:
+    """目标下拉框的文案在重名时补上游戏 id, 于是文案总能唯一地还原成 id."""
+    inspection = replace(_inspection(), matching_game_id=42)
+    batch = BatchInspection(
+        path=Path("batch.archive.zip"),
+        games=(BatchGameInspection(entry="a.archive.zip", inspection=inspection),),
+    )
+    games = [_packaged_game("42", "同名"), _packaged_game("7", "同名")]
+    other = [_packaged_game("7", "同名"), _packaged_game("9", "独一份")]
+
+    row = batch_import_prompt(batch, games).rows[0]
+    clean = batch_import_prompt(batch, other).rows[0]
+
+    assert [option.label for option in row.targets] == ["同名 (42)", "同名 (7)"]
+    assert [option.selected for option in row.targets] == [True, False]
+    assert row.match_text == tr("dialog.import_match", name="同名")
+    # 没有重名时文案保持干净(不额外加 id).
+    assert [option.label for option in clean.targets] == ["同名", "独一份"]
+    assert target_game_id(row.targets, "同名 (7)") == "7"
+    assert target_game_id(row.targets, "同名") is None
+    assert target_game_id(row.targets, "没有这一项") is None
+    assert target_label_for(row.targets, "42") == "同名 (42)"
+    assert target_label_for(row.targets, None) == "同名 (42)"
+
+
+def test_batch_row_choice_keeps_only_what_the_user_expressed() -> None:
+    """只有"合并"带目标, 空目标不猜; 留空的存档位置不导入."""
+    merged = batch_row_choice(
+        strategy=STRATEGY_MERGE, target="7", locations={0: " D:/saves ", 1: "   "}
+    )
+    fresh = batch_row_choice(strategy=STRATEGY_NEW, target="7", locations={})
+    empty_target = batch_row_choice(strategy=STRATEGY_MERGE, target=None, locations={})
+
+    assert merged == ImportChoice(
+        strategy=STRATEGY_MERGE,
+        target_game_id="7",
+        locations={0: "D:/saves"},
+    )
+    # "新建"即使界面上留着目标也不带它.
+    assert fresh.target_game_id is None
+    # 选了"合并"却没有目标: 留给后端报"需要先选定要合并到的游戏", 界面不替用户猜.
+    assert empty_target.target_game_id is None

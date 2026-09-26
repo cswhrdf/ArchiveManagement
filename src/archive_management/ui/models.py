@@ -6,12 +6,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
 from archive_management.application.home import HomeReport
+from archive_management.application.imports import (
+    STRATEGY_MERGE,
+    STRATEGY_NEW,
+    STRATEGY_SKIP,
+    BatchGameInspection,
+    BatchInspection,
+    ImportInspection,
+    PackageLocation,
+)
 from archive_management.domain import (
     GameAction,
     GameFacts,
@@ -28,7 +38,9 @@ from archive_management.domain import (
     tree_depths,
 )
 from archive_management.i18n import tr
+from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.services.pathcheck import dangerous_target_reason
+from archive_management.services.platforms import PLATFORM_LABELS
 
 
 class ViewKind(StrEnum):
@@ -117,6 +129,9 @@ class GameSummary:
     # 导入时写进存档位置的路径数(0 表示这次导入没有带存档位置);
     # 只用于现场反馈, 路径本身由用户在导入对话框里确认或修改.
     saved_paths: int = 0
+    # 录入时的名称(译名写回或用户改名之前的那个): 与 name 不同时界面会一并显示, 批量
+    # 导出的筛选也按它匹配 —— 用户脑子里记的可能还是当初那一个名字.
+    original_name: str = ""
 
     @property
     def list_detail(self) -> str:
@@ -932,4 +947,417 @@ def _home_item(facts: GameFacts, *, stamp: Callable[[datetime], str]) -> HomeGam
         archived=facts.archived,
         enabled=facts.enabled,
         tags=facts.tags,
+    )
+
+
+# -- 导入归档包 -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ImportLocationRow:
+    """导入对话框里的一行存档位置."""
+
+    index: int
+    text: str
+    default: str
+
+
+@dataclass(frozen=True)
+class ImportTargetOption:
+    """可以合并到的目标游戏(对话框里是一个单选项)."""
+
+    game_id: str
+    label: str
+    selected: bool = False
+
+
+@dataclass(frozen=True)
+class ImportChoice:
+    """用户在导入对话框里做出的选择(取消时对话框返回 ``None``)."""
+
+    strategy: str
+    target_game_id: str | None
+    locations: Mapping[int, str]
+
+
+@dataclass(frozen=True)
+class ImportPrompt:
+    """导入对话框需要的文案与选项(纯数据, 无头环境也能构造与断言)."""
+
+    summary: str
+    match_text: str
+    locations: tuple[ImportLocationRow, ...]
+    targets: tuple[ImportTargetOption, ...]
+
+
+def import_prompt(
+    inspection: ImportInspection, games: Sequence[GameSummary]
+) -> ImportPrompt:
+    """把体检结果与游戏库映射成导入对话框的文案与选项.
+
+    游戏库只用来提供"合并到哪一款"的选项与"疑似同一款"的提示: 真正写库的是
+    后端, 界面不替它做匹配判断。存档位置则只在包内路径本机已存在时才预填,
+    其余留空(留空的那一条不会被导入)。
+    """
+    matching_id = (
+        None
+        if inspection.matching_game_id is None
+        else str(inspection.matching_game_id)
+    )
+    return ImportPrompt(
+        summary=_import_summary(inspection),
+        match_text=_import_match_text(games, matching_id),
+        locations=tuple(_import_location(item) for item in inspection.locations),
+        targets=_import_targets(games, matching_id),
+    )
+
+
+def import_strategies(*, has_targets: bool) -> tuple[tuple[str, str], ...]:
+    """导入方式选项(策略键 + 文案): 没有可合并的游戏就不给"合并"."""
+    options = [(STRATEGY_NEW, tr("dialog.import_strategy_new"))]
+    if has_targets:
+        options.append((STRATEGY_MERGE, tr("dialog.import_strategy_merge")))
+    options.append((STRATEGY_SKIP, tr("dialog.import_strategy_skip")))
+    return tuple(options)
+
+
+def _import_summary(inspection: ImportInspection) -> str:
+    """包摘要: 游戏标识 + 备份/文件数与体积(没有 AppID 的包少一段说明)."""
+    platform = PLATFORM_LABELS.get(inspection.platform, inspection.platform)
+    key = (
+        "dialog.import_summary"
+        if inspection.steam_app_id is not None
+        else "dialog.import_summary_unknown_app"
+    )
+    return tr(
+        key,
+        name=inspection.game_name,
+        platform=platform,
+        app_id=inspection.steam_app_id,
+        backups=inspection.backup_count,
+        files=inspection.file_count,
+        size=size_label(inspection.total_bytes),
+    )
+
+
+def _import_match_text(games: Sequence[GameSummary], matching_id: str | None) -> str:
+    """库里疑似同一款游戏的提示(没有匹配时是空串, 对话框就不显示这一行)."""
+    game = next((item for item in games if item.game_id == matching_id), None)
+    if game is None:
+        return ""
+    return tr("dialog.import_match", name=game.name)
+
+
+def _import_targets(
+    games: Sequence[GameSummary], matching_id: str | None
+) -> tuple[ImportTargetOption, ...]:
+    """目标游戏选项: 疑似同一款排在最前并默认选中, 其余保持库里的顺序."""
+    if not games:
+        return ()
+    matching = tuple(game for game in games if game.game_id == matching_id)
+    others = tuple(game for game in games if game.game_id != matching_id)
+    return tuple(
+        ImportTargetOption(game_id=game.game_id, label=game.name, selected=index == 0)
+        for index, game in enumerate(matching + others)
+    )
+
+
+def _import_location(item: PackageLocation) -> ImportLocationRow:
+    """一行存档位置: 本机已有同名路径时才预填, 否则留空."""
+    exists = item.exists_here
+    return ImportLocationRow(
+        index=item.index,
+        text=(
+            tr("dialog.import_location_exists", path=item.path) if exists else item.path
+        ),
+        default=item.path if exists else "",
+    )
+
+
+# -- 批量导出 ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BatchExportOption:
+    """批量导出对话框里的一款游戏(一行复选框)."""
+
+    game_id: str
+    name: str
+    detail: str  # 存档位置与备份数量的摘要(与主页列表的副标题同一口径)
+    selected: bool = False
+    #: 录入时的名称(译名探测/用户改名之前的那个): **筛选也按它匹配** —— 库里的名字
+    #: 会被译名写回或用户改名换掉, 而用户脑子里记的可能还是当初那一个。
+    original_name: str = ""
+
+
+@dataclass(frozen=True)
+class BatchExportPrompt:
+    """批量导出对话框需要的文案与候选(纯数据, 无头环境也能构造与断言)."""
+
+    summary: str
+    filter_hint: str
+    options: tuple[BatchExportOption, ...]
+
+
+@dataclass(frozen=True)
+class BatchExportChoice:
+    """批量导出的选择(取消时对话框返回 ``None``)."""
+
+    game_ids: tuple[str, ...]
+
+
+def exportable_games(games: Sequence[GameSummary]) -> tuple[GameSummary, ...]:
+    """批量导出可选的游戏: **已归档的不提供, 停用的照常提供**.
+
+    归档表达"这款游戏我已经收起来了": 主页的默认视图不列它, 只有「已归档」视图才出现,
+    所以批量导出也不把它混进来(要单独导出归档游戏仍可去详情页的「导出游戏」, 那条规则
+    来自 ``domain.game_rules``, 这里没有改它)。
+
+    **停用不是"收起来"**: 应用里"全局至多一款启用"是硬约束(见
+    ``application.games.set_enabled``), 平时绝大多数游戏都是停用态 —— 把它们排除掉
+    等于让批量导出一次只能导一款, 与这个功能的用途相悖; 主页动作行对停用游戏也一样
+    提供备份/位置/标签等操作。因此这里只按归档过滤。
+    """
+    return tuple(game for game in games if not game.archived)
+
+
+def _export_detail(game: GameSummary) -> str:
+    """行尾的说明文字: 原名与界面名不同时把原名摆上, 否则只给位置/备份摘要.
+
+    带上原名是为了"按原名搜得到"这件事可解释: 否则搜出来的那行文字里看不出跟输入有
+    什么关系(而它确实命中了)。原名与界面名相同时不加, 免得白占宽度。
+    """
+    if game.original_name and game.original_name != game.name:
+        return (
+            f"{tr('hero.original_name', name=game.original_name)} · {game.list_detail}"
+        )
+    return game.list_detail
+
+
+def export_batch_prompt(games: Sequence[GameSummary]) -> BatchExportPrompt:
+    """把游戏库映射成批量导出对话框的文案与候选(默认一个都不勾选).
+
+    默认不勾选是刻意的: 批量导出会写出一个可能很大的包, "点什么都没选"比"以为只导了
+    一款却导出了全部"安全; 用户勾了才有下一步。
+    """
+    options = tuple(
+        BatchExportOption(
+            game_id=game.game_id,
+            name=game.name,
+            detail=_export_detail(game),
+            selected=False,
+            original_name=game.original_name,
+        )
+        for game in exportable_games(games)
+    )
+    return BatchExportPrompt(
+        summary=tr("dialog.export_batch_summary", count=len(options)),
+        filter_hint=tr("dialog.export_batch_filter_hint"),
+        options=options,
+    )
+
+
+def filter_export_options(
+    options: Sequence[BatchExportOption], query: str
+) -> tuple[BatchExportOption, ...]:
+    """按名称筛选候选: 空输入返回全部, 一条都不匹配就是空(界面据此给出提示).
+
+    匹配的是**界面上的名称与录入时的原名**两者之一(各算一次包含, 大小写不敏感):
+    库里那一个是译名写回或用户改名的结果, 用户可能拿当初的名字来搜.
+
+    与定时任务窗口的选择框的唯一不同是: 过滤**只影响显示**。勾选状态存在按游戏 id
+    索引的变量里, 被筛掉的行不会丢掉用户已经做过的选择(界面文案里也这么写)。
+    """
+    typed = query.strip().casefold()
+    if not typed:
+        return tuple(options)
+    return tuple(option for option in options if _matches_any(option, typed))
+
+
+def _matches_any(option: BatchExportOption, typed: str) -> bool:
+    """界面名或原名任一命中就算匹配(两个名字可能相同, 也可能有个是空的)."""
+    return any(
+        typed in candidate.casefold()
+        for candidate in (option.name, option.original_name)
+        if candidate
+    )
+
+
+def batch_export_choice(
+    selected: Mapping[str, bool], options: Sequence[BatchExportOption]
+) -> BatchExportChoice:
+    """把复选框状态整理成选择: 顺序与候选一致, 一个都没勾就是空选择."""
+    return BatchExportChoice(
+        game_ids=tuple(
+            option.game_id for option in options if selected.get(option.game_id, False)
+        )
+    )
+
+
+def batch_export_filename(count: int, *, moment: datetime) -> str:
+    """批量导出包的默认文件名: 游戏数 + 时间戳(用户仍可改目录与文件名).
+
+    带时间戳是让"同一个库导出两次"默认不互相覆盖; 名字里写明游戏数, 事后在文件管理器
+    里也能一眼看出这一批有几款。后缀与单包导出一致(同一种归档包)。
+    """
+    return f"batch-{count}games-{moment:%Y%m%dT%H%M%S}{ARCHIVE_SUFFIX}"
+
+
+# -- 批量导入 ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BatchImportRow:
+    """批量导入对话框里的一行(一款游戏的全部选项)."""
+
+    entry: str
+    name: str
+    meta: str
+    match_text: str
+    locations: tuple[ImportLocationRow, ...]
+    strategies: tuple[tuple[str, str], ...]
+    targets: tuple[ImportTargetOption, ...]
+    strategy: str
+    target_game_id: str | None
+
+
+@dataclass(frozen=True)
+class BatchImportPrompt:
+    """批量导入对话框需要的文案与逐游戏选项(纯数据, 无头环境也能断言)."""
+
+    summary: str
+    hint: str
+    rows: tuple[BatchImportRow, ...]
+
+
+@dataclass(frozen=True)
+class BatchImportSelection:
+    """批量导入的选择: 内层条目名 -> 该游戏的导入选择.
+
+    界面**不做 id 换算**: 目标游戏仍是界面用的字符串 id, 由后端在写库前换成整型
+    (与单包 :meth:`ArchiveService.run_import` 同一套做法).
+    """
+
+    choices: Mapping[str, ImportChoice]
+
+
+def batch_import_prompt(
+    batch: BatchInspection, games: Sequence[GameSummary]
+) -> BatchImportPrompt:
+    """把批量体检结果与游戏库映射成批量导入对话框的文案与逐行选项.
+
+    每一行的默认值都与单包对话框一致: 策略默认"新建", 目标游戏预选"疑似同一款"
+    (没有匹配就是库里的第一款), 存档位置只预填本机已存在的那些。行顺序与包内清单
+    一致 —— 用户看到的顺序就是导出时的顺序。
+    """
+    return BatchImportPrompt(
+        summary=tr(
+            "dialog.import_batch_summary",
+            games=batch.game_count,
+            backups=batch.backup_count,
+            files=batch.file_count,
+            size=size_label(batch.total_bytes),
+        ),
+        hint=tr("dialog.import_batch_hint"),
+        rows=tuple(_batch_row(item, games) for item in batch.games),
+    )
+
+
+def batch_row_choice(
+    *, strategy: str, target: str | None, locations: Mapping[int, str]
+) -> ImportChoice:
+    """把一行控件的取值整理成 :class:`ImportChoice`.
+
+    只有"合并"才带目标游戏; 目标为空时返回 ``None`` 而不是空串 —— 界面不替用户猜
+    要合并到哪一款(真导入时后端会明确报"合并导入需要先选定要合并到的游戏")。存档位置
+    去掉两端空白, 空串就是"这一条不导入"(与单包对话框同一条语义)。
+    """
+    return ImportChoice(
+        strategy=strategy,
+        target_game_id=target if strategy == STRATEGY_MERGE else None,
+        locations={
+            index: path.strip() for index, path in locations.items() if path.strip()
+        },
+    )
+
+
+def target_game_id(targets: Sequence[ImportTargetOption], label: str) -> str | None:
+    """把目标下拉框里的文案还原成游戏 id(找不到就是没选)."""
+    text = label.strip()
+    return next((option.game_id for option in targets if option.label == text), None)
+
+
+def target_label_for(targets: Sequence[ImportTargetOption], game_id: str | None) -> str:
+    """目标下拉框该显示的文案: 该游戏 id 对应的那一条, 找不到就用第一项."""
+    for option in targets:
+        if option.game_id == game_id:
+            return option.label
+    return targets[0].label if targets else ""
+
+
+def unique_targets(
+    games: Sequence[GameSummary], matching_id: str | None
+) -> tuple[ImportTargetOption, ...]:
+    """目标候选: 疑似同一款排最前并预选; **重名的补上 id**, 免得下拉框分不清.
+
+    单包对话框用单选按钮承载游戏 id, 重名不会混淆; 批量对话框里每一行是一个下拉框
+    (一款游戏一行, 铺不下整组单选按钮), 而下拉框的取值是文案 —— 于是只有**重名时**
+    才加一个 "(游戏 id)" 后缀, 常见情况的文案保持干净。
+    """
+    options = _import_targets(games, matching_id)
+    counts = Counter(option.label for option in options)
+    return tuple(
+        replace(option, label=f"{option.label} ({option.game_id})")
+        if counts[option.label] > 1
+        else option
+        for option in options
+    )
+
+
+def _batch_row(
+    item: BatchGameInspection, games: Sequence[GameSummary]
+) -> BatchImportRow:
+    """一行: 游戏标识 + 存档位置 + 策略与目标候选(默认值与单包对话框一致)."""
+    inspection = item.inspection
+    matching = (
+        None
+        if inspection.matching_game_id is None
+        else str(inspection.matching_game_id)
+    )
+    targets = unique_targets(games, matching)
+    return BatchImportRow(
+        entry=item.entry,
+        name=inspection.game_name,
+        meta=_batch_meta(inspection),
+        match_text=_import_match_text(games, matching),
+        locations=tuple(_import_location(loc) for loc in inspection.locations),
+        strategies=import_strategies(has_targets=bool(targets)),
+        targets=targets,
+        strategy=STRATEGY_NEW,
+        target_game_id=_selected_target(targets),
+    )
+
+
+def _selected_target(targets: Sequence[ImportTargetOption]) -> str | None:
+    """默认选中的目标: 预选项优先, 否则第一款(与单包对话框的默认一致)."""
+    for option in targets:
+        if option.selected:
+            return option.game_id
+    return targets[0].game_id if targets else None
+
+
+def _batch_meta(inspection: ImportInspection) -> str:
+    """一行游戏标识: 平台 + AppID(没有就不提) + 备份与文件数."""
+    platform = PLATFORM_LABELS.get(inspection.platform, inspection.platform)
+    key = (
+        "dialog.import_batch_row_meta"
+        if inspection.steam_app_id is not None
+        else "dialog.import_batch_row_meta_unknown_app"
+    )
+    return tr(
+        key,
+        platform=platform,
+        app_id=inspection.steam_app_id,
+        backups=inspection.backup_count,
+        files=inspection.file_count,
     )

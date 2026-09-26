@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
 from archive_management.application.games import ActivationOutcome
+from archive_management.application.imports import BatchInspection, ImportInspection
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan
 from archive_management.domain import (
@@ -25,6 +26,7 @@ from archive_management.ui.models import (
     GameDetail,
     GameSummary,
     HomeBoard,
+    ImportChoice,
     LocationItem,
     MonitoredDirItem,
     ScanSummary,
@@ -89,8 +91,62 @@ class ArchiveService(Protocol):
         """从指定节点创建分支."""
         ...
 
-    def run_export(self, game_id: str) -> str:
-        """导出选中游戏."""
+    def run_export(self, game_id: str, destination: str) -> str:
+        """把该游戏导出为归档包到 ``destination``, 返回本地化的成功提示.
+
+        ``destination`` 是用户在保存对话框里选定的文件路径; 实现负责把包真的是
+        写到那里(或明确说明没有写文件), 失败时抛出异常由界面提示。
+        """
+        ...
+
+    def run_export_batch(self, game_ids: Sequence[str], destination: str) -> str:
+        """把若干款游戏一起导出为**批量包**到 ``destination``, 返回本地化提示.
+
+        ``game_ids`` 是用户在多选对话框里勾选的游戏(顺序即包内顺序); 空选择或未知
+        游戏都抛异常。提示里带真实的游戏/备份/文件数与体积。**任何一款失败或取消都
+        让整批失败**: 目标路径上不留文件(服务层保证), 因此这里的取消不需要回滚。
+        """
+        ...
+
+    def inspect_import(self, path: str) -> ImportInspection | BatchInspection:
+        """只读地体检一个导出包, 返回包内容与冲突项.
+
+        单游戏包与批量包都从这里进(按包清单里的类型分派), 因此调用方拿到结果后要先
+        判断类型再决定弹哪个冲突对话框。这一步**不改数据库, 也不在备份根下写任何
+        东西**: 界面先把包里的游戏标识、存档位置、备份节点与"疑似同一款"的库内匹配
+        结果摆给用户看, 由用户决定导入方式。文件读不动/包损坏时抛异常由界面提示。
+        """
+        ...
+
+    def run_import(
+        self,
+        inspection: ImportInspection,
+        *,
+        strategy: str,
+        target_game_id: str | None,
+        locations: Mapping[int, str],
+    ) -> str:
+        """按 ``strategy`` 把体检过的包导入本机, 返回本地化的结果提示.
+
+        这一步会**真的写数据库与备份根**(新建游戏、追加备份节点、登记存档位置),
+        但**永不覆盖**: 已存在的节点目录按跳过计数, 因此重复导入同一个包不会产生
+        重复数据。``target_game_id`` 只在合并策略下使用; ``locations`` 是“包内序号
+        -> 本机路径”的映射, 没有映射的存档位置不导入。失败时抛出异常, 已写的节点
+        会被回滚。
+        """
+        ...
+
+    def run_import_batch(
+        self, batch: BatchInspection, choices: Mapping[str, ImportChoice]
+    ) -> str:
+        """按每款游戏各自的选择导入整批, 返回带真实计数的本地化提示.
+
+        ``choices`` 以**内层条目名**为键(与 :class:`BatchInspection.games` 里的
+        ``entry`` 一致); 没有给选择的那一款按默认值处理(新建游戏且不导入任何存档
+        位置)。界面只传字符串 id, 换算成整型是后端的事(与 :meth:`run_import` 同一套
+        做法)。**失败或取消会让整批停下, 但已经导完的游戏原样保留**(服务层的边界),
+        因此界面在取消后仍要刷新一次 —— 用户需要看到已经导进来了哪些。
+        """
         ...
 
     # -- 游戏与存档位置管理 -----------------------------------------------
@@ -103,8 +159,26 @@ class ArchiveService(Protocol):
         """重命名游戏并返回其摘要."""
         ...
 
-    def delete_game(self, game_id: str) -> None:
-        """删除游戏记录及其存档位置."""
+    def delete_export_path(self, game_id: str) -> str:
+        """算出删除该游戏时"告别包"的默认落点, **只计算路径**.
+
+        默认放在备份目录旁边的 ``exports`` 目录里, 文件名由游戏名与时间戳派生
+        (``<slug>-<YYYYMMDD-HHMMSS>.archive.zip``); 同名文件已存在时追加 ``-2``/
+        ``-3`` 保证每次自动导出落在不同的名字上, **绝不覆盖**上一份。实现**不建
+        目录也不写文件**: 界面要在确认框里先把这条路径给用户看, 真正落盘发生在
+        :meth:`delete_game` 里(失败就什么都不删)。
+        """
+        ...
+
+    def delete_game(self, game_id: str, destination: str) -> None:
+        """把游戏导出到 ``destination`` **再**删除它的记录.
+
+        导出的是这款游戏的完整内容(配置 + 每一个备份节点), 与「导出游戏」按钮
+        产生的是同一种包。**导出成功之前一个字段都不删**: 导出失败时抛出异常,
+        游戏记录、存档位置、探测候选记账与备份节点全部保持原样 —— 用户不能因为
+        删除而丢掉一款连告别包都写不出来的游戏。导出成功后才删记录(它的存档位置
+        与候选记账随之清除), 磁盘上备份目录里的备份文件保留。
+        """
         ...
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:

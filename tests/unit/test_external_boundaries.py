@@ -111,3 +111,31 @@ def test_pick_file_returns_choice_or_none(
 
     answers["chosen"] = ""
     assert pickers.pick_file(title="选择存档") is None
+
+
+def test_pick_save_file_returns_choice_or_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """保存对话框: 选中返回路径, 取消返回 ``None``, 预填文件名要透传."""
+    chosen = tmp_path / "Demo.archive.zip"
+    answers: dict[str, str] = {"chosen": str(chosen)}
+    seen: list[dict[str, object]] = []
+
+    def ask_save_file(**kwargs: object) -> str:
+        seen.append(kwargs)
+        return answers["chosen"]
+
+    monkeypatch.setattr(filedialog, "asksaveasfilename", ask_save_file)
+
+    picked = pickers.pick_save_file(title="导出游戏", initialfile="Demo.archive.zip")
+
+    assert picked == str(chosen)
+    assert seen[-1] == {"title": "导出游戏", "initialfile": "Demo.archive.zip"}
+
+    answers["chosen"] = ""
+    assert (
+        pickers.pick_save_file(title="导出游戏", initialfile="Demo.archive.zip") is None
+    )
+    # 不预填名字时也要把选项传给对话框(Tk 收到空串 = 没有默认文件名).
+    pickers.pick_save_file(title="导出游戏")
+    assert seen[-1] == {"title": "导出游戏", "initialfile": ""}

@@ -547,7 +547,7 @@ def _plan(sources: Sequence[SnapshotSource]) -> list[_CopyPlan]:
         )
         for path, relative in _iter_directory(origin):
             plans.append(_plan_entry(f"{root}/{relative}", path))
-    if not plans:
+    if not plans:  # pragma: no branch - create_snapshot 已拒绝空来源列表
         raise SnapshotError("存档位置为空, 没有可备份的内容")
     return plans
 

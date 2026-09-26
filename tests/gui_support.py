@@ -20,8 +20,10 @@ import pytest
 _LIVE_APPS: list[Any] = []
 
 # --- Tk 会话抖动的重试 ------------------------------------------------------
-# 同一个进程里反复建/销窗口之后, 解释器偶尔会连 Tcl 库数据都找不到, 于是建窗口
-# 这一步直接抛 `TclError: invalid command name "tcl_findLibrary"`。这是**环境问题**,
+# 同一个进程里反复建/销窗口之后, 解释器偶尔会连 Tcl/Tk 库数据都加载不了, 于是建窗口
+# 这一步直接抛错 —— 症状有三种写法(见 tests/tk_guard.KNOWN_TK_SKIP_MARKERS):
+# `invalid command name "tcl_findLibrary"`、`Can't find a usable init.tcl`,
+# 以及 Tk 侧的 `couldn't read file <...>/tk.tcl`。这是**环境问题**,
 # 不是被测行为: 重试一次通常就好(实测同一批用例里只有个别会撞上, 且与用例顺序相关)。
 #
 # 纪律(由 `tests/unit/test_gui_retry.py` 守住):
@@ -34,8 +36,9 @@ TK_RETRY_ATTEMPTS = 3
 TK_RETRY_DELAY_SECONDS = 0.2
 # 重试原因(必须写清楚: 这是环境抖动, 不是被测行为; 报告里也是拿这句话解释)。
 TK_RETRY_REASON = (
-    "Tk 会话抖动: 同进程反复建/销窗口后偶尔找不到 Tcl 库数据 "
-    '(invalid command name "tcl_findLibrary"), 重试即可恢复, 与用例断言无关'
+    "Tk 会话抖动: 同进程反复建/销窗口后偶尔加载不了 Tcl/Tk 库数据 "
+    '(`invalid command name "tcl_findLibrary"` / `Can\'t find a usable init.tcl` / '
+    "`couldn't read file <...>/tk.tcl`), 重试即可恢复, 与用例断言无关"
 )
 
 

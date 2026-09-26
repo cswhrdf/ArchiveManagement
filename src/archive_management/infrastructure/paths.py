@@ -47,14 +47,20 @@ class ApplicationPaths:
         """应用自有备份存储根目录;绝不直接写用户原始目录."""
         return self.data_dir / "backups"
 
+    @property
+    def exports_dir(self) -> Path:
+        """应用自有导出根目录: 自动导出的归档包默认落在这里(备份目录的旁边)."""
+        return self.data_dir / "exports"
+
     def ensure(self) -> ApplicationPaths:
-        """创建全部目录(含备份根), 幂等."""
+        """创建全部目录(含备份根与导出根), 幂等."""
         for directory in (
             self.config_dir,
             self.data_dir,
             self.log_dir,
             self.cache_dir,
             self.backup_root,
+            self.exports_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         return self

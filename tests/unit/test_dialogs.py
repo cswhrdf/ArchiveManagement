@@ -13,7 +13,13 @@ import customtkinter as ctk
 import pytest
 
 import archive_management.ui.dialogs as dialogs
+from archive_management.application.imports import (
+    STRATEGY_MERGE,
+    STRATEGY_NEW,
+    STRATEGY_SKIP,
+)
 from archive_management.i18n import tr
+from archive_management.ui import models
 from archive_management.ui.palette import DARK
 
 pytestmark = [
@@ -39,12 +45,18 @@ class _FakeWidget:
         self.destroyed = False
         # 测试用 harness 预置过内容时, 对话框自身的 initial 回填不再覆盖它.
         self._preset = False
+        # 是否在 pack 之后(pack_forget 会改回 False).
+        self.packed = False
 
     def configure(self, **kwargs: Any) -> None:
         self.kwargs.update(kwargs)
 
     def pack(self, **_kwargs: Any) -> None:
-        return None
+        # 记录是否在显示中: 批量导出的筛选会 pack/pack_forget 整行.
+        self.packed = True
+
+    def pack_forget(self) -> None:
+        self.packed = False
 
     def focus_set(self) -> None:
         return None
@@ -118,6 +130,85 @@ class _FakeCheckBox(_FakeWidget):
         if self.variable is not None:
             self.variable.set(False)
 
+    def invoke(self) -> None:
+        """模拟用户点击: 先翻转取值, 再触发命令(与真实 CTkCheckBox 一致).
+
+        命令从 ``kwargs`` 取: 真实控件允许建完再 ``configure(command=...)``
+        (全选框就是这样接上的), 而假控件只有 ``configure`` 会更新 ``kwargs``。
+        """
+        if self.variable is not None:
+            self.variable.set(not self.variable.get())
+        command = self.kwargs.get("command")
+        if command is not None:
+            command()
+
+
+class _FakeRadio(_FakeWidget):
+    """假单选按钮: 选中时写入变量, ``invoke()`` 才触发命令(与真实控件一致)."""
+
+    def __init__(self, master: Any = None, **kwargs: Any) -> None:
+        super().__init__(master=master, **kwargs)
+        self.variable = kwargs.get("variable")
+        self.value = kwargs.get("value")
+
+    def select(self) -> None:
+        """模拟"这一项被选中"(真实控件 ``set(True)`` 只写变量, 不调命令)."""
+        if self.variable is not None:
+            self.variable.set(self.value)
+
+    def invoke(self) -> None:
+        """模拟用户点击: 先选中, 再触发命令."""
+        self.select()
+        if self.command is not None:
+            self.command()
+
+
+class _FakeEntry(_FakeWidget):
+    """假单行输入框: 记录 ``<KeyRelease>`` 回调, 可用 type() 模拟用户打字."""
+
+    def __init__(self, master: Any = None, **kwargs: Any) -> None:
+        super().__init__(master=master, **kwargs)
+        self.key_callback: Callable[[object], None] | None = None
+
+    def bind(self, _sequence: str, callback: Any) -> None:
+        """记录按键回调(输入即筛选就是它)."""
+        self.key_callback = callback
+
+    def type(self, text: str) -> None:
+        """模拟用户输入: 写值并触发按键回调(与真实控件一致; 空串 = 清空)."""
+        self._value = text
+        if self.key_callback is not None:
+            self.key_callback(None)
+
+
+class _FakeComboBox(_FakeWidget):
+    """假下拉框: 记录候选, 并记住 ``<KeyRelease>`` 回调(输入即筛选就是它)."""
+
+    def __init__(self, master: Any = None, **kwargs: Any) -> None:
+        super().__init__(master=master, **kwargs)
+        self.values = list(kwargs.get("values") or ())
+        self.key_callback: Callable[[object], None] | None = None
+
+    def configure(self, **kwargs: Any) -> None:
+        """``values`` 会被读回(筛选与目标候选都靠它)."""
+        if "values" in kwargs:
+            self.values = list(kwargs["values"])
+        super().configure(**kwargs)
+
+    def set(self, value: str) -> None:
+        """真实 CTkComboBox.set: 只改当前值, 不触发回调."""
+        self._value = value
+
+    def bind(self, _sequence: str, callback: Any) -> None:
+        """记录按键回调."""
+        self.key_callback = callback
+
+    def type(self, text: str) -> None:
+        """模拟用户输入: 写值并触发按键回调(与真实控件一致)."""
+        self.set(text)
+        if self.key_callback is not None:
+            self.key_callback(None)
+
 
 class _FakeWindow(_FakeWidget):
     """假顶级窗口: 提供对话框所需的几何/几何查询 API."""
@@ -175,6 +266,8 @@ class _FakeParent(_FakeWidget):
         entries: list[_FakeWidget],
         checkboxes: list[_FakeCheckBox],
         labels: list[_FakeWidget],
+        radios: list[_FakeRadio],
+        combos: list[_FakeComboBox],
     ) -> None:
         super().__init__()
         self.buttons = buttons
@@ -182,6 +275,8 @@ class _FakeParent(_FakeWidget):
         self.entries = entries
         self.checkboxes = checkboxes
         self.labels = labels
+        self.radios = radios
+        self.combos = combos
         self.click_text: str | None = None
         self.wait_called = False
         self.entry_value = ""
@@ -214,73 +309,95 @@ class _FakeParent(_FakeWidget):
                 button.click()
                 return
 
+    def preset_entry(self, entry: _FakeWidget) -> None:
+        """把用例预置的取值填进新建的输入框(按顺序取, 其次用单值)."""
+        if self.entry_values:
+            entry._value = self.entry_values.pop(0)
+        elif self.entry_value:
+            entry._value = self.entry_value
+        else:
+            return
+        entry._preset = True
 
-@pytest.fixture
-def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
-    """把 dialogs 依赖的 ctk 控件替换为假实现, 返回假主窗口."""
-    windows: list[_FakeWindow] = []
-    buttons: list[_FakeWidget] = []
-    entries: list[_FakeWidget] = []
-    checkboxes: list[_FakeCheckBox] = []
-    labels: list[_FakeWidget] = []
-    parent = _FakeParent(buttons, windows, entries, checkboxes, labels)
+    def preset_textbox(self, box: _FakeTextbox) -> None:
+        """把用例预置的取值填进新建的多行文本框."""
+        if not self.textbox_value:
+            return
+        box._value = self.textbox_value
+        box._preset = True
+
+
+def _install_fakes(monkeypatch: pytest.MonkeyPatch, parent: _FakeParent) -> None:
+    """把 dialogs 依赖的 ctk 控件全部换成记录用的假实现.
+
+    工厂只负责"创建 + 登记", 判断留给 `_FakeParent`(夹具因此保持简单);
+    补丁打在 `customtkinter` 模块上, 与生产代码里的用法一致。
+    """
 
     def make_window(master: Any = None, **kwargs: Any) -> _FakeWindow:
         window = _FakeWindow(master=master, **kwargs)
-        windows.append(window)
+        parent.windows.append(window)
         return window
 
     def make_button(master: Any = None, **kwargs: Any) -> _FakeWidget:
         button = _FakeWidget(master=master, **kwargs)
-        buttons.append(button)
+        parent.buttons.append(button)
         return button
 
-    def make_entry(master: Any = None, **kwargs: Any) -> _FakeWidget:
-        entry = _FakeWidget(master=master, **kwargs)
-        if parent.entry_values:
-            entry._value = parent.entry_values.pop(0)
-            entry._preset = True
-        elif parent.entry_value:
-            entry._value = parent.entry_value
-            entry._preset = True
-        entries.append(entry)
+    def make_entry(master: Any = None, **kwargs: Any) -> _FakeEntry:
+        entry = _FakeEntry(master=master, **kwargs)
+        parent.preset_entry(entry)
+        parent.entries.append(entry)
         return entry
 
     def make_textbox(master: Any = None, **kwargs: Any) -> _FakeTextbox:
         box = _FakeTextbox(master=master, **kwargs)
-        if parent.textbox_value:
-            box._value = parent.textbox_value
-            box._preset = True
+        parent.preset_textbox(box)
         return box
 
     def make_label(master: Any = None, **kwargs: Any) -> _FakeWidget:
         label = _FakeWidget(master=master, **kwargs)
-        labels.append(label)
+        parent.labels.append(label)
         return label
 
     def make_checkbox(master: Any = None, **kwargs: Any) -> _FakeCheckBox:
         box = _FakeCheckBox(master=master, **kwargs)
-        checkboxes.append(box)
+        parent.checkboxes.append(box)
         return box
+
+    def make_radio(master: Any = None, **kwargs: Any) -> _FakeRadio:
+        radio = _FakeRadio(master=master, **kwargs)
+        parent.radios.append(radio)
+        return radio
+
+    def make_combo(master: Any = None, **kwargs: Any) -> _FakeComboBox:
+        combo = _FakeComboBox(master=master, **kwargs)
+        parent.combos.append(combo)
+        return combo
+
+    def make_plain(master: Any = None, **kwargs: Any) -> _FakeWidget:
+        return _FakeWidget(master=master, **kwargs)
 
     monkeypatch.setattr(ctk, "CTkToplevel", make_window)
     monkeypatch.setattr(ctk, "CTkLabel", make_label)
-    monkeypatch.setattr(
-        ctk,
-        "CTkFrame",
-        lambda master=None, **kwargs: _FakeWidget(master=master, **kwargs),
-    )
+    monkeypatch.setattr(ctk, "CTkFrame", make_plain)
+    monkeypatch.setattr(ctk, "CTkScrollableFrame", make_plain)
     monkeypatch.setattr(ctk, "CTkButton", make_button)
     monkeypatch.setattr(ctk, "CTkEntry", make_entry)
     monkeypatch.setattr(ctk, "CTkTextbox", make_textbox)
     monkeypatch.setattr(ctk, "CTkCheckBox", make_checkbox)
-    monkeypatch.setattr(
-        ctk,
-        "CTkScrollableFrame",
-        lambda master=None, **kwargs: _FakeWidget(master=master, **kwargs),
-    )
+    monkeypatch.setattr(ctk, "CTkRadioButton", make_radio)
+    monkeypatch.setattr(ctk, "CTkComboBox", make_combo)
     monkeypatch.setattr(ctk, "BooleanVar", lambda **kwargs: _FakeVar(**kwargs))
+    monkeypatch.setattr(ctk, "StringVar", lambda **kwargs: _FakeVar(**kwargs))
     monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
+
+
+@pytest.fixture
+def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
+    """把 dialogs 依赖的 ctk 控件替换为假实现, 返回假主窗口."""
+    parent = _FakeParent([], [], [], [], [], [], [])
+    _install_fakes(monkeypatch, parent)
     return parent
 
 
@@ -741,3 +858,580 @@ def test_restore_dialog_shows_danger_note_in_same_window(
     assert len(harness.windows) == 1
     texts = [label.kwargs.get("text") for label in harness.labels]
     assert note in texts
+
+
+# ---------------------------------------------------------------- 导入归档包
+
+
+def _import_args(
+    *,
+    locations: tuple[models.ImportLocationRow, ...] = (),
+    targets: tuple[models.ImportTargetOption, ...] = (),
+    match: str = "库里疑似同一款游戏: 星际拓荒(已默认选中)",
+) -> dict[str, Any]:
+    """导入对话框的参数(策略选项按"有没有目标游戏"给, 与界面同一套规则)."""
+    return {
+        "title": tr("dialog.import_title"),
+        "prompt": models.ImportPrompt(
+            summary="包摘要",
+            match_text=match,
+            locations=locations,
+            targets=targets,
+        ),
+        "locations_label": tr("dialog.import_locations"),
+        "locations_hint": tr("dialog.import_locations_hint"),
+        "strategy_label": tr("dialog.import_strategy"),
+        "strategies": models.import_strategies(has_targets=bool(targets)),
+        "target_label": tr("dialog.import_target"),
+        "target_hint": tr("dialog.import_target_hint"),
+        "confirm_text": tr("dialog.import_confirm"),
+    }
+
+
+def _rows() -> tuple[models.ImportLocationRow, ...]:
+    """两条包内存档位置: 一条本机已存在(预填), 一条不存在(留空)."""
+    return (
+        models.ImportLocationRow(
+            index=0, text="D:/saves(本机已存在)", default="D:/saves"
+        ),
+        models.ImportLocationRow(index=1, text="E:/gone", default=""),
+    )
+
+
+def _targets() -> tuple[models.ImportTargetOption, ...]:
+    return (
+        models.ImportTargetOption(game_id="7", label="星际拓荒", selected=True),
+        models.ImportTargetOption(game_id="9", label="山海旅人"),
+    )
+
+
+def _strategy_radios(harness: _FakeParent) -> list[_FakeRadio]:
+    """导入方式那组单选按钮(目标游戏那组的 value 是游戏 id, 不在此列)."""
+    keys = {STRATEGY_NEW, STRATEGY_MERGE, STRATEGY_SKIP}
+    return [radio for radio in harness.radios if radio.value in keys]
+
+
+def _target_radios(harness: _FakeParent) -> list[_FakeRadio]:
+    """目标游戏那组单选按钮."""
+    return [radio for radio in harness.radios if radio.value in {"7", "9"}]
+
+
+def test_import_package_dialog_maps_only_filled_rows(harness: _FakeParent) -> None:
+    """确认后返回策略 + 目标 + "填了路径的那几条"映射(留空的那条不导入)."""
+    harness.click_text = tr("dialog.import_confirm")
+    harness.entry_values = ["", "E:/local-saves"]
+
+    result = dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+    )
+
+    assert result == models.ImportChoice(
+        strategy=STRATEGY_NEW,
+        target_game_id=None,
+        locations={1: "E:/local-saves"},
+    )
+    assert len(harness.windows) == 1
+    assert harness.windows[0].window_title == tr("dialog.import_title")
+
+
+def test_import_package_dialog_defaults_to_the_packaged_path(
+    harness: _FakeParent,
+) -> None:
+    """包内路径本机已存在时才预填, 否则留空(用户填了才算映射)."""
+    harness.click_text = tr("dialog.import_confirm")
+
+    result = dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows())
+    )
+
+    assert [entry.get() for entry in harness.entries] == ["D:/saves", ""]
+    assert result is not None
+    assert result.locations == {0: "D:/saves"}
+
+
+def test_import_package_dialog_merges_into_the_selected_game(
+    harness: _FakeParent,
+) -> None:
+    """选"合并"时才返回目标游戏, 并顺手解锁目标游戏的单选区."""
+    harness.click_text = tr("dialog.import_confirm")
+    harness.on_wait = lambda: next(
+        radio for radio in _strategy_radios(harness) if radio.value == STRATEGY_MERGE
+    ).invoke()
+
+    result = dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+    )
+
+    assert result is not None
+    assert result.strategy == STRATEGY_MERGE
+    assert result.target_game_id == "7", "默认应选中匹配到的那一款"
+    assert [radio.kwargs.get("state") for radio in _target_radios(harness)] == [
+        "normal",
+        "normal",
+    ]
+    assert [radio.kwargs.get("state") for radio in _strategy_radios(harness)] == [
+        None,
+        None,
+        None,
+    ], "只置灰目标区, 导入方式那一组保持可用"
+
+
+def test_import_package_dialog_disables_the_target_picker_before_merging(
+    harness: _FakeParent,
+) -> None:
+    """默认的"新建游戏"用不到目标游戏: 目标区一开始就是置灰的."""
+    harness.click_text = tr("dialog.import_confirm")
+
+    dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+    )
+
+    assert [radio.kwargs.get("state") for radio in _target_radios(harness)] == [
+        "disabled",
+        "disabled",
+    ]
+
+
+def test_import_package_dialog_defaults_to_the_first_target(
+    harness: _FakeParent,
+) -> None:
+    """调用方没标预选时默认选第一款, 而不是留空(留空会让合并没有目标)."""
+    harness.click_text = tr("dialog.import_confirm")
+    harness.on_wait = lambda: next(
+        radio for radio in _strategy_radios(harness) if radio.value == STRATEGY_MERGE
+    ).invoke()
+    targets = (
+        models.ImportTargetOption(game_id="7", label="星际拓荒"),
+        models.ImportTargetOption(game_id="9", label="山海旅人"),
+    )
+
+    result = dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), targets=targets)
+    )
+
+    assert result is not None
+    assert result.target_game_id == "7"
+
+
+def test_import_package_dialog_without_candidates_offers_no_merge(
+    harness: _FakeParent,
+) -> None:
+    """库里没有可合并的游戏时不给"合并"选项, 也不返回目标游戏."""
+    harness.click_text = tr("dialog.import_confirm")
+
+    result = dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), match="")
+    )
+
+    assert [radio.value for radio in harness.radios] == [STRATEGY_NEW, STRATEGY_SKIP]
+    assert result is not None
+    assert result.strategy == STRATEGY_NEW
+    assert result.target_game_id is None
+
+
+def test_import_package_dialog_skip_returns_the_skip_strategy(
+    harness: _FakeParent,
+) -> None:
+    """选"跳过"时返回跳过策略且不带任何映射(用户仍然看得到包内容)."""
+    harness.click_text = tr("dialog.import_confirm")
+    harness.on_wait = lambda: next(
+        radio for radio in _strategy_radios(harness) if radio.value == STRATEGY_SKIP
+    ).invoke()
+
+    result = dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows())
+    )
+
+    assert result == models.ImportChoice(
+        strategy=STRATEGY_SKIP, target_game_id=None, locations={0: "D:/saves"}
+    )
+
+
+def test_import_package_dialog_cancel_returns_none(harness: _FakeParent) -> None:
+    """取消: 返回 None, 并且不会把当前选择写出去."""
+    harness.click_text = tr("dialog.cancel")
+
+    result = dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+    )
+
+    assert result is None
+    assert harness.windows[0].destroyed is True
+
+
+def test_import_package_dialog_shows_the_summary_and_the_match(
+    harness: _FakeParent,
+) -> None:
+    """包摘要与"疑似同一款"的提示都在同一个窗口里给出."""
+    harness.click_text = tr("dialog.cancel")
+    args = _import_args(locations=_rows(), targets=_targets())
+
+    dialogs.import_package_dialog(harness, DARK, **args)
+
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert args["prompt"].summary in texts
+    assert args["prompt"].match_text in texts
+    # 每行存档位置都要把包内路径摆出来(用户得知道这一条对应哪个目录).
+    assert "D:/saves(本机已存在)" in texts
+    assert "E:/gone" in texts
+
+
+# ---------------------------------------------------------------- 批量导出
+
+
+def _export_batch_prompt() -> models.BatchExportPrompt:
+    """两个候选: 一个是本机路径, 一个没有存档位置."""
+    return models.BatchExportPrompt(
+        summary="共 2 款游戏可以批量导出",
+        filter_hint="输入名称可缩小列表",
+        options=(
+            models.BatchExportOption(
+                game_id="1", name="星际拓荒", detail="1 个存档位置 · 1 个备份"
+            ),
+            models.BatchExportOption(
+                game_id="2", name="山海旅人", detail="没有存档位置"
+            ),
+        ),
+    )
+
+
+def _export_batch_args() -> dict[str, Any]:
+    return {
+        "title": tr("dialog.export_batch_title"),
+        "prompt": _export_batch_prompt(),
+        "filter_label": tr("dialog.export_batch_filter"),
+        "list_label": tr("dialog.export_batch_list"),
+        "no_match_text": tr("dialog.export_batch_no_match"),
+        "select_all_label": tr("dialog.export_batch_select_all"),
+        "confirm_text": tr("dialog.export_batch_confirm"),
+    }
+
+
+def _tick_boxes(harness: _FakeParent) -> list[Any]:
+    """逐行勾选框(全选框除外, 顺序与候选一致).
+
+    用文案认出全选框而不是靠创建顺序: 逐行勾选框的文案是游戏名, 全选框是固定文案。
+    """
+    master = next(
+        box
+        for box in harness.checkboxes
+        if box.kwargs.get("text") == tr("dialog.export_batch_select_all")
+    )
+    return [box for box in harness.checkboxes if box is not master]
+
+
+def _select_all_box(harness: _FakeParent) -> Any:
+    """批量导出对话框里的全选框."""
+    ticks = _tick_boxes(harness)
+    return next(box for box in harness.checkboxes if box not in ticks)
+
+
+def _export_filter(harness: _FakeParent) -> Any:
+    """批量导出的筛选框: 必须是一个**普通输入框**(不是下拉选框).
+
+    用 ``harness.entries`` 取它顺便钉住了控件类型 —— 换回 ``CTkComboBox`` 时这里找不到
+    输入框, 用例会直接红。
+    """
+    assert len(harness.entries) == 1, "批量导出对话框里应当只有一个输入框(筛选框)"
+    return harness.entries[0]
+
+
+def _export_rows(harness: _FakeParent) -> list[Any]:
+    """复选框所在的行(筛选只是 pack/pack_forget 这些行)."""
+    return [box.master for box in _tick_boxes(harness)]
+
+
+def test_export_batch_dialog_returns_the_ticked_games(harness: _FakeParent) -> None:
+    """确认后返回勾选的游戏(按候选顺序), 默认一个都不勾."""
+    harness.click_text = tr("dialog.export_batch_confirm")
+
+    def check_defaults_and_tick_the_second() -> None:
+        assert [box.get() for box in _tick_boxes(harness)] == [False, False]
+        _tick_boxes(harness)[1].select()
+
+    harness.on_wait = check_defaults_and_tick_the_second
+
+    result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    assert result == models.BatchExportChoice(game_ids=("2",))
+    assert harness.windows[0].window_title == tr("dialog.export_batch_title")
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert "共 2 款游戏可以批量导出" in texts
+    assert _export_batch_prompt().filter_hint in texts
+
+
+def test_export_batch_dialog_with_nothing_ticked_returns_an_empty_choice(
+    harness: _FakeParent,
+) -> None:
+    """一个都没勾也照常返回(界面据此提示"没有勾选任何游戏"), 而不是当成取消."""
+    harness.click_text = tr("dialog.export_batch_confirm")
+
+    result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    assert result == models.BatchExportChoice(game_ids=())
+
+
+# ---------------------------------------------------------------- 批量导入
+
+
+def _batch_import_prompt() -> models.BatchImportPrompt:
+    """两行: 第一行有两条存档位置与可合并的目标, 第二行什么都没有."""
+    return models.BatchImportPrompt(
+        summary="包内 2 款游戏",
+        hint="逐款选择导入方式",
+        rows=(
+            models.BatchImportRow(
+                entry="Demo.archive.zip",
+                name="Demo",
+                meta="Windows · AppID 730",
+                match_text="库里疑似同一款游戏: 星际拓荒(已默认选中)",
+                locations=_rows(),
+                strategies=models.import_strategies(has_targets=True),
+                targets=_targets(),
+                strategy=STRATEGY_NEW,
+                target_game_id="7",
+            ),
+            models.BatchImportRow(
+                entry="Other.archive.zip",
+                name="Other",
+                meta="Windows",
+                match_text="",
+                locations=(),
+                strategies=models.import_strategies(has_targets=False),
+                targets=(),
+                strategy=STRATEGY_NEW,
+                target_game_id=None,
+            ),
+        ),
+    )
+
+
+def _batch_import_args() -> dict[str, Any]:
+    return {
+        "title": tr("dialog.import_batch_title"),
+        "prompt": _batch_import_prompt(),
+        "locations_label": tr("dialog.import_locations"),
+        "locations_hint": tr("dialog.import_locations_hint"),
+        "strategy_label": tr("dialog.import_strategy"),
+        "target_label": tr("dialog.import_target"),
+        "confirm_text": tr("dialog.import_confirm"),
+    }
+
+
+def _batch_strategy_radios(harness: _FakeParent) -> list[list[_FakeRadio]]:
+    """按游戏分行的一组组策略单选按钮(同一行共用一个变量, 且是连着建的)."""
+    groups: list[list[_FakeRadio]] = []
+    for radio in _strategy_radios(harness):
+        if groups and groups[-1][0].variable is radio.variable:
+            groups[-1].append(radio)
+        else:
+            groups.append([radio])
+    return groups
+
+
+def test_batch_import_dialog_collects_defaults_per_game(harness: _FakeParent) -> None:
+    """确认后逐款返回选择: 默认"新建", 只带预填过的存档位置, 没目标的那款不带目标."""
+    harness.click_text = tr("dialog.import_confirm")
+
+    result = dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+    assert result is not None
+    assert result.choices == {
+        "Demo.archive.zip": models.ImportChoice(
+            strategy=STRATEGY_NEW, target_game_id=None, locations={0: "D:/saves"}
+        ),
+        "Other.archive.zip": models.ImportChoice(
+            strategy=STRATEGY_NEW, target_game_id=None, locations={}
+        ),
+    }
+    # 每款游戏一行卡片: 名称/标识/存档位置都摆出来了(用户得知道这一行是哪一款).
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert "Demo" in texts
+    assert "Windows · AppID 730" in texts
+    assert "Other.archive.zip" not in texts
+    assert len(harness.entries) == 2
+
+
+def test_batch_import_dialog_merges_into_the_chosen_target(
+    harness: _FakeParent,
+) -> None:
+    """选"合并"并把目标改成另一款: 返回的映射里就是那一款的 id."""
+    harness.click_text = tr("dialog.import_confirm")
+    harness.entry_values = ["", "E:/local-saves"]
+
+    def merge_into_the_second_target() -> None:
+        merge = next(
+            radio
+            for radio in _batch_strategy_radios(harness)[0]
+            if radio.value == STRATEGY_MERGE
+        )
+        merge.invoke()
+        harness.combos[0].set("山海旅人")
+
+    harness.on_wait = merge_into_the_second_target
+
+    result = dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+    assert result is not None
+    assert result.choices["Demo.archive.zip"] == models.ImportChoice(
+        strategy=STRATEGY_MERGE, target_game_id="9", locations={1: "E:/local-saves"}
+    )
+    assert result.choices["Other.archive.zip"].strategy == STRATEGY_NEW
+
+
+def test_batch_import_dialog_merging_without_a_target_keeps_it_empty(
+    harness: _FakeParent,
+) -> None:
+    """选了"合并"却把目标清空: 界面不猜目标(留给后端报"需要先选定要合并到的游戏")."""
+    harness.click_text = tr("dialog.import_confirm")
+
+    def merge_and_clear() -> None:
+        merge = next(
+            radio
+            for radio in _batch_strategy_radios(harness)[0]
+            if radio.value == STRATEGY_MERGE
+        )
+        merge.invoke()
+        harness.combos[0].set("")
+
+    harness.on_wait = merge_and_clear
+
+    result = dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+    assert result is not None
+    choice = result.choices["Demo.archive.zip"]
+    assert choice.strategy == STRATEGY_MERGE
+    assert choice.target_game_id is None
+
+
+def test_batch_import_dialog_disables_targets_until_merging(
+    harness: _FakeParent,
+) -> None:
+    """目标下拉框只在"合并"时可用; 没有候选游戏的那一款整块不出现."""
+    harness.click_text = tr("dialog.cancel")
+
+    def check_the_states() -> None:
+        assert [combo.kwargs.get("state") for combo in harness.combos] == [
+            "disabled",
+            "disabled",
+        ]
+        assert harness.combos[1].packed is False
+        merge = next(
+            radio
+            for radio in _batch_strategy_radios(harness)[0]
+            if radio.value == STRATEGY_MERGE
+        )
+        merge.invoke()
+        assert harness.combos[0].kwargs.get("state") == "normal"
+        assert harness.combos[0].values == ["星际拓荒", "山海旅人"]
+
+    harness.on_wait = check_the_states
+
+    dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+
+def test_batch_import_dialog_cancel_returns_none(harness: _FakeParent) -> None:
+    """取消: 返回 None, 整批都不导入."""
+    harness.click_text = tr("dialog.cancel")
+
+    result = dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+    assert result is None
+    assert harness.windows[0].destroyed is True
+
+
+def test_export_batch_dialog_cancel_returns_none(harness: _FakeParent) -> None:
+    """取消: 返回 None 并关掉窗口."""
+    harness.click_text = tr("dialog.cancel")
+
+    result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    assert result is None
+    assert harness.windows[0].destroyed is True
+
+
+def test_export_batch_dialog_filter_hides_rows_but_keeps_the_tick(
+    harness: _FakeParent,
+) -> None:
+    """筛选只影响显示: 被筛掉的游戏仍然带着用户的勾选被导出."""
+    harness.click_text = tr("dialog.export_batch_confirm")
+
+    def tick_then_filter() -> None:
+        _tick_boxes(harness)[1].select()
+        _export_filter(harness).type("星际")
+        assert [row.packed for row in _export_rows(harness)] == [True, False]
+        _export_filter(harness).type("没有这一款")
+        assert [row.packed for row in _export_rows(harness)] == [False, False]
+
+    harness.on_wait = tick_then_filter
+
+    result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    assert result == models.BatchExportChoice(game_ids=("2",))
+
+
+def test_export_batch_select_all_ticks_every_visible_row(
+    harness: _FakeParent,
+) -> None:
+    """全选框: 一下把当前筛出的行都勾上, 再点一下全部取消(状态跟着亮/灭)."""
+    harness.click_text = tr("dialog.export_batch_confirm")
+
+    def tick_all_then_untick_all() -> None:
+        master = _select_all_box(harness)
+        assert master.get() is False, "默认没勾选时全选框也不该是勾上的"
+        master.invoke()
+        assert [box.get() for box in _tick_boxes(harness)] == [True, True]
+        assert master.get() is True, "全部勾上后全选框应当跟着亮起来"
+        master.invoke()
+        assert [box.get() for box in _tick_boxes(harness)] == [False, False]
+        assert master.get() is False
+
+    harness.on_wait = tick_all_then_untick_all
+
+    result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    assert result == models.BatchExportChoice(game_ids=()), "取消全选后一个都不导"
+
+
+def test_export_batch_select_all_only_touches_the_filtered_rows(
+    harness: _FakeParent,
+) -> None:
+    """筛选后点全选: 只动当前显示的行, 被筛掉的保持原来的勾选(与筛选框同一条语义)."""
+    harness.click_text = tr("dialog.export_batch_confirm")
+
+    def tick_second_then_select_all_visible() -> None:
+        _tick_boxes(harness)[1].select()
+        _export_filter(harness).type("星际")
+        assert [row.packed for row in _export_rows(harness)] == [True, False]
+        master = _select_all_box(harness)
+        master.invoke()
+        assert [box.get() for box in _tick_boxes(harness)] == [True, True]
+        master.invoke()
+        assert [box.get() for box in _tick_boxes(harness)] == [False, True]
+
+    harness.on_wait = tick_second_then_select_all_visible
+
+    result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    assert result == models.BatchExportChoice(game_ids=("2",)), "被筛掉的那一款保留勾选"
+
+
+def test_export_batch_select_all_is_disabled_when_nothing_matches(
+    harness: _FakeParent,
+) -> None:
+    """一条都不匹配时全选框置灰(没有可见行可全选), 清空筛选后恢复可用."""
+    harness.click_text = tr("dialog.export_batch_confirm")
+
+    def filter_to_nothing_then_back() -> None:
+        master = _select_all_box(harness)
+        assert master.kwargs["state"] == "normal"
+        _export_filter(harness).type("没有这一款")
+        assert master.kwargs["state"] == "disabled"
+        _export_filter(harness).type("")
+        assert master.kwargs["state"] == "normal"
+
+    harness.on_wait = filter_to_nothing_then_back
+
+    result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    assert result == models.BatchExportChoice(game_ids=())

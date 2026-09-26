@@ -18,6 +18,7 @@ from PIL import Image
 from archive_management.domain import ArtworkRef, PlatformGame
 from archive_management.exceptions import ArtworkError
 from archive_management.infrastructure.paths import ApplicationPaths
+from archive_management.services import artwork as artwork_mod
 from archive_management.services.artwork import (
     ICON_SIZE,
     ICON_VERSION,
@@ -31,6 +32,7 @@ from archive_management.services.artwork import (
     artwork_cache_at,
     cached_artwork,
     icon_version,
+    local_artwork,
     platform_game,
     resolve_artwork,
     sniff_media_type,
@@ -475,3 +477,99 @@ def test_external_identifiers_cannot_escape_the_cache_root(tmp_path: Path) -> No
 
     assert cache.root in path.parents
     assert ".." not in path.relative_to(cache.root).parts
+
+
+# -- 本地文件与下载器的边界 -------------------------------------------------
+
+
+def test_http_fetcher_builds_its_own_client_when_none_is_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有注入客户端时自己建一个(注不注入都走同一条下载逻辑)."""
+    seen: list[str] = []
+
+    def fake_download(
+        client: httpx.Client, url: str, *, timeout: float, max_bytes: int
+    ) -> FetchedArtwork:
+        seen.append(url)
+        return FetchedArtwork(content=_PNG, declared_media_type="image/png")
+
+    monkeypatch.setattr(artwork_mod, "_download", fake_download)
+
+    fetched = HttpArtworkFetcher().fetch(
+        "https://cdn.example/steam/730/cover.jpg", timeout=1.0, max_bytes=64
+    )
+
+    assert seen == ["https://cdn.example/steam/730/cover.jpg"]
+    assert fetched.content == _PNG
+
+
+def test_prune_of_a_missing_cache_root_returns_nothing(tmp_path: Path) -> None:
+    """缓存根目录还不存在时清理是空操作(不会建一个空目录出来)."""
+    cache = ArtworkCache(tmp_path / "nope")
+
+    assert cache.prune(max_age_days=1) == []
+    assert not cache.root.exists()
+
+
+def test_local_artwork_skips_a_reference_whose_file_is_gone(tmp_path: Path) -> None:
+    """本地引用指向的文件不存在时跳过它, 继续看后面可用的引用."""
+    real = tmp_path / "header.jpg"
+    real.write_bytes(_JPEG)
+    game = PlatformGame(
+        platform="steam",
+        game_id="730",
+        name="Demo",
+        artwork=[
+            ArtworkRef(kind="cover", url="", local_path=str(tmp_path / "gone.jpg")),
+            ArtworkRef(kind="cover", url="", local_path=str(real)),
+        ],
+    )
+
+    assert local_artwork(game, "cover") == real
+
+
+def test_a_local_file_over_the_size_limit_is_used_as_is(tmp_path: Path) -> None:
+    """本地图片超过体积上限时不收进缓存, 但界面仍然直接用它."""
+    local = tmp_path / "header.jpg"
+    local.write_bytes(_JPEG)
+    cache = _cache(tmp_path)
+
+    result = resolve_artwork(
+        _game(local=local), "cover", cache, fetcher=_FakeFetcher(), max_bytes=1
+    )
+
+    assert result.path == local
+    assert result.source == "local"
+    assert "体积上限" in (result.reason or "")
+    assert cache.lookup("steam", "730", "cover", "v2") is None
+
+
+def test_a_local_file_that_is_not_an_image_is_used_without_caching(
+    tmp_path: Path,
+) -> None:
+    """本地文件认不出图片类型时直接用它, 不写进缓存(下次仍会重试)."""
+    local = tmp_path / "header.jpg"
+    local.write_bytes(_HTML)
+    cache = _cache(tmp_path)
+
+    result = resolve_artwork(_game(local=local), "cover", cache, fetcher=_FakeFetcher())
+
+    assert result.path == local
+    assert result.source == "local"
+    assert "可识别" in (result.reason or "")
+
+
+def test_validate_rejects_empty_and_unsupported_payloads() -> None:
+    """下载内容为空、或声明类型不受支持: 都给出具体原因而不是当成可用图片."""
+    empty_reason, empty_type = artwork_mod._validate(
+        FetchedArtwork(content=b""), max_bytes=64
+    )
+    declared_reason, declared_type = artwork_mod._validate(
+        FetchedArtwork(content=_PNG, declared_media_type="text/plain"), max_bytes=64
+    )
+
+    assert empty_reason == "下载内容为空"
+    assert empty_type == ""
+    assert "不受支持" in declared_reason
+    assert declared_type == ""

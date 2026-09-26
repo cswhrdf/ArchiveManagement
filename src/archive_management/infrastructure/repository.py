@@ -529,7 +529,7 @@ class BackupRepository:
                     int(node.is_safety),
                 ),
             )
-            if cursor.lastrowid is None:
+            if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
                 raise DatabaseError("插入备份节点失败: 未返回行 id")
             node_id = int(cursor.lastrowid)
         return BackupNode(

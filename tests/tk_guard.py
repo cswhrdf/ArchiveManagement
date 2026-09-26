@@ -22,11 +22,24 @@ from __future__ import annotations
 # 守卫统一使用的原因前缀(见 tests/integration/test_gui_*.py 与 tests/gui_support.py)。
 TK_SKIP_PREFIX = "tk 环境不可用"
 
-# 允许跳过的"已知环境问题": 解释器找不到 Tcl 库数据, 或者根本没有显示环境。
+# 允许跳过的"已知环境问题": 解释器加载不了 Tcl/Tk 库数据, 或者根本没有显示环境。
+#
+# Tcl 库数据那一组为什么能算环境问题: 这几句话只可能由 **Tcl 自己**在装库时说出
+# ("Can't find a usable init.tcl/tk.tcl"、"invalid command name tcl_findLibrary"、
+# "couldn't read file .../tk.tcl"), 与用例断言的东西无关。uv 托管的 standalone
+# 构建偶发这种情况(上游 astral-sh/uv#7036), 也是本仓库 CI 上"同进程反复建/销窗口,
+# 偶有一条用例建窗口时报 couldn't read file <...>/tk.tcl"的原因。
+#
+# 白名单只列 **Tcl 自己的库数据文件名**, 刻意不收两类更宽的说法:
+# "couldn't read file" 会把"应用要读的文件打不开"(例如某张封面图找不到)也算进来;
+# "can't find a usable" 同理 —— 那正是本模块开头记的那个错误("任何建窗口期报错
+# 都变成跳过")。两种拼法都能被文件名本身命中("Can't find a usable tk.tcl" 命中 `tk.tcl`)。
 KNOWN_TK_SKIP_MARKERS = (
-    # uv 托管的 standalone 构建偶尔缺 Tcl 数据文件(上游 astral-sh/uv#7036)。
+    # uv 托管的 standalone 构建偶尔缺 Tcl/Tk 数据文件(上游 astral-sh/uv#7036)。
     "tcl_findlibrary",
     "init.tcl",
+    # Tk 侧的库数据文件: 它读不出来时解释器同样起不来。
+    "tk.tcl",
     # 真的没有显示环境(无头 Linux 且没有 xvfb)。
     "no display name",
     "couldn't connect to display",

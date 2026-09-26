@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import helpers
+from archive_management.services import steam_cloud as steam_cloud_mod
 from archive_management.services.platform_scan import ScanRoots
 from archive_management.services.platforms import PlatformFamily
 from archive_management.services.steam_cloud import (
@@ -385,3 +386,38 @@ def test_debug_logging_is_not_required_for_a_successful_run(
 
     assert len(candidates) == 1
     assert _messages(caplog) == []
+
+
+def test_the_install_directory_is_found_after_another_app(tmp_path: Path) -> None:
+    """本机装有多款游戏时按 AppID 找到对应那一款的安装目录(而不是只看第一条)."""
+    steam = helpers.steam_tree(tmp_path)
+    helpers.write_steam_manifest(steam, "111", "Other", "Other")
+    helpers.write_steam_manifest(steam, "753640", "Outer Wilds", "OuterWilds")
+    helpers.write_remotecache(steam, "753640", {"Saves/a.sav": 1})
+
+    candidates = SteamCloudSource(_roots(tmp_path)).candidates("753640")
+
+    expected = steam / "steamapps" / "common" / "OuterWilds" / "Saves"
+    assert [item.path for item in candidates] == [str(expected)]
+
+
+def test_a_candidate_that_escapes_the_root_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """即使递进来的相对片段会跑出 root, 候选也不会落到外面(第二道闸).
+
+    正常路径下切片已经拒绝绝对路径与 ``..``, 所以用替身把这种片段直接递进去,
+    钉住 ``_build_candidate`` 自己那一次边界校验.
+    """
+    steam = helpers.steam_tree(tmp_path)
+    helpers.write_remotecache(steam, "753640", {"escape/x.sav": 2, "safe/y.sav": 2})
+
+    def parts(raw: str) -> tuple[str, ...]:
+        return ("..", "secret.sav") if raw.startswith("escape") else ("safe", "y.sav")
+
+    monkeypatch.setattr(steam_cloud_mod, "_relative_parts", parts)
+
+    candidates = SteamCloudSource(_roots(tmp_path)).candidates("753640")
+
+    assert len(candidates) == 1
+    assert Path(candidates[0].path).name == "y.sav"

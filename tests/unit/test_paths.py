@@ -28,7 +28,15 @@ def test_override_root_layout(tmp_path: Path) -> None:
     assert paths.cache_dir == tmp_path / "cache"
     assert paths.database_path == tmp_path / "data" / _DB_NAME
     assert paths.backup_root == tmp_path / "data" / "backups"
+    assert paths.exports_dir == tmp_path / "data" / "exports"
     assert paths.config_path == tmp_path / "config" / "config.json"
+
+
+def test_exports_dir_sits_next_to_the_backups(tmp_path: Path) -> None:
+    """自动导出的落点与备份目录是同一个父目录下的两个兄弟目录."""
+    paths = ApplicationPaths.default(override_root=tmp_path)
+    assert paths.exports_dir.parent == paths.backup_root.parent == paths.data_dir
+    assert paths.exports_dir != paths.backup_root
 
 
 def test_ensure_creates_directories(tmp_path: Path) -> None:
@@ -39,6 +47,7 @@ def test_ensure_creates_directories(tmp_path: Path) -> None:
         paths.log_dir,
         paths.cache_dir,
         paths.backup_root,
+        paths.exports_dir,
     ):
         assert directory.is_dir()
 
@@ -52,3 +61,4 @@ def test_default_returns_absolute_platform_paths() -> None:
     paths = ApplicationPaths.default()
     assert paths.database_path.is_absolute()
     assert paths.backup_root.is_absolute()
+    assert paths.exports_dir.is_absolute()

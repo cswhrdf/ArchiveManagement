@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from archive_management.exceptions import ArchiveManagementError, SnapshotError
+from archive_management.services import snapshot as snapshot_mod
 from archive_management.services.snapshot import (
     MANIFEST_FILENAME,
     SnapshotEntry,
@@ -473,3 +474,126 @@ def test_commit_reports_retry_count_when_occupation_persists(
     # 失败仍要清理临时目录, 不留半成品.
     assert not destination.exists()
     assert not list(destination.parent.glob("*.partial-*"))
+
+
+# -- 清单解析的拒绝 ---------------------------------------------------------
+
+
+def test_read_manifest_entries_rejects_values_that_are_not_manifests() -> None:
+    """清单顶层不是对象 / 缺 entries 列表 / 条目不是对象: 一律拒绝."""
+    with pytest.raises(SnapshotError, match="顶层必须是对象"):
+        read_manifest_entries([1])
+
+    with pytest.raises(SnapshotError, match="缺少 entries"):
+        read_manifest_entries({"version": snapshot_mod.SNAPSHOT_FORMAT_VERSION})
+
+    with pytest.raises(SnapshotError, match="清单项必须是对象"):
+        read_manifest_entries(
+            {"version": snapshot_mod.SNAPSHOT_FORMAT_VERSION, "entries": [1]}
+        )
+
+
+def _node_with_a_manifest(tmp_path: Path) -> Path:
+    """造一份真实快照并返回它的根目录(用于改写清单的现场)."""
+    destination = tmp_path / "node"
+    create_snapshot(
+        [SnapshotSource(path=str(_saved_dir(tmp_path)), kind="directory", index=0)],
+        destination,
+    )
+    return destination
+
+
+def _set_manifest_sources(root: Path, sources: object) -> None:
+    """只改清单里的 sources, 其余字段原样保留."""
+    path = root / MANIFEST_FILENAME
+    payload: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
+    payload["sources"] = sources
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_read_manifest_rejects_a_source_item_that_is_not_an_object(
+    tmp_path: Path,
+) -> None:
+    """清单里的来源项不是对象时拒绝: 恢复要靠它定位写回目标."""
+    root = _node_with_a_manifest(tmp_path)
+    _set_manifest_sources(root, [1])
+
+    with pytest.raises(SnapshotError, match="来源项必须是对象"):
+        snapshot_mod.read_manifest(root)
+
+
+def test_create_snapshot_rejects_a_file_source_that_is_not_a_file(
+    tmp_path: Path,
+) -> None:
+    """来源声明是 file 但实际是目录: 拒绝, 而不是把一个目录当成一个文件备一份."""
+    save = _saved_dir(tmp_path)
+
+    with pytest.raises(SnapshotError, match="存档文件不可用"):
+        create_snapshot(
+            [SnapshotSource(path=str(save), kind="file", index=0)], tmp_path / "node"
+        )
+
+    assert not (tmp_path / "node").exists()
+
+
+@pytest.mark.blocker
+def test_create_snapshot_records_a_child_that_reports_as_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """子项是符号链接时只记 link_target, 既不跟随也不复制它的内容.
+
+    本机(Windows 未开开发者模式)无权创建符号链接, 所以用替身钉住这条分支 ——
+    它正是"快照不越出用户确认过的存档路径"的实现所在.
+    """
+    save = _saved_dir(tmp_path)
+    linked = save / "slot1.dat"
+    outside = Path("C:/outside/secret.dat")
+    real_is_symlink = Path.is_symlink
+    real_readlink = Path.readlink
+
+    def looks_like_a_link(self: Path) -> bool:
+        return True if self == linked else real_is_symlink(self)
+
+    def read_as_a_link(self: Path) -> Path:
+        return outside if self == linked else real_readlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", looks_like_a_link)
+    monkeypatch.setattr(Path, "readlink", read_as_a_link)
+
+    result = create_snapshot(
+        [SnapshotSource(path=str(save), kind="directory", index=0)],
+        tmp_path / "node",
+    )
+
+    entries = {entry.relative_path: entry for entry in result.entries}
+    entry = entries["loc-0/slot1.dat"]
+    assert entry.file_kind == "symlink"
+    assert entry.link_target == str(outside)
+    assert not (result.root / "loc-0" / "slot1.dat").exists()
+
+
+def test_materialize_rejects_a_file_plan_without_an_origin(tmp_path: Path) -> None:
+    """计划里是文件却没有复制来源: 拒绝, 而不是写一个空文件."""
+    plan = snapshot_mod._CopyPlan(
+        entry=SnapshotEntry(relative_path="loc-0/slot.dat", file_kind="file"),
+        origin=None,
+    )
+
+    with pytest.raises(SnapshotError, match="缺少复制来源"):
+        snapshot_mod._materialize(plan, tmp_path / "out")
+
+
+def test_materialize_rechecks_the_hash_of_what_it_copied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """复制后按磁盘上的内容复核哈希: 写出来的字节与算出来的不一致就报错."""
+    origin = tmp_path / "src.dat"
+    origin.write_bytes(b"alpha")
+    plan = snapshot_mod._CopyPlan(
+        entry=SnapshotEntry(relative_path="loc-0/src.dat", file_kind="file"),
+        origin=origin,
+    )
+    monkeypatch.setattr(snapshot_mod, "sha256_of_file", lambda _path: "0" * 64)
+
+    with pytest.raises(SnapshotError, match="哈希校验失败"):
+        snapshot_mod._materialize(plan, tmp_path / "out")

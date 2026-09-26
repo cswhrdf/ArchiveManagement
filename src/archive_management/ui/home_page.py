@@ -180,6 +180,7 @@ class HomePage:
         on_notice: _NoticeCallback | None = None,
         on_activation_monitor: _MonitorCallback | None = None,
         on_activation_refresh: _ChangeCallback | None = None,
+        on_export_batch: _ChangeCallback | None = None,
     ) -> None:
         """在 ``parent`` 内构造主页(含游戏发现与游戏启停分区)."""
         self._parent = parent
@@ -190,6 +191,8 @@ class HomePage:
         self._on_notice = on_notice
         self._on_activation_monitor = on_activation_monitor
         self._on_activation_refresh = on_activation_refresh
+        # 批量导出要弹两个模态框(多选与保存位置), 由主窗口负责, 主页只转交一次点击.
+        self._on_export_batch = on_export_batch
         # 最近一次自动启停结果与开关状态: 主题切换会重建整个页面, 重建后要能回填。
         self._last_activation: ActivationOutcome | None = None
         self._activation_enabled = False
@@ -358,18 +361,29 @@ class HomePage:
         self._clear_btn.pack(side="left", padx=(6, 0))
 
     def _build_actions(self) -> None:
-        """操作行: 左侧是展示方式切换, 右侧是选中行的动作按钮."""
+        """操作行: 左侧是展示方式切换与库级别的批量导出, 右侧是选中行的动作按钮.
+
+        批量导出与选中的那一行无关(它自己在对话框里多选), 因此放在左边这一组; 中间
+        那列只吸收多余宽度, 两头的控件各自贴边。
+        """
         bar = ctk.CTkFrame(self._library, fg_color="transparent")
         bar.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 6))
-        bar.grid_columnconfigure(1, weight=1)
+        bar.grid_columnconfigure(2, weight=1)
 
         self._layout_switch = self._segmented(
             bar, [item.label for item in HomeLayout], self._on_layout_change
         )
         self._layout_switch.grid(row=0, column=0, padx=(0, 10))
+        self._export_batch_btn = self._button(
+            bar,
+            tr("home.action_export_batch"),
+            self._request_export_batch,
+            width=120,
+        )
+        self._export_batch_btn.grid(row=0, column=1, padx=(0, 10))
 
         actions = ctk.CTkFrame(bar, fg_color="transparent")
-        actions.grid(row=0, column=2, sticky="e")
+        actions.grid(row=0, column=3, sticky="e")
         self._detail_btn = self._button(
             actions, tr("home.action_detail"), self._on_detail, style="accent", width=96
         )
@@ -1338,6 +1352,15 @@ class HomePage:
         self._selected = game_id
         self._paint_rows()
         self._update_actions()
+
+    def _request_export_batch(self) -> None:
+        """请求主窗口发起批量导出(多选对话框与保存框都必须在主线程里弹).
+
+        主页只负责"用户点了这个按钮": 弹框、后台打包与反馈都在主窗口(它才有忙碌状态
+        与消息队列)。没有接线时什么都不做(与其它回调为 None 的处理一致)。
+        """
+        if self._on_export_batch is not None:
+            self._on_export_batch()
 
     # -- 状态与动作 ---------------------------------------------------------
 
