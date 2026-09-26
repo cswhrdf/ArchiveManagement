@@ -485,23 +485,38 @@ def test_external_identifiers_cannot_escape_the_cache_root(tmp_path: Path) -> No
 def test_http_fetcher_builds_its_own_client_when_none_is_injected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """没有注入客户端时自己建一个(注不注入都走同一条下载逻辑)."""
-    seen: list[str] = []
+    """没有注入客户端时自己建一个(注不注入都走同一条下载逻辑).
 
-    def fake_download(
-        client: httpx.Client, url: str, *, timeout: float, max_bytes: int
-    ) -> FetchedArtwork:
-        seen.append(url)
-        return FetchedArtwork(content=_PNG, declared_media_type="image/png")
+    只顶掉 ``httpx.Client`` 这个边界: 建客户端与流式下载都走真实实现, 所以
+    "省略注入"这条路上真的建了客户端、也真的发出了那一次请求(不是靠替身假装).
+    """
+    built: list[tuple[float, bool]] = []
+    requested: list[str] = []
+    real_client = httpx.Client
+    url = "https://cdn.example/steam/730/cover.jpg"
 
-    monkeypatch.setattr(artwork_mod, "_download", fake_download)
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(
+            200, headers={"content-type": "image/png; charset=binary"}, content=_PNG
+        )
 
-    fetched = HttpArtworkFetcher().fetch(
-        "https://cdn.example/steam/730/cover.jpg", timeout=1.0, max_bytes=64
-    )
+    def build(*, timeout: float, follow_redirects: bool) -> httpx.Client:
+        built.append((timeout, follow_redirects))
+        return real_client(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+        )
 
-    assert seen == ["https://cdn.example/steam/730/cover.jpg"]
+    monkeypatch.setattr(httpx, "Client", build)
+
+    fetched = HttpArtworkFetcher().fetch(url, timeout=1.0, max_bytes=64)
+
+    assert built == [(1.0, True)]
+    assert requested == [url]
     assert fetched.content == _PNG
+    assert fetched.declared_media_type == "image/png"
 
 
 def test_prune_of_a_missing_cache_root_returns_nothing(tmp_path: Path) -> None:

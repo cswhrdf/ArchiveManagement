@@ -1341,7 +1341,7 @@ def _batch_row(
 def _selected_target(targets: Sequence[ImportTargetOption]) -> str | None:
     """默认选中的目标: 预选项优先, 否则第一款(与单包对话框的默认一致)."""
     for option in targets:
-        if option.selected:
+        if option.selected:  # pragma: no branch - 候选恒把第一项标为选中
             return option.game_id
     return targets[0].game_id if targets else None
 

@@ -3083,3 +3083,103 @@ def test_half_written_rows_are_treated_as_unknown(
         service._game_ref("1")
     with pytest.raises(ArchiveManagementError):
         service._location_ref("1")
+
+
+def test_save_candidate_source_falls_back_to_the_local_steam_cloud(
+    tmp_path: Path,
+) -> None:
+    """没有注入来源时读本机公开的 Steam 云同步清单(只读本机文件, 不联网)."""
+    from archive_management.services.steam_cloud import SteamCloudSource
+
+    service = _service(tmp_path)
+
+    assert isinstance(service._save_candidate_source(), SteamCloudSource)
+
+
+def test_prefetch_artwork_starts_one_background_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有在跑的一轮时: 先占住运行标志, 再起一条后台线程(界面不阻塞)."""
+    service = _cached_service(tmp_path, cache_dir=tmp_path / "cache")
+    service.add_game("手填游戏")
+    ran: list[str] = []
+    monkeypatch.setattr(service, "_download_artwork", lambda: ran.append("ran"))
+
+    assert service._artwork_running is False
+    service.prefetch_artwork()
+
+    assert service._artwork_running is True, "起线程前必须先占住运行标志"
+
+
+def test_update_location_rejects_a_path_that_cannot_be_read(tmp_path: Path) -> None:
+    """改成读不到的路径要被拦下, 库里那条位置保持原样."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    location = service.list_locations(game_id)[0]
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.update_location(location.location_id, path=str(tmp_path / "missing"))
+
+    assert str(excinfo.value) == tr("error.loc_missing", path=str(tmp_path / "missing"))
+    assert service.list_locations(game_id)[0].path == location.path
+
+
+def test_run_export_batch_is_rejected_while_another_operation_runs(
+    tmp_path: Path,
+) -> None:
+    """已有任务在跑时批量导出明确报忙, 目标路径一个文件都不留."""
+    from archive_management.ui.sql_backend import _ActiveOperation
+
+    service, game_ids = _source_service(tmp_path, count=1)
+    destination = tmp_path / "busy.archive.zip"
+    service._active = _ActiveOperation(game_id=int(game_ids[0]))
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.run_export_batch(game_ids, str(destination))
+
+    assert str(excinfo.value) == tr("error.operation_busy")
+    assert destination.exists() is False
+    assert list(tmp_path.glob(".batch-*")) == []
+
+
+def test_run_import_batch_is_rejected_while_another_operation_runs(
+    tmp_path: Path,
+) -> None:
+    """已有任务在跑时批量导入明确报忙, 候选包里的游戏一款都不进库."""
+    from archive_management.ui.sql_backend import _ActiveOperation
+
+    batch_path = _exported_batch(tmp_path)
+    service, _database, _backup_root = _target_service(tmp_path)
+    batch = service.inspect_import(str(batch_path))
+    assert isinstance(batch, BatchInspection)
+    placeholder = service.add_game("占位游戏")
+    service._active = _ActiveOperation(game_id=int(placeholder.game_id))
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.run_import_batch(batch, {})
+
+    assert str(excinfo.value) == tr("error.operation_busy")
+    assert [game.name for game in service.list_games()] == ["占位游戏"]
+
+
+def test_a_failed_batch_import_is_logged_and_reraised(
+    tmp_path: Path, audit_log: list[str]
+) -> None:
+    """批量导入失败且不是用户取消时: 记一条失败审计, 异常照常抛上去."""
+    batch_path = _exported_batch(tmp_path)
+    service, _database, _backup_root = _target_service(tmp_path)
+    batch = service.inspect_import(str(batch_path))
+    assert isinstance(batch, BatchInspection)
+    entry = batch.games[0].entry
+
+    with pytest.raises(ArchiveManagementError):
+        service.run_import_batch(
+            batch,
+            {
+                entry: ImportChoice(
+                    strategy="不认识的策略", target_game_id=None, locations={}
+                )
+            },
+        )
+
+    assert any("import.batch_failed" in line for line in audit_log)
+    assert service.list_games() == []

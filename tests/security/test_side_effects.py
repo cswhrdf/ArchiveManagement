@@ -197,6 +197,22 @@ class SideEffectRecorder:
         monkeypatch.setattr(module, function_name, wrapper)
 
 
+# 平台能力: `os.unlink` 接受 `dir_fd`(POSIX 才有, Windows 的 os 没有这一支)。
+#
+# 记下来的是**导入期**那个函数对象: recorder 夹具会把 `os.unlink` 换成记账包装函数,
+# 而 `os.supports_dir_fd` 里放的是原始的内置函数对象 —— 在夹具装好之后用
+# `os.unlink in os.supports_dir_fd` 现查, 在**每个**平台上都是假。2026-09-26 的 CI 报告里
+# 那条 `dir_fd` 自检在 Linux 与 Windows 上都写着 `Skipped: 本平台不支持 dir_fd` 就是这么
+# 来的(守卫自己把自己关掉了, 所以谁也没发现)。平台能力与"此刻谁挂在这个名字上"必须
+# 分开问。
+_ORIGINAL_UNLINK = os.unlink
+
+
+def _dir_fd_is_available() -> bool:
+    """本平台是否支持 `dir_fd`(问的是 :data:`_ORIGINAL_UNLINK` 那个原始函数)."""
+    return _ORIGINAL_UNLINK in os.supports_dir_fd
+
+
 # “fd → 目录”的两条常见路径(Linux 用 /proc, macOS 用 /dev); 读到就接回绝对路径。
 _FD_PATH_TEMPLATES = ("/proc/self/fd/{fd}", "/dev/fd/{fd}")
 
@@ -277,10 +293,20 @@ def test_the_recorder_resolves_paths_relative_to_a_directory_fd(
     `shutil.rmtree` 在支持 `dir_fd` 的平台上就是"打开目录 + `os.unlink(条目名, dir_fd=fd)`",
     所以记账器必须把相对基准还原回来 —— 否则一次合法删除会被判成越界变更(2026-09-25 的
     Linux CI 就是这样红的: `越界变更: [_Call(phase='restore', kind='delete', path='slot.dat')]`)。
-    本平台不支持 `dir_fd` 时这条自检没有可测的行为, 明确跳过而不是假装通过。
+
+    平台能力经 :func:`_dir_fd_is_available` 问(导入期快照), **不能**在这里写
+    `os.unlink in os.supports_dir_fd` —— 那个名字此刻已经被记账器换掉了, 现查必然为假。
+    真的没有 `dir_fd` 这一支的平台(Windows)明确跳过, 原因里写清缺的是哪一项能力。
+
+    路径按**解析后**的形式比较: 记账器还原出来的是 `realpath`(经 `/proc/self/fd` 或
+    `/dev/fd`), 而 macOS 的临时目录本身是符号链接(`/var` → `/private/var`), 拿 `tmp_path`
+    的原始字符串比会在 macOS 上假报失败。
     """
-    if os.unlink not in os.supports_dir_fd:
-        pytest.skip("本平台不支持 dir_fd(os.unlink 不接受 dir_fd)")
+    if not _dir_fd_is_available():
+        pytest.skip(
+            "本平台不支持 dir_fd: os.supports_dir_fd 里没有 os.unlink"
+            "(Windows 的 os.unlink 不接受 dir_fd 参数, 这条自检没有可测的行为)"
+        )
     folder = tmp_path / "root"
     folder.mkdir()
     victim = folder / "child.dat"
@@ -294,10 +320,28 @@ def test_the_recorder_resolves_paths_relative_to_a_directory_fd(
             os.close(fd)
 
     recorded = recorder.paths(phase="probe", kind="delete")
+    expected = str(victim.resolve())
 
     assert recorded, "删了文件却没记账"
-    assert str(victim) in recorded, f"没还原成绝对路径: {recorded}"
+    assert expected in recorded, f"没还原成绝对路径: {recorded}"
     assert all(_inside(tmp_path, path) for path in recorded), f"记成了越界: {recorded}"
+
+
+def test_installing_the_recorder_does_not_change_the_platform_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """自检: 装上记账器不会改变"本平台是否支持 `dir_fd`"的答案.
+
+    记账器把 `os.unlink` 换成记账包装函数, 而 `os.supports_dir_fd` 里放的是**原始的内置
+    函数对象** —— 任何"用当前挂在 `os` 上的那个名字现查"的写法, 都会在装上记账器之后翻成
+    假, 于是上面那条 `dir_fd` 自检在**每个**平台上都被跳过(2026-09-26 的 CI 报告: Linux
+    与 Windows 都是 `Skipped: 本平台不支持 dir_fd`)。这条自检在装着记账器的状态下再问一次。
+    """
+    before = _dir_fd_is_available()
+    SideEffectRecorder().install(monkeypatch)
+
+    assert os.unlink is not _ORIGINAL_UNLINK, "自检前提: 记账器没有替换 os.unlink"
+    assert _dir_fd_is_available() is before, "记账器改变了平台能力判定"
 
 
 def test_resolve_dir_fd_joins_the_directory_when_it_can_be_read(

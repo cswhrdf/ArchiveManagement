@@ -591,7 +591,7 @@ class DemoArchiveService:
         self, game_id: str, plan: DeletionPlan, reverse: dict[int, str]
     ) -> None:
         """SHIFT 模式: 把被顶替的子分支改挂到新的父节点上."""
-        if plan.shifted_child_id is None:
+        if plan.shifted_child_id is None:  # pragma: no branch - SHIFT 必然带子节点
             return
         child_id = reverse.get(plan.shifted_child_id)
         parent_id = (
@@ -707,7 +707,7 @@ class DemoArchiveService:
             ),
             None,
         )
-        if item is None:
+        if item is None:  # pragma: no branch - 映射与内存条目同源
             raise ArchiveManagementError(
                 tr("error.unknown_backup", backup_id=backup_id)
             )
@@ -1112,7 +1112,7 @@ class DemoArchiveService:
             else:
                 updated_list.append(replace(item, is_primary=False))
         self._locations[game_id] = updated_list
-        if updated_target is None:
+        if updated_target is None:  # pragma: no branch - 位置刚被查到必然在列
             raise ArchiveManagementError(
                 tr("error.unknown_location", location_id=location_id)
             )

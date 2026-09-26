@@ -45,6 +45,7 @@ from archive_management.ui.models import (
     MonitoredDirItem,
     SavePathSuggestion,
     ScanSummary,
+    ScheduleItem,
     SourceFilter,
     ViewKind,
     batch_export_choice,
@@ -1152,3 +1153,35 @@ def test_batch_row_choice_keeps_only_what_the_user_expressed() -> None:
     assert fresh.target_game_id is None
     # 选了"合并"却没有目标: 留给后端报"需要先选定要合并到的游戏", 界面不替用户猜.
     assert empty_target.target_game_id is None
+
+
+def test_backup_display_title_falls_back_to_the_branch_name() -> None:
+    """未命名但开启了分支的节点显示分支名(而不是"手动备份"这类类型默认名)."""
+    item = replace(
+        _item("branch", _dt(day=2, hour=9, minute=0)),
+        title="",
+        branch_name="黑棘",
+        is_branch=True,
+    )
+
+    assert item.display_title == "黑棘"
+    # 没有分支名时仍回落到类型默认名(顺手把已有行为一起钉住).
+    assert replace(item, branch_name="").display_title == tr("backup.title_manual")
+
+
+def test_schedule_item_without_an_interval_reports_unscheduled() -> None:
+    """还没配置周期的任务: 周期文案说"未配置", 也不允许暂停/继续."""
+    item = ScheduleItem(
+        game_id="g",
+        game_name="Demo",
+        interval_text="",
+        enabled=False,
+        keep_auto=3,
+        next_run_label="—",
+        auto_count=0,
+    )
+
+    assert item.interval_label == tr("task.unscheduled")
+    assert item.can_toggle is False
+    # 有周期且游戏可用时才能暂停/继续(与 state_label 的三种状态同一套判据).
+    assert replace(item, interval_text="30m", enabled=True).can_toggle is True

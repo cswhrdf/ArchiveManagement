@@ -641,17 +641,25 @@ def test_auto_backup_becomes_current_node(tmp_path: Path) -> None:
 # -- "当前节点"指针的边界 ---------------------------------------------------
 
 
-def test_current_node_falls_back_when_the_pointer_dangles(tmp_path: Path) -> None:
-    """指针指向已被删掉的行时回退到最新节点(向下保存始终有父节点)."""
+def test_current_node_falls_back_when_the_pointer_row_is_deleted(
+    tmp_path: Path,
+) -> None:
+    """指针指向的那一行被绕过服务删掉后回退到最新节点(向下保存始终有父节点).
+
+    外键是 ``ON DELETE SET NULL``, 所以删行会把指针清成空 —— "悬空 id"在真实库里
+    不存在(:meth:`BackupService.current_node` 里那句 ``node is None`` 因此被豁免),
+    这条钉的是指针为空时的回落.
+    """
     service, game_id = _service(tmp_path)
     first = service.create_backup(game_id)
     _touch_save(tmp_path)
     second = service.create_backup(game_id)
     assert first.id is not None
     assert second.id is not None
-    # 绕过服务直接删行, 造出"指针悬空"的脏库现场.
+    # 绕过服务直接删行, 造出"指针已空"的脏库现场.
     service._backups.delete(second.id)
 
+    assert service._games.current_backup(game_id) is None
     fallback = service.current_node(game_id)
 
     assert fallback is not None
@@ -732,7 +740,7 @@ def test_deleting_a_node_without_a_directory_only_removes_the_row(
     plan = service.delete_node(game_id, node.id)
 
     assert plan.removed_count == 1
-    assert service._backups.get(node.id) is None
+    assert service.get(node.id) is None
 
 
 def test_delete_skips_a_node_that_was_never_stored(tmp_path: Path) -> None:
@@ -749,7 +757,7 @@ def test_delete_skips_a_node_that_was_never_stored(tmp_path: Path) -> None:
 
     service.delete(stored)
 
-    assert service._backups.get(stored.id) is None
+    assert service.get(stored.id) is None
 
 
 def test_pruning_auto_backups_without_directories_only_removes_rows(
@@ -794,7 +802,12 @@ def _stale_pointer(service: BackupService, removed_id: int) -> None:
 def test_deleting_the_current_leaf_clears_a_stale_pointer(
     tmp_path: Path,
 ) -> None:
-    """指针还指着被删的行时(脏库)也要被修正, 不能留一个悬空指针."""
+    """指针还指着被删的行时(脏库)不留悬空指针.
+
+    终态与"外键把指针清成 NULL"重合, 所以它分辨不出修正逻辑到底跑没跑
+    (能单独变红的是 test_deleting_the_current_root_moves_a_stale_pointer_to_the_child);
+    这里的作用是让修正分支被真实执行, 而不是凭"没报错"充当守卫.
+    """
     service, game_id = _service(tmp_path)
     first = service.create_backup(game_id)
     _touch_save(tmp_path)

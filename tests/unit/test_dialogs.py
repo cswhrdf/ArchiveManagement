@@ -1435,3 +1435,86 @@ def test_export_batch_select_all_is_disabled_when_nothing_matches(
     result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
 
     assert result == models.BatchExportChoice(game_ids=())
+
+
+def test_import_game_dialog_cancelled_browse_keeps_the_row(
+    harness: _FakeParent,
+) -> None:
+    """浏览被取消(返回 None)时那一行保持原样, 不会被清空."""
+
+    def browse_then_confirm() -> None:
+        for button in harness.buttons:
+            if button.text == tr("dialog.browse"):
+                button.click()
+        next(
+            button
+            for button in harness.buttons
+            if button.text == tr("dialog.import_confirm")
+        ).click()
+
+    harness.on_wait = browse_then_confirm
+    result = dialogs.import_game_dialog(
+        harness,
+        DARK,
+        title="导入为游戏",
+        name_label="确认游戏名称:",
+        initial_name="星露谷",
+        paths_label="存档路径:",
+        paths_hint="提示",
+        initial_paths=("C:/kept",),
+        add_text=tr("dialog.import_add_path"),
+        confirm_text=tr("dialog.import_confirm"),
+        browse=lambda: None,
+    )
+
+    assert result == ("星露谷", ("C:/kept",))
+
+
+def test_edit_tags_dialog_at_the_limit_adds_no_empty_row(
+    harness: _FakeParent,
+) -> None:
+    """现有标签已经顶满上限时不再补空行(否则会超出行数上限)."""
+    harness.click_text = tr("dialog.tags_save")
+
+    result = dialogs.edit_tags_dialog(harness, DARK, tags=("a", "b", "c"), max_tags=3)
+
+    assert len(harness.entries) == 3
+    assert result == ("a", "b", "c")
+
+
+def test_edit_tags_dialog_removing_the_last_row_restores_an_empty_one(
+    harness: _FakeParent,
+) -> None:
+    """删掉唯一一行后自动补一行空的, 对话框里总有一个输入框可用."""
+
+    def drop_the_only_row() -> None:
+        next(b for b in harness.buttons if b.text == tr("dialog.tags_remove")).click()
+        next(b for b in harness.buttons if b.text == tr("dialog.tags_save")).click()
+
+    harness.on_wait = drop_the_only_row
+    result = dialogs.edit_tags_dialog(harness, DARK, tags=("探索",), max_tags=1)
+
+    assert len(harness.entries) == 2, "删空后应当自动补一行空的"
+    assert result == ()
+
+
+def test_ask_text_browse_fills_the_entry_and_ignores_a_cancelled_pick(
+    harness: _FakeParent,
+) -> None:
+    """浏览按钮的两种结果: 挑到路径就写进输入框, 取消则保持原样."""
+    picks: list[str | None] = ["C:/picked", None]
+
+    def browse() -> str | None:
+        return picks.pop(0)
+
+    def click_browse_twice() -> None:
+        button = next(b for b in harness.buttons if b.text == tr("dialog.browse"))
+        button.click()
+        button.click()
+        next(b for b in harness.buttons if b.text == tr("dialog.confirm")).click()
+
+    harness.on_wait = click_browse_twice
+    result = dialogs.ask_text(harness, DARK, title="选目录", text="路径", browse=browse)
+
+    assert picks == [], "两次点击都要真的请求过路径"
+    assert result == "C:/picked"

@@ -428,8 +428,9 @@ def import_candidate(
     games = GameRepository(database)
     if candidate.status == "imported" and candidate.game_id is not None:
         existing = games.get(candidate.game_id)
-        # 删除游戏时外键会把候选退回待处理, 因此这条游戏行必然还在.
-        if existing is not None:  # pragma: no cover - 已导入的候选必然指向存在的游戏
+        # 删除游戏时外键会把候选退回待处理, 因此这条游戏行必然还在 ——
+        # 这个 if 只会走 True 一个方向(False 那支不可达), 所以标 no branch 而不是 no cover.
+        if existing is not None:  # pragma: no branch - 已导入的候选必然指向存在的游戏
             raise ArchiveManagementError(f"该探测结果已导入为游戏「{existing.name}」")
     final_name = (name if name is not None else candidate.name).strip()
     if not final_name:

@@ -543,10 +543,21 @@ def test_path_health_reports_an_unreadable_directory(
 
 
 def test_registry_paths_are_empty_off_windows(tmp_path: Path) -> None:
-    """注册表读取只在 Windows 生效: 其它平台显式返回空, 不假装查过."""
-    roots = _roots(tmp_path, platform="linux")
+    """注册表读取只在 Windows 生效: 非 Windows 显式返回空, 哪怕替身里真的登记了路径."""
+    subkey = r"Software\Valve\Steam"
+    registry = FakeRegistry(
+        values={(HKCU, subkey): {"SteamPath": str(tmp_path / "Steam")}}
+    )
 
-    assert registry_paths(roots, HKCU, r"Software\Valve\Steam", ("SteamPath",)) == []
+    off_windows = registry_paths(
+        _roots(tmp_path, registry, platform="linux"), HKCU, subkey, ("SteamPath",)
+    )
+    on_windows = registry_paths(
+        _roots(tmp_path, registry, platform="windows"), HKCU, subkey, ("SteamPath",)
+    )
+
+    assert off_windows == []
+    assert on_windows == [tmp_path / "Steam"]
 
 
 def test_steam_libraries_skips_an_empty_registered_path(tmp_path: Path) -> None:

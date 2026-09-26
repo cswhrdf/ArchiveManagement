@@ -892,3 +892,72 @@ def test_demo_run_import_batch_rejects_unknown_strategy_target_and_empty_batch(
         )
     with pytest.raises(ArchiveManagementError):
         service.run_import_batch(_batch_inspection(), {})
+
+
+def test_demo_storage_folder_is_derived_on_the_first_backup(
+    service: DemoArchiveService,
+) -> None:
+    """新导入的游戏还没有备份目录名: 第一次备份时按名称 + 存档路径推导出来."""
+    game_id = service.add_game("新游戏").game_id
+    service.add_location(game_id, path="C:/demo/new-save", kind="directory")
+    assert service.get_detail(game_id).storage_folder == ""
+
+    service.run_backup_now(game_id)
+
+    folder = service.get_detail(game_id).storage_folder
+    assert folder != "", "首次备份必须把目录名固化下来"
+    # 第二次备份不会换成另一个目录名(目录名一旦确定就固定).
+    service.run_backup_now(game_id)
+    assert service.get_detail(game_id).storage_folder == folder
+
+
+def test_demo_removing_a_non_primary_location_keeps_the_primary_flag(
+    service: DemoArchiveService,
+) -> None:
+    """删掉的不是主位置时不动主标记(只有主位置被删才交接)."""
+    primary = service.list_locations("outer-wilds")[0]
+    second = service.add_location(
+        "outer-wilds", path="C:/demo/non-primary", kind="directory"
+    )
+    assert second.is_primary is False
+
+    service.remove_location(second.location_id)
+
+    remaining = service.list_locations("outer-wilds")
+    assert [item.location_id for item in remaining] == [primary.location_id]
+    assert remaining[0].is_primary is True
+
+
+def test_demo_monitored_directory_updates_path_and_note_separately(
+    service: DemoArchiveService,
+) -> None:
+    """只改备注或只改路径都行(另一个字段保持原样), 但重复/空路径仍要拦下."""
+    first = service.add_monitored_directory("C:/demo/one", note="原始备注")
+    second = service.add_monitored_directory("C:/demo/two")
+
+    renamed = service.update_monitored_directory(first.directory_id, note="新备注")
+    assert (renamed.path, renamed.note) == ("C:/demo/one", "新备注")
+
+    moved = service.update_monitored_directory(
+        second.directory_id, path="C:/demo/moved"
+    )
+    assert (moved.path, moved.note) == ("C:/demo/moved", "")
+
+    with pytest.raises(ArchiveManagementError):
+        service.update_monitored_directory(second.directory_id, path="C:/demo/one")
+    with pytest.raises(ArchiveManagementError):
+        service.update_monitored_directory(second.directory_id, path="   ")
+
+
+def test_demo_importing_a_candidate_twice_is_refused(
+    service: DemoArchiveService,
+) -> None:
+    """同一份探测结果不能导入两次: 第二次要报"已导入"而不是又建一款游戏."""
+    candidate = next(item for item in service.list_candidates() if item.status == "new")
+    service.import_candidate(candidate.candidate_id)
+    games_before = len(service.list_games())
+
+    with pytest.raises(ArchiveManagementError):
+        service.import_candidate(candidate.candidate_id)
+
+    assert len(service.list_games()) == games_before

@@ -127,7 +127,9 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 
 **结论项要能体现失败（2026-09-25 补）**：安全用例只在 `security` 作业里跑（不在 pytest 分片里），所以它的成败原本只体现在那个作业的状态上，而报告里的 `Security findings` 汇总项永远是绿的 —— 实测那次 Linux 有 1 条安全用例失败（2641 条结果里唯一一条 `failed`），报告里却完全查不到。现在这项结论按两条判据定状态：**未拦截的结论**（`blocked` 非真）与**真的失败的安全用例**（按 `layer=security` 与 `env` 标签逐平台统计，`broken` 也算）；任一条命中就写 `failed`（原因进 `statusDetails.message`），运行总账里那行也给出"失败用例数 + 通过/未通过"，原生质量门会跟着红。守卫：`tests/unit/test_report_verification.py`。
 
-**记账器要还原 `dir_fd` 相对路径**：`shutil.rmtree` 在支持 `dir_fd` 的平台上（POSIX）是"打开目录 + `os.unlink(条目名, dir_fd=fd)`"逐个删的，记账器若直接记裸文件名，一次**合法**删除会被判成越界变更（2026-09-25 的 Linux CI 现场：`越界变更: [_Call(phase='restore', kind='delete', path='slot.dat')]`；Windows 不支持 `dir_fd`，所以本机一直是绿的）。现在按 `/proc/self/fd/<fd>`（Linux）或 `/dev/fd/<fd>`（macOS）把相对基准接回去，读不到时**原样返回**（宁可响亮地判越界，也不静默放行）；`test_side_effects.py` 里有一条对应的自检用例（`dir_fd` 不支持的平台会明确 skip）。
+**记账器要还原 `dir_fd` 相对路径**：`shutil.rmtree` 在支持 `dir_fd` 的平台上（POSIX）是"打开目录 + `os.unlink(条目名, dir_fd=fd)`"逐个删的，记账器若直接记裸文件名，一次**合法**删除会被判成越界变更（2026-09-25 的 Linux CI 现场：`越界变更: [_Call(phase='restore', kind='delete', path='slot.dat')]`；Windows 不支持 `dir_fd`，所以本机一直是绿的）。现在按 `/proc/self/fd/<fd>`（Linux）或 `/dev/fd/<fd>`（macOS）把相对基准接回去，读不到时**原样返回**（宁可响亮地判越界，也不静默放行）；`test_side_effects.py` 里有一条对应的自检用例（Linux/macOS 上真的跑；只有确实没有 `dir_fd` 这一支的 Windows 会 skip，跳过信息里写明缺的是"`os.supports_dir_fd` 里没有 `os.unlink`"）。断言按 `realpath` 比较，因为 macOS 的临时目录本身是符号链接（`/var` → `/private/var`）。
+
+**自检自己别把自己关掉（2026-09-26 补）**：上面那条自检原来在用例里现查 `os.unlink in os.supports_dir_fd`，而 `recorder` 夹具（在用例体之前装好）早已把 `os.unlink` 换成记账包装函数，`os.supports_dir_fd` 里放的却是**原始的内置函数对象** —— 于是这个判定在**每个**平台上都为假：Linux 与 Windows 的 CI 报告里都写着 `Skipped: 本平台不支持 dir_fd`，一条守着"合法删除不能被判越界"的自检等于不存在（它还是**跨平台**失效的，所以连"只在某个平台红"这条线索都没有）。现在能力判定走导入期快照（`_ORIGINAL_UNLINK`），并有一条自检钉住"装上记账器前后的答案必须一致"。教训：**当守卫要问的名字会被它自己替换掉时，能力判定必须在替换之前取好**；跳过信息必须写清缺的是哪一项能力，否则报告里只剩一句无法核对的"环境不支持"。
 
 ## 5. 结果与报告元数据
 
@@ -135,6 +137,9 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 - 每条安全结论记录：类别、场景、输入摘要、期望拦截行为、实际结果、是否拦截。
 - 环境信息记录：操作系统与平台族、Python 版本与实现、提交 SHA、分支与 CI run id、测试类别是否执行、覆盖率门槛（`scripts/create_allure_summary.py` 写入`allure-results/environment.properties`）。
 - 覆盖率摘要由 `scripts/create_allure_coverage.py` 生成；性能与安全结果由`scripts/create_allure_summary.py` 生成，原始 JSON/CSV 作为附件保留，保证结论可下载、可追溯。覆盖率摘要项同样**把原始 `coverage.xml` 作为附件**带进报告（脚本按 `RAW_REPORT_FILES` 逐个收集，存在哪个带哪个：以后加 `coverage.json` 或把 `--cov-report=term-missing` 的输出重定向成文件，不改代码就会一并附上）；HTML 报告是整站，仍旧作为 `coverage-<os>` artifact 上传。
+- **汇总结论项的状态由数据决定（报告不许骗人）**：`scripts/create_allure_summary.py` 除了写环境信息，还会为每一类结果写"结论项"。安全（`Security findings`，见 §4）之外的另外两类：性能 `Performance baseline` —— 只要有一条测量 `passed` 为假就写 `failed`（描述里给出基准名/取值/阈值），结果文件缺失则写 `broken` 并说明原因（**不是**"没有这条"）；覆盖率 `Coverage conclusion` —— **每个跑出用例结果的平台都要有一份达标的覆盖率结论**，缺一份（报告作业挂了、产物没合并进来）或合计覆盖率低于 `pyproject.toml` 的 `[tool.coverage.report] fail_under` 都写 `failed`，描述里给出行/分支/合计的百分比与门槛。覆盖率的"合计"按 coverage.py 的口径算：`(行覆盖 + 分支覆盖) / (行总数 + 分支总数)`，与 `fail_under` 比的就是它（`scripts/create_allure_summary.py` 的 `test_coverage_fail_under_matches_pyproject` 把脚本常量与配置钉在一起）。
+- **运行总账里的性能/覆盖率两节与安全同一风格**：覆盖率一节给每平台一行（行覆盖率/分支覆盖率/合计/门槛/结论 + 原始报告归属），性能一节给每平台一行（基准数/未达标数/结论），安全一节给（结论条数/未拦截条数/失败用例/结论）。任一个"结论"列都不是猜的，而是从原始数据算出来的。
+- **「有意不统计的覆盖」是报告首页的一份全局附件**（`allure-coverage-exclusions.md`，由 `scripts/create_allure_summary.py` 生成、由仓库根 `allurerc.mjs` 的 `globalAttachments` 收进报告「全局附件」页签）：数据来自 `src/**/*.py` 里的 `# pragma: no cover` / `# pragma: no branch` 标记与 `pyproject.toml` 的 `exclude_also`，按文件列出 `路径:行号 — 标记 — 原因`，并给出 `no cover` / `no branch` / `exclude_also` 的条数与「写入问题」（缺原因、原因太短或占位、`no branch` 标在无分支的行上等）。解析规则与 `tests/unit/test_coverage_pragmas.py` **共用同一份实现**（定义在 `scripts/create_allure_summary.py`，守卫直接导入它），所以"守卫认可的写法"与"报告列出来的写法"永远一致；一条豁免都没有时清单会明确写出"没有"，而不是留白。
 - **平台以 Allure 的"环境"维度呈现**（这是看出"结果来自哪台机器"的主路径）：每个用例都会写入 `env` 标签（取值就是平台展示名），仓库根的 **`allurerc.mjs`** 用 matcher 把它映射成 Allure 3 的环境。于是一份合并报告里会出现 `Windows` / `Linux` 两个环境（macOS 屏蔽期间；环境选择器、用例详情页的「环境」分页都在这个维度上），而不是只能从参数或套件名后缀里去认平台。
   另保留两样兜底：`平台` 参数（平台也进结果身份：三个平台的同名结果 `retryHash` 各不相同、`isRetry` 均为 `false`，不会互相并成重试；`historyId` 共享，所以历史趋势能连上）与 `os` 标签 + `parentSuite` 后缀（筛选与只认 suite 标签的控件）。
   **生成报告必须在仓库根目录执行**（CI 与本文档的命令都是如此）：环境不会仅因结果带 `env` 标签就生效，CLI 得读到 `allurerc.mjs` 才会识别；读不到时环境会静默退回单个 `default`，`scripts/verify_allure_report.py` 会把这种退化判为报告不完整（它同时打印 `环境: ...` 一行）。性能/安全/覆盖率摘要项也按同一规则处理：带 `env` 标签、**标题不再拼平台名**（三个环境里的标题完全一致，都是 `Coverage report` / `Performance baseline` / `Security findings`），平台由环境表达；`平台` 参数与 `os` 标签作为兜底（与用例结果一致）。
@@ -152,7 +157,8 @@ security    (Windows/Linux: 越权与危险操作防护)
 pytest-report (每平台一份报告: 合并各片的 Allure 结果与覆盖率,
                **两个平台都在 ubuntu 上生成** → 生成并自检报告)
       ↓
-allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全汇总 → 生成最终报告)
+allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全/覆盖率汇总
+               结论 + 有意不统计的覆盖豁免清单 → 生成最终报告)
 ```
 
 **作业数量也是额度**：一轮 CI 是 11 个作业实例（`quality` 1 + `pytest` 5 + `pytest-report` 2 + `security` 2 + `allure-summary` 1），每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”，见 `PLAN.md` 第 11.10 节）；`paths-ignore` 只加在 **push** 上 —— PR 被路径过滤跳过会让分支保护里的必需检查永远停在 pending，反而合不了 PR。完整的优化清单与取舍记在 `PLAN.md` 第 11 节。

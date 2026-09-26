@@ -508,7 +508,7 @@ def edit_tags_dialog(
 
     def remove_row(row: ctk.CTkFrame, entry: ctk.CTkEntry) -> None:
         """删掉一行; 删空了补一个空行, 窗户里总有一个输入框可用."""
-        if entry in entries:
+        if entry in entries:  # pragma: no branch - 按钮随所在行一起销毁
             entries.remove(entry)
         row.destroy()
         if not entries:
@@ -636,7 +636,7 @@ def ask_text(
     cancel.pack(side="left", padx=(0, 10))
 
     def fill_from_browse() -> None:
-        if browse is not None:
+        if browse is not None:  # pragma: no branch - 按钮只在 browse 非空时创建
             picked = browse()
             if picked:
                 entry.delete(0, "end")

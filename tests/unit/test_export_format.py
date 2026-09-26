@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import zipfile
 from pathlib import Path
@@ -126,7 +127,10 @@ def test_write_package_records_every_member_with_hashes(tmp_path: Path) -> None:
         ]
         first = manifest["entries"][0]
         assert first["sha256"] == fmt.sha256_of_file(text)
-        assert archive.read(fmt.CONFIG_NAME)
+        assert json.loads(archive.read(fmt.CONFIG_NAME)) == {
+            "game": {"name": "Demo"},
+            "locations": [],
+        }
 
 
 def test_written_package_reads_back_with_matching_entries(tmp_path: Path) -> None:
@@ -157,7 +161,13 @@ def test_write_package_replaces_the_target_atomically(tmp_path: Path) -> None:
 
     assert summary.path == destination
     assert not list(tmp_path.glob(f"*{fmt._PARTIAL_SUFFIX}*"))
-    assert fmt.read_package(destination, verify_hashes=True).entries
+    assert [
+        entry.path
+        for entry in fmt.read_package(destination, verify_hashes=True).entries
+    ] == [
+        "branches/n1/loc-0/a.txt",
+        "timeline/n2/loc-0/nested/中文.bin",
+    ]
 
 
 def test_write_package_cleans_up_when_cancelled(tmp_path: Path) -> None:
@@ -264,11 +274,11 @@ def test_read_package_detects_content_that_does_not_match_the_manifest(
 def test_read_package_rejects_a_member_that_escapes_the_package_root(
     tmp_path: Path,
 ) -> None:
-    """包内夹带 ``../escape.txt`` 时必须拒绝(清单里没有它也一样)."""
+    """包内夹带 ``../escape.txt`` 时必须由路径校验拒绝(不能只靠"清单没声明"这一道)."""
     destination = _write(tmp_path).path
     _rewrite_zip(destination, ("../escape.txt", b"boom"))
 
-    with pytest.raises(PackageError):
+    with pytest.raises(PackageError, match="不安全的片段"):
         fmt.read_package(destination, verify_hashes=True)
 
 
@@ -347,20 +357,28 @@ def test_read_package_enforces_the_total_size_limit(
 def test_read_package_enforces_the_compression_ratio_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """压缩比异常高的条目视为解压炸弹."""
+    """压缩比异常高的条目视为解压炸弹(条目如实写进清单, 只由压缩比这道闸拦下)."""
     destination = tmp_path / "bomb.archive.zip"
     payload = b"0" * 100_000
     _write_raw_zip(
         destination,
         {
             fmt.CONFIG_NAME: b"{}",
-            fmt.MANIFEST_NAME: _manifest_json(entries=[]),
+            fmt.MANIFEST_NAME: _manifest_json(
+                entries=[
+                    {
+                        "path": "branches/n1/blob.bin",
+                        "size": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    }
+                ]
+            ),
             "branches/n1/blob.bin": payload,
         },
     )
     monkeypatch.setattr(fmt, "MAX_COMPRESSION_RATIO", 1.0)
 
-    with pytest.raises(PackageError):
+    with pytest.raises(PackageError, match="压缩比"):
         fmt.read_package(destination)
 
 
@@ -490,6 +508,8 @@ def test_extract_package_honours_cancellation(tmp_path: Path) -> None:
 
     with pytest.raises(OperationCancelledError):
         fmt.extract_package(contents, target, cancelled=lambda: True)
+
+    assert list(target.iterdir()) == [], "取消后一个条目都不该解出来"
 
 
 def test_member_target_resolves_under_the_root(tmp_path: Path) -> None:

@@ -6,14 +6,22 @@
    平台), 让每份报告都能回答"这次结果是在哪个平台、哪个提交上跑出来的";
 2. 把 ``performance-results.json`` / ``security-results.json`` 转成 Allure 里
    可检索的测试项: 指标表写进描述, 原始 JSON/CSV 作为附件, 保证结论可下载;
-   每个平台各写一条(名称/参数/标签都带平台), 三个平台的安全结论不会互相覆盖;
+   每个平台各写一条(名称/参数/标签都带平台), 三个平台的安全结论不会互相覆盖。
+   性能与覆盖率的结论项同样**由数据决定状态**: 有一条基准冲破预算就写 ``failed``,
+   某个有用例结果的平台缺一份覆盖率结论(或覆盖率低于 ``fail_under``)也写 ``failed`` ——
+   报告里的红/绿必须是真实结论, 不能因为"文件不在"就默默变绿;
 3. 写一份"运行总账"到 ``allure-run-ledger.md``(Markdown 附件: 报告里会**渲染**成
    表格与标题, 而不是丢一屏纯文本; 仓库根的 ``allurerc.mjs`` 按这个文件名把它收进报告
    首页「全局附件」): 质量门逐项结论 + 覆盖率(各平台, 数字取自原始 XML) + 性能一行
    + 安全各平台一行 + 产物清单(只列脚本生成的汇总结论项, 逐项核对原始文件在不在)。
    Allure 原生「质量门」页签只有 ``allure run`` 会填(见 allurerc.mjs 的注释), 所以
    总账就是这份报告里"一眼看完"的入口;
-4. 缺少某类结果时不报错(例如只跑了单元测试), 只是跳过该类并写进环境信息与总账。
+4. 把"有意不统计的覆盖"写成另一份全局附件 ``allure-coverage-exclusions.md``:
+   扫描 ``src/**/*.py`` 的 ``# pragma: no cover`` / ``# pragma: no branch`` 标记(逐条列出
+   文件:行号、标记种类与原因)与 ``pyproject.toml`` 的 ``exclude_also`` —— 数据来自真实
+   源码, 且每条豁免都必须写明原因(缺原因的会单独列为"写入问题");
+5. 缺少某类结果时不报错(例如只跑了单元测试), 只是跳过该类并写进环境信息与总账;
+   **但性能结果文件缺失时会写一条 broken 结论项** —— "没有这条"与"这条通过"必须能分辨。
 
 用法(CI 汇总 job): ``uv run python scripts/create_allure_summary.py``
 """
@@ -26,7 +34,9 @@ import os
 import re
 import sys
 import time
+import tomllib
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -62,8 +72,43 @@ SUMMARY_SEVERITY = "trivial"
 SECURITY_LAYER = "security"
 # “没通过”的状态: broken 是夹具/环境炸了, 同样不能算通过。
 FAILING_STATUSES = ("failed", "broken")
-# 覆盖率门槛与 pytest 配置保持一致(低于该值 pytest 已经失败, 这里只作记录).
-COVERAGE_THRESHOLD = "80"
+# 覆盖率门槛: 必须与 pyproject.toml 的 [tool.coverage.report] fail_under 一致 ——
+# 守卫 test_coverage_fail_under_matches_pyproject 会把两处钉在一起. 汇总作业不装任何依赖,
+# 所以这里写常量而不是去解析配置.
+COVERAGE_THRESHOLD = "95"
+# 覆盖率总结论项的标题: 与 create_allure_coverage.py 写的原始报告项 `Coverage report` 分工
+# 不同 —— 那一条承载原始 XML(状态只说明"报告生成出来了"), 这一条才是"达没达标"的结论.
+COVERAGE_CONCLUSION_TITLE = "Coverage conclusion"
+# 平台缺一份覆盖率结论项时用的哨兵状态(Allure 自己的状态里没有它, 不会与真实状态撞车).
+MISSING_STATUS = "missing"
+# 有意不统计的覆盖(豁免清单): 与运行总账一样放在仓库根, 由 allurerc.mjs 的
+# globalAttachments 收进报告首页「全局附件」页签(改名要同时改配置与 .gitignore).
+COVERAGE_EXCLUSIONS_REPORT = Path("allure-coverage-exclusions.md")
+# 仓库根与源码树: 豁免清单的数据必须来自真实源码 + pyproject.toml, 不能是手工清单.
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+SOURCE_ROOT_NAME = "src"
+PYPROJECT_NAME = "pyproject.toml"
+# 覆盖率豁免标记的解析规则: 与 tests/unit/test_coverage_pragmas.py 共用(那个守卫直接导入
+# 这里), 因此不存在"两套宽松程度不同的解析器"—— 放宽一处, 另一处就把该报的问题当合规.
+PRAGMA_PATTERN = re.compile(r"#\s*pragma:\s*(?P<kind>no cover|no branch)(?P<rest>.*)$")
+MIN_PRAGMA_REASON_LENGTH = 5
+# 占位词: 写了等于没写(按整句比较, 不做子串匹配, 否则"无头环境"会被"无"误伤).
+PRAGMA_PLACEHOLDERS = frozenset(
+    {"todo", "fixme", "无", "略", "……", "...", "待补", "稍后"}
+)
+# 允许 ``no branch`` 出现的行: 标在别处等于没标.
+BRANCH_LINE_PREFIXES = (
+    "if ",
+    "if(",
+    "elif ",
+    "else:",
+    "for ",
+    "while ",
+    "except",
+    "finally",
+)
+# 不许把整块排除掉: 标记落在定义行上等于"这块不测".
+DEFINITION_PREFIXES = ("def ", "class ", "async def ")
 
 
 def ensure_utf8_output() -> None:
@@ -292,23 +337,65 @@ def labels_of(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def percentage(value: object) -> str:
-    """覆盖率比率(``0.9182``)写成百分比(``91.82%``); 缺失或非法时给 ``?``."""
+def first_line(value: object) -> str:
+    """取多行文本的第一行(空值给空串), 用于把 Allure 的失败原因压成一行."""
+    lines = str(value or "").strip().splitlines()
+    return lines[0] if lines else ""
+
+
+def _ratio(value: object) -> float | None:
+    """把 XML 属性里的比率(``0.9182``)转成浮点数; 缺失或非法时给 None."""
     try:
-        return f"{float(str(value)) * 100:.2f}%"
+        return float(str(value))
     except (TypeError, ValueError):
-        return "?"
+        return None
 
 
-def coverage_rates(payload: dict[str, Any], results_dir: Path) -> tuple[str, str]:
-    """从覆盖率项的原始 XML 里取 (行覆盖率, 分支覆盖率).
+def _percent(rate: float | None) -> str:
+    """覆盖率比率写成百分比(``91.82%``); 取不到时给 ``?`` —— 不猜一个数字出来."""
+    return "?" if rate is None else f"{rate * 100:.2f}%"
 
-    只读文件头部的根节点属性: 为了两个数字引入 XML 解析不合算(coverage.xml 动辄几百
-    KB), 而根节点上的 ``line-rate`` / ``branch-rate`` 就足以回答"这份报告多少覆盖率"。
 
-    **不能**简单取"第一个 ``>`` 之前的内容": coverage.py 写的文件带一行
-    ``<?xml version="1.0" ?>`` 声明, 那样只会拿到声明本身 —— 实测总账里三个平台的
-    覆盖率因此全显示成 ``?``。这里显式匹配 ``<coverage ...>`` 根标签再读它的属性。
+@dataclass(frozen=True)
+class CoverageNumbers:
+    """一个平台的覆盖率数字(都来自该平台结论项附带的原始 coverage.xml)."""
+
+    line_rate: float | None
+    branch_rate: float | None
+    combined_rate: float | None
+
+
+def _coverage_numbers(attributes: dict[str, str]) -> CoverageNumbers:
+    """按 coverage.py 的口径算"合计覆盖率": (行覆盖 + 分支覆盖) / (行总数 + 分支总数).
+
+    覆盖率门槛 ``fail_under`` 比的就是这个合计值(coverage report 的 TOTAL 一列), 不是行
+    覆盖率 —— 实测某次报告 12922 行 / 2886 分支, 用这份公式算出的 TOTAL 与 CLI 打印的 98%
+    一致。拿不到计数(旧格式的 XML)时退回行覆盖率, 宁可少一层信息也不要凭空算一个数。
+    """
+    line = _ratio(attributes.get("line-rate"))
+    branch = _ratio(attributes.get("branch-rate"))
+    covered_lines = _ratio(attributes.get("lines-covered"))
+    covered_branches = _ratio(attributes.get("branches-covered"))
+    valid_lines = _ratio(attributes.get("lines-valid"))
+    valid_branches = _ratio(attributes.get("branches-valid"))
+    if (
+        covered_lines is None
+        or covered_branches is None
+        or valid_lines is None
+        or valid_branches is None
+    ):
+        return CoverageNumbers(line, branch, line)
+    valid = valid_lines + valid_branches
+    combined = (covered_lines + covered_branches) / valid if valid > 0 else line
+    return CoverageNumbers(line, branch, combined)
+
+
+def coverage_numbers(payload: dict[str, Any], results_dir: Path) -> CoverageNumbers:
+    """从覆盖率结论项附带的原始 XML 里读数字(读不到就给全 None).
+
+    只读根节点属性: coverage.xml 动辄几百 KB, 为了几个数字引入 XML 解析不合算。**不能**
+    简单取"第一个 ``>`` 之前的内容": coverage.py 写的文件带一行 ``<?xml ... ?>`` 声明,
+    那样只会拿到声明本身, 各平台的覆盖率会全变成 ``?``(实测踩过).
     """
     for attachment in payload.get("attachments") or []:
         if not isinstance(attachment, dict):
@@ -323,26 +410,273 @@ def coverage_rates(payload: dict[str, Any], results_dir: Path) -> tuple[str, str
         root = re.search(r"<coverage\b([^>]*)>", head)
         if root is None:
             continue
-        attributes = dict(re.findall(r'([\w-]+)="([^"]*)"', root.group(1)))
-        return percentage(attributes.get("line-rate")), percentage(
-            attributes.get("branch-rate")
-        )
-    return "?", "?"
+        return _coverage_numbers(dict(re.findall(r'([\w-]+)="([^"]*)"', root.group(1))))
+    return CoverageNumbers(None, None, None)
 
 
-def coverage_rows(
+def coverage_problem(numbers: CoverageNumbers, item_status: str, message: str) -> str:
+    """某平台覆盖率结论的判定理由; 空串表示通过(绝不把"读不到"当通过)."""
+    if item_status == MISSING_STATUS:
+        return "缺少覆盖率结论项(报告作业可能没有运行, 或产物没合并进来)"
+    if item_status != "passed":
+        detail = f": {message}" if message else ""
+        return f"覆盖率结论项状态为 {item_status}{detail}"
+    if numbers.combined_rate is None:
+        return "读不到覆盖率数字(结论项没有附带可解析的 coverage.xml)"
+    if numbers.combined_rate * 100 < float(COVERAGE_THRESHOLD):
+        return f"合计覆盖率 {_percent(numbers.combined_rate)} 低于门槛 {COVERAGE_THRESHOLD}%"
+    return ""
+
+
+def _coverage_items(
     results_dir: Path, payloads: list[dict[str, Any]]
-) -> list[tuple[str, str, str]]:
-    """覆盖率结论: (平台, 行覆盖率, 分支覆盖率) —— 每个平台各一行."""
-    rows = []
+) -> dict[str, tuple[CoverageNumbers, str, str]]:
+    """按平台收集覆盖率结论项 ``{平台: (数字, 状态, 失败原因首行)}``.
+
+    平台取自结论项的 ``env`` 标签(仓库根的 ``allurerc.mjs`` 按它把结果归到各环境), 缺了才
+    退回 ``os`` 标签 —— 与总账一直以来的口径一致。
+    """
+    items: dict[str, tuple[CoverageNumbers, str, str]] = {}
     for payload in payloads:
         if payload.get("fullName") != COVERAGE_FULL_NAME:
             continue
         labels = labels_of(payload)
-        env = labels.get("env") or labels.get("os") or "default"
-        line, branch = coverage_rates(payload, results_dir)
-        rows.append((env, line, branch))
-    return sorted(rows)
+        platform = labels.get("env") or labels.get("os") or "default"
+        details = payload.get("statusDetails")
+        message = (
+            first_line(details.get("message")) if isinstance(details, dict) else ""
+        )
+        items[platform] = (
+            coverage_numbers(payload, results_dir),
+            str(payload.get("status", "unknown")),
+            message,
+        )
+    return items
+
+
+def coverage_conclusion(
+    results_dir: Path, payloads: list[dict[str, Any]], expected_platforms: list[str]
+) -> tuple[str, list[str], list[tuple[str, str, str, str, str, str]]]:
+    """覆盖率总结论 ``(状态, 失败原因, 每平台一行)``.
+
+    每个**有用例结果的平台**(``expected_platforms``)都该有一份覆盖率结论: 缺了就要红 ——
+    "文件不在"绝不能退化成一个静默的通过。数字取自各平台结论项附带的原始 ``coverage.xml``。
+    """
+    items = _coverage_items(results_dir, payloads)
+    failures: list[str] = []
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for platform in sorted({*expected_platforms, *items}):
+        numbers, status, message = items.get(
+            platform, (CoverageNumbers(None, None, None), MISSING_STATUS, "")
+        )
+        problem = coverage_problem(numbers, status, message)
+        if problem:
+            failures.append(f"{platform}: {problem}")
+        rows.append(
+            (
+                platform,
+                _percent(numbers.line_rate),
+                _percent(numbers.branch_rate),
+                _percent(numbers.combined_rate),
+                f"{COVERAGE_THRESHOLD}%",
+                "未通过" if problem else "通过",
+            )
+        )
+    if not rows:
+        return "broken", ["本次运行没有任何覆盖率结论项, 也没有可据以判断的平台"], rows
+    return ("failed" if failures else "passed"), failures, rows
+
+
+def coverage_digest(status: str, failures: list[str]) -> str:
+    """覆盖率结论项开头的"结论"段: 一眼看出这次覆盖率过没过."""
+    if status == "passed":
+        return "## 结论\n\n**通过** —— 每个有用例结果的平台都有一份达标的覆盖率结论。\n"
+    lines = ["## 结论", "", f"**未通过**({len(failures)} 条):", ""]
+    lines += [f"- {_cell(item)}" for item in failures]
+    return "\n".join(lines) + "\n"
+
+
+def coverage_table(rows: list[tuple[str, str, str, str, str, str]]) -> str:
+    """覆盖率数字表: 平台 / 行 / 分支 / 合计 / 门槛 / 结论."""
+    lines = [
+        "## 按平台",
+        "",
+        "| 平台 | 行覆盖率 | 分支覆盖率 | 合计 | 门槛 | 结论 |",
+        "| --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    lines += ["| " + " | ".join(_cell(value) for value in row) + " |" for row in rows]
+    if not rows:
+        lines.append("| 没有数据 | - | - | - | - | - |")
+    lines += [
+        "",
+        "- 合计覆盖率按 coverage.py 的口径算: (行覆盖 + 分支覆盖) / (行总数 + 分支总数), "
+        "与 `fail_under` 比的就是它。",
+        "- 有意不统计的豁免(每条标记的原因)见报告首页「全局附件」的 "
+        "`allure-coverage-exclusions.md`。",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def is_pragma_line(text: str) -> bool:
+    """该行是否"看起来"是一条覆盖率豁免标记(写法不规范也算, 交给调用方判定)."""
+    return "pragma:" in text and ("no cover" in text or "no branch" in text)
+
+
+def parse_pragma(text: str) -> re.Match[str] | None:
+    """按规范写法解析豁免标记; 不合规范时返回 None."""
+    return PRAGMA_PATTERN.search(text)
+
+
+def pragma_reason_problem(explanation: str) -> str:
+    """原因文字是否合格(太短或占位词); 合格给空串."""
+    normalized = explanation.removesuffix("。").removesuffix(".").lower()
+    if len(explanation) < MIN_PRAGMA_REASON_LENGTH:
+        return f"原因太短 ({explanation})"
+    if normalized in PRAGMA_PLACEHOLDERS:
+        return f"原因是占位词 ({explanation})"
+    return ""
+
+
+@dataclass(frozen=True)
+class PragmaNote:
+    """源码里的一条覆盖率豁免标记(含解析结果与合规问题)."""
+
+    path: str
+    line: int
+    kind: str
+    marker: str
+    reason: str
+    problem: str
+
+
+def pragma_note(
+    module: Path, source_root: Path, number: int, text: str
+) -> PragmaNote | None:
+    """把一行文本解析成 :class:`PragmaNote`(不是豁免标记时返回 None)."""
+    match = parse_pragma(text)
+    if match is None:
+        return None
+    marker = text.strip()
+    rest = match.group("rest").strip()
+    reason = rest.lstrip("- ").strip() if rest.startswith("-") else ""
+    problem = _pragma_problem(marker, rest, reason, match.group("kind"))
+    return PragmaNote(
+        module.relative_to(source_root).as_posix(),
+        number,
+        match.group("kind"),
+        marker,
+        reason,
+        problem,
+    )
+
+
+def _pragma_problem(marker: str, rest: str, reason: str, kind: str) -> str:
+    """逐条检查规范(定义行 / 缺原因 / 原因质量 / no branch 的位置), 返回第一条问题."""
+    if marker.startswith(DEFINITION_PREFIXES):
+        return "标记落在函数/类定义上(等于整块不测)"
+    if not rest.startswith("-"):
+        return "缺少 ` - 原因`"
+    problem = pragma_reason_problem(reason)
+    if problem:
+        return problem
+    if kind == "no branch" and not marker.startswith(BRANCH_LINE_PREFIXES):
+        return "`no branch` 标在了没有分支的行上"
+    return ""
+
+
+def source_pragma_notes(source_root: Path) -> list[PragmaNote]:
+    """扫描源码树, 收集全部豁免标记(按文件与行号排序)."""
+    notes: list[PragmaNote] = []
+    for module in sorted(source_root.rglob("*.py")):
+        for number, text in enumerate(
+            module.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if not is_pragma_line(text):
+                continue
+            note = pragma_note(module, source_root, number, text)
+            if note is not None:
+                notes.append(note)
+    return notes
+
+
+def excluded_also(project_root: Path) -> tuple[str, ...]:
+    """读 ``pyproject.toml`` 的 ``[tool.coverage.report] exclude_also``(读不到给空)."""
+    path = project_root / PYPROJECT_NAME
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"跳过无法解析的 {path}: {exc}", file=sys.stderr)
+        return ()
+    report = payload.get("tool", {}).get("coverage", {}).get("report", {})
+    entries = report.get("exclude_also", []) if isinstance(report, dict) else []
+    return tuple(str(item) for item in entries) if isinstance(entries, list) else ()
+
+
+def _pragma_file_sections(notes: list[PragmaNote]) -> list[str]:
+    """按文件列出豁免标记; 一条都没有时给出明确的"没有豁免"说明."""
+    if not notes:
+        return [
+            "## 按文件",
+            "",
+            "本次没有任何 `# pragma: no cover` / `# pragma: no branch` 标记 —— "
+            "没有代码被刻意跳过(覆盖率统计覆盖了全部可达代码)。",
+            "",
+        ]
+    lines = ["## 按文件", ""]
+    for path in sorted({note.path for note in notes}):
+        lines.append(f"### `{path}`")
+        lines.append("")
+        for note in (item for item in notes if item.path == path):
+            detail = f"`{note.path}:{note.line}` — `{note.kind}`"
+            if note.reason:
+                detail += f" — 原因: {note.reason}"
+            if note.problem:
+                detail += f" — **问题: {note.problem}**"
+            lines.append(f"- {detail}")
+        lines.append("")
+    return lines
+
+
+def coverage_exclusions_report(
+    project_root: Path, *, source_root: Path | None = None
+) -> str:
+    """渲染"有意不统计的覆盖"清单(Markdown, 作为报告首页的全局附件).
+
+    数据来自真实源码(``src/**/*.py``)与 ``pyproject.toml``, 不是手工维护的清单; 解析规则与
+    ``tests/unit/test_coverage_pragmas.py`` 共用同一份实现(见模块常量区的说明)。
+    """
+    root = source_root if source_root is not None else project_root / SOURCE_ROOT_NAME
+    notes = source_pragma_notes(root)
+    excluded = excluded_also(project_root)
+    covers = sum(1 for note in notes if note.kind == "no cover")
+    branches = sum(1 for note in notes if note.kind == "no branch")
+    problems = [note for note in notes if note.problem]
+    lines = [
+        "# 有意不统计的覆盖率(豁免清单)",
+        "",
+        "- 数据来源: `src/**/*.py` 里的 `# pragma: no cover` / `# pragma: no branch` 标记与 "
+        f"`{PYPROJECT_NAME}` 的 `[tool.coverage.report] exclude_also` —— 不是手工维护的清单。",
+        f"- 汇总: `no cover` {covers} 条, `no branch` {branches} 条, "
+        f"`exclude_also` {len(excluded)} 条。",
+        "",
+    ]
+    if problems:
+        lines += [f"- **写入问题: {len(problems)} 条(详见文末「写入问题」)。**", ""]
+    lines += _pragma_file_sections(notes)
+    lines += ["## `exclude_also`(pyproject.toml)", ""]
+    if excluded:
+        lines += [f"- `{_cell(item)}`" for item in excluded]
+    else:
+        lines.append("`exclude_also` 为空: 没有额外排除的代码块。")
+    lines += ["", "## 写入问题", ""]
+    if problems:
+        lines += [
+            f"- `{note.path}:{note.line}` — {note.problem} — `{_cell(note.marker)}`"
+            for note in problems
+        ]
+    else:
+        lines.append("没有: 每个豁免标记都写明了原因。")
+    return "\n".join(lines) + "\n"
 
 
 def performance_note(performance: dict[str, Any] | None) -> str:
@@ -356,6 +690,52 @@ def performance_note(performance: dict[str, Any] | None) -> str:
     else:
         verdict = f"{passed}/{len(measurements)} 项达标"
     return f"平台 {platform_of(performance)}: **{verdict}**"
+
+
+def performance_verdict(performance: dict[str, Any]) -> tuple[str, list[str]]:
+    """性能结论 ``(状态, 未达标说明)``.
+
+    任何一条测量 ``passed`` 非真就写 ``failed``(基准冲破预算 = 性能回归), 一条测量都没有
+    写 ``broken`` —— 空结果不能算通过。
+    """
+    measurements = [
+        item for item in performance.get("measurements", []) if isinstance(item, dict)
+    ]
+    if not measurements:
+        return "broken", ["性能结果里没有任何测量"]
+    failures = [
+        f"未达标: {item.get('name', '?')} [{item.get('scale', '?')}] "
+        f"{item.get('metric', '?')}={item.get('value', '?')}{item.get('unit', '')}"
+        f"(阈值 {'≤' if item.get('comparison') == 'max' else '≥'} "
+        f"{item.get('threshold', '?')})"
+        for item in measurements
+        if not item.get("passed")
+    ]
+    return ("failed" if failures else "passed"), failures
+
+
+def performance_digest(status: str, failures: list[str]) -> str:
+    """性能结论项开头的"结论"段: 一眼看出这次基准过没过."""
+    if status == "passed":
+        return "## 结论\n\n**通过** —— 全部基准都在预算内。\n"
+    lines = ["## 结论", "", f"**未通过**({len(failures)} 条):", ""]
+    lines += [f"- {_cell(item)}" for item in failures]
+    return "\n".join(lines) + "\n"
+
+
+def performance_rows(
+    performance: dict[str, Any] | None,
+) -> list[tuple[str, str, str, str]]:
+    """总账里的性能行 ``(平台, 基准数, 未达标数, 结论)``; 没有结果时给空列表."""
+    if performance is None:
+        return []
+    measurements = [
+        item for item in performance.get("measurements", []) if isinstance(item, dict)
+    ]
+    failed = sum(1 for item in measurements if not item.get("passed"))
+    status, _ = performance_verdict(performance)
+    verdict = {"passed": "通过", "failed": "**未通过**", "broken": "**不可用**"}[status]
+    return [(platform_of(performance), str(len(measurements)), str(failed), verdict)]
 
 
 def security_test_failures(results_dir: Path, platform: str) -> list[tuple[str, str]]:
@@ -512,16 +892,24 @@ def run_ledger(
     payloads: list[dict[str, Any]],
     performance: dict[str, Any] | None,
     security_payloads: list[dict[str, Any]],
+    platforms: list[str] | None = None,
 ) -> str:
-    """把四类结论与产物清单合成一份"运行总账"(报告首页「全局附件」页签)."""
-    platforms = tested_platforms(results_dir)
+    """把四类结论与产物清单合成一份"运行总账"(报告首页「全局附件」页签).
+
+    ``platforms`` 是本次运行涉及、且**应该**有覆盖率结论的平台(调用方在写任何新结论项之前
+    采好的那一份); 不传时退回"结果里出现过的平台"。
+    """
+    known_platforms = tested_platforms(results_dir) if platforms is None else platforms
+    expected_coverage = [
+        name for name in known_platforms if name not in {"unknown", "", "default"}
+    ]
     lines = [
         "# 运行总账",
         "",
         f"- 提交: `{git_commit()[:12]}`"
         f"(分支 {os.environ.get('GITHUB_REF_NAME', 'local')}"
         f", 运行 {os.environ.get('GITHUB_RUN_ID', 'local')})",
-        f"- 涉及平台: {', '.join(platforms) if platforms else 'unknown'}",
+        f"- 涉及平台: {', '.join(known_platforms) if known_platforms else 'unknown'}",
         "- 下面四节是本次运行的结论, 每节都注明原始产物在哪条结论项里; "
         "末尾的产物清单逐项核对文件是否存在。",
         "",
@@ -533,19 +921,28 @@ def run_ledger(
         "## 覆盖率",
         "",
     ]
-    coverage = coverage_rows(results_dir, payloads)
-    if coverage:
-        lines += [
-            "| 平台 | 行覆盖率 | 分支覆盖率 | 原始报告 |",
-            "| --- | ---: | ---: | --- |",
-        ]
-        lines += [
-            f"| {_cell(env)} | {_cell(line)} | {_cell(branch)} | "
-            "`coverage.xml`(见结论项 `Coverage report`) |"
-            for env, line, branch in coverage
-        ]
-    else:
-        lines.append("本次运行没有覆盖率结论项。")
+    coverage_status, coverage_failures, coverage = coverage_conclusion(
+        results_dir, payloads, expected_coverage
+    )
+    verdict = (
+        "**通过**"
+        if coverage_status == "passed"
+        else f"**未通过({len(coverage_failures)} 条)**"
+    )
+    lines += [
+        f"- 结论: {verdict} —— 每个有用例结果的平台都要有一份达标的覆盖率结论。",
+        "",
+        "| 平台 | 行覆盖率 | 分支覆盖率 | 合计 | 门槛 | 结论 | 原始报告 |",
+        "| --- | ---: | ---: | ---: | ---: | --- | --- |",
+    ]
+    lines += [
+        f"| {_cell(platform)} | {_cell(line)} | {_cell(branch)} | {_cell(combined)} "
+        f"| {_cell(threshold)} | {_cell(state)} "
+        "| `coverage.xml`(见结论项 `Coverage report`) |"
+        for platform, line, branch, combined, threshold, state in coverage
+    ]
+    if not coverage:
+        lines.append("| (没有数据) | - | - | - | - | - | - |")
     lines += [
         "",
         "## 性能基准(只在 Linux 执行)",
@@ -554,9 +951,22 @@ def run_ledger(
         "- 原始数据 `performance-results.json` / `.csv` "
         "见结论项 `Performance baseline`。",
         "",
-        "## 安全测试",
-        "",
     ]
+    bench_rows = performance_rows(performance)
+    if bench_rows:
+        lines += [
+            "| 平台 | 基准数 | 未达标 | 结论 |",
+            "| --- | ---: | ---: | --- |",
+        ]
+        lines += [
+            f"| {_cell(platform)} | {total} | {failed} | {state} |"
+            for platform, total, failed, state in bench_rows
+        ]
+    else:
+        lines.append(
+            "本次运行没有性能结果文件(结论项 `Performance baseline` 记为 **broken**)。"
+        )
+    lines += ["", "## 安全测试", ""]
     security = security_rows(results_dir, security_payloads)
     if security:
         lines += [
@@ -727,37 +1137,28 @@ def write_result(
     )
 
 
-def main() -> int:
-    """把性能/安全结果与环境信息写入 allure-results."""
-    results_dir = RESULTS_DIRECTORY
-    if not results_dir.is_dir():
-        print(f"Allure 结果目录不存在: {results_dir}", file=sys.stderr)
-        return 1
-
-    performance = read_json(PERFORMANCE_JSON)
-    security_payloads = [
-        payload for payload in (read_json(path) for path in security_files()) if payload
-    ]
-
-    platforms = sorted(
-        {
-            *tested_platforms(results_dir),
-            *([platform_of(performance)] if performance is not None else []),
-            *(platform_of(payload) for payload in security_payloads),
-        }
-        - {"unknown"}
-    )
-    lines = environment_lines(
-        performance, security_payloads[0] if security_payloads else None, platforms
-    )
-    (results_dir / ENVIRONMENT_FILENAME).write_text(
-        "".join(f"{key}={value}\n" for key, value in lines), encoding="utf-8"
-    )
-
-    if performance is not None:
-        measurements = list(performance.get("measurements", []))
-        platform = platform_of(performance)
-        result_id = str(uuid.uuid4())
+def _write_performance_result(
+    results_dir: Path, performance: dict[str, Any] | None
+) -> None:
+    """写性能结论项: 缺失结果文件时写 broken, 而不是不写(不能静默地"没有这条")."""
+    platform = platform_of(performance) if performance is not None else "unknown"
+    result_id = str(uuid.uuid4())
+    attachments: list[dict[str, str]] = []
+    measurements: list[dict[str, Any]] = []
+    if performance is None:
+        status = "broken"
+        failures = [
+            f"缺少性能结果文件: {PERFORMANCE_JSON}"
+            "(性能基准作业可能没有运行, 或产物没合并进来)"
+        ]
+        description = performance_digest(status, failures)
+    else:
+        status, failures = performance_verdict(performance)
+        measurements = [
+            item
+            for item in performance.get("measurements", [])
+            if isinstance(item, dict)
+        ]
         attachments = [
             item
             for item in (
@@ -766,17 +1167,27 @@ def main() -> int:
             )
             if item is not None
         ]
-        write_result(
-            results_dir,
-            result_id=result_id,
-            category="performance",
-            title="Performance baseline",
-            description=performance_table(measurements),
-            attachments=attachments,
-            platform=platform,
+        description = (
+            performance_digest(status, failures)
+            + "\n"
+            + performance_table(measurements)
         )
-        print(f"性能基准已写入 Allure: {len(measurements)} 条测量({platform})")
+    write_result(
+        results_dir,
+        result_id=result_id,
+        category="performance",
+        title="Performance baseline",
+        description=description,
+        attachments=attachments,
+        platform=platform,
+        status=status,
+        status_message="; ".join(failures),
+    )
+    print(f"性能基准已写入 Allure: {len(measurements)} 条测量({platform}, {status})")
 
+
+def _write_security_results(results_dir: Path) -> None:
+    """逐平台写安全结论项(状态由未拦截结论与失败用例共同决定)."""
     for source in security_files():
         payload = read_json(source)
         if payload is None:
@@ -808,15 +1219,79 @@ def main() -> int:
             f"{status}, 来源 {source})"
         )
 
+
+def _write_coverage_conclusion(results_dir: Path, platforms: list[str]) -> None:
+    """写覆盖率总结论: 每个有用例结果的平台都要有一份达标的覆盖率结论."""
+    expected = [name for name in platforms if name not in {"unknown", ""}]
+    status, failures, rows = coverage_conclusion(
+        results_dir, result_payloads(results_dir), expected
+    )
+    write_result(
+        results_dir,
+        result_id=str(uuid.uuid4()),
+        category="coverage-conclusion",
+        title=COVERAGE_CONCLUSION_TITLE,
+        description=coverage_digest(status, failures) + "\n" + coverage_table(rows),
+        attachments=[],
+        platform="unknown",
+        status=status,
+        status_message="; ".join(failures),
+    )
+    print(f"覆盖率结论已写入 Allure: {len(rows)} 个平台({status})")
+
+
+def _write_coverage_exclusions() -> None:
+    """写"有意不统计的覆盖"清单(报告首页「全局附件」的一份附件)."""
+    COVERAGE_EXCLUSIONS_REPORT.write_text(
+        coverage_exclusions_report(REPOSITORY_ROOT), encoding="utf-8"
+    )
+    print(f"覆盖率豁免清单已写入 {COVERAGE_EXCLUSIONS_REPORT}")
+
+
+def main() -> int:
+    """把性能/安全/覆盖率结论与环境信息写入 allure-results."""
+    results_dir = RESULTS_DIRECTORY
+    if not results_dir.is_dir():
+        print(f"Allure 结果目录不存在: {results_dir}", file=sys.stderr)
+        return 1
+
+    performance = read_json(PERFORMANCE_JSON)
+    security_payloads = [
+        payload for payload in (read_json(path) for path in security_files()) if payload
+    ]
+
+    platforms = sorted(
+        {
+            *tested_platforms(results_dir),
+            *([platform_of(performance)] if performance is not None else []),
+            *(platform_of(payload) for payload in security_payloads),
+        }
+        - {"unknown", ""}
+    )
+    lines = environment_lines(
+        performance, security_payloads[0] if security_payloads else None, platforms
+    )
+    (results_dir / ENVIRONMENT_FILENAME).write_text(
+        "".join(f"{key}={value}\n" for key, value in lines), encoding="utf-8"
+    )
+
+    _write_performance_result(results_dir, performance)
+    _write_security_results(results_dir)
+    _write_coverage_conclusion(results_dir, platforms)
+    _write_coverage_exclusions()
+
     if performance is None:
-        print(f"未找到性能结果文件, 已跳过: {PERFORMANCE_JSON}")
+        print(
+            f"未找到性能结果文件, 结论项记为 broken: {PERFORMANCE_JSON}",
+            file=sys.stderr,
+        )
     if not security_payloads:
         print(f"未找到安全结果文件, 已跳过: {SECURITY_JSON}")
 
     checks = quality_checks(results_dir)
     payloads = result_payloads(results_dir)
     QUALITY_GATE_REPORT.write_text(
-        run_ledger(results_dir, payloads, performance, security_payloads),
+        run_ledger(results_dir, payloads, performance, security_payloads, platforms),
         encoding="utf-8",
     )
     artifacts = artifact_rows(results_dir, payloads)

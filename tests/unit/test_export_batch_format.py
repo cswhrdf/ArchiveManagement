@@ -15,6 +15,7 @@ import hashlib
 import json
 import zipfile
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -197,7 +198,8 @@ def test_batch_manifest_records_kind_versions_and_real_hashes(tmp_path: Path) ->
     assert manifest["kind"] == fmt.BATCH_KIND
     assert manifest["version"] == fmt.EXPORT_FORMAT_VERSION
     assert manifest["tool_version"] == "9.9.9"
-    assert manifest["created_at"]
+    created = datetime.fromisoformat(manifest["created_at"])
+    assert created.tzinfo is not None, "清单时间要带时区(全库统一用 UTC)"
     sizes = [item.stat().st_size for item in inners]
     assert manifest["files"] == {"count": 2, "bytes": sum(sizes)}
     rows = manifest["games"]

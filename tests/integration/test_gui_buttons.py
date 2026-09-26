@@ -5551,3 +5551,750 @@ def test_main_window_covers_empty_states_and_archived_guards(
         app._set_detail_names()
     finally:
         app.destroy()
+
+
+# --------------------------------- 补分支: 界面层剩下的边角与守卫(逐条钉住)
+
+
+def test_smoke_start_schedules_a_self_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """带 ``--smoke`` 启动: 构造时就排好"到点自己关闭", 并真的走到正常关闭路径.
+
+    没有这个参数时走的是另一条路(启动即补一次译名探测), 两条都要能跑。
+    """
+    import contextlib
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    closed: list[str] = []
+    backend = DemoArchiveService(delay=0)
+    monkeypatch.setattr(backend, "shutdown", lambda: closed.append("shutdown"))
+
+    def build(service: Any) -> Any:
+        hotkeys = GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用"))
+        return ArchiveApp(
+            service, title="冒烟自检", hotkeys=hotkeys, smoke_seconds=0.05
+        )
+
+    app = gui_app(build, backend)
+    deadline = time.monotonic() + 5.0
+    while not closed and time.monotonic() < deadline:
+        with contextlib.suppress(TclError):
+            _pump(app)
+        time.sleep(0.02)
+
+    assert closed, "冒烟自检到点必须走 _on_close(它负责释放调度器与快捷键)"
+
+
+def test_run_gui_reports_every_config_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``run_gui`` 读配置的三个分支: 干净 / 只坏一项(修复) / 整份坏掉(还原).
+
+    窗口在这里用替身: 这条用例要的是"读配置之后的三个分支", 真窗口由冒烟那条用例覆盖。
+    """
+    import archive_management.ui.main_window as main_window_mod
+    from archive_management.ui.main_window import run_gui
+
+    opened: list[Any] = []
+
+    class _StubApp:
+        """替身窗口: 不建 Tk 根, 也不进事件循环."""
+
+        def __init__(self, backend: Any, **_kwargs: Any) -> None:
+            opened.append(backend)
+
+        def mainloop(self) -> None:
+            """替身不进入事件循环."""
+
+    monkeypatch.setattr(main_window_mod, "ArchiveApp", _StubApp)
+
+    def run_once(name: str, config_text: str | None) -> None:
+        paths = ApplicationPaths.default(override_root=tmp_path / name).ensure()
+        if config_text is not None:
+            paths.config_path.write_text(config_text, encoding="utf-8")
+        assert run_gui(paths=paths) == 0
+
+    run_once("fresh", None)
+    run_once("repaired", '{"version": 1, "theme": "neon"}')
+    run_once("reset", "{")
+    assert len(opened) == 3, "三次启动都要真的装配过后端"
+
+
+def test_settings_writes_reach_the_config_file(tmp_path: Path) -> None:
+    """有配置路径时三个写回口真的落盘(字号 / 调试日志 / 自动启停)."""
+    from archive_management.config import load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    app = gui_app(_new_app, DemoArchiveService(delay=0), paths=paths)
+    try:
+        _pump(app)
+        assert app._paths is not None
+
+        assert app._on_font_size_change(18) is None
+        assert load_config(paths.config_path).ui.base_font_px == 18
+
+        assert app._on_debug_change(True) is None
+        assert load_config(paths.config_path).logging.debug is True
+        app._on_debug_change(False)
+        assert load_config(paths.config_path).logging.debug is False
+
+        app._on_activation_change(True)
+        _drain(app)
+        assert load_config(paths.config_path).activation.auto is True
+        app._on_activation_change(False)
+        _drain(app)
+        assert load_config(paths.config_path).activation.auto is False
+    finally:
+        app.destroy()
+
+
+def test_cancel_with_a_running_operation_reports_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真的有可取消的操作时点取消: 进"正在取消"提示, 并记住这次取消."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        monkeypatch.setattr(app.backend, "cancel_active", lambda: True)
+
+        app._on_cancel()
+
+        assert app._canceled is True
+        assert app._last_feedback[0] == FeedbackKind.PENDING
+        assert app._last_feedback[1] == tr("action.cancel_pending")
+    finally:
+        app._canceled = False
+        app.destroy()
+
+
+def test_export_batch_is_ignored_while_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """忙碌时批量导出直接返回: 连"勾选游戏"的多选对话框都不弹."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        main_mod, "export_batch_dialog", lambda *_a, **_k: asked.append("dialog")
+    )
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        app._set_busy(True)
+
+        app._on_export_batch()
+
+        assert asked == [], "忙碌时不该弹出批量导出对话框"
+        app._set_busy(False)
+        assert app._busy is False
+    finally:
+        app.destroy()
+
+
+def test_refresh_after_manage_resets_the_probe_ladder() -> None:
+    """手动改完游戏状态后, 自动启停的轮询间隔退回最快档(马上再探一次)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        app._activation = True
+        app._activation_steps = 4
+        app._activation_due = time.monotonic() + 99.0
+
+        app._refresh_after_manage()
+
+        assert app._activation_steps == 0
+        assert app._activation_due == 0.0
+    finally:
+        app._activation = False
+        app.destroy()
+
+
+def test_save_hotkey_starts_a_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """快捷键"立即备份"那一路: 选中一款可备份的游戏时真的发起一次备份."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        app._select_game("outer-wilds")
+        _pump(app)
+        before = len(app.backend.list_backups("outer-wilds"))
+
+        from archive_management.services.hotkeys import ACTION_SAVE_NOW
+
+        app._run_hotkey(ACTION_SAVE_NOW)
+        _drain(app)
+
+        assert len(app.backend.list_backups("outer-wilds")) == before + 1
+    finally:
+        app.destroy()
+
+
+def test_confirming_a_branch_root_deletes_the_subtree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认删除分支根节点后连带子树一起删掉(取消的那一半已有用例)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch, confirm=True)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        app._select_game("outer-wilds")
+        _pump(app)
+        root = next(item for item in app._items if item.backup_id == "b3")
+        app._select_backup(root)
+        _pump(app)
+        plan = app.backend.plan_delete("outer-wilds", "b3")
+        assert plan.needs_confirmation is True
+        before = len(app._items)
+
+        app._on_delete_backup()
+        _drain(app)
+
+        assert app._last_feedback[0] == FeedbackKind.SUCCESS
+        assert len(app._items) == before - len(plan.removed_ids)
+    finally:
+        app.destroy()
+
+
+def test_restore_danger_note_flags_a_running_game() -> None:
+    """预检发现游戏正在运行时, 危险提示行里要写明(用户据此决定是否强制恢复)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        plan = app.backend.preview_restore("outer-wilds", "b2")
+        assert plan.process.running is True
+
+        note = app._restore_danger_note(plan)
+
+        expected = tr(
+            "dialog.restore_process", matches=", ".join(plan.process.matches[:3])
+        )
+        assert expected in note
+    finally:
+        app.destroy()
+
+
+def test_restore_with_a_blocked_target_reports_instead_of_asking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """预检报告"目标被拦下"时直接进错误提示: 不弹恢复对话框、也不起后台任务."""
+    from dataclasses import replace
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        main_mod, "restore_dialog", lambda *_a, **_k: asked.append("dialog")
+    )
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        app._select_game("outer-wilds")
+        _pump(app)
+        item = app._items[0]
+        app._select_backup(item)
+        _pump(app)
+        plan = app.backend.preview_restore("outer-wilds", item.backup_id)
+        blocked = replace(plan.targets[0], problem="protected")
+        monkeypatch.setattr(
+            app.backend,
+            "preview_restore",
+            lambda *_a, **_k: replace(plan, targets=(blocked,)),
+        )
+
+        app._on_restore()
+
+        assert asked == [], "目标被拦下时不该弹恢复对话框"
+        assert app._last_feedback[0] == FeedbackKind.ERROR
+        expected = tr(
+            "dialog.restore_blocked",
+            path=blocked.path,
+            reason=app._restore_problem_text(blocked.problem),
+        )
+        assert expected in app._last_feedback[1]
+        assert app._busy is False
+    finally:
+        app.destroy()
+
+
+def test_home_page_guards_need_forced_state() -> None:
+    """主页三处守卫: 没接批量导出回调 / 选中的游戏没有可用存档位置 / 海报下没有卡片."""
+    from dataclasses import replace
+
+    from archive_management.domain import HomeLayout
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.home_page import HomePage
+    from archive_management.ui.palette import Palette
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    palette = Palette.for_theme(app._theme)
+    page = HomePage(ctk.CTkFrame(app), backend=app.backend, palette=palette)
+    try:
+        # ① 独立构造的主页没有批量导出回调: 点按钮什么都不做。
+        page._request_export_batch()
+        assert page._on_export_batch is None
+
+        main = app._home_page
+        main._select("outer-wilds")
+        _pump(app)
+        board = main._board
+        assert board is not None
+
+        # ② 选中的游戏没有可用存档位置: 只提示原因, 不起后台任务。
+        main._board = replace(
+            board,
+            games=tuple(
+                replace(game, location_count=0)
+                if game.game_id == "outer-wilds"
+                else game
+                for game in board.games
+            ),
+        )
+        before = len(app.backend.list_backups("outer-wilds"))
+        main._on_backup()
+        assert app._busy is False
+        assert tr("error.home_location_required") in _label_texts(main.frame)
+        assert len(app.backend.list_backups("outer-wilds")) == before
+
+        # ③ 海报模式下还没有卡片时收到尺寸事件: 直接返回(不去重排空网格)。
+        main._board = board
+        main._filter = replace(main._filter, layout=HomeLayout.POSTER)
+        main._rows.clear()
+        main._on_list_box_resize(SimpleNamespace(width=900))
+        assert main._rows == {}
+    finally:
+        page.frame.destroy()
+        app.destroy()
+
+
+def test_table_header_alignment_stops_when_it_cannot_improve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """表头对齐的两处止损: 调太多次之后不再折腾; 内边距顶到边上就不再挪.
+
+    真实窗口里布局一旦稳定, 表头与数据行的偏移就是 0(那会走"已经对齐"的提前返回),
+    所以这里把两处几何量换成"表头整体偏右 5px"的替身, 专门驱动止损分支。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.home_page import _ALIGN_MAX_ATTEMPTS
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        main = app._home_page
+        main._select("outer-wilds")
+        _pump(app)
+        parts = next(iter(main._row_parts.values()))
+        head_name = main._head_name
+        head_columns = main._head_columns
+        # 偏移: 左边 5px(表头偏右), 右边 5px(表头右边界超出数据行)。
+        monkeypatch.setattr(
+            parts.name_block, "winfo_rootx", lambda: head_name.winfo_rootx() - 5
+        )
+        monkeypatch.setattr(parts.columns, "winfo_rootx", head_columns.winfo_rootx)
+        monkeypatch.setattr(
+            parts.columns, "winfo_width", lambda: head_columns.winfo_width() - 5
+        )
+        assert head_name.winfo_rootx() - parts.name_block.winfo_rootx() == 5
+
+        # ① 已经调了很多轮: 不再改内边距, 也不再计数。
+        main._align_attempts = _ALIGN_MAX_ATTEMPTS
+        main._align_table_header()
+        assert main._align_attempts == _ALIGN_MAX_ATTEMPTS
+
+        # ② 左边距已经是 0(不能再往左挪), 算出来的新值与当前一致: 就此停手。
+        main._align_attempts = 0
+        main._head_pads = (0, main._head_pads[1])
+        before_pads = main._head_pads
+        main._align_table_header()
+        assert main._head_pads == before_pads
+    finally:
+        app.destroy()
+
+
+def test_schedule_window_notifies_and_refuses_archived_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """定时任务窗口: 每次成功改动都通知主窗口; 归档游戏的任务不可编辑(只提示原因)."""
+    from dataclasses import replace
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.schedule_window import ScheduleWindow
+
+    _patch_dialogs(monkeypatch, schedule_result=("1h", "3"))
+    noted: list[str] = []
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        window = ScheduleWindow(
+            app,
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
+            on_change=lambda: noted.append("changed"),
+        )
+        item = next(row for row in window._items if row.game_id == "outer-wilds")
+
+        # ① 编辑成功。
+        assert window._apply(item) is True
+        assert noted == ["changed"]
+
+        # ② 暂停/继续。
+        window._select("outer-wilds")
+        window._on_toggle()
+        assert noted == ["changed", "changed"]
+
+        # ③ 删除(确认后)。
+        _patch_dialogs(monkeypatch, confirm=True)
+        window._select("outer-wilds")
+        window._on_remove()
+        assert noted == ["changed", "changed", "changed"]
+
+        # ④ 归档游戏的任务: 不可编辑, 只把原因写进提示行。
+        archived = replace(item, archived=True)
+        assert window._apply(archived) is False
+        expected = tr("error.archived_game_schedule", name=archived.game_name)
+        assert window._status_label.cget("text") == expected
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_schedule_window_blocks_toggle_and_keeps_add_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """停用中的游戏不能启用任务; 新增时配置对话框被取消就不加任务、也不改选中项."""
+    import archive_management.ui.schedule_window as sched_window_mod
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.schedule_window import ScheduleWindow
+
+    _patch_dialogs(monkeypatch, schedule_result=None)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        # 停用"outer-wilds": 任务保留周期但被强制暂停, 于是 can_toggle 为假。
+        app.backend.set_game_enabled("outer-wilds", False)
+        window = ScheduleWindow(
+            app, backend=app.backend, palette=Palette.for_theme(app._theme)
+        )
+        window._select("outer-wilds")
+        selected = window._selected_item()
+        assert selected is not None
+        assert selected.can_toggle is False
+        before = app.backend.task_status("outer-wilds").schedule_enabled
+
+        # ① 启停: 只弹提示(已替身), 配置一点没变。
+        window._on_toggle()
+        assert app.backend.task_status("outer-wilds").schedule_enabled == before
+
+        # ② 新增: 选好了游戏但配置对话框被取消 → 不写库, 也不选中它。
+        monkeypatch.setattr(
+            sched_window_mod, "add_schedule_dialog", lambda *_a, **_k: "shanhai"
+        )
+        window._selected = None
+        window._on_add()
+        assert window._selected is None
+        assert app.backend.task_status("shanhai").schedule_text == ""
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_add_schedule_dialog_handles_an_empty_blocked_list_and_typing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """新增定时任务的弹窗: 没有被拦下的游戏就不显示原因行; 输入即筛选真的过滤候选."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.schedule_window import (
+        ScheduleWindow,
+        add_schedule_dialog,
+    )
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        # 多补一款可调度的游戏: 只有一个候选时"筛选"根本看不出效果。
+        extra = app.backend.add_game("第二款待配置")
+        save = tmp_path / "extra-save"
+        save.mkdir()
+        app.backend.add_location(extra.game_id, path=str(save), kind="directory")
+        palette = Palette.for_theme(app._theme)
+        window = ScheduleWindow(app, backend=app.backend, palette=palette)
+        candidates = window._addable()
+        assert len(candidates) >= 2, "候选太少就测不出筛选"
+        names = [item.game_name for item in candidates]
+
+        combos: list[Any] = []
+        toplevels: list[Any] = []
+        real_combo = ctk.CTkComboBox
+        real_toplevel = ctk.CTkToplevel
+
+        def make_combo(*args: Any, **kwargs: Any) -> Any:
+            combo: Any = real_combo(*args, **kwargs)
+            original = combo.bind
+
+            def recording_bind(
+                sequence: Any = None, command: Any = None, add: Any = True
+            ) -> Any:
+                if sequence == "<KeyRelease>":
+                    combo.key_callback = command
+                return original(sequence, command, add)
+
+            combo.bind = recording_bind
+            combos.append(combo)
+            return combo
+
+        def make_toplevel(*args: Any, **kwargs: Any) -> Any:
+            top: Any = real_toplevel(*args, **kwargs)
+            toplevels.append(top)
+            return top
+
+        monkeypatch.setattr(ctk, "CTkComboBox", make_combo)
+        monkeypatch.setattr(ctk, "CTkToplevel", make_toplevel)
+        # 弹窗不再阻塞主线程: "关闭窗口"这一步由用例自己接管。
+        monkeypatch.setattr(app, "wait_window", lambda *_a, **_k: None)
+
+        # ① 没有被拦下的游戏: 不显示原因行(窗口仍然正常打开)。
+        assert (
+            add_schedule_dialog(app, palette, candidates=candidates, blocked=()) is None
+        )
+        assert tr("dialog.schedule_add_blocked", names="") not in _label_texts(
+            toplevels[-1]
+        )
+        toplevels[-1].destroy()
+
+        # ② 输入即筛选: 清空时回到全部候选, 输入片段时只剩命中的那一条。
+        assert (
+            add_schedule_dialog(app, palette, candidates=candidates, blocked=()) is None
+        )
+        combo = combos[-1]
+        combo.set("")
+        combo.key_callback(None)
+        assert list(combo.cget("values")) == names
+        combo.set(names[-1][1:])
+        combo.key_callback(None)
+        assert list(combo.cget("values")) == [names[-1]]
+        toplevels[-1].destroy()
+    finally:
+        app.destroy()
+
+
+def test_schedule_window_focus_reports_whether_it_is_open() -> None:
+    """焦点请求: 窗口还在时提前台返回 True, 关掉之后再请求返回 False."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.schedule_window import ScheduleWindow
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = ScheduleWindow(
+        app, backend=app.backend, palette=Palette.for_theme(app._theme)
+    )
+
+    assert window.focus() is True
+
+    window.close()
+    assert window.focus() is False
+    assert app._active_window is None
+    app.destroy()
+
+
+def test_discovery_panel_edits_and_removes_a_monitored_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """监控目录: 只答路径不答备注就整条不动; 两个都答完才写回; 删除要确认."""
+    import archive_management.ui.discovery_page as disc_page_mod
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.palette import Palette
+
+    _patch_dialogs(monkeypatch, confirm=True)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app),
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
+        )
+        target = panel._dirs[0].directory_id
+        panel._select_dir(target)
+        before = app.backend.list_monitored_directories()
+        moved = str(tmp_path / "moved")
+
+        # ① 备注那一步被取消: 路径虽然填了也不写回。
+        answers = iter([moved, None])
+        monkeypatch.setattr(disc_page_mod, "ask_text", lambda *_a, **_k: next(answers))
+        panel._on_edit_dir()
+        assert app.backend.list_monitored_directories() == before
+
+        # ② 两个输入框都答完: 路径与备注一起写回。
+        answers = iter([moved, "新备注"])
+        panel._on_edit_dir()
+        updated = next(
+            item
+            for item in app.backend.list_monitored_directories()
+            if item.directory_id == target
+        )
+        assert (updated.path, updated.note) == (moved, "新备注")
+
+        # ③ 删除: 确认后记录消失。
+        panel._on_remove_dir()
+        assert target not in {
+            item.directory_id for item in app.backend.list_monitored_directories()
+        }
+    finally:
+        app.destroy()
+
+
+def test_discovery_panel_candidate_answers_and_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """候选: 取消导入不动数据 / 填了新路径就修正 / 不认识的筛选与状态都安静跳过."""
+    from dataclasses import replace
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.models import CandidateFilter, SavePathSuggestion
+    from archive_management.ui.palette import Palette
+
+    relocated = str(tmp_path / "relocated")
+    _patch_dialogs(monkeypatch, ask_text=relocated, import_result=None)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app),
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
+        )
+        # ① 下拉框给了不认识的值: 筛选保持原样, 列表照常重绘。
+        panel._on_filter_change("不认识的筛选")
+        assert panel._filter is CandidateFilter.NEW
+
+        candidate = next(item for item in panel._candidates if item.importable)
+        panel._select_candidate(candidate.candidate_id)
+        before = app.backend.list_candidates()
+
+        # ② 导入对话框被取消: 候选一个字段都不变。
+        panel._on_import()
+        assert app.backend.list_candidates() == before
+
+        # ③ 修正路径: 填了新路径就写回。
+        panel._on_relocate()
+        moved = next(
+            item
+            for item in app.backend.list_candidates()
+            if item.candidate_id == candidate.candidate_id
+        )
+        assert moved.install_dir == relocated
+
+        # ④ 后端给出三种之外的状态时, 计数只统计认识的那些。
+        weird = replace(candidate, status="unknown")
+        known = panel._candidates
+        panel._candidates = [weird, *known]
+        counts = panel._status_counts()
+        panel._candidates = known
+        assert sum(counts.values()) == len(known), "不认识的状态不该被算进任何一档"
+
+        # ⑤ 有存档路径且都不危险: 路径区用成功色。
+        suggestion = SavePathSuggestion(path=relocated, path_kind="directory")
+        with_paths = replace(candidate, save_paths=(suggestion,))
+        assert panel._save_color(with_paths) == panel._palette.success
+    finally:
+        app.destroy()
+
+
+def test_activation_page_refresh_reaches_the_callback() -> None:
+    """启停分页的"刷新": 把请求交给主窗口(它顺带把轮询间隔退回最快档)."""
+    from archive_management.ui.activation_page import ActivationPanel
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+
+    seen: list[str] = []
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    panel = ActivationPanel(
+        ctk.CTkFrame(app),
+        palette=Palette.for_theme(app._theme),
+        on_monitor=lambda _game_id: None,
+        on_refresh=lambda: seen.append("refresh"),
+    )
+    try:
+        panel._refresh()
+
+        assert seen == ["refresh"]
+    finally:
+        panel.frame.destroy()
+        app.destroy()
+
+
+def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut() -> (
+    None
+):
+    """字号改成功就停在新值上(不回拨); 快捷键注册失败要把原因写进提示行."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.settings_window import SettingsWindow
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = SettingsWindow(
+        app,
+        palette=app.p,
+        theme=app._theme,
+        language=app._language,
+        base_font_px=16,
+        debug=False,
+        activation=False,
+        shortcuts=app._shortcuts,
+        on_toggle_theme=lambda: app._theme,
+        on_apply_language=lambda _locale: None,
+        on_apply_font_size=lambda _size: None,
+        on_apply_debug=lambda _enabled: None,
+        on_apply_activation=lambda _enabled: None,
+        on_apply_shortcut=lambda _action, _accelerator: "快捷键被占用",
+        on_capture_start=lambda: None,
+        on_capture_end=lambda: None,
+    )
+    try:
+        # ① 字号: 回调返回 None 表示成功, 下拉停在新值上。
+        current = window._font_label_of(16)
+        other = next(
+            label for label in window._font_box.cget("values") if label != current
+        )
+        # 真实流程是"下拉框先选中新值, 再触发命令", 这里照做。
+        window._font_box.set(other)
+        window._on_font_selected(other)
+        assert window._font_box.get() == other, "成功时不该把下拉拨回旧值"
+
+        # ② 快捷键: 录到一个合法组合但注册失败 → 原因进提示行, 按钮仍是旧值。
+        window._toggle_capture(ACTION_SAVE_NOW)
+        _press(window, "Win_L", 91)
+        _press(window, "Control_L", 17)
+        _press(window, "s", 83)
+
+        assert _wait_for(
+            app, lambda: window._shortcut_error.cget("text") == "快捷键被占用"
+        )
+        assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
+            DEFAULT_SAVE_ACCELERATOR
+        )
+    finally:
+        window.close()
+        app.destroy()

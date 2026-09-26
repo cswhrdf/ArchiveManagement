@@ -1981,7 +1981,7 @@ class SqlArchiveService:
         return location, location.id
 
     def _summary(self, game: Game) -> GameSummary:
-        if game.id is None:
+        if game.id is None:  # pragma: no branch - 游戏行来自仓储, id 必然非空
             raise ArchiveManagementError(tr("error.unknown_game", game_id=""))
         location_count = self._games.count_locations(game.id)
         backup_count = self._games.count_backups(game.id)

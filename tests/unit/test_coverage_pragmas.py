@@ -18,12 +18,19 @@
   整块(含 ``if`` 行与它的块)都不计入行与分支;
 - ``no branch``: 代码会执行, 但**只会走一个方向**(例如"前缀不可能是整串"),
   因此不报"分支只覆盖了一半"。
+
+解析规则**只有一份**: 定义在 ``scripts/create_allure_summary.py`` 里(它据此生成报告首页的
+``allure-coverage-exclusions.md``), 本模块直接复用同一批常量与函数 —— 否则会出现两套宽松程度
+不同的解析器: 一处放宽, 另一处就把该报的问题当成合规。
 """
 
 from __future__ import annotations
 
-import re
+import importlib.util
+import sys
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -35,15 +42,30 @@ pytestmark = [
     pytest.mark.layer("unit"),
 ]
 
-_SRC = Path(__file__).resolve().parents[2] / "src"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC = _REPO_ROOT / "src"
+
+
+def _load_summary() -> Any:
+    """按路径加载汇总脚本(``scripts`` 不在 pythonpath 里, 不能直接 import)."""
+    spec = importlib.util.spec_from_file_location(
+        "create_allure_summary",
+        _REPO_ROOT / "scripts" / "create_allure_summary.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module: ModuleType = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# 与报告附件共用同一份规则(见模块 docstring)。
+summary = _load_summary()
 # 规范写法 + 原因: `# pragma: no cover - 原因`。
-_PRAGMA = re.compile(r"#\s*pragma:\s*(?P<kind>no cover|no branch)(?P<rest>.*)$")
-# 原因至少要有这么多字符(中文很密, "窗口已销毁"这种 5 字已足够说明问题).
-_MIN_REASON_LENGTH = 5
-# 占位词: 写了等于没写。按**整句**比较, 不做子串匹配 —— 否则"无头环境"会被"无"误伤。
-_PLACEHOLDERS = frozenset({"todo", "fixme", "无", "略", "……", "...", "待补", "稍后"})
+_PRAGMA = summary.PRAGMA_PATTERN
 # 允许 ``no branch`` 出现的行: 标在别处等于没标。
-_BRANCH_LINES = ("if ", "if(", "elif ", "else:", "for ", "while ", "except", "finally")
+_BRANCH_LINES = summary.BRANCH_LINE_PREFIXES
 
 
 def _python_files() -> list[Path]:
@@ -58,7 +80,7 @@ def _pragma_lines() -> list[tuple[Path, int, str]]:
         for number, text in enumerate(
             module.read_text(encoding="utf-8").splitlines(), start=1
         ):
-            if "pragma:" in text and ("no cover" in text or "no branch" in text):
+            if summary.is_pragma_line(text):
                 found.append((module, number, text))
     return found
 
@@ -78,14 +100,14 @@ def test_every_pragma_uses_the_canonical_spelling() -> None:
     offenders = [
         f"{_relative(module)}:{number}: {text.strip()}"
         for module, number, text in _pragma_lines()
-        if _PRAGMA.search(text) is None
+        if summary.parse_pragma(text) is None
     ]
 
     assert offenders == [], f"pragma 写法不规范: {offenders}"
 
 
 def test_every_pragma_states_why_it_can_be_skipped() -> None:
-    """每个豁免都必须写明原因(长度下限 + 不是占位词)."""
+    """每个豁免都必须写明原因(长度下限 + 不是占位词); 判定复用脚本里的同一份规则."""
     offenders: list[str] = []
     for module, number, text in _pragma_lines():
         match = _PRAGMA.search(text)
@@ -97,15 +119,9 @@ def test_every_pragma_states_why_it_can_be_skipped() -> None:
                 f"{_relative(module)}:{number}: 缺少 ` - 原因` ({text.strip()})"
             )
             continue
-        explanation = reason.lstrip("- ").strip()
-        # 去掉句末标点后再比对占位词(用 removesuffix 而不是多字符 strip)。
-        normalized = explanation.removesuffix("。").removesuffix(".").lower()
-        if len(explanation) < _MIN_REASON_LENGTH:
-            offenders.append(f"{_relative(module)}:{number}: 原因太短 ({explanation})")
-        elif normalized in _PLACEHOLDERS:
-            offenders.append(
-                f"{_relative(module)}:{number}: 原因是占位词 ({explanation})"
-            )
+        problem = summary.pragma_reason_problem(reason.lstrip("- ").strip())
+        if problem:
+            offenders.append(f"{_relative(module)}:{number}: {problem}")
 
     assert offenders == [], f"豁免标记没有说明原因: {offenders}"
 

@@ -88,6 +88,15 @@ def test_invalid_budgets_return_the_text_unchanged(width: int, max_lines: int) -
     assert fit_text("abc", _FakeFont(), width, max_lines=max_lines) == "abc"
 
 
+def test_leading_whitespace_can_end_the_wrap_loop_without_a_break() -> None:
+    """整段放不下、去掉首尾空白后却放得下: 循环按条件自然结束, 也不补省略号.
+
+    这是唯一会走 ``while remaining:`` 的假分支(其余出口都是循环体内的 ``break``)
+    的输入形态: 首尾空白让整段超出预算, 而真正要排的内容一行就够。
+    """
+    assert fit_text("  hello", _FakeFont(), 50, max_lines=2) == "hello"
+
+
 def test_empty_text_stays_empty() -> None:
     assert fit_text("", _FakeFont(), 10) == ""
 

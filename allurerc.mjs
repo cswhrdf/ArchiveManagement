@@ -69,7 +69,10 @@ export default {
   // 只放"没有归属"的东西: 覆盖率/性能/安全报告已经各自挂在对应的汇总项上(见
   // scripts/create_allure_quality.py 与 create_allure_summary.py), 再放进这里只会
   // 让报告 zip 变大一倍, 所以刻意不加。要加就把文件名追加到这个数组。
-  globalAttachments: ["allure-run-ledger.md"],
+  // 现在两项: 运行总账(整次运行的结论)与"有意不统计的覆盖"豁免清单(逐条列出
+  // `# pragma: no cover` / `# pragma: no branch` 的位置与原因 + exclude_also) ——
+  // 后者的数据来自真实源码, 由 scripts/create_allure_summary.py 生成。
+  globalAttachments: ["allure-run-ledger.md", "allure-coverage-exclusions.md"],
   /**
    * 质量门(Allure 原生): 规则写在这里, CI 在汇总作业里用
    * `allure quality-gate --config allurerc.mjs allure-results` 跑一遍, 用它的退出码当门禁。

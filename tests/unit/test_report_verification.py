@@ -908,10 +908,20 @@ def test_quality_gate_report_without_checks() -> None:
 
 
 def test_global_attachment_matches_what_the_summary_writes() -> None:
-    """首页「全局附件」靠配置里的 glob 匹配 —— 文件名与脚本写的必须一致."""
+    """首页「全局附件」靠配置里的 glob 匹配 —— 文件名与脚本写的必须一致.
+
+    两份都要在: 运行总账(``QUALITY_GATE_REPORT``)与"有意不统计的覆盖"豁免清单
+    (``COVERAGE_EXCLUSIONS_REPORT``)。写错一个名字不会报错, 只是报告里少一份附件。
+    """
     module = _load_script("create_allure_summary")
     config = _ALLURE_CONFIG.read_text(encoding="utf-8")
-    assert f'globalAttachments: ["{module.QUALITY_GATE_REPORT.name}"]' in config
+    matched = re.search(r"globalAttachments:\s*\[([^\]]*)\]", config)
+    assert matched is not None, "配置里要有 globalAttachments"
+    names = {item.strip().strip('"') for item in matched.group(1).split(",")}
+    assert names == {
+        module.QUALITY_GATE_REPORT.name,
+        module.COVERAGE_EXCLUSIONS_REPORT.name,
+    }
 
 
 def test_native_quality_gate_is_configured_and_pinned() -> None:
@@ -1122,6 +1132,9 @@ def test_security_summary_reflects_a_failed_case(
     monkeypatch.setattr(
         module, "QUALITY_GATE_REPORT", tmp_path / "allure-run-ledger.md"
     )
+    monkeypatch.setattr(
+        module, "COVERAGE_EXCLUSIONS_REPORT", tmp_path / "allure-coverage-exclusions.md"
+    )
     monkeypatch.setattr(module, "NATIVE_GATE_LOG", tmp_path / "allure-quality-gate.txt")
 
     assert module.main() == 0
@@ -1172,6 +1185,9 @@ def test_security_summary_stays_green_when_everything_blocked(
     monkeypatch.setattr(
         module, "QUALITY_GATE_REPORT", tmp_path / "allure-run-ledger.md"
     )
+    monkeypatch.setattr(
+        module, "COVERAGE_EXCLUSIONS_REPORT", tmp_path / "allure-coverage-exclusions.md"
+    )
     monkeypatch.setattr(module, "NATIVE_GATE_LOG", tmp_path / "allure-quality-gate.txt")
 
     assert module.main() == 0
@@ -1203,6 +1219,359 @@ def test_security_ledger_row_carries_the_verdict(tmp_path: Path) -> None:
     ledger = module.run_ledger(results, payloads, None, security)
 
     assert "| Linux | 1 | 0 | 1 | **未通过** |" in ledger
+
+
+def _patch_summary_paths(
+    module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, results: Path
+) -> None:
+    """把汇总脚本的全部输入/输出指到临时目录(否则会写进仓库根)."""
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(
+        module, "PERFORMANCE_JSON", tmp_path / "performance-results.json"
+    )
+    monkeypatch.setattr(module, "PERFORMANCE_CSV", tmp_path / "performance-results.csv")
+    monkeypatch.setattr(module, "SECURITY_JSON", tmp_path / "security-results.json")
+    monkeypatch.setattr(
+        module, "SECURITY_FINDINGS_DIRECTORY", tmp_path / "security-findings"
+    )
+    monkeypatch.setattr(
+        module, "QUALITY_GATE_REPORT", tmp_path / "allure-run-ledger.md"
+    )
+    monkeypatch.setattr(
+        module, "COVERAGE_EXCLUSIONS_REPORT", tmp_path / "allure-coverage-exclusions.md"
+    )
+    monkeypatch.setattr(module, "NATIVE_GATE_LOG", tmp_path / "allure-quality-gate.txt")
+
+
+def _measurement(*, passed: bool, value: float = 1.5) -> dict[str, Any]:
+    """一条性能测量(阈值 1.0 秒, 越大越差): 与 performance-results.json 同形."""
+    return {
+        "name": "主页基准",
+        "scale": "2000 款",
+        "metric": "duration",
+        "value": value,
+        "unit": "seconds",
+        "threshold": 1.0,
+        "comparison": "max",
+        "passed": passed,
+    }
+
+
+def _write_performance(tmp_path: Path, *measurements: dict[str, Any]) -> Path:
+    """写一份性能结果文件(平台按 Linux 记, 与 CI 的 quality 作业一致)."""
+    path = tmp_path / "performance-results.json"
+    path.write_text(
+        json.dumps(
+            {
+                "category": "performance",
+                "environment": {"os_family": "Linux"},
+                "measurements": list(measurements),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _summary_item(results: Path, name: str) -> dict[str, Any]:
+    """从结果目录里取一条脚本生成的结论项."""
+    return next(
+        payload
+        for payload in (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(results.glob("*-result.json"))
+        )
+        if payload["name"] == name
+    )
+
+
+def _write_coverage_item(
+    results: Path,
+    *,
+    platform: str,
+    line_rate: float,
+    branch_rate: float,
+    status: str = "passed",
+    result_id: str = "cov",
+) -> None:
+    """写一条覆盖率结论项: 数字直接写在 XML 根属性上(与 coverage.py 的输出同形)."""
+    attachment = results / f"{result_id}-attachment.xml"
+    attachment.write_text(
+        '<?xml version="1.0" ?>\n'
+        f'<coverage line-rate="{line_rate}" branch-rate="{branch_rate}" '
+        f'lines-covered="{int(line_rate * 100)}" lines-valid="100" '
+        f'branches-covered="{int(branch_rate * 100)}" branches-valid="100">\n'
+        "</coverage>\n",
+        encoding="utf-8",
+    )
+    (results / f"{result_id}-result.json").write_text(
+        json.dumps(
+            {
+                "uuid": result_id,
+                "name": "Coverage report",
+                "fullName": "archive-management.coverage",
+                "status": status,
+                "labels": [{"name": "env", "value": platform}],
+                "attachments": [
+                    {
+                        "name": "coverage.xml",
+                        "source": attachment.name,
+                        "type": "application/xml",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_performance_conclusion_fails_a_breached_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """有一条基准冲破预算, 性能结论项就必须红(带具体数字)."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _patch_summary_paths(module, monkeypatch, tmp_path, results)
+    monkeypatch.setattr(
+        module,
+        "PERFORMANCE_JSON",
+        _write_performance(tmp_path, _measurement(passed=False)),
+    )
+
+    assert module.main() == 0
+
+    item = _summary_item(results, "Performance baseline")
+    assert item["status"] == "failed", "基准未达标时结论项不能还是绿的"
+    assert "**未通过**" in item["description"]
+    assert "1.5" in item["description"]
+    assert "1.0" in item["description"]
+    assert "未达标" in item["statusDetails"]["message"]
+
+
+def test_performance_conclusion_stays_green_when_every_budget_is_met(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全部达标时仍然是绿的(别把结论项写成永远失败)."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _patch_summary_paths(module, monkeypatch, tmp_path, results)
+    monkeypatch.setattr(
+        module,
+        "PERFORMANCE_JSON",
+        _write_performance(tmp_path, _measurement(passed=True)),
+    )
+
+    assert module.main() == 0
+
+    item = _summary_item(results, "Performance baseline")
+    assert item["status"] == "passed"
+    assert "**通过**" in item["description"]
+    assert "statusDetails" not in item
+
+
+def test_performance_conclusion_is_broken_when_the_result_file_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """性能结果文件缺失时写 broken 并给出原因 —— 不能"没有这条"就算通过."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _patch_summary_paths(module, monkeypatch, tmp_path, results)
+
+    assert module.main() == 0
+
+    item = _summary_item(results, "Performance baseline")
+    assert item["status"] == "broken"
+    assert "缺少性能结果文件" in item["statusDetails"]["message"]
+
+
+def test_coverage_conclusion_fails_a_platform_below_the_threshold(
+    tmp_path: Path,
+) -> None:
+    """覆盖率低于 fail_under 的平台要判红, 并把具体数字写出来."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_coverage_item(results, platform="Windows", line_rate=0.9, branch_rate=0.9)
+
+    status, failures, rows = module.coverage_conclusion(
+        results, module.result_payloads(results), ["Windows"]
+    )
+
+    assert status == "failed"
+    assert any("Windows" in item and "90.00%" in item for item in failures)
+    assert rows == [("Windows", "90.00%", "90.00%", "90.00%", "95%", "未通过")]
+
+
+def test_coverage_conclusion_stays_green_above_the_threshold(tmp_path: Path) -> None:
+    """达标的运行保持绿色: 合计覆盖率按 coverage.py 的口径算."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_coverage_item(results, platform="Linux", line_rate=0.99, branch_rate=0.99)
+
+    status, failures, rows = module.coverage_conclusion(
+        results, module.result_payloads(results), ["Linux"]
+    )
+
+    assert status == "passed"
+    assert failures == []
+    assert rows == [("Linux", "99.00%", "99.00%", "99.00%", "95%", "通过")]
+
+
+def test_coverage_conclusion_is_red_when_a_platform_has_no_item(
+    tmp_path: Path,
+) -> None:
+    """有用例结果的平台缺一份覆盖率结论时必须红(文件不在不等于通过)."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_coverage_item(results, platform="Windows", line_rate=0.99, branch_rate=0.99)
+
+    status, failures, rows = module.coverage_conclusion(
+        results, module.result_payloads(results), ["Windows", "Linux"]
+    )
+
+    assert status == "failed"
+    assert any("Linux" in item and "缺少覆盖率结论项" in item for item in failures)
+    assert {row[0]: row[5] for row in rows} == {"Windows": "通过", "Linux": "未通过"}
+
+
+def test_coverage_conclusion_is_red_when_the_numbers_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """结论项在、但附带的 coverage.xml 丢了时必须红 —— "读不到数字"不等于通过."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_coverage_item(results, platform="Windows", line_rate=0.99, branch_rate=0.99)
+    (results / "cov-attachment.xml").unlink()
+
+    status, failures, rows = module.coverage_conclusion(
+        results, module.result_payloads(results), ["Windows"]
+    )
+
+    assert status == "failed"
+    assert any("Windows" in item and "读不到覆盖率数字" in item for item in failures)
+    assert rows == [("Windows", "?", "?", "?", "95%", "未通过")]
+
+
+def test_coverage_conclusion_without_any_data_is_broken(tmp_path: Path) -> None:
+    """一条覆盖率结论项都没有时记 broken —— 不能因为"没有可比的东西"就写通过."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+
+    status, failures, rows = module.coverage_conclusion(
+        results, module.result_payloads(results), []
+    )
+
+    assert status == "broken"
+    assert any("没有任何覆盖率结论项" in item for item in failures)
+    assert rows == []
+
+
+def test_coverage_conclusion_item_is_written_by_the_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """汇总脚本要把覆盖率总结论写成一条结论项(而不是只写进总账)."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _patch_summary_paths(module, monkeypatch, tmp_path, results)
+    (results / "case-result.json").write_text(
+        json.dumps(
+            {
+                "uuid": "case",
+                "name": "某个用例",
+                "status": "passed",
+                "labels": [{"name": "os", "value": "Windows"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_coverage_item(results, platform="Windows", line_rate=0.9, branch_rate=0.9)
+
+    assert module.main() == 0
+
+    item = _summary_item(results, "Coverage conclusion")
+    assert item["status"] == "failed"
+    assert "90.00%" in item["description"]
+    assert "95%" in item["statusDetails"]["message"]
+
+
+def test_coverage_fail_under_matches_pyproject() -> None:
+    """覆盖率门槛与 pyproject 的 fail_under 必须是同一个数(两处打架时会自相矛盾)."""
+    import tomllib
+
+    module = _load_script("create_allure_summary")
+    pyproject = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    fail_under = pyproject["tool"]["coverage"]["report"]["fail_under"]
+    assert str(fail_under) == module.COVERAGE_THRESHOLD
+
+
+def test_summary_writes_the_coverage_exclusions_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """汇总脚本要写出"有意不统计的覆盖"清单(报告首页的全局附件)."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _patch_summary_paths(module, monkeypatch, tmp_path, results)
+
+    assert module.main() == 0
+
+    text = (tmp_path / "allure-coverage-exclusions.md").read_text(encoding="utf-8")
+    assert "# 有意不统计的覆盖率(豁免清单)" in text
+    # 数据来自真实源码 + pyproject: 两节都要在(本仓库确实有豁免, 所以按文件一节非空).
+    assert "## 按文件" in text
+    assert "## `exclude_also`(pyproject.toml)" in text
+
+
+def test_run_ledger_columns_carry_the_performance_and_coverage_verdicts(
+    tmp_path: Path,
+) -> None:
+    """总账里的性能/覆盖率一节要给出计数与结论(与安全列同一风格)."""
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_coverage_item(results, platform="Windows", line_rate=0.9, branch_rate=0.9)
+    payloads = module.result_payloads(results)
+    breached = {
+        "environment": {"os_family": "Linux"},
+        "measurements": [_measurement(passed=False)],
+    }
+
+    failing = module.run_ledger(results, payloads, breached, [], ["Windows"])
+
+    assert "- 结论: **未通过(1 条)**" in failing
+    assert "| 平台 | 行覆盖率 | 分支覆盖率 | 合计 | 门槛 | 结论 | 原始报告 |" in failing
+    assert "| Windows | 90.00% | 90.00% | 90.00% | 95% | 未通过 |" in failing
+    assert "| 平台 | 基准数 | 未达标 | 结论 |" in failing
+    assert "| Linux | 1 | 1 | **未通过** |" in failing
+
+    healthy_results = tmp_path / "healthy-results"
+    healthy_results.mkdir()
+    _write_coverage_item(
+        healthy_results, platform="Windows", line_rate=0.99, branch_rate=0.99
+    )
+    healthy = module.run_ledger(
+        healthy_results,
+        module.result_payloads(healthy_results),
+        {
+            "environment": {"os_family": "Linux"},
+            "measurements": [_measurement(passed=True)],
+        },
+        [],
+        ["Windows"],
+    )
+
+    assert "- 结论: **通过**" in healthy
+    assert "| Windows | 99.00% | 99.00% | 99.00% | 95% | 通过 |" in healthy
+    assert "| Linux | 1 | 0 | 通过 |" in healthy
 
 
 def test_quality_items_use_the_declared_common_environment(

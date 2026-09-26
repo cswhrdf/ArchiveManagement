@@ -36,6 +36,7 @@ from archive_management.infrastructure.repository import (
     ScheduledJobRepository,
 )
 from archive_management.services import export_format as fmt
+from archive_management.services.naming import game_folder
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.snapshot import read_manifest
 
@@ -259,7 +260,8 @@ def test_the_new_strategy_creates_a_disabled_game_and_normalizes_locations(
     assert game.platform == "windows"
     assert game.origin == "steam"
     assert game.tags == ("动作", "存档")
-    assert game.storage_key
+    # 备份目录名按"调用方映射进来的路径"推导(落库那条位置则是规范化后的), 值可精确算出.
+    assert game.storage_key == game_folder(NAME, [messy])
     locations = SaveLocationRepository(database).list_for_game(result.game_id)
     assert normalize_path(messy) == str(source.save)
     assert [item.path for item in locations] == [normalize_path(messy)]
@@ -405,7 +407,9 @@ def test_the_merge_strategy_appends_to_the_game_and_keeps_its_settings(
         == ids[inspection.nodes[1].key]
     )
     assert games.current_backup(existing.id) == ids[inspection.nodes[2].key]
-    assert backup_root.is_dir()
+    assert {path.name for path in (backup_root / key).iterdir()} == {
+        item.key for item in inspection.nodes
+    }
     remaining = jobs.for_game(existing.id)
     assert len(remaining) == 1
     assert remaining[0].schedule == "2h"
@@ -800,5 +804,5 @@ def test_import_accepts_a_node_without_a_creation_time(tmp_path: Path) -> None:
     result = service.import_package(inspection, locations=_mapping(source))
 
     assert result.nodes == len(inspection.nodes)
-    game = GameRepository(database).get(result.game_id)
-    assert game is not None
+    stored = BackupRepository(database).list_for_game(result.game_id)
+    assert {node.title for node in stored} == {"第一次", "第二次", "恢复前安全点"}
