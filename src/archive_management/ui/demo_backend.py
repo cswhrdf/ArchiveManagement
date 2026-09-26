@@ -252,7 +252,7 @@ _DETAILS: dict[str, GameDetail] = {
         last_backup_sub="",
         total_backups_label="0 个节点",
         total_backups_sub="",
-        next_backup_label="—",
+        next_backup_label="",
     ),
 }
 
@@ -472,7 +472,7 @@ class DemoArchiveService:
                 else tr("task.unscheduled")
             ),
             progress=0.0,
-            next_run_label="今天 12:00" if interval else "—",
+            next_run_label="今天 12:00" if interval else "",
             target_label="本地备份目录",
             theme_name=self._theme,
             backend_ok=True,
@@ -537,7 +537,7 @@ class DemoArchiveService:
                     interval_text=interval,
                     enabled=enabled and bool(interval),
                     keep_auto=keep,
-                    next_run_label="今天 12:00" if interval and enabled else "—",
+                    next_run_label="今天 12:00" if interval and enabled else "",
                     auto_count=len(autos),
                     tone=summary.tone,
                     has_locations=summary.has_locations,
@@ -938,7 +938,7 @@ class DemoArchiveService:
             last_backup_sub="",
             total_backups_label=tr("detail.backups_none"),
             total_backups_sub="",
-            next_backup_label="—",
+            next_backup_label="",
             original_name=clean,
         )
         self._locations[game_id] = []

@@ -28,6 +28,7 @@ try:
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
+import archive_management.ui.dialogs as dialogs_mod
 import archive_management.ui.discovery_page as disc_mod
 import archive_management.ui.home_page as home_page_mod
 import archive_management.ui.main_window as main_mod
@@ -60,6 +61,7 @@ from archive_management.ui.models import (
     FeedbackKind,
     ImportChoice,
 )
+from archive_management.ui.widgets import scrollbar_needed
 
 pytestmark = [
     pytest.mark.integration,
@@ -1194,6 +1196,81 @@ def test_default_page_is_home_and_detail_round_trips(
     assert app._back_btn.grid_info() == {}
 
 
+def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """候选行的长安装路径按"中间省略"裁进卡片; 行重建后旧标签的回调不再写已销毁控件.
+
+    回归 08/09 号评审: 长路径既不换行也不省略, 会直接顶到卡片右边缘。
+    """
+    from archive_management.domain import GameCandidate
+    from archive_management.infrastructure.database import Database
+    from archive_management.services.platform_scan import LocalGameScanner
+    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    db = Database(tmp_path / "clip.db")
+    db.migrate()
+    games = tmp_path / "Games"
+    deep = games / "Alpha" / "一个很深的目录层级" / "再来一层目录" / "存档目录"
+    deep.mkdir(parents=True)
+
+    def fake_scan(
+        self: object, *, monitored: Sequence[str] = ()
+    ) -> list[GameCandidate]:
+        del self, monitored
+        return [
+            GameCandidate(
+                name="路径很长的候选游戏",
+                install_dir=str(deep),
+                source="monitored",
+                confidence="medium",
+                reason_code="monitored_child",
+                health="ok",
+            )
+        ]
+
+    monkeypatch.setattr(LocalGameScanner, "scan", fake_scan)
+    service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+    service.add_monitored_directory(str(games))
+    try:
+        app = _new_app(service)
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app), backend=service, palette=Palette.for_theme(app._theme)
+        )
+        panel._on_scan()
+        _pump(app)
+        item = panel._candidates[0]
+        path_key = f"path:{item.candidate_id}"
+        label = panel._fitted[path_key].label
+        _pump(app)
+
+        shown = str(label.cget("text"))
+        assert shown != item.install_dir, "长安装路径必须被裁"
+        assert "…" in shown, f"路径要中间省略: {shown!r}"
+        width = int(label.winfo_width())
+        if width > 1:
+            assert panel._path_font.measure(shown) <= width, f"路径溢出卡片: {shown!r}"
+
+        # 没有存档路径时只剩结论那一行(调用方据此决定不登记重裁).
+        assert panel._save_lines(item) == item.save_label
+
+        # 列表重建后旧标签的 <Configure> 回调还会来一趟: 忽略掉这条候选之后它就再也
+        # 取不到目标了 —— 这时必须直接返回, 不能再往已销毁的控件上写文本.
+        panel._select_candidate(item.candidate_id)
+        panel._on_ignore()
+        _pump(app)
+        assert path_key not in panel._fitted
+        panel._refit(path_key)
+    finally:
+        app.destroy()
+
+
 def test_home_page_switches_between_library_and_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1312,7 +1389,7 @@ def test_home_page_supports_poster_mode_and_paging(
     assert any(text.startswith("最近活动") for text in card_texts)
     assert tr("home.poster_backups", count=5) in card_texts
 
-    # 封面是竖屏(高度明显大于宽度), 角标贴在封面的右下角.
+    # 封面是竖屏(高度明显大于宽度); 备份数角标排在卡片里、封面**下方**, 不压在封面上.
     card = page._rows["outer-wilds"]
     cover = card.winfo_children()[0]
     assert cover.winfo_reqheight() > 140
@@ -1322,18 +1399,240 @@ def test_home_page_supports_poster_mode_and_paging(
     assert min(item.winfo_x() for item in cards) == 4
     assert min(item.winfo_y() for item in cards) == 4
     badge = next(
-        child
-        for child in cover.winfo_children()
-        if child.cget("text") == tr("home.poster_backups", count=5)
+        label
+        for label in _card_labels(card)
+        if str(label.cget("text")) == tr("home.poster_backups", count=5)
     )
-    sticky = str(badge.grid_info()["sticky"])
-    assert "s" in sticky
-    assert "e" in sticky
+    assert badge not in cover.winfo_children(), "备份数角标不该压在封面上"
+    cover_bottom = cover.winfo_y() + cover.winfo_height()
+    assert badge.winfo_y() >= cover_bottom, "备份数角标要排在封面下面"
 
     # 展示偏好会持久化: 重新读取主页仍是海报 + 每页 60 条.
     reloaded = app.backend.load_home()
     assert reloaded.filter.layout is HomeLayout.POSTER
     assert reloaded.filter.page_size == 60
+
+
+def _assert_no_half_chip(line: str, chips: Sequence[str]) -> None:
+    """断言行内除"被末尾省略号标注的那一段前缀"之外都是完整标签(第 6 号评审)."""
+    body = line.removesuffix("…")
+    parts = [part for part in body.split(" · ") if part]
+    if line.endswith("…"):
+        parts = parts[:-1]
+    halves = [part for part in parts if part not in chips]
+    assert not halves, f"状态列把标签拦腰截断: {halves} (整行 {line!r})"
+
+
+def _card_labels(card: Any) -> list[Any]:
+    """海报卡片里的文本标签.
+
+    ``CTkFrame`` 不接受 ``cget("text")``(会抛 ValueError), 所以必须先按类型筛,
+    不能对卡片的每个子控件直接读 text。
+    """
+    return [child for child in card.winfo_children() if isinstance(child, ctk.CTkLabel)]
+
+
+def test_home_page_hides_the_table_and_footer_when_the_library_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """空库时收起表头/表格骨架与底部统计翻页, 加进第一款游戏后再长回来.
+
+    回归第 1/2 号评审: 一条数据都没有却摆着七个列头, 底下再挂一行
+    "共 0 款游戏 · 第 1/1 页", 页面看起来像渲染了一半。
+    """
+    from archive_management.infrastructure.database import Database
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    _patch_dialogs(monkeypatch)
+    db = Database(tmp_path / "empty.db")
+    db.migrate()
+    service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+    try:
+        app = _new_app(service)
+    except TclError as exc:  # pragma: no cover - 取决于运行环境
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        page = app._home_page
+        assert page._head.grid_info() == {}, "空库不该显示表头"
+        assert page._footer.grid_info() == {}, "空库不该显示底部统计与翻页"
+        texts = _label_texts(page._list_box)
+        assert tr("home.empty_library") in texts
+        assert tr("home.empty_library_hint") in texts
+
+        app.backend.add_game("第一款游戏")
+        page.reload()
+        _pump(app)
+        assert page._head.grid_info() != {}, "有游戏后表头要回来"
+        assert page._footer.grid_info() != {}, "有游戏后底部统计与翻页要回来"
+        board = page._board
+        assert board is not None
+        assert page._summary_label.cget("text") == board.summary
+    finally:
+        app.destroy()
+
+
+def test_list_scrollbar_appears_only_when_the_games_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """内容装得下时右侧不立滚动条, 真的溢出才出现(第 1/2/7 号评审).
+
+    常驻的滚动条在说"下面还有内容", 而它其实拖不动 —— 少几行数据时这是纯噪声。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    _pump(app)
+    scrollbar = page._list_box._scrollbar
+    assert not scrollbar.winfo_ismapped(), "三行游戏装得下, 不该出现滚动条"
+
+    for index in range(40):
+        app.backend.add_game(f"溢出游戏{index:02d}")
+    page.reload()
+    _pump(app)
+    page._sync_scrollbar()
+    _pump(app)
+    assert scrollbar.winfo_ismapped(), "内容溢出后必须出现滚动条"
+
+
+def test_pager_buttons_look_disabled_when_there_is_nowhere_to_go(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分页按钮的禁用态必须与可用态明显不同: 底色/文字一起压暗(第 1 号评审)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    palette = page._palette
+    assert str(page._prev_btn.cget("state")) == "disabled"
+    disabled_bg = str(page._prev_btn.cget("fg_color"))
+    assert disabled_bg == palette.disabled_bg
+    assert str(page._prev_btn.cget("text_color")) == palette.text_disabled
+    assert disabled_bg != palette.raised, "禁用底色不能与可用按钮同色"
+
+    for index in range(32):
+        app.backend.add_game(f"批量游戏{index:02d}")
+    page.reload()
+    _pump(app)
+    assert str(page._next_btn.cget("state")) == "normal"
+    assert str(page._next_btn.cget("fg_color")) == palette.raised, (
+        "可用按钮要回到常规底色"
+    )
+
+
+def test_list_and_poster_selection_share_the_soft_accent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """列表与海报的"选中"是同一套表达(淡底 + 描边), 并与主按钮的实心绿区分开."""
+    from archive_management.domain import HomeLayout
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    palette = page._palette
+    page._select("shanhai")
+    _pump(app)
+    selected = page._rows["shanhai"]
+    other = page._rows["outer-wilds"]
+    assert str(selected.cget("fg_color")) == palette.accent_soft
+    assert str(selected.cget("border_color")) == palette.accent_soft_border
+    assert str(other.cget("fg_color")) == palette.card
+    assert palette.accent_soft != palette.accent, "选中不能与主按钮同色"
+
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _pump(app)
+    card = page._rows["shanhai"]
+    assert str(card.cget("fg_color")) == palette.accent_soft
+    assert str(card.cget("border_color")) == palette.accent_soft_border
+    assert str(page._rows["outer-wilds"].cget("fg_color")) == palette.card
+
+
+def test_poster_card_keeps_its_meta_below_the_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """海报卡片: 角标不压封面、名称与元信息分开、占位字不再超大(第 5 号评审)."""
+    from archive_management.domain import HomeLayout
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.home_page import (
+        _POSTER_HEIGHT,
+        _POSTER_PLACEHOLDER_SIZE,
+    )
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _pump(app)
+    page.frame.update_idletasks()
+    card = page._rows["outer-wilds"]
+    cover = card.winfo_children()[0]
+    badge = next(
+        label
+        for label in _card_labels(card)
+        if str(label.cget("text")) == tr("home.poster_backups", count=5)
+    )
+    assert badge not in cover.winfo_children(), "角标不该压在封面上"
+    cover_bottom = cover.winfo_y() + cover.winfo_height()
+    assert badge.winfo_y() >= cover_bottom, "角标要排在封面下面"
+    name = next(
+        label for label in _card_labels(card) if str(label.cget("text")) == "星际拓荒"
+    )
+    name_bottom = name.winfo_y() + name.winfo_height()
+    assert name_bottom <= badge.winfo_y(), "名称与元信息之间要分开, 不能挤在一起"
+    placeholder = next(
+        child for child in cover.winfo_children() if str(child.cget("text")) == "星际"
+    )
+    size = int(placeholder.cget("font").cget("size"))
+    assert size == _POSTER_PLACEHOLDER_SIZE
+    assert size < 34, "占位字不该比卡片标题大一倍"
+    # 卡片内所有直接子控件都不许越出卡片: 越界就会盖住下边框.
+    bottom = max(
+        child.winfo_y() + child.winfo_height() for child in card.winfo_children()
+    )
+    assert bottom <= _POSTER_HEIGHT
+
+
+def test_state_column_never_shows_half_a_chip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """状态列放不下时先换行再补省略号, 不许出现"测…"这种半句话(第 6 号评审)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.home_page import _STATE_MAX_LINES
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    # 三个满长(16 字)标签 + 平台/备份状态: 一定塞不进 200px 的状态列.
+    app.backend.set_game_tags(
+        "outer-wilds",
+        [
+            "一二三四五六七八九十一二三四五六",
+            "二二三四五六七八九十一二三四五六",
+            "三二三四五六七八九十一二三四五六",
+        ],
+    )
+    page.reload()
+    _pump(app)
+
+    item = _home_item(page, "outer-wilds")
+    label = page._row_parts["outer-wilds"].columns.winfo_children()[-1]
+    text = str(label.cget("text"))
+    lines = text.split("\n")
+    assert 1 <= len(lines) <= _STATE_MAX_LINES
+    assert "\n" in text, f"两行放得下就不该只排一行: {text!r}"
+    assert text.endswith("…"), f"第二行还放不下时要补省略号: {text!r}"
+    for line in lines:
+        _assert_no_half_chip(line, item.chips)
 
 
 def test_home_page_follows_theme_switch(
@@ -2109,6 +2408,179 @@ def test_add_schedule_dialog_filters_typing_and_needs_a_match(
     assert add_schedule_dialog(app, palette, candidates=(), blocked=()) is None
 
 
+def test_add_schedule_dialog_separates_title_hint_and_blocked_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """新增定时任务的弹窗: 标题有分割线, 被拦下的游戏名逐行列出, 不再重复窗口的指引."""
+    import customtkinter as ctk
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.schedule_window import (
+        ScheduleWindow,
+        add_schedule_dialog,
+    )
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    palette = Palette.for_theme(app._theme)
+    window = ScheduleWindow(app, backend=app.backend, palette=palette)
+    candidates = window._addable()
+    blocked = window._blocked()
+    assert blocked, "演示数据里应当有一款未配置存档位置的游戏"
+
+    toplevels: list[Any] = []
+    real_toplevel = ctk.CTkToplevel
+
+    def make_toplevel(*args: Any, **kwargs: Any) -> Any:
+        top = real_toplevel(*args, **kwargs)
+        toplevels.append(top)
+        return top
+
+    monkeypatch.setattr(ctk, "CTkToplevel", make_toplevel)
+    monkeypatch.setattr(app, "wait_window", lambda *_a, **_k: None)
+
+    assert (
+        add_schedule_dialog(app, palette, candidates=candidates, blocked=blocked)
+        is None
+    )
+    top = toplevels[-1]
+    texts = _label_texts(top)
+
+    # ① 标题下面有一条 1px 分割线(否则粗体标题看起来就是第一个字段的标签)。
+    dividers = [
+        child
+        for child in top.winfo_children()
+        if isinstance(child, ctk.CTkFrame)
+        and child.cget("fg_color") == palette.border
+        and int(child.cget("height")) == 1
+    ]
+    assert dividers, "标题与正文之间应当有一条分割线"
+
+    # ② 被拦下的游戏名逐行列出(带项目符号), 不再是拼在一句话里的逗号列表。
+    expected = "\n".join(f"· {item.game_name}" for item in blocked)
+    assert expected in texts, "被拦下的游戏名应当逐行列出"
+    assert ", ".join(item.game_name for item in blocked) not in texts, (
+        "游戏名不该再拼回一句逗号列表"
+    )
+
+    # ③ "推荐去游戏设置"的指引只留在窗口副标题里, 弹窗不再重复一遍。
+    assert tr("schedule.subtitle") not in texts
+    assert not any("推荐" in text for text in texts)
+
+    # ④ "可以打字筛选"紧贴在选择框下方(而不是藏在说明句中间)。
+    children = list(top.winfo_children())
+    picker_index = next(
+        index
+        for index, child in enumerate(children)
+        if isinstance(child, ctk.CTkComboBox)
+    )
+    assert isinstance(children[picker_index + 1], ctk.CTkLabel)
+    assert children[picker_index + 1].cget("text") == tr("dialog.schedule_add_filter")
+
+
+@pytest.mark.blocker
+def test_tags_dialog_does_not_twitch_or_crash_while_adding_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真窗口回归: 连点两次"添加标签"时滚动条不能抽动, 更不能把回调递归到崩溃.
+
+    这条用例盯的是当年那个真实故障(用户实测: 打开"编辑标签"后连点两次"添加标签"
+    界面抽搐, 控制台报 ``Exception in Tkinter callback`` / ``maximum recursion depth
+    exceeded``)。两个机制都要拦:
+
+    ① **滚动条的高度请求必须是 1px** —— CTk 的滚动条默认请求 200px, 与画布在同一行:
+       一旦显示就把那一行撑到 200, 视口跟着变高 → 内容又装得下 → 收起 → 视口变矮 →
+       又溢出 → 再显示…… 实测就在边界上无限抽动(它同时会引出无穷的 Configure);
+    ② **重入与判定次数有上限** —— 改几何会引出新的 Configure, 没有重入闸门时会在同一个
+       调用栈里递归到崩溃。这里用 1.5 秒的有限事件循环统计判定次数, 抽搐时实测上百次。
+
+    断言顺序是刻意的: 先查高度请求(确定性, 且在任何点击之前), 再跑事件循环 ——
+    高度请求被改回去时用例立刻红, 不会先掉进那个可能卡住的事件循环里。
+    """
+    import customtkinter as ctk
+
+    from archive_management.ui import widgets
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    # Tk 回调里的异常默认只打到 stderr(测试里看不见): 这里收下来当断言用。
+    callback_errors: list[str] = []
+    app.report_callback_exception = lambda exc, value, _tb: callback_errors.append(
+        f"{exc.__name__}: {value}"
+    )
+
+    toplevels: list[Any] = []
+    real_toplevel = ctk.CTkToplevel
+
+    def make_toplevel(*args: Any, **kwargs: Any) -> Any:
+        top = real_toplevel(*args, **kwargs)
+        toplevels.append(top)
+        return top
+
+    monkeypatch.setattr(ctk, "CTkToplevel", make_toplevel)
+    # 弹窗不再阻塞主线程: "点按钮"这一步由用例自己接管。
+    monkeypatch.setattr(app, "wait_window", lambda *_a, **_k: None)
+
+    calls: list[Any] = []
+    real_sync = widgets.sync_scrollbar
+
+    def counting_sync(frame: Any) -> bool:
+        calls.append(frame)
+        return real_sync(frame)
+
+    monkeypatch.setattr(widgets, "sync_scrollbar", counting_sync)
+
+    dialogs_mod.edit_tags_dialog(app, app.p, tags=("探索",))
+    window = toplevels[-1]
+    rows = _scrollable_with_height(window, 150)
+    assert getattr(rows._scrollbar, "_desired_height", None) == 1, (
+        "滚动条的高度请求必须压到 1px: 否则它一显示就会把视口撑高, 判定在边界上无限抽动"
+    )
+
+    add = _button_by_text(window, tr("dialog.tags_add"))
+    calls.clear()
+    add.invoke()
+    add.invoke()
+    for _ in range(60):
+        app.update_idletasks()
+        app.update()
+        time.sleep(0.01)
+
+    assert callback_errors == [], f"回调里不该出现异常: {callback_errors}"
+    assert len(calls) < 30, f"滚动条判定被反复触发({len(calls)} 次): 界面在抽搐"
+    window.destroy()
+
+
+def _scrollable_with_height(widget: Any, height: int) -> Any:
+    """递归找出指定高度的滚动容器(弹窗里同一个高度只有一个)."""
+    for child in widget.winfo_children():
+        if (
+            hasattr(child, "_scrollbar")
+            and hasattr(child, "_parent_canvas")
+            and int(child.cget("height")) == height
+        ):
+            return child
+        found = _scrollable_with_height(child, height)
+        if found is not None:
+            return found
+    return None
+
+
+def _button_by_text(widget: Any, text: str) -> Any:
+    """递归找出文案匹配的按钮(CTk 自绘, 只能按 cget("text") 认)."""
+    import customtkinter as ctk
+
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkButton) and str(child.cget("text")) == text:
+            return child
+        found = _button_by_text(child, text)
+        if found is not None:
+            return found
+    return None
+
+
 def test_edit_schedule_rejects_invalid_keep_auto(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2361,6 +2833,61 @@ def test_manage_window_location_actions_need_a_real_selection(
         True,
         *[False] * (len(before) - 1),
     ]
+    window.close()
+
+
+def test_manage_window_rename_passes_the_current_name_as_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重命名弹窗要带上"当前名称": 它与"新增游戏"长得一样(20 号评审)."""
+    from archive_management.ui import manage_window as manage_mod
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    seen: dict[str, object] = {}
+
+    def record(*_args: object, **kwargs: object) -> str | None:
+        seen.update(kwargs)
+        return None
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    monkeypatch.setattr(manage_mod, "ask_text", record)
+    window = _manage_game_window(
+        app, game_id="outer-wilds", name="星际拓荒", enabled=True
+    )
+
+    window._on_rename()
+
+    assert seen["context"] == tr("dialog.rename_context", name="星际拓荒")
+    window.close()
+
+
+def test_manage_window_location_buttons_stay_inside_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """位置操作按钮必须整颗落在窗口里.
+
+    六个按钮挤一行时总宽已经等于容器可用宽度, 再加间距必然溢出 —— 最右边的
+    "删除"会被窗口边缘裁掉半颗(15 号评审)。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _manage_game_window(
+        app, game_id="outer-wilds", name="星际拓荒", enabled=True
+    )
+    assert _wait_for(app, lambda: window._location_buttons[0].winfo_width() > 1), (
+        "窗口未布局"
+    )
+
+    frame = window._window
+    right = frame.winfo_rootx() + frame.winfo_width()
+    for index, button in enumerate(window._location_buttons):
+        edge = button.winfo_rootx() + button.winfo_width()
+        assert edge <= right, f"第 {index} 个位置按钮被窗口裁掉: {edge} > {right}"
     window.close()
 
 
@@ -3161,6 +3688,21 @@ def test_settings_window_holds_theme_and_hotkey_shortcuts(
     }
     assert tr(f"theme.name_{app._theme}") in window._theme_label.cget("text")
 
+    # 界面字号/界面语言两个下拉框也要跟着换配色: 它们不在 UiKit 的重绘表里, 漏在
+    # restyle 之外时同一个窗口里会留着上一套主题的底色(用户实测: 要重开窗口才恢复)。
+    from archive_management.ui.palette import Palette
+
+    palette = Palette.for_theme(app._theme)
+    for box in (window._font_box, window._language_box):
+        assert box.cget("fg_color") == palette.input_bg
+        assert box.cget("border_color") == palette.border
+        assert box.cget("button_color") == palette.raised
+        assert box.cget("text_color") == palette.text_body
+        # 展开后的那层菜单同样要换: 只改外框时点开还是旧配色。
+        menu = box._dropdown_menu
+        assert menu.cget("fg_color") == palette.panel
+        assert menu.cget("text_color") == palette.text_body
+
 
 def test_settings_window_fits_its_content(
     monkeypatch: pytest.MonkeyPatch,
@@ -3197,6 +3739,60 @@ def test_settings_window_fits_its_content(
         cut = label.winfo_reqwidth() - label.winfo_width()
         hint = f"{name}被裁掉 {cut}px(换行宽度超过了可用宽度)"
         assert cut <= 1, hint
+
+
+def test_settings_window_scrollbar_only_when_the_content_overflows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """屏幕够高(窗口按内容定高)时不该立着一条拖不动的滚动条(16 号评审).
+
+    窗口没映射时 ``winfo_ismapped()`` 恒为 0(假绿), 因此先等到窗口真的在屏幕上,
+    再断言滚动条与“内容是否溢出”一致。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    # 把屏幕报得很高: 窗口高度会等于内容高度, 滚动区刚好装下.
+    monkeypatch.setattr(app, "winfo_screenheight", lambda: 4000)
+    window = _settings_window(app, [])
+    assert _wait_for(app, lambda: window._window.winfo_ismapped()), "窗口未映射"
+
+    canvas = window._body._parent_canvas
+    region = canvas.bbox("all")
+    content = 0 if region is None else int(region[3]) - int(region[1])
+    assert scrollbar_needed(content, int(canvas.winfo_height())) is False
+    assert _wait_for(app, lambda: not window._body._scrollbar.winfo_ismapped()), (
+        "内容装得下却仍立着滚动条"
+    )
+
+
+def test_settings_window_scrollbar_appears_when_the_content_does_not_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """屏幕不够高时窗口被夹住, 内容必须能滚动(不能把底部说明与"关闭"推出去)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    monkeypatch.setattr(app, "winfo_screenheight", lambda: 520)
+    window = _settings_window(app, [])
+    assert _wait_for(app, lambda: window._window.winfo_ismapped()), "窗口未映射"
+
+    canvas = window._body._parent_canvas
+    region = canvas.bbox("all")
+    content = 0 if region is None else int(region[3]) - int(region[1])
+    assert scrollbar_needed(content, int(canvas.winfo_height())) is True
+    assert _wait_for(app, lambda: window._body._scrollbar.winfo_ismapped()), (
+        "内容溢出却没有滚动条"
+    )
+    frame = window._window
+    frame.update_idletasks()
+    bottom = frame.winfo_rooty() + frame.winfo_height()
+    edge = window._close_btn.winfo_rooty() + window._close_btn.winfo_height()
+    assert edge <= bottom, f"关闭按钮被推出窗口: {edge} > {bottom}"
 
 
 def test_settings_window_records_a_pressed_combination(
@@ -3460,7 +4056,9 @@ def test_task_card_state_follows_schedule_state() -> None:
     app._select_game("shanhai")
     _pump(app)
     assert app._task_state_label.cget("text") == tr("schedule.state_off")
-    assert app._task_next.cget("text") == "—"
+    # 没有排期时给出口径, 而不是一个像加载失败的短横线(13/18 号评审).
+    assert app._task_next.cget("text") == tr("task.next_none")
+    assert app._task_next.cget("text") != "—"
 
 
 def test_backup_restore_branch_export_report_success(
@@ -3684,10 +4282,13 @@ def test_deleting_a_game_shows_the_package_path_and_really_exports_it(
 
     service, game_id, _save = _real_service_with_one_backup(monkeypatch, tmp_path)
     messages: list[str] = []
+    details: list[str] = []
 
     def record_confirm(*_args: Any, **kwargs: Any) -> bool:
         """记下确认框文案并直接同意."""
         messages.append(str(kwargs.get("message", "")))
+        # 告别包的落点按 24 号评审单独一行给出(带底色), 不再塞进正文句子里。
+        details.append(str(kwargs.get("detail", "")))
         return True
 
     monkeypatch.setattr(mgr_mod, "confirm_dialog", record_confirm)
@@ -3708,11 +4309,11 @@ def test_deleting_a_game_shows_the_package_path_and_really_exports_it(
 
         # ① 确认框里必须写明包会落在哪里(用户要能先看到再决定).
         assert messages, "删除前必须先弹确认框"
-        assert str(tmp_path / "exports") in messages[-1]
+        assert str(tmp_path / "exports") in details[-1]
         # ② 确认后真的写出了一份可以回读的完整包.
         packages = list((tmp_path / "exports").glob("*.archive.zip"))
         assert len(packages) == 1, f"告别包应当恰好一份: {packages}"
-        assert packages[0].name in messages[-1]
+        assert packages[0].name in details[-1]
         contents = read_package(packages[0], verify_hashes=True)
         assert contents.game["name"] == "真实游戏"
         assert len(contents.config_list("backups")) == 1
@@ -4910,10 +5511,12 @@ def test_gui_backup_button_writes_snapshot_through_service(
         assert len(manifests) == 1
         snapshot_root = manifests[0].parent
         assert snapshot_root.parent.parent == backup_root
-        # 游戏目录用名称命名(而不是数字 id), 并在概要区展示出来.
+        # 游戏目录用名称命名(而不是数字 id); 界面上只说"由应用自动命名", 真实
+        # 目录名收在悬停提示里(13 号评审).
         assert snapshot_root.parent.name.startswith("快照游戏-")
         assert snapshot_root.parent.name != game.game_id
-        assert snapshot_root.parent.name in app._hero_origin_label.cget("text")
+        assert app._hero_origin_label.cget("text") == tr("hero.storage_folder")
+        assert snapshot_root.parent.name in app._origin_tip
         copies = sorted(path.name for path in snapshot_root.rglob("*.sav"))
         assert copies == ["a.sav", "b.sav"]
     finally:
@@ -6074,7 +6677,7 @@ def test_add_schedule_dialog_handles_an_empty_blocked_list_and_typing(
         assert (
             add_schedule_dialog(app, palette, candidates=candidates, blocked=()) is None
         )
-        assert tr("dialog.schedule_add_blocked", names="") not in _label_texts(
+        assert tr("dialog.schedule_add_blocked_title") not in _label_texts(
             toplevels[-1]
         )
         toplevels[-1].destroy()

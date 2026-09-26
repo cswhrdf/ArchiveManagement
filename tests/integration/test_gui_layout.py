@@ -312,6 +312,38 @@ def test_library_and_discovery_borders_are_visible() -> None:
     assert _offenders(page.frame) == []
 
 
+def _padding(value: object) -> tuple[int, int]:
+    """把 ``grid_info`` 的 padx/pady 归一成两元组(Tk 两侧相同时只回一个数)."""
+    parts = str(value).replace(",", " ").split()
+    first = int(parts[0])
+    return (first, int(parts[1]) if len(parts) > 1 else first)
+
+
+def test_poster_view_gives_the_games_area_equal_margins() -> None:
+    """海报模式收起表头后, 游戏区的四边边距要相同.
+
+    表头那一行塔成 0 高时游戏区会贴到面板上沿(上边距 0、其余三边 10px); 现在把上
+    边距补成 10 —— 既不保留那条表头空行, 也不让边距不一致。
+    """
+    app = gui_app(_new_app)
+    page = app._home_page
+    _pump(app)
+    assert page._head.winfo_ismapped()
+    list_pady = page._list_box.grid_info()["pady"]
+
+    page._on_layout_change("海报")
+    _pump(app)
+
+    assert not page._head.winfo_ismapped()
+    poster_info = page._list_box.grid_info()
+    poster_pady = _padding(poster_info["pady"])
+    assert poster_pady == (10, 10), f"上下边距不一致: {poster_pady}"
+    assert poster_pady[0] == _padding(poster_info["padx"])[0], (
+        f"上下与左右边距不一致: {poster_info}"
+    )
+    assert list_pady != poster_pady, "列表模式的上边距由表头提供, 不该被改到"
+
+
 def test_workspace_window_borders_are_visible() -> None:
     """设置与定时任务窗口里的卡片四边框都必须可见."""
     try:
@@ -337,13 +369,26 @@ def test_workspace_window_borders_are_visible() -> None:
         app.destroy()
 
 
-def _insets(page: Any, widget: Any) -> tuple[int, int]:
-    """控件相对页面容器的左/右内缩(实时读取基座, 避免窗口还在移动时报错值)."""
-    base = page.frame.winfo_rootx()
+def _page_margin(page: Any, box: Any) -> int:
+    """滚动区**外框**相对页面容器的左内缩(页边距链, 与滚动条无关).
+
+    量滚动区控件本身会把"内容装不下时右侧立起的滚动条"算进来(画布因此窄十几
+    像素), 那条差值说明的是内容多少, 不是卡片有没有被往里挤。
+    """
+    outer = box._parent_frame
+    return int(outer.winfo_rootx()) - int(page.frame.winfo_rootx())
+
+
+def _card_insets(box: Any) -> tuple[int, int]:
+    """卡片相对滚动区**内容区**的左/右内缩(同样与滚动条无关)."""
+    first = box.winfo_children()[0]
+    left = int(first.winfo_rootx()) - int(box.winfo_rootx())
     right = (
-        base + page.frame.winfo_width() - (widget.winfo_rootx() + widget.winfo_width())
+        int(box.winfo_rootx())
+        + int(box.winfo_width())
+        - (int(first.winfo_rootx()) + int(first.winfo_width()))
     )
-    return (widget.winfo_rootx() - base, right)
+    return (left, right)
 
 
 def _game_name(page: Any, game_id: str) -> str:
@@ -393,21 +438,30 @@ def test_detail_page_and_manage_window_borders_are_visible() -> None:
 
 
 def test_discovery_uses_same_page_margin_as_library() -> None:
-    """回归: "游戏发现"的内容内缩不能比"游戏库"更宽(卡片不能往里挤)."""
+    """回归: "游戏发现"的内容内缩不能比"游戏库"更宽(卡片不能往里挤).
+
+    两侧的页边距链是同一个(页面 24 + 卡片 10), 卡片相对滚动区内容区的内缩也必须
+    一样。**不要直接比滚动区控件本身的内缩**: 内容装不下时右侧会立起滚动条, 画布
+    因此窄一条滚动条, 那说的是内容多少而不是内缩。
+    """
     app = gui_app(_new_app)
     assert _wait_mapped(app)
     page = app._home_page
     _settle_layout(app)
-    library_insets = _insets(page, page._list_box)
+    library = page._list_box
+    library_margin = _page_margin(page, library)
+    library_card = _card_insets(library)
 
     page._show_section(HomeSection.DISCOVERY)
     _settle_layout(app)
-    assert _insets(page, page._discovery._cand_box) == library_insets
+    assert _page_margin(page, page._discovery._cand_box) == library_margin
+    assert _card_insets(page._discovery._cand_box) == library_card
 
     # 监控目录页未显示时其滚动区没有布局, 必须先切过去再量.
     page._discovery._show_page(DiscoveryPage.MONITORED)
     _settle_layout(app)
-    assert _insets(page, page._discovery._dirs_box) == library_insets
+    assert _page_margin(page, page._discovery._dirs_box) == library_margin
+    assert _card_insets(page._discovery._dirs_box) == library_card
 
 
 # ------------------------------------------------------------ 长名称不挤坏布局

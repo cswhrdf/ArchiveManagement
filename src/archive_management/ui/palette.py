@@ -32,6 +32,9 @@ class Palette:
     text_body: str  # 正文
     text_hint: str  # 功能说明文字(比 muted 清楚, 比正文淡)
     text_muted: str  # 次要/元数据文本(时间、计数等)
+    text_disabled: str  # 禁用态文字(比 muted 更暗, 一眼看出不能点)
+    disabled_bg: str  # 禁用态底色(比 raised 更暗)
+    disabled_border: str  # 禁用态描边(压暗到几乎看不出)
     accent: str  # 强调主色(teal)
     accent_text: str  # 强调色上的文字
     accent_soft: str  # 强调淡底(选中项)
@@ -46,6 +49,8 @@ class Palette:
     badge_manual_text: str
     badge_auto_bg: str  # “自动”徽章
     badge_auto_text: str
+    badge_safety_bg: str  # “恢复前安全点”徽章(与手动/自动必须是三种可区分的颜色)
+    badge_safety_text: str
     success: str  # 状态成功点
 
     @classmethod
@@ -54,6 +59,17 @@ class Palette:
         if name == "light":
             return LIGHT
         return DARK
+
+    def selection_colors(self, selected: bool) -> tuple[str, str]:
+        """返回选中项的(底色, 描边色), 未选中时返回卡片的常规配色.
+
+        **所有列表/卡片视图共用这一条规则**: 选中 = 描边 + 浅底, 而不是换成主按钮
+        那种实心强调色。列表与海报因此有了同一套"我选中了谁"的表达, 也不会与
+        "+ 添加游戏 / 打开详情"这类"哪里能点"的实心绿撞在一起。
+        """
+        if selected:
+            return self.accent_soft, self.accent_soft_border
+        return self.card, self.card_border
 
 
 DARK = Palette(
@@ -72,6 +88,9 @@ DARK = Palette(
     text_body="#d2dbea",
     text_hint="#aab8ce",
     text_muted="#8291aa",
+    text_disabled="#5a6a80",
+    disabled_bg="#0d1523",
+    disabled_border="#1b2a3d",
     accent="#55d6be",
     accent_text="#092329",
     accent_soft="#17343a",
@@ -86,6 +105,8 @@ DARK = Palette(
     badge_manual_text="#e1c8ed",
     badge_auto_bg="#29384a",
     badge_auto_text="#b8c9df",
+    badge_safety_bg="#4a3b22",
+    badge_safety_text="#f2d6a4",
     success="#55d6be",
 )
 
@@ -105,6 +126,9 @@ LIGHT = Palette(
     text_body="#405168",
     text_hint="#4c5d73",
     text_muted="#657589",
+    text_disabled="#a3b0be",
+    disabled_bg="#e6ebef",
+    disabled_border="#dde3e9",
     accent="#2fae97",
     accent_text="#ffffff",
     accent_soft="#d9eee8",
@@ -119,5 +143,7 @@ LIGHT = Palette(
     badge_manual_text="#70427b",
     badge_auto_bg="#e8edf1",
     badge_auto_text="#4d5d70",
+    badge_safety_bg="#f7e7c9",
+    badge_safety_text="#8a5a12",
     success="#1e9b80",
 )

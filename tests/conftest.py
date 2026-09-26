@@ -3,8 +3,10 @@
 严重等级使用 Allure 官方分级: blocker/critical/normal/minor/trivial/no_severity,
 **语义是"用例失败的影响面", 与测试层次无关**(层次用 ``layer`` 表达):
 
-- ``blocker``: 安全与数据完整性底线 —— 路径越界/危险目标必须被拒、快照或清单被篡改
-  必须拒绝恢复、游戏运行中不得静默覆盖存档;
+- ``blocker``: 安全与数据完整性底线, 以及**会让软件崩溃/卡死的缺陷** —— 路径越界/危险目标
+  必须被拒、快照或清单被篡改必须拒绝恢复、游戏运行中不得静默覆盖存档、界面不得因事件递归
+  而崩溃或抽死(如按需滚动条引发的 `maximum recursion depth exceeded`, 见
+  ``.github/instructions/ctk-scrollbar-twitch.instructions.md``);
 - ``critical``: 核心业务不可用或结果不正确 —— 备份/快照/恢复/删除计划、仓储事务、
   数据库迁移、调度、GUI 真实后端、全链路流水线;
 - ``normal``: 常规功能与交互 —— 配置、平台探测、主页聚合、对话框、CLI、热键、

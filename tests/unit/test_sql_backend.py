@@ -135,15 +135,20 @@ def test_update_game_renames(tmp_path: Path) -> None:
     assert detail.origin_label == "原始名称: 旧名"
 
 
-def test_backup_uses_named_folder_and_shows_it(tmp_path: Path) -> None:
-    """备份目录改用"名称 + 哈希", 并在详情里作为额外信息展示."""
+def test_backup_uses_named_folder_and_hides_the_key(tmp_path: Path) -> None:
+    """备份目录用"名称 + 哈希", 但详情正文只说明它由应用自动命名."""
     service, game_id, save = _service_with_save(tmp_path)
     service.run_backup_now(game_id)
 
     detail = service.get_detail(game_id)
     assert detail.storage_folder.startswith("Demo-")
     assert detail.storage_folder != game_id
-    assert detail.origin_label == f"备份目录: {detail.storage_folder}"
+    # 内部存储键只在悬停提示里, 不上正文(13 号评审).
+    assert detail.origin_label == tr("hero.storage_folder")
+    assert detail.storage_folder not in detail.origin_label
+    assert detail.storage_hint == tr(
+        "hero.storage_folder_tip", folder=detail.storage_folder
+    )
     snapshots = list(
         (tmp_path / "backups" / detail.storage_folder).glob("*/loc-0/*.dat")
     )
@@ -1528,9 +1533,11 @@ def test_list_schedules_reports_all_games(tmp_path: Path) -> None:
     assert configured.game_name == "Demo"
     assert configured.interval_text == "30m"
     assert configured.keep_auto == 2
-    # ManifestBackend 没有时间轴(下次运行时间为 None), 因此文案回退到占位符;
-    # 真实调度器会给出具体时间戳(见 test_pause_keeps_interval_configuration).
-    assert configured.next_run_label
+    # ManifestBackend 没有时间轴(下次运行时间为 None): 标签本身是空串, 但给用户看的
+    # 文案必须落到"未安排"这种能读的说法上, 而不是一个像加载失败的短横线; 真实调度器
+    # 会给出具体时间戳(见 test_pause_keeps_interval_configuration).
+    assert configured.next_run_label == ""
+    assert configured.next_run_text == tr("schedule.next_run_none")
     assert configured.auto_count == 1
     assert configured.auto_count_label
     assert configured.state_label == "已启用"
@@ -1538,6 +1545,24 @@ def test_list_schedules_reports_all_games(tmp_path: Path) -> None:
     idle = items[other]
     assert idle.interval_text == ""
     assert idle.state_label == "未配置"
+
+
+def test_detail_marks_a_paused_schedule_as_paused_not_missing(tmp_path: Path) -> None:
+    """配了周期但没启用时, 详情页不能说"未配置"(用户反馈: 会产生误解)."""
+    service, game_id, _backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m", enabled=False)
+
+    paused = service.get_detail(game_id)
+
+    assert paused.next_backup_label == ""
+    assert paused.next_backup_paused is True
+    assert paused.next_backup_text == tr("hero.next_paused")
+
+    # 启用之后回到"有时间戳"的正常路径, 不再报暂停.
+    service.set_schedule(game_id, "30m")
+    enabled = service.get_detail(game_id)
+    assert enabled.next_backup_paused is False
+    assert enabled.next_backup_text != tr("hero.next_paused")
 
 
 def test_pause_keeps_interval_configuration(tmp_path: Path) -> None:
@@ -1552,7 +1577,9 @@ def test_pause_keeps_interval_configuration(tmp_path: Path) -> None:
     assert item.interval_text == "30m"
     assert item.enabled is False
     assert item.state_label == "已暂停"
-    assert item.next_run_label == "—"
+    # 暂停后没有排期: 标签为空, 展示文案给出"未安排", 而不是一个孤零零的破折号.
+    assert item.next_run_label == ""
+    assert item.next_run_text == tr("schedule.next_run_none")
 
 
 def test_schedule_for_a_disabled_game_is_created_paused(tmp_path: Path) -> None:

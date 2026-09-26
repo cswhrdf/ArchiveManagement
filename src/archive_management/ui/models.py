@@ -41,6 +41,7 @@ from archive_management.i18n import tr
 from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.services.pathcheck import dangerous_target_reason
 from archive_management.services.platforms import PLATFORM_LABELS
+from archive_management.ui.textfit import MeasurableFont, fit_text
 
 
 class ViewKind(StrEnum):
@@ -101,6 +102,50 @@ def size_label(total: int) -> str:
     if total >= 1024:
         return f"{total / 1024:.1f} KB"
     return f"{total} B"
+
+
+def format_stamp(value: str, *, fallback: str = "—") -> str:
+    """把 ISO 时间戳格式化成 ``2026/09/26 20:11``(空值给占位符).
+
+    全应用只允许一种日期写法: 主页与详情用 ``2026/09/24``, 启停队列曾经用 ``-``
+    分隔 —— 同一屏里两种格式会让人以为其中一处是"原始数据"。脏数据原样显示
+    (把 ``T`` 换成空格), 至少不丢信息。
+    """
+    if not value:
+        return fallback
+    try:
+        return datetime.fromisoformat(value).strftime("%Y/%m/%d %H:%M")
+    except ValueError:
+        return value.replace("T", " ")
+
+
+def chips_lines(
+    chips: Sequence[str],
+    font: MeasurableFont,
+    width: int,
+    *,
+    max_lines: int = 2,
+) -> str:
+    """把状态标签排成状态列的文案: 能换行就换行, 放不下才补省略号.
+
+    规则(与 06 号评审一致):
+
+    * **不在标签中间断开** —— 每行都停在一个完整标签之后(贪心塞满第一行, 换行只
+      发生在 ``" · "`` 处), 所以不会出现把 "测试1" 裁成 "测…" 这种半句话;
+    * 换行后仍放不下的部分交给 :func:`fit_text` 补省略号, 由它保证每行都不超宽。
+    """
+    if not chips:
+        return ""
+    first: list[str] = []
+    for chip in chips:
+        candidate = " · ".join([*first, chip])
+        if first and font.measure(candidate) > width:
+            break
+        first.append(chip)
+    rest = list(chips[len(first) :])
+    if not rest or max_lines <= 1:
+        return fit_text(" · ".join([*first, *rest]), font, width)
+    return "\n".join((" · ".join(first), fit_text(" · ".join(rest), font, width)))
 
 
 class FeedbackKind(StrEnum):
@@ -170,16 +215,45 @@ class GameDetail:
     original_name: str = ""
     # 备份根目录下实际使用的目录名; 尚未备份过时为空.
     storage_folder: str = ""
+    # 配了定时备份但当前未启用(暂停): 不能当成"未配置"(见 next_backup_text).
+    next_backup_paused: bool = False
+
+    @property
+    def next_backup_text(self) -> str:
+        """下次自动备份的展示文本.
+
+        没有排期时不能只给一个短横线 —— 那看起来像加载失败; 这里换成一句能读的
+        口径(与任务卡里的"未配置"、定时窗口里的"未安排"保持同一套说法)。
+
+        "配了周期但没启用"与"压根没配"必须分开: 前者说"已暂停", 否则用户会以为
+        自己没配过(用户反馈)。
+        """
+        if self.next_backup_label:
+            return self.next_backup_label
+        if self.next_backup_paused:
+            return tr("hero.next_paused")
+        return tr("hero.next_none")
 
     @property
     def origin_label(self) -> str:
-        """返回"原始名称 / 备份目录"补充信息(无内容可展示时返回空串)."""
+        """返回"原始名称 / 备份目录"补充信息(无内容可展示时返回空串).
+
+        备份目录**只说明它由应用自动命名**: 真实目录名是 ``<slug>-<短哈希>`` 这种
+        内部存储键, 用户既改不了也用不上(需要时靠 :attr:`storage_hint` 悬停提示看)。
+        """
         parts: list[str] = []
         if self.original_name and self.original_name != self.name:
             parts.append(tr("hero.original_name", name=self.original_name))
         if self.storage_folder:
-            parts.append(tr("hero.storage_folder", folder=self.storage_folder))
+            parts.append(tr("hero.storage_folder"))
         return " · ".join(parts)
+
+    @property
+    def storage_hint(self) -> str:
+        """悬停提示里的技术信息(备份目录名); 还没有备份过时返回空串."""
+        if not self.storage_folder:
+            return ""
+        return tr("hero.storage_folder_tip", folder=self.storage_folder)
 
 
 @dataclass(frozen=True)
@@ -263,6 +337,11 @@ class TaskStatus:
     keep_auto: int = 3  # 自动备份保留份数
     revision: int = 0  # 备份数据版本号: 变化即表示列表需要重载
 
+    @property
+    def next_run_text(self) -> str:
+        """下次运行的展示文本(没有排期时给出口径, 而不是一个孤零零的破折号)."""
+        return self.next_run_label or tr("task.next_none")
+
 
 @dataclass(frozen=True)
 class ScheduleItem:
@@ -281,11 +360,6 @@ class ScheduleItem:
     # 游戏本身的状态: 停用或归档时保留任务配置, 但不允许启用与执行.
     game_enabled: bool = True
     archived: bool = False
-
-    @property
-    def game_label(self) -> str:
-        """返回任务来自哪个游戏的展示文案."""
-        return tr("schedule.game_label", name=self.game_name)
 
     @property
     def interval_label(self) -> str:
@@ -331,8 +405,15 @@ class ScheduleItem:
 
     @property
     def auto_count_label(self) -> str:
-        """当前自动备份存档数量文案."""
+        """当前自动备份存档数量文案(带单位: 数的是关掉定时后会自动删除的那几份)."""
         return tr("schedule.auto_count", count=self.auto_count)
+
+    @property
+    def next_run_text(self) -> str:
+        """下次运行的展示文本(没有排期时给出口径, 而不是一个孤零零的破折号)."""
+        if not self.next_run_label:
+            return tr("schedule.next_run_none")
+        return tr("schedule.next_run", stamp=self.next_run_label)
 
     @property
     def summary(self) -> str:
@@ -340,7 +421,7 @@ class ScheduleItem:
         return " · ".join(
             (
                 self.interval_label,
-                tr("schedule.next_run", stamp=self.next_run_label),
+                self.next_run_text,
                 self.auto_count_label,
             )
         )
@@ -385,6 +466,16 @@ def _with_branch_labels(
             )
         )
     return labelled
+
+
+def backup_card_detail(item: BackupItem) -> str:
+    """备份卡片副标题: "所属分支 · 容量", 再换行附上描述(没有描述就一行).
+
+    **两种视图共用同一份结构**: 分支树里层级已经表达了归属、时间线里层级恒为 0,
+    早先分支树只写容量而时间线多一段"主线 · " —— 同一张卡片切视图就"变了形状"。
+    """
+    text = f"{item.branch_label}  ·  {item.size_label}"
+    return f"{text}\n{item.sub}" if item.sub else text
 
 
 def visible_in_branch_view(
@@ -569,14 +660,28 @@ class MonitoredDirItem:
         return tr("discovery.dir_on") if self.enabled else tr("discovery.dir_off")
 
     @property
-    def summary(self) -> str:
-        """列表行副标题: 路径 + 状态 + 上次扫描时间."""
-        parts = [self.state_label, self.health_label]
+    def state_tone(self) -> str:
+        """启用状态的颜色基调: 停用是要被注意的状态, 不能与"路径可用"同色.
+
+        路径状态(可用)用成功色, 备注与扫描时间用弱化色; "已停用"用提醒色, 于是
+        "这条记录当前不参与扫描"一眼可见(10 号评审)。
+        """
+        return "ok" if self.enabled else "attention"
+
+    @property
+    def detail(self) -> str:
+        """列表行副标题的后半段: 路径状态 + 备注 + 上次扫描时间(不含启用状态)."""
+        parts = [self.health_label]
         if self.note:
             parts.append(self.note)
         if self.last_scan_label:
             parts.append(tr("discovery.dir_last_scan", stamp=self.last_scan_label))
         return " · ".join(parts)
+
+    @property
+    def summary(self) -> str:
+        """列表行副标题: 启用状态 + 路径状态 + 上次扫描时间(启用状态单独着色)."""
+        return " · ".join((self.state_label, self.detail))
 
 
 class CandidateFilter(StrEnum):
@@ -882,9 +987,19 @@ class HomeBoard:
         )
 
     @property
+    def empty_library(self) -> bool:
+        """游戏库是否**完全为空**(连归档的都没有一款).
+
+        空库时界面要克制: 表头、底部统计与翻页整行都收起, 只留一条解释性空状态
+        (第 1/2 号评审)。筛选把结果筛空时不算空库 —— 那时用户还需要计数来对照着
+        改筛选条件, 因此判据用的是"库里一款都没有", 而不是"这一页没有内容"。
+        """
+        return self.stats.total == 0 and self.stats.archived == 0
+
+    @property
     def empty_message(self) -> str:
         """空状态主文案: 区分"游戏库为空"与"当前筛选没有匹配"."""
-        if self.stats.total == 0 and self.stats.archived == 0:
+        if self.empty_library:
             return tr("home.empty_library")
         if not self.narrowing:
             return tr("home.empty_view", view=self.filter.view.label)
@@ -893,7 +1008,7 @@ class HomeBoard:
     @property
     def empty_hint(self) -> str:
         """空状态补充说明(始终给出下一步可以做什么)."""
-        if self.stats.total == 0 and self.stats.archived == 0:
+        if self.empty_library:
             return tr("home.empty_library_hint")
         if not self.narrowing:
             return tr("home.empty_hint")
@@ -1088,6 +1203,11 @@ class BatchExportOption:
     #: 录入时的名称(译名探测/用户改名之前的那个): **筛选也按它匹配** —— 库里的名字
     #: 会被译名写回或用户改名换掉, 而用户脑子里记的可能还是当初那一个。
     original_name: str = ""
+    #: 行内单独展示的"原始名称: X"(不适用时为空串)。
+    #:
+    #: 它原来是被拼进 ``detail`` 里的一句灰字, 和"已停用"这种状态连在一起, 看起来像
+    #: 两个字段粘成了一句(27 号评审); 拆成独立字段后界面才能给它单独的颜色与前缀。
+    original_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -1121,17 +1241,15 @@ def exportable_games(games: Sequence[GameSummary]) -> tuple[GameSummary, ...]:
     return tuple(game for game in games if not game.archived)
 
 
-def _export_detail(game: GameSummary) -> str:
-    """行尾的说明文字: 原名与界面名不同时把原名摆上, 否则只给位置/备份摘要.
+def _export_original_label(game: GameSummary) -> str:
+    """行内的"原始名称: X": 只在它与界面名不同时才给(相同则白占宽度).
 
-    带上原名是为了"按原名搜得到"这件事可解释: 否则搜出来的那行文字里看不出跟输入有
-    什么关系(而它确实命中了)。原名与界面名相同时不加, 免得白占宽度。
+    带上它是为了"按原名也搜得到"这件事可解释: 否则搜出来的那一行里看不出跟输入有
+    什么关系(而它确实命中了)。
     """
     if game.original_name and game.original_name != game.name:
-        return (
-            f"{tr('hero.original_name', name=game.original_name)} · {game.list_detail}"
-        )
-    return game.list_detail
+        return tr("hero.original_name", name=game.original_name)
+    return ""
 
 
 def export_batch_prompt(games: Sequence[GameSummary]) -> BatchExportPrompt:
@@ -1144,9 +1262,10 @@ def export_batch_prompt(games: Sequence[GameSummary]) -> BatchExportPrompt:
         BatchExportOption(
             game_id=game.game_id,
             name=game.name,
-            detail=_export_detail(game),
+            detail=game.list_detail,
             selected=False,
             original_name=game.original_name,
+            original_label=_export_original_label(game),
         )
         for game in exportable_games(games)
     )

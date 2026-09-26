@@ -247,3 +247,5 @@ __marimo__/
 crash-dumps/
 # coredumpy 插件自己的默认目录(--enable-coredumpy 不带 --coredumpy-dir 时)
 coredumpy/
+ui-review/*
+!ui-review/pages.md

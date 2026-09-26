@@ -86,6 +86,7 @@ from archive_management.ui.models import (
     SourceFilter,
     TaskStatus,
     ViewKind,
+    backup_card_detail,
     batch_export_filename,
     batch_import_prompt,
     branch_order,
@@ -103,7 +104,7 @@ from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
 from archive_management.ui.textfit import fit_text
 from archive_management.ui.typography import install_font_scaling, set_base_font_px
-from archive_management.ui.widgets import UiKit
+from archive_management.ui.widgets import UiKit, attach_tooltip
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,11 @@ _HEADER_NAME_LINES = 2
 _HERO_NAME_LINES = 2
 # 拖窗口时把名称重裁合并成一次(每个像素都跑一遍会卡).
 _REFIT_DELAY_MS = 60
+# 任务卡里的名称/值: 控件还没测量出来时的落位预算(实测侧栏内容宽约 314px, 去掉
+# 两侧 18px 内边距)。名称最多两行, 放不下补省略号。
+_TASK_NAME_WIDTH = 260
+_TASK_NAME_LINES = 2
+_TASK_VALUE_WIDTH = 260
 _RAIL_WIDTH = 350
 # 分支视图中用于标示层级的连接符(与缩进配合).
 _BRANCH_MARK = "└ "
@@ -790,8 +796,12 @@ class ArchiveApp(ctk.CTk):
             info, text="", font=ctk.CTkFont(size=12, weight="bold")
         )
         self._hero_verified_label.pack(anchor="w", pady=(6, 0))
-        # 额外信息: 原始名称(改过名时)与备份根下的目录名.
+        # 额外信息: 原始名称(改过名时)与备份目录. 目录名是 slug + 短哈希这种内部
+        # 存储键, 放在正文里用户既改不了也用不上 —— 正文只说明"由应用自动命名",
+        # 真实目录名挂在悬停提示上(技术信息不丢, 也不占正文)。
         self._hero_origin_label = self.kit.label(info, "", style="muted", size=11)
+        self._origin_tip = ""
+        attach_tooltip(self._hero_origin_label, lambda: self._origin_tip)
         self.kit.register(
             lambda p: self._hero_verified_label.configure(
                 text_color=p.success if self._verified else p.danger
@@ -825,27 +835,18 @@ class ArchiveApp(ctk.CTk):
 
         chip = ctk.CTkFrame(stats, corner_radius=10)
         chip.pack(side="left", padx=(4, 0))
-        self.kit.register(
-            lambda p: chip.configure(
-                fg_color=p.accent_soft,
-                border_color=p.accent_soft_border,
-                border_width=1,
-            )
-        )
+        self._next_chip = chip
+        # 没有排期时不能穿"正向"的强调色: 一眼看去会像"已安排好了".
+        self._next_scheduled = False
+        self.kit.register(lambda p: self._paint_next_chip(p))
         self._stat_next_caption = ctk.CTkLabel(
             chip, text=tr("hero.next_auto"), font=ctk.CTkFont(size=11), anchor="w"
         )
         self._stat_next_caption.pack(anchor="w", padx=12, pady=(10, 0))
-        self.kit.register(
-            lambda p: self._stat_next_caption.configure(text_color=p.success)
-        )
         self._stat_next_value = ctk.CTkLabel(
             chip, text="", font=ctk.CTkFont(size=16, weight="bold"), anchor="w"
         )
         self._stat_next_value.pack(anchor="w", padx=12, pady=(2, 10))
-        self.kit.register(
-            lambda p: self._stat_next_value.configure(text_color=p.accent_soft_text)
-        )
 
     def _build_toolbar(self, parent: ctk.CTkFrame) -> None:
         parent.grid_columnconfigure(5, weight=1)
@@ -887,7 +888,7 @@ class ArchiveApp(ctk.CTk):
         self._backup_btn = self.kit.button(
             parent,
             tr("action.backup_now"),
-            style="danger",
+            style="accent",
             command=self._on_backup,
             width=150,
             height=36,
@@ -1064,13 +1065,15 @@ class ArchiveApp(ctk.CTk):
         self.kit.label(
             panel, tr("task.title"), style="h2", size=15, weight="bold"
         ).grid(row=0, column=0, padx=18, pady=(14, 8), sticky="w")
+        # 任务名自己占满一整行(右边只留状态): 早先它和"备份目标"那条长路径挤同两列,
+        # 亏空从名称列扣, "每 5m 备份 · 保留 3 份"被静默截成"每 5m 备份 · 保"。
         self._task_name_label = self.kit.label(
             panel, "", style="body", size=13, weight="bold"
         )
-        self._task_name_label.configure(wraplength=180, justify="left")
-        self._task_name_label.grid(row=1, column=0, padx=18, sticky="w")
+        self._task_name_label.configure(wraplength=_TASK_NAME_WIDTH, justify="left")
+        self._task_name_label.grid(row=1, column=0, padx=18, sticky="ew")
         self._task_state_label = self.kit.label(panel, "", style="muted", size=12)
-        self._task_state_label.grid(row=1, column=1, padx=(0, 18), sticky="e")
+        self._task_state_label.grid(row=1, column=1, padx=(8, 18), sticky="e")
 
         self._task_progress = ctk.CTkProgressBar(panel, height=8, corner_radius=4)
         self._task_progress.grid(
@@ -1094,29 +1097,34 @@ class ArchiveApp(ctk.CTk):
             width=86,
             height=26,
         )
-        self._cancel_btn.grid(row=3, column=1, padx=(0, 18), pady=(0, 8), sticky="e")
+        self._cancel_btn.grid(row=3, column=1, padx=(8, 18), pady=(0, 8), sticky="e")
         self._cancel_btn.configure(state="disabled")
 
+        # 说明与它的值各占一行(值拿满宽度): 长路径不再需要和别的列抢位置。
         self.kit.label(panel, tr("task.next"), style="muted", size=12).grid(
-            row=4, column=0, padx=18, sticky="w"
+            row=4, column=0, columnspan=2, padx=18, sticky="w"
         )
         self._task_next = self.kit.label(panel, "", style="body", size=12)
-        self._task_next.configure(wraplength=180, justify="left")
-        self._task_next.grid(row=4, column=1, padx=(0, 18), sticky="e")
+        self._task_next.configure(wraplength=_TASK_VALUE_WIDTH, justify="left")
+        self._task_next.grid(
+            row=5, column=0, columnspan=2, padx=18, pady=(2, 0), sticky="ew"
+        )
 
         self.kit.label(panel, tr("task.target"), style="muted", size=12).grid(
-            row=5, column=0, padx=18, pady=(6, 0), sticky="nw"
+            row=6, column=0, columnspan=2, padx=18, pady=(8, 0), sticky="w"
         )
         # 备份目标是完整路径, 必须换行显示, 否则会被卡片裁掉.
         self._task_target = self.kit.label(panel, "", style="hint", size=12)
-        self._task_target.configure(wraplength=190, justify="left")
-        self._task_target.grid(row=5, column=1, padx=(0, 18), pady=(6, 0), sticky="ne")
+        self._task_target.configure(wraplength=_TASK_VALUE_WIDTH, justify="left")
+        self._task_target.grid(
+            row=7, column=0, columnspan=2, padx=18, pady=(2, 0), sticky="ew"
+        )
 
         # 快捷键不在任务状态卡里展示: 它属于全局设置, 统一在"设置"窗口里查看与修改。
         self._task_hint = self.kit.label(panel, "", style="hint", size=12)
         self._task_hint.configure(wraplength=250, justify="left")
         self._task_hint.grid(
-            row=6, column=0, columnspan=2, padx=18, pady=(12, 12), sticky="w"
+            row=8, column=0, columnspan=2, padx=18, pady=(12, 12), sticky="w"
         )
 
     # ---------------------------------------------------------------- 数据装载
@@ -1183,7 +1191,9 @@ class ArchiveApp(ctk.CTk):
         self._stat_recent_sub.configure(text="")
         self._stat_total_value.configure(text=tr("detail.backups_none"))
         self._stat_total_sub.configure(text="")
-        self._stat_next_value.configure(text="—")
+        self._next_scheduled = False
+        self._stat_next_value.configure(text=tr("hero.next_none"))
+        self._paint_next_chip(self.p)
         self._render_selected(None)
         self._render_task(self.backend.task_status(None))
         self._update_actions()
@@ -1219,8 +1229,12 @@ class ArchiveApp(ctk.CTk):
             self._feedback(FeedbackKind.INFO, tr("game.no_locations_hint"))
 
     def _render_origin(self, detail: GameDetail) -> None:
-        """展示"原始名称 / 备份目录"补充信息(无内容时不占位)."""
+        """展示"原始名称 / 备份目录"补充信息(无内容时不占位).
+
+        备份目录那一句只说"由应用自动命名", 真实目录名(内部存储键)进悬停提示。
+        """
         text = detail.origin_label
+        self._origin_tip = detail.storage_hint
         if not text:
             self._hero_origin_label.pack_forget()
             return
@@ -1244,7 +1258,32 @@ class ArchiveApp(ctk.CTk):
         self._stat_recent_sub.configure(text=detail.last_backup_sub)
         self._stat_total_value.configure(text=detail.total_backups_label)
         self._stat_total_sub.configure(text=detail.total_backups_sub)
-        self._stat_next_value.configure(text=detail.next_backup_label)
+        self._next_scheduled = bool(detail.next_backup_label)
+        self._stat_next_value.configure(text=detail.next_backup_text)
+        self._paint_next_chip(self.p)
+
+    def _paint_next_chip(self, palette: Palette) -> None:
+        """下次自动备份那个胶囊的配色跟着有没有排期走.
+
+        有排期 = 强调色的正向提示; 没有排期 = 中性底色 + 中性字(未配置), 不再是
+        一个穿着正向色、里面只有一条短横线的面板。
+        """
+        if self._next_scheduled:
+            self._next_chip.configure(
+                fg_color=palette.accent_soft,
+                border_color=palette.accent_soft_border,
+                border_width=1,
+            )
+            self._stat_next_caption.configure(text_color=palette.success)
+            self._stat_next_value.configure(text_color=palette.accent_soft_text)
+            return
+        self._next_chip.configure(
+            fg_color=palette.panel,
+            border_color=palette.border,
+            border_width=1,
+        )
+        self._stat_next_caption.configure(text_color=palette.text_muted)
+        self._stat_next_value.configure(text_color=palette.text_muted)
 
     def _notice(self, text: str) -> None:
         """把发现分区的提示(如"开始尝试探测封面")写到左下角状态栏."""
@@ -1357,13 +1396,14 @@ class ArchiveApp(ctk.CTk):
     def _render_task(self, task: TaskStatus) -> None:
         """刷新任务状态卡: 运行中的操作优先, 否则显示定时任务的启用状态."""
         state = tr("task.running") if task.running else _schedule_state(task)
-        self._task_name_label.configure(text=task.task_name)
+        self._fit_task_name(task.task_name)
+        self._show_task_progress(task.running)
         self._task_state_label.configure(text=state)
         self._task_progress.set(task.progress)
         self._task_progress_label.configure(
             text=task.progress_label if task.running else ""
         )
-        self._task_next.configure(text=task.next_run_label)
+        self._task_next.configure(text=task.next_run_text)
         self._task_target.configure(text=task.target_label)
         self._task_hint.configure(text=tr("task.hint"))
         self._cancel_btn.configure(state="normal" if task.cancellable else "disabled")
@@ -1371,6 +1411,42 @@ class ArchiveApp(ctk.CTk):
         self._service_label.configure(
             text=f"{tr('status.service_ok')} · {self._usage_text}"
         )
+
+    def _fit_task_name(self, text: str) -> None:
+        """按标签的**当前宽度**裁剪任务名.
+
+        宽度不够时先换行, 两行还放不下才补省略号 —— 绝不允许出现"每 5m 备份 · 保"
+        这种半句话(13 号评审)。控件还没量出宽度时用设计预算兜底。
+        """
+        width = int(self._task_name_label.winfo_width())
+        budget = width if width > 1 else _TASK_NAME_WIDTH
+        self._task_name_label.configure(wraplength=budget)
+        self._task_name_label.configure(
+            text=fit_text(
+                text,
+                self._task_name_label.cget("font"),
+                budget,
+                max_lines=_TASK_NAME_LINES,
+            )
+        )
+
+    def _show_task_progress(self, running: bool) -> None:
+        """进度条与取消入口只在真的有操作时占面积.
+
+        空闲时那条约 8px 的进度槽在深色底上就是一个没有说明的小绿点(13 号评审),
+        所以整行收起, 而不是留在那里"占位"。
+        """
+        widgets = (
+            self._task_progress,
+            self._task_progress_label,
+            self._cancel_btn,
+        )
+        if running:
+            for widget in widgets:
+                widget.grid()
+            return
+        for widget in widgets:
+            widget.grid_remove()
 
     def _refresh_task(self) -> None:
         """轮询任务状态: 备份进行中时刷新进度, 数据变化时重载列表.
@@ -1536,14 +1612,10 @@ class ArchiveApp(ctk.CTk):
     def _card_detail(self, item: BackupItem) -> str:
         """卡片副标题.
 
-        分支树视图里层级已经表达了分支归属, 因此只显示容量与描述; 时间线
-        视图需要额外标明该备份处于哪条分支下.
+        两种视图共用同一份结构(``backup_card_detail``): 时间线早先多一段"主线 · ",
+        分支树只有容量, 同一张卡片切视图就"变了形状"。
         """
-        if self._view == ViewKind.TIMELINE:
-            text = f"{item.branch_label}  ·  {item.size_label}"
-        else:
-            text = item.size_label
-        return f"{text}\n{item.sub}" if item.sub else text
+        return backup_card_detail(item)
 
     def _apply_period_filter(self, items: list[BackupItem]) -> list[BackupItem]:
         """按时间范围筛选备份节点(来源筛选已在排序前完成)."""
@@ -1648,7 +1720,13 @@ class ArchiveApp(ctk.CTk):
             title.configure(text_color=palette.text_primary)
         when.configure(text_color=palette.text_body)
         detail.configure(text_color=palette.text_muted)
-        if item.auto:
+        if item.safety:
+            # 安全点与"手动/自动"的语义不同(一个是种类、两个是来源): 三者必须
+            # 是三种可区分的颜色, 否则同一张卡片上两个胶囊看着一样。
+            badge.configure(
+                fg_color=palette.badge_safety_bg, text_color=palette.badge_safety_text
+            )
+        elif item.auto:
             badge.configure(
                 fg_color=palette.badge_auto_bg, text_color=palette.badge_auto_text
             )
@@ -1726,7 +1804,11 @@ class ArchiveApp(ctk.CTk):
             text=(
                 tr("sel.current")
                 if item.is_current
-                else tr("sel.not_current", size=item.size_label)
+                else tr(
+                    "sel.not_current",
+                    size=item.size_label,
+                    button=tr("action.restore"),
+                )
             )
         )
         self._update_actions()
@@ -2025,6 +2107,7 @@ class ArchiveApp(ctk.CTk):
                     count=plan.removed_count,
                 ),
                 confirm_text=tr("dialog.delete_confirm"),
+                danger=True,
             )
             if not confirmed:
                 log_action(
@@ -2119,6 +2202,7 @@ class ArchiveApp(ctk.CTk):
             list_label=tr("dialog.export_batch_list"),
             no_match_text=tr("dialog.export_batch_no_match"),
             select_all_label=tr("dialog.export_batch_select_all"),
+            select_all_scope=tr("dialog.export_batch_select_all_scope"),
             confirm_text=tr("dialog.export_batch_confirm"),
         )
         if choice is None:
@@ -2218,6 +2302,7 @@ class ArchiveApp(ctk.CTk):
             strategies=import_strategies(has_targets=bool(prompt.targets)),
             target_label=tr("dialog.import_target"),
             target_hint=tr("dialog.import_target_hint"),
+            target_locked_hint=tr("dialog.import_target_locked"),
             confirm_text=tr("dialog.import_confirm"),
         )
         if choice is None:

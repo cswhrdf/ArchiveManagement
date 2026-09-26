@@ -65,6 +65,42 @@ def _tail(text: str, font: MeasurableFont, width: int) -> str:
     return ELLIPSIS if limit <= 0 else f"{text[:limit].rstrip()}{ELLIPSIS}"
 
 
+def _longest_suffix(text: str, font: MeasurableFont, width: int) -> int:
+    """二分找出能放进 ``width`` 的最长后缀长度(一个字符都放不下时为 0)."""
+    low, high, best = 1, len(text), 0
+    while low <= high:
+        middle = (low + high) // 2
+        if font.measure(text[len(text) - middle :]) <= width:
+            best, low = middle, middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def fit_path(text: str, font: MeasurableFont, width: int) -> str:
+    """把长路径压进 ``width``: **中间省略**, 头尾都留.
+
+    路径越长, 末尾的目录名越重要(前面是所有人都一样的盘符与用户目录), 因此不能用
+    从头截断的 :func:`fit_text`; 但整行不截断又会顶出卡片(第 8/9 号评审)。这里留一小
+    段头部(盘符/根)与尽可能长的尾部, 中间用省略号连起来; 极窄时退回头部截断。
+    """
+    if width <= 0 or font.measure(text) <= width:
+        return text
+    if font.measure(ELLIPSIS) > width:
+        return ""
+    budget = width - font.measure(ELLIPSIS)
+    head_length = min(_longest_prefix(text, font, budget // 3), max(0, len(text) // 3))
+    head = text[:head_length]
+    tail_length = _longest_suffix(text, font, budget - font.measure(head))
+    if tail_length <= 0:
+        return fit_text(text, font, width)
+    clipped = f"{head}{ELLIPSIS}{text[len(text) - tail_length :]}"
+    # 两侧都留时理论宽度可能因为字体取整略超: 真超了就退回头部截断(保证不溢出).
+    if font.measure(clipped) > width:
+        return fit_text(text, font, width)
+    return clipped
+
+
 def fit_text(text: str, font: MeasurableFont, width: int, *, max_lines: int = 1) -> str:
     """把 ``text`` 压进 ``max_lines`` 行、每行不超过 ``width`` 像素.
 

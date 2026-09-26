@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import tkinter as tk
 from collections.abc import Callable
 from typing import Any, TypedDict
 
@@ -47,6 +48,8 @@ class _FakeWidget:
         self._preset = False
         # 是否在 pack 之后(pack_forget 会改回 False).
         self.packed = False
+        # 最近一次 pack 的参数(用来断言内边距/填充一类布局细节).
+        self.pack_kwargs: dict[str, Any] = {}
 
     def configure(self, **kwargs: Any) -> None:
         self.kwargs.update(kwargs)
@@ -54,6 +57,7 @@ class _FakeWidget:
     def pack(self, **_kwargs: Any) -> None:
         # 记录是否在显示中: 批量导出的筛选会 pack/pack_forget 整行.
         self.packed = True
+        self.pack_kwargs = dict(_kwargs)
 
     def pack_forget(self) -> None:
         self.packed = False
@@ -64,8 +68,17 @@ class _FakeWidget:
     def get(self) -> str:
         return self._value
 
-    def bind(self, _sequence: str, _callback: Any) -> None:
+    def bind(self, _sequence: str, _callback: Any, **_kwargs: Any) -> None:
+        # ``add="+"`` 这类可选参数要接受: auto_scrollbar 会这样挂 Configure.
         return None
+
+    def after_idle(self, _callback: Any = None) -> None:
+        """假控件不跑事件循环: 按需滚动条的首帧判定直接跳过."""
+        return
+
+    def update_idletasks(self) -> None:
+        """假控件没有布局可言: 长对话框"按内容定高"那一步直接跳过."""
+        return
 
     def insert(self, _index: str, text: str) -> None:
         # 真实 Tk 的 insert 不会清空已有内容; 空串插入视为无操作,
@@ -170,9 +183,9 @@ class _FakeEntry(_FakeWidget):
         super().__init__(master=master, **kwargs)
         self.key_callback: Callable[[object], None] | None = None
 
-    def bind(self, _sequence: str, callback: Any) -> None:
+    def bind(self, _sequence: str, _callback: Any, **_kwargs: Any) -> None:
         """记录按键回调(输入即筛选就是它)."""
-        self.key_callback = callback
+        self.key_callback = _callback
 
     def type(self, text: str) -> None:
         """模拟用户输入: 写值并触发按键回调(与真实控件一致; 空串 = 清空)."""
@@ -199,9 +212,9 @@ class _FakeComboBox(_FakeWidget):
         """真实 CTkComboBox.set: 只改当前值, 不触发回调."""
         self._value = value
 
-    def bind(self, _sequence: str, callback: Any) -> None:
+    def bind(self, _sequence: str, _callback: Any, **_kwargs: Any) -> None:
         """记录按键回调."""
-        self.key_callback = callback
+        self.key_callback = _callback
 
     def type(self, text: str) -> None:
         """模拟用户输入: 写值并触发按键回调(与真实控件一致)."""
@@ -216,8 +229,12 @@ class _FakeWindow(_FakeWidget):
     def __init__(self, master: Any = None, **kwargs: Any) -> None:
         super().__init__(master=master, **kwargs)
         self.window_title = ""
+        self.visible = True
+        self.alpha = 1.0
         self.geometry_text: str | None = None
         self.destroyed = False
+        # 调用流水(居中实现要靠它证明"窗口可见时已经位于最终位置").
+        self.calls: list[str] = []
 
     def title(self, value: str) -> None:
         self.window_title = value
@@ -233,12 +250,38 @@ class _FakeWindow(_FakeWidget):
 
     def geometry(self, value: str) -> None:
         self.geometry_text = value
+        self.calls.append(f"geometry({value})")
 
     def update_idletasks(self) -> None:
         return None
 
     def update(self) -> None:
-        return None
+        self.calls.append("update()")
+
+    def withdraw(self) -> None:
+        """藏起来: 居中过程里"量偏移"必须在看不见的时候做."""
+        self.visible = False
+        self.calls.append("withdraw()")
+
+    def deiconify(self) -> None:
+        """显示出来."""
+        self.visible = True
+        self.calls.append("deiconify()")
+
+    def attributes(self, name: str, value: float) -> None:
+        """记录不透明度(不支持的平台由用例抛 TclError 模拟)."""
+        self.alpha = value
+        self.calls.append(f"{name}={value}")
+
+    def winfo_ismapped(self) -> bool:
+        return self.visible
+
+    def winfo_reqwidth(self) -> int:
+        """请求尺寸: 真窗口在映射时会被窗口管理器改掉, 这里给一个不同的值以便区分."""
+        return 200
+
+    def winfo_reqheight(self) -> int:
+        return 120
 
     def winfo_rootx(self) -> int:
         return 5
@@ -251,6 +294,10 @@ class _FakeWindow(_FakeWidget):
 
     def winfo_height(self) -> int:
         return 180
+
+    def winfo_screenheight(self) -> int:
+        """假窗口给的屏幕高度: 对话框靠它算正文滚动区的高度。"""
+        return 1080
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -325,6 +372,11 @@ class _FakeParent(_FakeWidget):
             return
         box._value = self.textbox_value
         box._preset = True
+
+
+def _parent_of(widget: _FakeWidget) -> Any:
+    """假控件的上级控件(``master`` 可为空, 链式访问时显式挡一层)."""
+    return widget.master
 
 
 def _install_fakes(monkeypatch: pytest.MonkeyPatch, parent: _FakeParent) -> None:
@@ -418,6 +470,55 @@ def test_confirm_geometry_is_centered_on_parent(harness: _FakeParent) -> None:
     expected_x = 100 + (800 - 320) // 2 - 5
     expected_y = 50 + (600 - 180) // 2 - 8
     assert harness.windows[0].geometry_text == f"+{expected_x}+{expected_y}"
+
+
+def test_centering_never_shows_the_dialog_at_the_screen_origin(
+    harness: _FakeParent,
+) -> None:
+    """居中不能让窗口先在屏幕左上角闪一下(用户实测).
+
+    判据是"可见性 / 不透明度 / 位置"三者的顺序: 量装潢偏移与最终定位都必须在
+    **看不见**的状态里完成 —— 窗口第一次可见时就已经在最终位置上。
+    """
+    harness.click_text = tr("dialog.confirm")
+    dialogs.confirm_dialog(harness, DARK, title="t", message="m")
+    window = harness.windows[0]
+    calls = window.calls
+
+    assert calls[0] == "withdraw()", "先藏起来再量"
+    assert calls[-1] == "-alpha=1.0", "最后才恢复不透明"
+    # 量装潢偏移用的 (0,0) 必须发生在显示之前 —— 这正是原来的"左上角闪一下"。
+    assert calls.index("geometry(+0+0)") < calls.index("deiconify()")
+    # 真正的定位两次(按请求尺寸估一次 + 按真实尺寸精确一次)都在看不见的时候。
+    positioned = [
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("geometry(+") and call != "geometry(+0+0)"
+    ]
+    assert len(positioned) == 2, f"应当只在不可见时定位: {calls}"
+    assert calls.index("withdraw()") < positioned[0] < calls.index("-alpha=0.0")
+    assert calls.index("-alpha=0.0") < calls.index("deiconify()") < positioned[-1]
+    assert "update()" not in calls, "不能再用一次全量 update 把窗口先画出来"
+
+
+def test_centering_survives_a_platform_without_window_transparency(
+    harness: _FakeParent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """平台不支持 ``-alpha``(无合成器的 Linux)时退化成"估个位置再微调", 不能报错."""
+    harness.click_text = tr("dialog.confirm")
+
+    def no_alpha(_self: Any, _name: str, _value: float) -> None:
+        raise tk.TclError("wm attributes -alpha not supported")
+
+    monkeypatch.setattr(_FakeWindow, "attributes", no_alpha)
+
+    dialogs.confirm_dialog(harness, DARK, title="t", message="m")
+
+    window = harness.windows[0]
+    # 仍然落在居中位置(按真实尺寸算的那一次), 不因为不支持透明度而抛错。
+    centered = f"+{100 + (800 - 320) // 2 - 5}+{50 + (600 - 180) // 2 - 8}"
+    assert window.geometry_text == centered
+    assert window.visible is True
 
 
 def test_confirm_cancel_returns_false(harness: _FakeParent) -> None:
@@ -583,6 +684,174 @@ def test_edit_tags_dialog_drops_both_comma_forms(harness: _FakeParent) -> None:
     result = dialogs.edit_tags_dialog(harness, DARK, tags=())
 
     assert result == ("探索解谜", "动作冒险")
+
+
+def test_restore_dialog_hangs_wrapped_bullet_lines(harness: _FakeParent) -> None:
+    """23 号评审: 摘要里的"· "行要带悬挂缩进, 长路径折行后不能顶到最左边."""
+    harness.click_text = tr("dialog.restore_confirm")
+
+    dialogs.restore_dialog(
+        harness,
+        DARK,
+        title="恢复到此节点",
+        summary=(
+            "将把「Demo」恢复到备份「手动」:\n"
+            "· 快照 2 个文件 · 1 B\n"
+            "· 写回位置:\n"
+            "· D:\\Saves\\Demo"
+        ),
+        safety_label=tr("dialog.restore_safety"),
+        safety_hint=tr("dialog.restore_safety_hint"),
+        safety_available=True,
+    )
+
+    texts = [label.text for label in harness.labels]
+    # 符号与正文拆成两个控件, 折行后的正文才与首行文字左对齐.
+    assert "·" in texts
+    assert "D:\\Saves\\Demo" in texts
+    path_label = next(
+        label for label in harness.labels if label.text == "D:\\Saves\\Demo"
+    )
+    assert int(path_label.kwargs["wraplength"]) == 380
+
+
+def test_restore_dialog_option_does_not_wear_the_primary_green(
+    harness: _FakeParent,
+) -> None:
+    """23 号评审: 勾选态是"选项", 不该与"开始恢复"同一颗实心绿."""
+    harness.click_text = tr("dialog.restore_confirm")
+
+    dialogs.restore_dialog(
+        harness,
+        DARK,
+        title="恢复到此节点",
+        summary="摘要",
+        safety_label=tr("dialog.restore_safety"),
+        safety_hint=tr("dialog.restore_safety_hint"),
+        safety_available=True,
+    )
+
+    box = harness.checkboxes[0]
+    assert box.kwargs["fg_color"] == DARK.accent_soft_border
+    assert box.kwargs["fg_color"] != DARK.accent
+
+
+def test_confirm_dialog_gives_the_path_a_row_and_the_button_a_danger_color(
+    harness: _FakeParent,
+) -> None:
+    """24 号评审: 导出路径单独一行带底色, 破坏性确认按钮穿危险色."""
+    harness.click_text = "删除记录"
+
+    dialogs.confirm_dialog(
+        harness,
+        DARK,
+        title="删除游戏",
+        message="删除「Demo」前, 会先把它的配置与全部备份导出到下面这个文件。",
+        detail="D:\\Exports\\Demo-20260926.archive.zip",
+        confirm_text="删除记录",
+        danger=True,
+    )
+
+    path_label = next(
+        label
+        for label in harness.labels
+        if label.text == "D:\\Exports\\Demo-20260926.archive.zip"
+    )
+    assert path_label.kwargs["fg_color"] == DARK.input_bg
+    button = next(b for b in harness.buttons if b.text == "删除记录")
+    assert button.kwargs["fg_color"] == DARK.danger
+
+
+def test_schedule_dialog_shows_the_state_on_its_own_line_with_equal_fields(
+    harness: _FakeParent,
+) -> None:
+    """25 号评审: 当前排期单独一行(不塞在说明句尾), 两个输入框同宽."""
+    harness.click_text = tr("dialog.schedule_save")
+
+    dialogs.schedule_dialog(
+        harness,
+        DARK,
+        title="定时备份 · 测试游戏",
+        interval_label=tr("dialog.schedule_interval_label"),
+        interval_prompt=tr("dialog.schedule_prompt"),
+        keep_label=tr("dialog.keep_auto_label"),
+        keep_prompt=tr("dialog.keep_auto_prompt", max=60),
+        initial_interval="",
+        current=tr("dialog.schedule_current", current=tr("task.unscheduled")),
+    )
+
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert tr("dialog.schedule_current", current=tr("task.unscheduled")) in texts
+    widths = {entry.kwargs.get("width") for entry in harness.entries}
+    assert widths == {dialogs._SCHEDULE_FIELD_WIDTH}
+
+
+def test_ask_text_hints_enter_and_left_aligns_the_blocks(
+    harness: _FakeParent,
+) -> None:
+    """19 号评审: 回车能提交要写在界面上, 提示/输入框/按钮统一左对齐同宽."""
+    harness.click_text = tr("dialog.cancel")
+
+    dialogs.ask_text(harness, DARK, title="新增游戏", text="请输入游戏名称:")
+
+    assert [
+        label.text for label in harness.labels if label.text == tr("dialog.enter_hint")
+    ] == [tr("dialog.enter_hint")]
+    prompt = next(label for label in harness.labels if label.text == "请输入游戏名称:")
+    assert prompt.kwargs["anchor"] == "w"
+    assert int(prompt.kwargs["wraplength"]) == dialogs._TEXT_WIDTH
+
+
+def test_ask_text_context_says_what_is_being_edited(harness: _FakeParent) -> None:
+    """20 号评审: 重命名与"新增"长得一样, 要写清在改谁."""
+    harness.click_text = tr("dialog.cancel")
+
+    dialogs.ask_text(
+        harness,
+        DARK,
+        title="重命名",
+        text="输入新的游戏名称:",
+        initial="测试游戏",
+        context=tr("dialog.rename_context", name="测试游戏"),
+    )
+
+    texts = [label.text for label in harness.labels]
+    assert tr("dialog.rename_context", name="测试游戏") in texts
+
+
+def test_tags_row_delete_is_disabled_while_its_row_is_empty(
+    harness: _FakeParent,
+) -> None:
+    """21 号评审: 空行的"删除"点了等于删一个不存在的标签, 应该压暗."""
+    harness.click_text = tr("dialog.tags_save")
+
+    dialogs.edit_tags_dialog(harness, DARK, tags=("探索",))
+
+    removes = [
+        button for button in harness.buttons if button.text == tr("dialog.tags_remove")
+    ]
+    # 一条已有标签 + 一条尾随的空行.
+    assert len(removes) == 2
+    assert removes[0].kwargs["fg_color"] == DARK.raised
+    assert removes[1].kwargs["fg_color"] == DARK.disabled_bg
+
+
+def test_backup_dialog_does_not_count_its_placeholder(harness: _FakeParent) -> None:
+    """22 号评审: 描述框的占位文案不算用户输入, 字数从 0 开始."""
+    harness.click_text = tr("dialog.cancel")
+
+    dialogs.edit_backup_dialog(
+        harness,
+        DARK,
+        title=tr("dialog.rename_title"),
+        name_label=tr("dialog.rename_label"),
+        desc_label=tr("dialog.describe_label"),
+        desc_prompt=tr("dialog.describe_prompt"),
+        limit=200,
+    )
+
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert tr("dialog.counter", count=0, limit=200) in texts
 
 
 def test_edit_tags_dialog_starts_from_existing_tags(harness: _FakeParent) -> None:
@@ -884,6 +1153,7 @@ def _import_args(
         "strategies": models.import_strategies(has_targets=bool(targets)),
         "target_label": tr("dialog.import_target"),
         "target_hint": tr("dialog.import_target_hint"),
+        "target_locked_hint": tr("dialog.import_target_locked"),
         "confirm_text": tr("dialog.import_confirm"),
     }
 
@@ -1076,6 +1346,80 @@ def test_import_package_dialog_shows_the_summary_and_the_match(
     assert "E:/gone" in texts
 
 
+def test_dialog_body_height_is_clamped_to_the_screen() -> None:
+    """28 号评审: 长对话框的正文高度按屏幕的 80% 封顶, 并夹在上下限之间.
+
+    正文区要自己滚, 底部的按钮才不会被切出屏幕 —— 533x832 的导入弹窗在 768/900 高的
+    屏幕上就是这个下场。
+    """
+
+    class _Screen:
+        """只要能报出屏幕高度的最小替身."""
+
+        def __init__(self, height: int) -> None:
+            self._height = height
+
+        def winfo_screenheight(self) -> int:
+            return self._height
+
+    assert dialogs._dialog_body_height(_Screen(800)) == 640, "矮屏取屏幕的 80%"
+    assert dialogs._dialog_body_height(_Screen(1080)) == dialogs._DIALOG_BODY_MAX
+    assert dialogs._dialog_body_height(_Screen(400)) == dialogs._DIALOG_BODY_MIN
+
+
+def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
+    harness: _FakeParent,
+) -> None:
+    """28 号评审: 正文可以滚, 但「取消 / 导入」永远留在滚动区外面."""
+    harness.click_text = tr("dialog.cancel")
+
+    dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+    )
+
+    window = harness.windows[0]
+    for text in (tr("dialog.cancel"), tr("dialog.import_confirm")):
+        button = next(
+            button for button in harness.buttons if button.kwargs.get("text") == text
+        )
+        # 按钮在 window → buttons 框里, 而不是在正文滚动区里。
+        assert _parent_of(_parent_of(button)) is window
+
+
+def test_import_package_dialog_explains_why_the_target_list_is_locked(
+    harness: _FakeParent,
+) -> None:
+    """28 号评审: 没选"合并"时目标区要写明原因并看得出是禁用的, 选中后说明换回来."""
+    dialogs.import_package_dialog(
+        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+    )
+
+    targets = _target_radios(harness)
+    assert targets, "应当有可合并的目标游戏"
+    assert {radio.kwargs.get("state") for radio in targets} == {"disabled"}
+    assert {radio.kwargs.get("text_color_disabled") for radio in targets} == {
+        DARK.text_disabled
+    }
+    assert {radio.kwargs.get("fg_color") for radio in targets} == {
+        DARK.accent_soft_border
+    }, "选中态用淡强调色, 不与「导入」按钮的实心绿撞色"
+
+    hint = next(
+        label
+        for label in harness.labels
+        if label.kwargs.get("text") == tr("dialog.import_target_locked")
+    )
+    assert hint is not None
+
+    merge = next(
+        radio for radio in _strategy_radios(harness) if radio.value == STRATEGY_MERGE
+    )
+    merge.invoke()
+
+    assert hint.kwargs.get("text") == tr("dialog.import_target_hint")
+    assert {radio.kwargs.get("state") for radio in targets} == {"normal"}
+
+
 # ---------------------------------------------------------------- 批量导出
 
 
@@ -1103,6 +1447,7 @@ def _export_batch_args() -> dict[str, Any]:
         "list_label": tr("dialog.export_batch_list"),
         "no_match_text": tr("dialog.export_batch_no_match"),
         "select_all_label": tr("dialog.export_batch_select_all"),
+        "select_all_scope": tr("dialog.export_batch_select_all_scope"),
         "confirm_text": tr("dialog.export_batch_confirm"),
     }
 
@@ -1163,12 +1508,78 @@ def test_export_batch_dialog_returns_the_ticked_games(harness: _FakeParent) -> N
 def test_export_batch_dialog_with_nothing_ticked_returns_an_empty_choice(
     harness: _FakeParent,
 ) -> None:
-    """一个都没勾也照常返回(界面据此提示"没有勾选任何游戏"), 而不是当成取消."""
+    """一个都没勾也照常返回(界面据此提示"没有勾选任何游戏"), 而不是当成取消.
+
+    按钮本身在没勾选时是禁用态(见下一个用例), 这里断言的是**兜底**: 万一它被强行
+    触发, 也不能把"什么都没选"当成用户取消。
+    """
     harness.click_text = tr("dialog.export_batch_confirm")
 
     result = dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
 
     assert result == models.BatchExportChoice(game_ids=())
+
+
+def test_export_batch_dialog_disables_confirm_until_something_is_ticked(
+    harness: _FakeParent,
+) -> None:
+    """27 号评审: 一份都没勾时确认按钮就该是禁用态, 勾上第一个之后才亮起来."""
+    dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
+
+    confirm = next(
+        button
+        for button in harness.buttons
+        if button.kwargs.get("text") == tr("dialog.export_batch_confirm")
+    )
+    assert confirm.kwargs.get("state") == "disabled"
+    assert confirm.kwargs.get("fg_color") == DARK.disabled_bg
+
+    boxes = _tick_boxes(harness)
+    boxes[0].select()
+    boxes[0].kwargs["command"]()
+    assert confirm.kwargs.get("state") == "normal"
+    assert confirm.kwargs.get("fg_color") == DARK.accent
+
+    boxes[0].deselect()
+    boxes[0].kwargs["command"]()
+    assert confirm.kwargs.get("state") == "disabled"
+
+
+def test_export_batch_dialog_rows_put_the_metadata_on_its_own_line(
+    harness: _FakeParent,
+) -> None:
+    """27 号评审: 勾选框只写游戏名, 原名与状态摘要是另一行、且各用各的颜色."""
+    prompt = models.BatchExportPrompt(
+        summary="共 1 款游戏可以批量导出",
+        filter_hint="输入名称可缩小列表",
+        options=(
+            models.BatchExportOption(
+                game_id="1",
+                name="暴食的怪兽公主",
+                detail=tr("game.disabled_short"),
+                original_name="Kaiju Princess 2",
+                original_label=tr("hero.original_name", name="Kaiju Princess 2"),
+            ),
+        ),
+    )
+    args = _export_batch_args()
+    args["prompt"] = prompt
+    dialogs.export_batch_dialog(harness, DARK, **args)
+
+    row_box = _tick_boxes(harness)[0]
+    assert row_box.kwargs.get("text") == "暴食的怪兽公主", "勾选框只写游戏名"
+    meta = {
+        label.kwargs.get("text"): label.kwargs.get("text_color")
+        for label in harness.labels
+    }
+    assert meta.get("· 原始名称: Kaiju Princess 2") == DARK.text_hint
+    assert meta.get(tr("game.disabled_short")) == DARK.text_muted
+    # 全选的作用域单独成行, 不再挂在"全选"后面同字号同色。
+    assert meta.get(tr("dialog.export_batch_select_all_scope")) == DARK.text_hint
+
+    # 勾选行是一张铺满宽度的卡片(右侧不再是空白 + 常驻滚动条)。
+    row = row_box.master
+    assert row.kwargs.get("fg_color") == DARK.card
 
 
 # ---------------------------------------------------------------- 批量导入
@@ -1250,6 +1661,47 @@ def test_batch_import_dialog_collects_defaults_per_game(harness: _FakeParent) ->
     assert "Windows · AppID 730" in texts
     assert "Other.archive.zip" not in texts
     assert len(harness.entries) == 2
+
+
+def test_batch_import_dialog_keeps_cards_compact_and_uniform(
+    harness: _FakeParent,
+) -> None:
+    """29 号评审: 卡片紧凑(名称与元信息同一行)、控件同高、边距左右对称、无绿字小标题."""
+    dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    # 四个小标题同一套样式(次要色), 其中"疑似同一款"原来是最亮的提示色, 看着像链接。
+    headings = [
+        label
+        for label in harness.labels
+        if label.kwargs.get("text")
+        in {
+            tr("dialog.import_strategy"),
+            tr("dialog.import_target"),
+            tr("dialog.import_locations"),
+            "库里疑似同一款游戏: 星际拓荒(已默认选中)",
+        }
+    ]
+    assert len(headings) >= 3
+    assert {label.kwargs.get("text_color") for label in headings} == {
+        DARK.text_muted
+    }, "小标题不该有的亮有的暗"
+    # 元信息不再单独占一行(它是右侧那一列), 名称与它同一行。
+    assert "Windows · AppID 730" in texts
+    # 输入框与下拉框统一高度: 同一张卡片里不再出现 28px 与 30px 两种控件高度。
+    heights = {
+        widget.kwargs.get("height")
+        for widget in [*harness.entries, *harness.combos]
+        if "height" in widget.kwargs
+    }
+    assert heights == {dialogs._CARD_CONTROL_HEIGHT}
+    # 卡片右边界不再被滚动条压住: 卡片在两份对称的内边距之间, 卡片内的控件也是。
+    demo = next(label for label in harness.labels if label.kwargs.get("text") == "Demo")
+    card = _parent_of(_parent_of(demo))
+    assert card.kwargs.get("fg_color") == DARK.card
+    assert card.kwargs.get("corner_radius") == 8
+    assert card.pack_kwargs.get("padx") == dialogs._CARD_INSET
+    assert harness.entries[0].pack_kwargs.get("padx") == dialogs._CARD_PAD
 
 
 def test_batch_import_dialog_merges_into_the_chosen_target(

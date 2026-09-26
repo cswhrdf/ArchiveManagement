@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -54,11 +55,13 @@ from archive_management.ui.models import (
     batch_row_choice,
     branch_order,
     can_backup,
+    chips_lines,
     export_batch_prompt,
     exportable_games,
     filter_by_source,
     filter_by_source_label,
     filter_export_options,
+    format_stamp,
     group_by_parent,
     home_board,
     import_prompt,
@@ -83,6 +86,18 @@ pytestmark = [
 
 def _dt(*, day: int, hour: int, minute: int) -> datetime:
     return datetime(2026, 9, day, hour, minute, tzinfo=UTC)
+
+
+def _i18n_text(locale: str, key: str) -> str:
+    """直接读资源文件取文案.
+
+    为一条断言来回切全局语言会污染同一进程里的其它用例(语言是模块级状态), 而
+    这里要钉的是"两份 JSON 一起改过"。
+    """
+    root = Path(__file__).resolve().parents[2]
+    path = root / "src" / "archive_management" / "resources" / "i18n" / f"{locale}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return str(payload[key])
 
 
 def _item(backup_id: str, created_dt: datetime) -> BackupItem:
@@ -129,21 +144,65 @@ def _detail(*, name: str, original_name: str = "", folder: str = "") -> GameDeta
     )
 
 
-def test_detail_origin_label_lists_original_name_and_folder() -> None:
-    """改名后额外展示原始名称, 并始终展示磁盘上的备份目录."""
+def test_detail_origin_label_lists_original_name_and_a_plain_folder_note() -> None:
+    """改名后额外展示原始名称; 备份目录只说"由应用自动命名".
+
+    真实目录名是 slug + 短哈希这种内部存储键, 摊在正文里用户既改不了也用不上 ——
+    它改挂在悬停提示(storage_hint)上。
+    """
     detail = _detail(name="新名字", original_name="旧名字", folder="旧名字-1a2b3c4d")
 
-    assert detail.origin_label == "原始名称: 旧名字 · 备份目录: 旧名字-1a2b3c4d"
+    assert detail.origin_label == "原始名称: 旧名字 · 备份目录: 应用自动命名"
+    assert detail.storage_folder not in detail.origin_label
+    assert (
+        detail.storage_hint == "应用自动管理的备份目录(位于备份目标下): 旧名字-1a2b3c4d"
+    )
 
 
 def test_detail_origin_label_skips_unchanged_name() -> None:
     detail = _detail(name="Demo", original_name="Demo", folder="Demo-1a2b3c4d")
 
-    assert detail.origin_label == "备份目录: Demo-1a2b3c4d"
+    assert detail.origin_label == "备份目录: 应用自动命名"
 
 
 def test_detail_origin_label_empty_before_first_backup() -> None:
     assert _detail(name="Demo", original_name="Demo").origin_label == ""
+    # 还没备份过时不该弹出一条空的技术信息.
+    assert _detail(name="Demo", original_name="Demo").storage_hint == ""
+
+
+def test_detail_next_backup_text_gives_a_readable_fallback() -> None:
+    """没有排期时"下次自动备份"要给出口径, 而不是一条像加载失败的短横线(13 号评审)."""
+    scheduled = replace(_detail(name="Demo"), next_backup_label="2026/09/26 20:11")
+
+    assert scheduled.next_backup_text == "2026/09/26 20:11"
+    # 空标签不能再原样显到界面上.
+    empty = replace(scheduled, next_backup_label="")
+    assert empty.next_backup_text == tr("hero.next_none")
+    assert empty.next_backup_text != "—"
+
+
+def test_detail_next_backup_text_tells_paused_apart_from_missing() -> None:
+    """配了周期但未启用时说"已暂停", 不能说"未配置"(用户反馈)."""
+    paused = replace(
+        _detail(name="Demo"), next_backup_label="", next_backup_paused=True
+    )
+
+    assert paused.next_backup_text == tr("hero.next_paused")
+    assert paused.next_backup_text != tr("hero.next_none")
+    # 压根没配过才是"未配置".
+    assert replace(paused, next_backup_paused=False).next_backup_text == tr(
+        "hero.next_none"
+    )
+
+
+def test_selected_backup_hint_names_the_real_restore_button() -> None:
+    """选中面板的指引必须写出真实按钮名: 早先这里是没被替换的占位符(13 号评审)."""
+    text = tr("sel.not_current", size="14 B", button=tr("action.restore"))
+
+    assert "{" not in text
+    assert "}" not in text
+    assert tr("action.restore") in text
 
 
 def test_can_backup_only_with_locations() -> None:
@@ -832,6 +891,117 @@ def test_poster_columns_scales_with_width() -> None:
     assert poster_columns(1400) > poster_columns(1000)
 
 
+class _FixedWidthFont:
+    """每个字符固定 10px 的假字体: 状态列换行不需要真实字体度量."""
+
+    WIDTH = 10
+
+    def measure(self, text: str) -> int:
+        """按字符数算像素宽度."""
+        return len(text) * self.WIDTH
+
+
+_CHIP_FONT = _FixedWidthFont()
+_CHIP_WIDTH = _CHIP_FONT.WIDTH
+
+
+def _assert_no_half_chip(line: str, chips: tuple[str, ...]) -> None:
+    """断言行内除"被末尾省略号标注的那一段前缀"之外, 都是完整标签.
+
+    :func:`chips_lines` 允许最后一段被裁短(它由省略号标注), 但不许在行中间出现
+    半个标签 —— "手动添加" 被裁成 "手动…" 之后, 用户读到的是一句没有主语的话。
+    """
+    body = line.removesuffix("…")
+    parts = [part for part in body.split(" · ") if part]
+    if line.endswith("…"):
+        parts = parts[:-1]
+    halves = [part for part in parts if part not in chips]
+    assert not halves, f"标签被拦腰截断: {halves} (整行 {line!r})"
+
+
+def test_chips_lines_wraps_at_a_chip_boundary_before_truncating() -> None:
+    """状态列放不下时先换行, 且每一行都停在一个完整标签之后(第 6 号评审).
+
+    "手动添加 · 已备份 · 未启用 · 测试1 · 测…" 这种一行到底再裁掉半个标签的写法,
+    读起来像一句没说完的话; 两行装得下就不该只排一行。
+    """
+    chips = ("手动添加", "已备份", "未启用", "测试1", "测试2")
+    text = chips_lines(chips, _CHIP_FONT, 12 * _CHIP_WIDTH)
+
+    lines = text.split("\n")
+    assert len(lines) == 2, f"两行放得下, 不该只排一行: {text!r}"
+    assert not lines[0].endswith("…"), f"第一行不该被截断: {text!r}"
+    assert lines[1].endswith("…"), f"第二行还放不下时要补省略号: {text!r}"
+    for line in lines:
+        _assert_no_half_chip(line, chips)
+
+
+def test_chips_lines_never_truncates_before_using_the_second_line() -> None:
+    """只要还有第二行可用, 截断就只能发生在换行之后."""
+    chips = ("手动添加", "已备份", "未启用", "测试1", "测试2")
+    text = chips_lines(chips, _CHIP_FONT, 6 * _CHIP_WIDTH)
+
+    assert "\n" in text, f"必须先换行再截断: {text!r}"
+    assert text.endswith("…")
+    for line in text.split("\n"):
+        _assert_no_half_chip(line, chips)
+
+
+def test_chips_lines_uses_one_line_when_everything_fits() -> None:
+    """放得下就原样排一行, 不换行也不加省略号."""
+    chips = ("Steam", "已备份")
+
+    assert chips_lines(chips, _CHIP_FONT, 40 * _CHIP_WIDTH) == " · ".join(chips)
+
+
+def test_chips_lines_handles_empty_and_single_line_budgets() -> None:
+    """没有标签时返回空串; 只允许一行时不留换行, 截断仍带省略号."""
+    assert chips_lines((), _CHIP_FONT, 100) == ""
+
+    text = chips_lines(
+        ("Steam", "已备份", "未启用"),
+        _CHIP_FONT,
+        8 * _CHIP_WIDTH,
+        max_lines=1,
+    )
+
+    assert "\n" not in text
+    assert text.endswith("…")
+
+
+def test_home_board_flags_a_completely_empty_library() -> None:
+    """空库标志只在"一款游戏都没有"时为真: 筛选筛空不算(第 1/2 号评审).
+
+    界面按它收起表头与底部统计; 若把"当前筛选没有匹配"也算成空库, 用户就失去了
+    "库里到底有几款"这个改筛选时唯一的参照。
+    """
+    assert _home_board([]).empty_library is True
+    assert _home_board([_home_facts("1")]).empty_library is False
+    # 只剩归档游戏的库不是空库: 页签上还有"已归档 (1)"要显示.
+    assert _home_board([_home_facts("1", archived=True)]).empty_library is False
+    assert (
+        _home_board([_home_facts("1")], HomeFilter(search="zzz")).empty_library is False
+    )
+
+
+def test_locations_column_header_says_it_is_a_count() -> None:
+    """列头必须说清那一列给的是数量(第 2/6 号评审).
+
+    原文案是"存档位置", 而单元格里写的是 0/1/1 —— 列名与内容不是一回事, 有数据的
+    时候很容易被读成路径。
+    """
+    assert tr("home.col_locations") == "位置数"
+    assert _i18n_text("en", "home.col_locations") == "Locations"
+
+
+def test_stamps_are_formatted_in_one_way() -> None:
+    """全应用只允许一种日期写法: 空值给占位符, 脏数据原样降级(第 12 号评审)."""
+    assert format_stamp("2026-09-26T20:11:00+00:00") == "2026/09/26 20:11"
+    assert format_stamp("") == "—"
+    assert format_stamp("不是时间") == "不是时间"
+    assert format_stamp("2026-09-26T20:11", fallback="-") == "2026/09/26 20:11"
+
+
 # ---------------------------------------------------------------- 导入提示
 
 
@@ -1012,10 +1182,11 @@ def test_filter_export_options_also_matches_the_original_name() -> None:
 
 
 def test_the_batch_export_row_shows_the_original_name_only_when_it_differs() -> None:
-    """行尾说明里带原名, 但只在它跟界面名不同的时候带 —— 否则白占宽度.
+    """行内的原名单独成一个字段, 且只在它跟界面名不同的时候带上.
 
     带上它是因为"按原名搜得到"这件事得可解释: 搜出来的那行文字里否则看不出跟输入
-    有什么关系(而它确实命中了)。
+    有什么关系(而它确实命中了)。拆成独立字段是为了让界面把"原名"与"已停用"这类
+    状态分开呈现(27 号评审: 两句同色灰字拼在一起像两个字段粘成一句)。
     """
     renamed = _packaged_game("1", "星际拓荒", original_name="Outer Wilds")
     same = _packaged_game("2", "山海旅人", original_name="山海旅人")
@@ -1024,10 +1195,12 @@ def test_the_batch_export_row_shows_the_original_name_only_when_it_differs() -> 
     options = export_batch_prompt([renamed, same, unknown]).options
 
     assert options[0].original_name == "Outer Wilds"
-    assert tr("hero.original_name", name="Outer Wilds") in options[0].detail
+    assert options[0].original_label == tr("hero.original_name", name="Outer Wilds")
     assert renamed.list_detail in options[0].detail, "位置/备份摘要照旧带上"
-    assert options[1].detail == same.list_detail, "原名与界面名相同时不重复显示"
-    assert options[2].detail == unknown.list_detail, "没有原名时也不显示"
+    assert options[1].original_label == "", "原名与界面名相同时不重复显示"
+    assert options[1].detail == same.list_detail
+    assert options[2].original_label == "", "没有原名时也不显示"
+    assert options[2].detail == unknown.list_detail
 
 
 def test_batch_export_choice_keeps_the_candidate_order() -> None:
@@ -1167,6 +1340,26 @@ def test_backup_display_title_falls_back_to_the_branch_name() -> None:
     assert item.display_title == "黑棘"
     # 没有分支名时仍回落到类型默认名(顺手把已有行为一起钉住).
     assert replace(item, branch_name="").display_title == tr("backup.title_manual")
+
+
+def test_schedule_item_next_run_text_says_unscheduled_instead_of_a_dash() -> None:
+    """没有排期的任务: 文案落到"未安排", 不是一个孤零零的破折号(18 号评审)."""
+    item = ScheduleItem(
+        game_id="g",
+        game_name="Demo",
+        interval_text="30m",
+        enabled=False,
+        keep_auto=3,
+        next_run_label="",
+        auto_count=0,
+    )
+
+    assert item.next_run_text == tr("schedule.next_run_none")
+    assert item.next_run_text in item.summary
+    # 有排期时照旧展示时间戳.
+    assert replace(item, next_run_label="2026/09/26 20:11").next_run_text == tr(
+        "schedule.next_run", stamp="2026/09/26 20:11"
+    )
 
 
 def test_schedule_item_without_an_interval_reports_unscheduled() -> None:

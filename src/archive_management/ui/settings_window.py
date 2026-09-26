@@ -39,6 +39,7 @@ from archive_management.services.hotkeys import (
 from archive_management.ui.dialogs import _center
 from archive_management.ui.palette import Palette
 from archive_management.ui.typography import FONT_CHOICES
+from archive_management.ui.widgets import auto_scrollbar
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,11 @@ _WINDOW_WIDTH = 480
 _WINDOW_PAD_X = 18
 _WINDOW_PAD_Y = 16
 _WINDOW_MIN_HEIGHT = 500
+# 滚动区与固定页脚之间的间距(与 _footer 的 pady 一致).
+_FOOTER_GAP = 12
+# 窗口高度最多占到"屏幕高 - 这个留白": 给系统标题栏与任务栏留位, 免得窗口
+# 在 1366x768 上比屏幕还高(底部的关闭按钮被推到屏幕外)。
+_SCREEN_MARGIN = 120
 # 应用一个新组合键; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyShortcut = Callable[[str, str], "str | None"]
 # 切换界面语言; 返回 None 表示成功, 否则返回可直接展示的失败说明.
@@ -70,6 +76,25 @@ _SHORTCUT_ROWS: tuple[tuple[str, str], ...] = (
 # 用户可能一根一根地按(而不是一直按着), 所以不能一松开就收尾;
 # 留出一个很短的空档, 既容得下逐键输入, 也不会让人觉得卡。
 _CAPTURE_SETTLE_MS = 600
+
+
+def _paint_combo(box: ctk.CTkComboBox, palette: Palette) -> None:
+    """按调色板重绘一个下拉框(含展开后那层菜单的配色).
+
+    下拉框不归 UiKit 登记(它不属于本窗口的重绘表), 所以主题切换时得自己重绘一遍 ——
+    漏在 :meth:`SettingsWindow.restyle` 外面时, 同一个窗口里会留下上一套主题的底色
+    (用户实测: 界面字号/界面语言两个下拉框还是旧的样式, 重新打开窗口才变)。
+    """
+    box.configure(
+        fg_color=palette.input_bg,
+        border_color=palette.border,
+        button_color=palette.raised,
+        button_hover_color=palette.item_hover,
+        text_color=palette.text_body,
+        dropdown_fg_color=palette.panel,
+        dropdown_hover_color=palette.item_hover,
+        dropdown_text_color=palette.text_body,
+    )
 
 
 class SettingsWindow:
@@ -143,9 +168,21 @@ class SettingsWindow:
             pady=_WINDOW_PAD_Y,
         )
         self._container.grid_columnconfigure(0, weight=1)
+        self._container.grid_rowconfigure(0, weight=1)
+
+        # 面板与说明都放进滚动区: 窗口高度被夹到屏幕可用高度以内, 内容装不下时自己
+        # 滚动 —— 底部那条说明与"关闭"按钮留在固定页脚里, 永远看得见(16 号评审)。
+        self._body = ctk.CTkScrollableFrame(
+            self._container, fg_color=palette.background, corner_radius=0
+        )
+        self._body.grid(row=0, column=0, sticky="nsew")
+        self._body.grid_columnconfigure(0, weight=1)
+        # 内容装得下就不立滚动条: 窗口高度按内容算, 恰好放下时右侧那条拖不动的滑块
+        # 只是噪声(与主页列表/定时窗口同一条规则)。
+        auto_scrollbar(self._body)
 
         self._title_label = ctk.CTkLabel(
-            self._container,
+            self._body,
             text=tr("settings.title"),
             anchor="w",
             font=ctk.CTkFont(size=16, weight="bold"),
@@ -154,7 +191,7 @@ class SettingsWindow:
         self._title_label.grid(row=0, column=0, sticky="w", pady=(0, 12))
 
         self._appearance_panel = ctk.CTkFrame(
-            self._container,
+            self._body,
             fg_color=palette.panel,
             corner_radius=10,
             border_width=1,
@@ -224,6 +261,7 @@ class SettingsWindow:
             button_hover_color=palette.item_hover,
             text_color=palette.text_body,
             dropdown_fg_color=palette.panel,
+            dropdown_hover_color=palette.item_hover,
             dropdown_text_color=palette.text_body,
             font=ctk.CTkFont(size=12),
             dropdown_font=ctk.CTkFont(size=12),
@@ -233,7 +271,7 @@ class SettingsWindow:
         self._font_box.grid(row=3, column=1, padx=16, pady=(0, 14))
 
         self._language_panel = ctk.CTkFrame(
-            self._container,
+            self._body,
             fg_color=palette.panel,
             corner_radius=10,
             border_width=1,
@@ -271,6 +309,7 @@ class SettingsWindow:
             border_color=palette.border,
             text_color=palette.text_body,
             dropdown_fg_color=palette.panel,
+            dropdown_hover_color=palette.item_hover,
             dropdown_text_color=palette.text_body,
             font=ctk.CTkFont(size=12),
             dropdown_font=ctk.CTkFont(size=12),
@@ -294,7 +333,7 @@ class SettingsWindow:
         )
 
         self._logging_panel = ctk.CTkFrame(
-            self._container,
+            self._body,
             fg_color=palette.panel,
             corner_radius=10,
             border_width=1,
@@ -348,7 +387,7 @@ class SettingsWindow:
         )
 
         self._activation_panel = ctk.CTkFrame(
-            self._container,
+            self._body,
             fg_color=palette.panel,
             corner_radius=10,
             border_width=1,
@@ -402,7 +441,7 @@ class SettingsWindow:
         )
 
         self._shortcut_panel = ctk.CTkFrame(
-            self._container,
+            self._body,
             fg_color=palette.panel,
             corner_radius=10,
             border_width=1,
@@ -439,11 +478,39 @@ class SettingsWindow:
                 width=148,
                 height=30,
                 corner_radius=8,
+                # 按键区域要看起来能点: 输入框那样的底 + 1px 描边(16 号评审:
+                # 光秃秃的粗体文字看不出可以点进去录制)。
+                fg_color=palette.input_bg,
+                hover_color=palette.item_hover,
+                text_color=palette.text_body,
+                border_width=1,
+                border_color=palette.border,
                 font=ctk.CTkFont(size=12, weight="bold"),
             )
             button.grid(row=row, column=1, padx=16, pady=(0, 8), sticky="e")
             self._shortcut_buttons[action] = button
 
+        # 录制中的明确状态: 只有按钮文字变色的话, 用户看不出"正在监听"(17 号评审)。
+        self._capture_status = ctk.CTkLabel(
+            self._shortcut_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            wraplength=400,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=palette.accent,
+        )
+        self._capture_status.grid(
+            row=1 + len(_SHORTCUT_ROWS),
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(0, 6),
+            sticky="w",
+        )
+
+        # 这条说明是"为什么我按的键不被接受"的唯一出处, 因此用正文色(而不是最弱的
+        # 灰字) —— 它还要配得上"录制中"时被反复阅读(17 号评审)。
         self._shortcut_hint = ctk.CTkLabel(
             self._shortcut_panel,
             text=tr("settings.shortcut_hint"),
@@ -451,10 +518,10 @@ class SettingsWindow:
             justify="left",
             wraplength=400,
             font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
+            text_color=palette.text_body,
         )
         self._shortcut_hint.grid(
-            row=1 + len(_SHORTCUT_ROWS), column=0, columnspan=2, padx=16, sticky="w"
+            row=2 + len(_SHORTCUT_ROWS), column=0, columnspan=2, padx=16, sticky="w"
         )
         # 面板最后一行的底部留白不能省: 贴边的文字会盖住面板自己的下边框。
         self._shortcut_error = ctk.CTkLabel(
@@ -467,7 +534,7 @@ class SettingsWindow:
             text_color=palette.danger,
         )
         self._shortcut_error.grid(
-            row=2 + len(_SHORTCUT_ROWS),
+            row=3 + len(_SHORTCUT_ROWS),
             column=0,
             columnspan=2,
             padx=16,
@@ -476,19 +543,24 @@ class SettingsWindow:
         )
         self._paint_shortcuts()
 
+        # 说明与关闭按钮在一个**固定页脚**里: 内容再长也只滚动上面的面板区,
+        # 这两样永远留在窗口里可读可点(16 号评审)。
+        self._footer = ctk.CTkFrame(self._container, fg_color=palette.background)
+        self._footer.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self._footer.grid_columnconfigure(0, weight=1)
         self._note_label = ctk.CTkLabel(
-            self._container,
+            self._footer,
             text=tr("settings.note"),
             anchor="w",
             justify="left",
-            wraplength=400,
+            wraplength=320,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._note_label.grid(row=6, column=0, sticky="w", pady=(12, 0))
+        self._note_label.grid(row=0, column=0, sticky="w")
 
         self._close_btn = ctk.CTkButton(
-            self._container,
+            self._footer,
             text=tr("settings.close"),
             command=self.close,
             width=96,
@@ -501,13 +573,23 @@ class SettingsWindow:
             border_color=palette.border,
             font=ctk.CTkFont(size=12),
         )
-        self._close_btn.grid(row=7, column=0, sticky="e", pady=(14, 0))
+        self._close_btn.grid(row=0, column=1, sticky="e")
 
-        # 高度按**实际内容**算(说明文字会随语言换行): 固定高度会把底部裁掉,
-        # 算完再居中 —— 这样"关闭"按钮与最后的说明一定在窗口里。
+        # 高度按**实际内容**算(说明文字会随语言换行), 再夹到屏幕可用高度以内:
+        # 装不下时滚动区自己滚,"关闭"与说明留在固定页脚里(16 号评审: 1366x768
+        # 上底部按钮被屏幕下沿切掉)。先定宽再量 —— 换行后的高度才是准的。
+        window.geometry(f"{_WINDOW_WIDTH}x{_WINDOW_MIN_HEIGHT}")
         window.update_idletasks()
-        content_height = self._container.winfo_reqheight() + _WINDOW_PAD_Y * 2
-        window.geometry(f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, content_height)}")
+        content_height = (
+            int(self._body.winfo_reqheight())
+            + int(self._footer.winfo_reqheight())
+            + _FOOTER_GAP
+            + _WINDOW_PAD_Y * 2
+        )
+        available = int(self._parent.winfo_screenheight()) - _SCREEN_MARGIN
+        window.geometry(
+            f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, min(content_height, available))}"
+        )
         _center(self._parent, window)
 
     def _toggle_text(self) -> str:
@@ -627,6 +709,8 @@ class SettingsWindow:
         self._palette = palette
         self._window.configure(fg_color=palette.background)
         self._container.configure(fg_color=palette.background)
+        self._body.configure(fg_color=palette.background)
+        self._footer.configure(fg_color=palette.background)
         for panel in (
             self._appearance_panel,
             self._language_panel,
@@ -650,7 +734,8 @@ class SettingsWindow:
             (self._debug_label, palette.text_muted),
             (self._activation_hint, palette.text_hint),
             (self._activation_label, palette.text_muted),
-            (self._shortcut_hint, palette.text_hint),
+            (self._shortcut_hint, palette.text_body),
+            (self._capture_status, palette.accent),
             (self._shortcut_error, palette.danger),
             (self._note_label, palette.text_hint),
             (self._theme_label, palette.text_muted),
@@ -670,6 +755,9 @@ class SettingsWindow:
                 button_hover_color=palette.item_hover,
                 fg_color=palette.input_bg,
             )
+        # 两个下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
+        for box in (self._font_box, self._language_box):
+            _paint_combo(box, palette)
         self._theme_label.configure(
             text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}"))
         )
@@ -682,7 +770,6 @@ class SettingsWindow:
         self._paint_shortcuts()
 
     # -- 快捷键录制 ---------------------------------------------------------
-
     def shortcut_text(self, action: str) -> str:
         """返回某个动作当前展示的组合键文本(录制中显示提示文案)."""
         if self._capturing == action:
@@ -795,18 +882,31 @@ class SettingsWindow:
                 continue
 
     def _paint_shortcuts(self) -> None:
-        """刷新快捷键按钮与错误提示的文案与配色."""
+        """刷新快捷键按钮、录制状态与错误提示的文案与配色.
+
+        录制中除了底色变强调色, 还要加粗描边 + 一行"正在监听…可取消": 只把按钮
+        文字变绿的话, 用户分不出"录好了"还是"卡住了"(17 号评审)。
+        """
         palette = self._palette
         for action, button in self._shortcut_buttons.items():
             recording = self._capturing == action
             button.configure(
                 text=self.shortcut_text(action),
-                fg_color=palette.accent if recording else palette.raised,
+                fg_color=palette.accent if recording else palette.input_bg,
                 hover_color=palette.accent if recording else palette.item_hover,
                 text_color=palette.accent_text if recording else palette.text_body,
+                border_width=2 if recording else 1,
                 border_color=palette.accent if recording else palette.border,
             )
+        self._capture_status.configure(text=self._recording_status())
         self._shortcut_error.configure(text=self._error)
+
+    def _recording_status(self) -> str:
+        """录制中的说明文字(平时为空, 不占高度)."""
+        if self._capturing is None:
+            return ""
+        key = dict(_SHORTCUT_ROWS).get(self._capturing, "")
+        return tr("settings.recording_hint", action=tr(key) if key else self._capturing)
 
     def focus(self) -> bool:
         """把窗口提到前台; 窗口已关闭时返回 False(主窗口据此允许重新打开)."""

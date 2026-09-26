@@ -149,9 +149,13 @@ def _stamp(moment: datetime) -> str:
     return moment.astimezone().strftime("%Y/%m/%d %H:%M")
 
 
-def _stamp_or_dash(moment: datetime | None) -> str:
-    """时间戳文案: 没有时间就用破折号."""
-    return _stamp(moment) if moment is not None else "—"
+def _stamp_or_empty(moment: datetime | None) -> str:
+    """时间戳文案: 没有排期时返回空串.
+
+    界面据此给出"未配置/未安排"这种能读的说法(见 ``ui.models`` 的
+    ``next_backup_text`` / ``next_run_text``), 而不是一个像加载失败的短横线。
+    """
+    return _stamp(moment) if moment is not None else ""
 
 
 def _schedule_next_run(
@@ -403,7 +407,7 @@ class SqlArchiveService:
         main, verified, note = self._primary_location_view(gid)
         backups = self._nodes.count(gid)
         last_label, last_sub = self._last_backup_labels(self._backups.latest(gid))
-        next_run = self._next_run(gid)
+        next_run, next_paused = self._next_run_state(gid)
         return GameDetail(
             name=game.name,
             subtitle=tr("detail.subtitle"),
@@ -418,7 +422,8 @@ class SqlArchiveService:
                 else tr("detail.backups_count", count=backups)
             ),
             total_backups_sub="",
-            next_backup_label=_stamp_or_dash(next_run),
+            next_backup_label=_stamp_or_empty(next_run),
+            next_backup_paused=next_paused,
             original_name=game.original_name or game.name,
             storage_folder=game.storage_key,
         )
@@ -703,7 +708,7 @@ class SqlArchiveService:
             running=active is not None,
             task_name=task_name,
             progress=active.fraction if active is not None else 0.0,
-            next_run_label=_stamp_or_dash(next_run),
+            next_run_label=_stamp_or_empty(next_run),
             target_label=str(self._backup_root),
             theme_name=self._theme,
             backend_ok=True,
@@ -759,7 +764,7 @@ class SqlArchiveService:
             interval_text=interval_text,
             enabled=enabled,
             keep_auto=keep_auto,
-            next_run_label=_stamp_or_dash(_schedule_next_run(entry, job)),
+            next_run_label=_stamp_or_empty(_schedule_next_run(entry, job)),
             auto_count=self._auto_backup_count(game.id),
             last_error=(job.last_error if job is not None else "") or "",
             has_locations=self._games.count_locations(game.id) > 0,
@@ -1924,10 +1929,20 @@ class SqlArchiveService:
 
     def _next_run(self, game_id: int) -> datetime | None:
         """返回某游戏定期备份的下次运行时间."""
+        return self._next_run_state(game_id)[0]
+
+    def _next_run_state(self, game_id: int) -> tuple[datetime | None, bool]:
+        """返回(下次运行时间, 是否"配了周期但没启用").
+
+        两者都返回 ``None`` / False 会让"未配置"与"配置了但暂停"在界面上变成同一句
+        话 —— 用户看到"未配置"会以为自己没配过(用户反馈)。
+        """
         entry = self._scheduler.get(game_id)
-        if entry is None or not entry.enabled:
-            return None
-        return entry.next_run_at
+        if entry is None:
+            return None, False
+        if not entry.enabled:
+            return None, True
+        return entry.next_run_at, False
 
     # -- 内部 ---------------------------------------------------------------
 

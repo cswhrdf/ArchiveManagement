@@ -14,6 +14,13 @@
 "重新扫描"固定放在页签行右侧, 两个子页都能随时触发。这里只做展示与交互编排:
 路径校验、重复检测与落库都在后端完成, 失败时把后端给出的原因展示在弹窗与状态
 文案里。所有文案来自 i18n, 便于无头测试。
+
+三处界面规则(来自逐页评审):
+
+- 说明文字与筛选控件**分栏**: 说明在左列(按列宽换行), 控件在右列, 两者不互挤;
+- 动作按钮与列表的选中状态绑定: 没选中任何一项时按钮置灰, 并在按钮左边写明
+  "这一排按钮作用于谁";
+- 长路径**中间省略**, 卡片上下留出内边距, 滚到底时不会顶着一行被裁掉的字。
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import customtkinter as ctk
 
@@ -43,6 +51,13 @@ from archive_management.ui.models import (
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
+from archive_management.ui.textfit import fit_path
+from archive_management.ui.widgets import (
+    auto_scrollbar,
+    paint_button_disabled,
+    paint_button_enabled,
+    track_wraplength,
+)
 
 _ChangeCallback = Callable[[], None]
 _NoticeCallback = Callable[[str], None]
@@ -51,6 +66,26 @@ logger = logging.getLogger(__name__)
 
 # 卡片内文字/列表相对卡片边缘的内缩: 与游戏库的卡片保持一致(那里也是 10).
 _PANEL_PAD = 10
+# 数据行右侧再留一点: 滚动条一出现就贴在画布右边, 最后一行文字不该顶上去.
+_SCROLL_INSET = 6
+# 说明文字的右侧预留: 同一行的筛选控件/按钮大概占这么宽, 说明不许压过去.
+_HINT_INSET = 190
+# 卡片正文的兜底宽度: 真实宽度要等布局完成(标签自己的 Configure)才知道.
+_CARD_TEXT_WIDTH = 680
+
+
+@dataclass
+class _FitTarget:
+    """一张卡片里"按宽度重新裁剪"的标签(安装路径与存档路径区).
+
+    候选行的宽度要等布局完成才知道, 所以先在构造时按兜底宽度裁一次, 之后由标签
+    自己的 ``<Configure>`` 按真实宽度重裁 —— 与主页列表的名称同一套做法。
+    路径一律走"中间省略"(尾部是目录名, 比盘符更值得留)。
+    """
+
+    label: ctk.CTkLabel
+    lines: tuple[str, ...]
+    fitted_width: int = 0
 
 
 class DiscoveryPanel:
@@ -81,6 +116,12 @@ class DiscoveryPanel:
         self._cand_rows: dict[str, ctk.CTkFrame] = {}
         self._selected_dir: str | None = None
         self._selected_candidate: str | None = None
+        # 按钮与它们的样式: 可用/禁用切换时按这份登记重绘配色.
+        self._styles: dict[ctk.CTkButton, str] = {}
+        # 卡片内"按宽度重新裁剪"的标签(安装路径与存档路径区), 建行时登记.
+        self._fitted: dict[str, _FitTarget] = {}
+        # 与卡片正文同规格的字体, 用来量文本宽度.
+        self._path_font = ctk.CTkFont(size=12)
         # 这个页面的用途是"把发现的游戏加进游戏库", 因此默认只看待处理项.
         self._filter = CandidateFilter.NEW
         self._page: DiscoveryPage = DiscoveryPage.CANDIDATES
@@ -216,18 +257,25 @@ class DiscoveryPanel:
         self._dirs_hint = ctk.CTkLabel(
             panel,
             text=tr("discovery.dirs_hint"),
-            anchor="w",
+            anchor="nw",
             justify="left",
-            wraplength=760,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._dirs_hint.grid(row=0, column=0, padx=_PANEL_PAD, pady=(14, 0), sticky="w")
+        self._dirs_hint.grid(
+            row=0, column=0, padx=(_PANEL_PAD, 16), pady=(14, 0), sticky="ew"
+        )
+        # 说明按可用宽度换行: 固定宽度在宽窗口里会提前折行, 看起来像被截断。
+        track_wraplength(panel, self._dirs_hint, inset=_HINT_INSET)
 
         actions = ctk.CTkFrame(panel, fg_color="transparent")
-        actions.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="e")
+        actions.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="ne")
         self._add_dir_btn = self._button(
-            actions, tr("discovery.dir_add"), self._on_add_dir, width=76
+            actions,
+            tr("discovery.dir_add"),
+            self._on_add_dir,
+            style="accent",
+            width=76,
         )
         self._edit_dir_btn = self._button(
             actions, tr("discovery.dir_edit"), self._on_edit_dir, width=76
@@ -235,11 +283,12 @@ class DiscoveryPanel:
         self._toggle_dir_btn = self._button(
             actions, tr("discovery.dir_disable"), self._on_toggle_dir, width=76
         )
+        # 删除保持危险色, 但改成"描边 + 危险色文字": 破坏性动作不该比"添加"更抢眼.
         self._remove_dir_btn = self._button(
             actions,
             tr("discovery.dir_remove"),
             self._on_remove_dir,
-            style="danger",
+            style="danger_soft",
             width=76,
         )
         for index, button in enumerate(
@@ -251,6 +300,7 @@ class DiscoveryPanel:
             )
         ):
             button.grid(row=0, column=index, padx=(0, 6))
+        self._order_dir_buttons()
 
         self._dirs_box = ctk.CTkScrollableFrame(
             panel,
@@ -261,6 +311,11 @@ class DiscoveryPanel:
             row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 14), sticky="nsew"
         )
         self._dirs_box.grid_columnconfigure(0, weight=1)
+        auto_scrollbar(self._dirs_box)
+
+    def _order_dir_buttons(self) -> None:
+        """把"添加"放在最左边并贴近编辑/启停, "删除"拉开一段距离(避免误点)."""
+        self._remove_dir_btn.grid_configure(padx=(14, 0))
 
     def _build_candidates(self, panel: ctk.CTkFrame) -> None:
         """探测结果页: 说明 + 筛选 + 导入/忽略/修正路径 + 整页高度的候选列表."""
@@ -271,18 +326,19 @@ class DiscoveryPanel:
         self._hint_label = ctk.CTkLabel(
             panel,
             text=tr("discovery.hint"),
-            anchor="w",
+            anchor="nw",
             justify="left",
-            wraplength=760,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
         self._hint_label.grid(
-            row=0, column=0, padx=_PANEL_PAD, pady=(14, 0), sticky="w"
+            row=0, column=0, padx=(_PANEL_PAD, 16), pady=(14, 0), sticky="ew"
         )
+        # 与筛选下拉分栏: 说明只占左列, 右列留给控件(两者不再互相挤压).
+        track_wraplength(panel, self._hint_label, inset=_HINT_INSET)
 
         filters = ctk.CTkFrame(panel, fg_color="transparent")
-        filters.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="e")
+        filters.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="ne")
         self._filter_box = ctk.CTkComboBox(
             filters,
             values=[item.label for item in CandidateFilter],
@@ -303,8 +359,19 @@ class DiscoveryPanel:
 
         actions = ctk.CTkFrame(panel, fg_color="transparent")
         actions.grid(
-            row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(8, 0), sticky="e"
+            row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 0), sticky="ew"
         )
+        # 左边写明这一排按钮作用于谁: 列表里没有选中项时按钮置灰并说明原因,
+        # 而不是让三个按钮"悬"在筛选下方看不出作用对象(03/08 号评审).
+        actions.grid_columnconfigure(0, weight=1)
+        self._acting_label = ctk.CTkLabel(
+            actions,
+            text="",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_muted,
+        )
+        self._acting_label.grid(row=0, column=0, sticky="w")
         self._import_btn = self._button(
             actions, tr("discovery.cand_import"), self._on_import, style="accent"
         )
@@ -317,7 +384,7 @@ class DiscoveryPanel:
         for index, button in enumerate(
             (self._import_btn, self._ignore_btn, self._relocate_btn)
         ):
-            button.grid(row=0, column=index, padx=(6, 0))
+            button.grid(row=0, column=index + 1, padx=(6, 0))
 
         self._cand_box = ctk.CTkScrollableFrame(
             panel,
@@ -328,6 +395,7 @@ class DiscoveryPanel:
             row=2, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 14), sticky="nsew"
         )
         self._cand_box.grid_columnconfigure(0, weight=1)
+        auto_scrollbar(self._cand_box)
 
     def _button(
         self,
@@ -338,27 +406,77 @@ class DiscoveryPanel:
         style: str = "ghost",
         width: int = 88,
     ) -> ctk.CTkButton:
-        """按窗口调色板创建一个按钮."""
-        palette = self._palette
-        colors = {
-            "accent": (palette.accent, palette.accent_soft_border, palette.accent_text),
-            "danger": (palette.danger, palette.item_hover, palette.danger_text),
-            "ghost": (palette.raised, palette.item_hover, palette.text_body),
-        }[style]
-        return ctk.CTkButton(
+        """按窗口调色板创建一个按钮(样式登记下来, 之后按可用性重绘)."""
+        button = ctk.CTkButton(
             parent,
             text=text,
             command=command,
             width=width,
             height=30,
             corner_radius=8,
-            fg_color=colors[0],
-            hover_color=colors[1],
-            text_color=colors[2],
-            border_width=1 if style == "ghost" else 0,
-            border_color=palette.border,
             font=ctk.CTkFont(size=12, weight="bold"),
+            **self._style_colors(style),
         )
+        self._styles[button] = style
+        return button
+
+    def _style_colors(self, style: str) -> dict[str, object]:
+        """按钮样式的常规配色(禁用态由 ``paint_button_disabled`` 另行压暗)."""
+        palette = self._palette
+        colors: dict[str, dict[str, object]] = {
+            "accent": {
+                "fg_color": palette.accent,
+                "hover_color": palette.accent_soft_border,
+                "text_color": palette.accent_text,
+                "border_width": 0,
+            },
+            "danger": {
+                "fg_color": palette.danger,
+                "hover_color": palette.item_hover,
+                "text_color": palette.danger_text,
+                "border_width": 0,
+            },
+            "danger_soft": {
+                "fg_color": palette.raised,
+                "hover_color": palette.item_hover,
+                "text_color": palette.danger,
+                "border_width": 1,
+                "border_color": palette.danger,
+            },
+            "ghost": {
+                "fg_color": palette.raised,
+                "hover_color": palette.item_hover,
+                "text_color": palette.text_body,
+                "border_width": 1,
+                "border_color": palette.border,
+            },
+        }
+        return colors[style]
+
+    def _restyle_buttons(self) -> None:
+        """按可用性重绘本页所有按钮: 禁用态统一压暗, 可用态回到各自样式.
+
+        强调项只有两处(页签行右侧的"重新扫描"与监控目录页的"添加"); 删除是危险色
+        描边, 破坏性动作不再比主操作更抢眼(10 号评审)。
+        """
+        palette = self._palette
+        for button, style in self._styles.items():
+            if str(button.cget("state")) == "disabled":
+                paint_button_disabled(button, palette)
+                continue
+            colors = self._style_colors(style)
+            paint_button_enabled(
+                button,
+                palette,
+                fg_color=str(colors["fg_color"]),
+                text_color=str(colors["text_color"]),
+                hover_color=str(colors["hover_color"]),
+                border_color=(
+                    None
+                    if "border_color" not in colors
+                    else str(colors["border_color"])
+                ),
+            )
 
     # -- 数据加载与渲染 -----------------------------------------------------
 
@@ -395,14 +513,22 @@ class DiscoveryPanel:
     def _render_counts(self) -> None:
         """按当前数据刷新底部计数文案(扫描完成后会被结果摘要覆盖).
 
-        第二行按处理进度分列计数: 筛选到"已导入/已忽略"时如果一条都没有, 用
-        户可以直接从这行看出原因, 而不会以为筛选坏了。
+        **每个子页只报自己的数字**: 在监控目录页显示"候选 23 项 · 待处理 13 项"会
+        让人以为这一页也在统计别的东西(第 3/10 号评审)。探测结果页的第二行按处理
+        进度分列计数 —— 筛选到"已导入/已忽略"时如果一条都没有, 用户可以直接从这行
+        看出原因, 而不会以为筛选坏了。
         """
         counts = self._status_counts()
+        if self._page is DiscoveryPage.MONITORED:
+            self._summary_label.configure(
+                text=tr("discovery.counts", dirs=len(self._dirs)),
+                text_color=self._palette.text_body,
+            )
+            self._detail_label.configure(text="")
+            return
         self._summary_label.configure(
             text=tr(
-                "discovery.counts",
-                dirs=len(self._dirs),
+                "discovery.counts_candidates",
                 candidates=len(self._candidates),
                 pending=counts["new"],
             ),
@@ -430,14 +556,11 @@ class DiscoveryPanel:
             child.destroy()
         self._dir_rows = {}
         if not self._dirs:
-            empty = ctk.CTkLabel(
+            self._render_empty(
                 self._dirs_box,
-                text=tr("discovery.dirs_empty"),
-                anchor="w",
-                font=ctk.CTkFont(size=11),
-                text_color=self._palette.text_muted,
+                title=tr("discovery.dirs_empty"),
+                hint=tr("discovery.dirs_empty_hint"),
             )
-            empty.pack(fill="x", padx=6, pady=8)
             self._selected_dir = None
             self._update_actions()
             return
@@ -445,7 +568,7 @@ class DiscoveryPanel:
             self._selected_dir = self._dirs[0].directory_id
         for item in self._dirs:
             row = self._build_dir_row(item)
-            row.pack(fill="x", padx=4, pady=3)
+            row.pack(fill="x", padx=(4, _SCROLL_INSET), pady=3)
             self._dir_rows[item.directory_id] = row
         self._paint_dirs()
         self._update_actions()
@@ -458,28 +581,67 @@ class DiscoveryPanel:
             text=item.path,
             anchor="w",
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=self._palette.text_body,
+            text_color=self._palette.text_primary,
         )
         name.grid(row=0, column=0, padx=12, pady=(8, 0), sticky="ew")
-        detail = ctk.CTkLabel(
-            row,
-            text=item.summary,
+        # 启用状态单独一个标签: "已停用"是要被注意的状态, 不该与"路径可用"同色.
+        detail = ctk.CTkFrame(row, fg_color="transparent")
+        detail.grid(row=1, column=0, padx=12, pady=(1, 8), sticky="ew")
+        state = ctk.CTkLabel(
+            detail,
+            text=item.state_label,
+            anchor="w",
+            font=ctk.CTkFont(size=11, weight="bold" if item.enabled else "normal"),
+            text_color=(
+                self._palette.text_muted
+                if item.state_tone == "ok"
+                else self._palette.danger
+            ),
+        )
+        state.pack(side="left")
+        rest = ctk.CTkLabel(
+            detail,
+            text=item.detail,
             anchor="w",
             font=ctk.CTkFont(size=11),
             text_color=self._palette.text_muted,
         )
-        detail.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
-        for widget in (row, name, detail):
+        rest.pack(side="left", padx=(6, 0))
+        for widget in (row, name, detail, state, rest):
             widget.bind(
                 "<Button-1>",
                 lambda _event, key=item.directory_id: self._select_dir(key),
             )
         return row
 
+    def _render_empty(
+        self, box: ctk.CTkScrollableFrame, *, title: str, hint: str
+    ) -> None:
+        """列表空状态: 一句结论 + 一句下一步(表头/表格骨架都不显示时它就是这一页的内容)."""
+        headline = ctk.CTkLabel(
+            box,
+            text=title,
+            anchor="w",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=self._palette.text_primary,
+        )
+        headline.pack(fill="x", padx=6, pady=(12, 0))
+        detail = ctk.CTkLabel(
+            box,
+            text=hint,
+            anchor="nw",
+            justify="left",
+            font=ctk.CTkFont(size=12),
+            text_color=self._palette.text_hint,
+        )
+        detail.pack(fill="x", padx=6, pady=(6, 12))
+        track_wraplength(box, detail)
+
     def _render_candidates(self) -> None:
         for child in self._cand_box.winfo_children():
             child.destroy()
         self._cand_rows = {}
+        self._fitted = {}
         visible = [
             item
             for item in self._candidates
@@ -492,9 +654,12 @@ class DiscoveryPanel:
             return
         if self._selected_candidate not in {item.candidate_id for item in visible}:
             self._selected_candidate = visible[0].candidate_id
-        for item in visible:
+        for index, item in enumerate(visible):
             row = self._build_candidate_row(item)
-            row.pack(fill="x", padx=4, pady=3)
+            # 上下都留出内边距: 滚到底时顶部那张卡片不会被贴着边缘裁掉(8/9 号评审).
+            row.pack(
+                fill="x", padx=(4, _SCROLL_INSET), pady=(6 if index == 0 else 3, 6)
+            )
             self._cand_rows[item.candidate_id] = row
         self._paint_candidates()
         self._update_actions()
@@ -503,41 +668,22 @@ class DiscoveryPanel:
         """候选列表空状态: 区分"还没有候选"与"当前筛选没有匹配项".
 
         两种情况都给出同一句"暂无探测结果"会让人以为筛选失效(筛选到"已导入"
-        而当时一条都没导入时尤其明显), 因此这里分开措辞。
+        而当时一条都没导入时尤其明显), 因此这里分开措辞; 而且它往往是这一页唯一
+        的行动指引, 所以用结论 + 说明两层, 不再是最弱的一行灰字。
         """
-        palette = self._palette
         filtered = bool(self._candidates) and self._filter is not CandidateFilter.ALL
-        message = (
-            tr("discovery.empty_filtered", filter=self._filter.label)
-            if filtered
-            else tr("discovery.candidates_empty")
-        )
-        label = ctk.CTkLabel(
-            self._cand_box,
-            text=message,
-            anchor="w",
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
-        )
-        label.pack(fill="x", padx=6, pady=(8, 0))
-        if not filtered:
+        if filtered:
+            self._render_empty(
+                self._cand_box,
+                title=tr("discovery.empty_filtered", filter=self._filter.label),
+                hint=tr("discovery.empty_filtered_hint", **self._status_counts()),
+            )
             return
-        counts = self._status_counts()
-        hint = ctk.CTkLabel(
+        self._render_empty(
             self._cand_box,
-            text=tr(
-                "discovery.empty_filtered_hint",
-                new=counts["new"],
-                imported=counts["imported"],
-                ignored=counts["ignored"],
-            ),
-            anchor="w",
-            justify="left",
-            wraplength=620,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            title=tr("discovery.candidates_empty"),
+            hint=tr("discovery.candidates_empty_hint"),
         )
-        hint.pack(fill="x", padx=6, pady=(2, 8))
 
     def _build_candidate_row(self, item: CandidateItem) -> ctk.CTkFrame:
         row = ctk.CTkFrame(self._cand_box, corner_radius=8)
@@ -547,17 +693,20 @@ class DiscoveryPanel:
             text=self._candidate_title(item),
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self._palette.text_body,
+            text_color=self._palette.text_primary,
         )
         name.grid(row=0, column=0, padx=12, pady=(8, 0), sticky="ew")
+        # 安装路径: 长路径中间省略, 宽度变化时重裁(与主页列表的名称同一套做法).
+        path_text = self._clip_path(item.install_dir, _CARD_TEXT_WIDTH)
         path = ctk.CTkLabel(
             row,
-            text=item.install_dir,
+            text=path_text,
             anchor="w",
-            font=ctk.CTkFont(size=11),
+            font=self._path_font,
             text_color=self._palette.text_muted,
         )
-        path.grid(row=1, column=0, padx=12, pady=(1, 0), sticky="ew")
+        path.grid(row=1, column=0, padx=12, pady=(2, 0), sticky="ew")
+        self._track_fit(f"path:{item.candidate_id}", path, (item.install_dir,))
         detail = ctk.CTkLabel(
             row,
             text=item.summary,
@@ -565,24 +714,74 @@ class DiscoveryPanel:
             font=ctk.CTkFont(size=11),
             text_color=self._palette.text_muted,
         )
-        detail.grid(row=2, column=0, padx=12, pady=(0, 2), sticky="ew")
-        # 探测这款游戏时顺带推断出的存档路径: 导入时直接进对话框预填.
-        saves = ctk.CTkLabel(
+        detail.grid(row=2, column=0, padx=12, pady=(2, 0), sticky="ew")
+        # 存档路径区分两层: 结论(一行)与路径(每条一行), 路径同样中间省略.
+        conclusion = ctk.CTkLabel(
             row,
-            text=self._save_lines(item),
+            text=item.save_label,
             anchor="w",
-            justify="left",
-            wraplength=680,
             font=ctk.CTkFont(size=11),
             text_color=self._save_color(item),
         )
-        saves.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
-        for widget in (row, name, path, detail, saves):
+        conclusion.grid(row=3, column=0, padx=12, pady=(4, 0), sticky="ew")
+        lines = tuple(f"· {path_.text}" for path_ in item.save_paths)
+        saves = ctk.CTkLabel(
+            row,
+            text=self._clip_lines(lines, _CARD_TEXT_WIDTH),
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=(
+                self._palette.danger
+                if any(path_.dangerous for path_ in item.save_paths)
+                else self._palette.text_muted
+            ),
+        )
+        saves.grid(row=4, column=0, padx=12, pady=(2, 10), sticky="ew")
+        if lines:
+            self._track_fit(f"saves:{item.candidate_id}", saves, lines)
+        for widget in (row, name, path, detail, conclusion, saves):
             widget.bind(
                 "<Button-1>",
                 lambda _event, key=item.candidate_id: self._select_candidate(key),
             )
         return row
+
+    def _clip_path(self, text: str, width: int) -> str:
+        """按宽度裁剪一行路径: **中间省略**, 头尾都留.
+
+        尾部是目录名(最有用的一段), 因此不能用从头截断的 :func:`fit_text`。
+        """
+        return fit_path(text, self._path_font, width)
+
+    def _clip_lines(self, lines: tuple[str, ...], width: int) -> str:
+        """多行文本逐行裁剪后拼起来(每行都不许溢出)."""
+        return "\n".join(self._clip_path(line, width) for line in lines)
+
+    def _track_fit(
+        self,
+        key: str,
+        label: ctk.CTkLabel,
+        lines: tuple[str, ...],
+    ) -> None:
+        """登记一个"按真实宽度重裁"的标签(宽度要等布局完成才知道)."""
+        self._fitted[key] = _FitTarget(label, lines)
+        label.bind("<Configure>", lambda _event, name=key: self._refit(name), add="+")
+
+    def _refit(self, key: str) -> None:
+        """按标签当前宽度重裁: 宽度未知或没变就不动(免得改文本触发新的事件互相追).
+
+        列表重建后旧标签的 ``<Configure>`` 回调还会来一趟(那时它已经不在登记表里),
+        所以取不到目标就直接返回。
+        """
+        target = self._fitted.get(key)
+        if target is None:
+            return
+        width = int(target.label.winfo_width())
+        if width <= 1 or width == target.fitted_width:
+            return
+        target.fitted_width = width
+        target.label.configure(text=self._clip_lines(target.lines, width))
 
     @staticmethod
     def _candidate_title(item: CandidateItem) -> str:
@@ -593,7 +792,10 @@ class DiscoveryPanel:
 
     @staticmethod
     def _save_lines(item: CandidateItem) -> str:
-        """候选行里的存档路径区: 结论一行, 之后每条路径一行."""
+        """候选行里的存档路径区: 结论一行, 之后每条路径一行.
+
+        没有存档路径时只剩结论那一行(调用方按行数决定要不要登记重裁)。
+        """
         if not item.save_paths:
             return item.save_label
         lines = [item.save_label]
@@ -610,24 +812,18 @@ class DiscoveryPanel:
         return palette.text_muted
 
     def _paint_dirs(self) -> None:
-        palette = self._palette
         for key, row in self._dir_rows.items():
-            selected = key == self._selected_dir
-            row.configure(
-                fg_color=palette.item_active if selected else palette.card,
-                border_width=1,
-                border_color=palette.accent if selected else palette.card_border,
+            background, border = self._palette.selection_colors(
+                key == self._selected_dir
             )
+            row.configure(fg_color=background, border_width=1, border_color=border)
 
     def _paint_candidates(self) -> None:
-        palette = self._palette
         for key, row in self._cand_rows.items():
-            selected = key == self._selected_candidate
-            row.configure(
-                fg_color=palette.item_active if selected else palette.card,
-                border_width=1,
-                border_color=palette.accent if selected else palette.card_border,
+            background, border = self._palette.selection_colors(
+                key == self._selected_candidate
             )
+            row.configure(fg_color=background, border_width=1, border_color=border)
 
     def _select_dir(self, directory_id: str) -> None:
         self._selected_dir = directory_id
@@ -665,10 +861,31 @@ class DiscoveryPanel:
         )
 
     def _update_actions(self) -> None:
-        """按选中项与状态决定按钮可用性与文案."""
-        palette = self._palette
+        """按选中项与状态决定按钮可用性与文案.
+
+        三个候选动作挂在"列表里选中的那一条"上: 没有选中项时一起置灰, 并在按钮
+        左边写明这一点 —— 否则按钮悬在筛选下方, 看不出作用对象(03/08 号评审)。
+        """
         directory = self._dir_item()
-        # 添加按钮不依赖选中项; 其余三个按钮需要先选中一个监控目录.
+        candidate = self._candidate_item()
+        self._update_dir_actions(directory)
+        self._update_candidate_actions(candidate)
+        self._acting_label.configure(
+            text=(
+                tr("discovery.acting_on", name=candidate.display_name)
+                if candidate is not None
+                else tr("discovery.no_selection")
+            ),
+            text_color=(
+                self._palette.text_hint
+                if candidate is not None
+                else self._palette.text_muted
+            ),
+        )
+        self._restyle_buttons()
+
+    def _update_dir_actions(self, directory: MonitoredDirItem | None) -> None:
+        """监控目录页的四个按钮: 除"添加"外都要求先选中一条."""
         self._add_dir_btn.configure(state="normal")
         for button in (
             self._edit_dir_btn,
@@ -676,52 +893,34 @@ class DiscoveryPanel:
             self._remove_dir_btn,
         ):
             button.configure(state="normal" if directory is not None else "disabled")
-        if directory is not None:
-            self._toggle_dir_btn.configure(
-                text=(
-                    tr("discovery.dir_disable")
-                    if directory.enabled
-                    else tr("discovery.dir_enable")
-                )
+        if directory is None:
+            return
+        self._toggle_dir_btn.configure(
+            text=(
+                tr("discovery.dir_disable")
+                if directory.enabled
+                else tr("discovery.dir_enable")
             )
-        candidate = self._candidate_item()
+        )
+
+    def _update_candidate_actions(self, candidate: CandidateItem | None) -> None:
+        """探测结果页的三个按钮: 选中后才能用, 且不可导入的候选只能忽略/修正."""
         for button in (
             self._import_btn,
             self._ignore_btn,
             self._relocate_btn,
         ):
             button.configure(state="normal" if candidate is not None else "disabled")
-        if candidate is not None:
-            self._import_btn.configure(
-                state="normal" if candidate.importable else "disabled"
-            )
-            self._ignore_btn.configure(
-                text=(
-                    tr("discovery.cand_restore")
-                    if candidate.status == "ignored"
-                    else tr("discovery.cand_ignore")
-                )
-            )
-        self._paint_buttons(palette)
-
-    def _paint_buttons(self, palette: Palette) -> None:
-        """禁用态按钮统一用弱化配色, 避免看起来仍可点击."""
-        for button in (
-            self._add_dir_btn,
-            self._edit_dir_btn,
-            self._toggle_dir_btn,
-            self._remove_dir_btn,
-            self._import_btn,
-            self._ignore_btn,
-            self._relocate_btn,
-        ):
-            if str(button.cget("state")) == "disabled":
-                button.configure(fg_color=palette.raised, text_color=palette.text_muted)
+        if candidate is None:
+            return
         self._import_btn.configure(
-            fg_color=(
-                palette.accent
-                if str(self._import_btn.cget("state")) == "normal"
-                else palette.raised
+            state="normal" if candidate.importable else "disabled"
+        )
+        self._ignore_btn.configure(
+            text=(
+                tr("discovery.cand_restore")
+                if candidate.status == "ignored"
+                else tr("discovery.cand_ignore")
             )
         )
 
@@ -826,6 +1025,7 @@ class DiscoveryPanel:
             title=tr("dialog.monitor_remove_title"),
             message=tr("dialog.monitor_remove_message", path=directory.path),
             confirm_text=tr("discovery.dir_remove"),
+            danger=True,
         ):
             log_action("monitor.remove", basic=True, result="cancelled")
             return

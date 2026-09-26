@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from archive_management.ui.textfit import ELLIPSIS, fit_text
+from archive_management.ui.textfit import ELLIPSIS, fit_path, fit_text
 
 pytestmark = [
     pytest.mark.normal,
@@ -104,6 +104,68 @@ def test_empty_text_stays_empty() -> None:
 def test_container_too_narrow_for_one_character_yields_nothing() -> None:
     """多行时限宽连一个字符都放不下: 直接结束, 不硬塞字符、也不崩."""
     assert fit_text("abcdefgh", _FakeFont(), 5, max_lines=2) == ""
+
+
+class _PaddedFont(_FakeFont):
+    """把"长整串"量得更宽的字体替身.
+
+    真实字体对整串的测量并不等于各部分相加(字距/取整), 因此"头部 + 省略号 + 尾部"
+    可能刚好超出预算 —— :func:`fit_path` 的最后一层兜底就是为这种情况写的。
+    """
+
+    def measure(self, text: str) -> int:
+        """长度超过 8 个字符时多算 40px(两个单位)."""
+        base = super().measure(text)
+        return base + 4 * _UNIT if len(text) > 8 else base
+
+
+def test_path_that_fits_is_returned_unchanged() -> None:
+    """放得下的路径原样返回: 不该多出省略号."""
+    assert fit_path("C:/Saves/Game", _FakeFont(), 300) == "C:/Saves/Game"
+
+
+def test_long_paths_keep_the_head_and_the_tail() -> None:
+    """长路径中间省略: 头(盘符/根)与尾(目录名)都留, 且不超宽(第 8/9 号评审)."""
+    font = _FakeFont()
+    path = "C:/Users/ycswh/Documents/COMPILE HEART/约会大作战/saves"
+    width = 200
+
+    fitted = fit_path(path, font, width)
+
+    assert fitted.startswith("C:/"), "尾部更重要, 但盘符/根也要留一段"
+    assert fitted.endswith("saves"), "路径尾部(目录名)必须完整"
+    assert ELLIPSIS in fitted
+    assert font.measure(fitted) <= width
+
+
+@pytest.mark.parametrize("width", [0, -10])
+def test_path_with_an_invalid_budget_is_returned_unchanged(width: int) -> None:
+    """非法预算(0/负数)不裁剪: 上层给错值时不要静默吞掉文本."""
+    assert fit_path("C:/Saves", _FakeFont(), width) == "C:/Saves"
+
+
+def test_path_width_too_small_for_the_ellipsis_returns_nothing() -> None:
+    """宽度连省略号都放不下时返回空串, 而不是把卡片撑宽."""
+    assert fit_path("C:/Saves/Game", _FakeFont(), 5) == ""
+
+
+def test_path_too_narrow_for_a_tail_falls_back_to_head_truncation() -> None:
+    """连一个尾部字符都放不进剩下的空间时退回头部截断(省略号仍然在)."""
+    fitted = fit_path("C:/Saves/Game", _FakeFont(), 15)
+
+    assert fitted == ELLIPSIS
+    assert _FakeFont().measure(fitted) <= 15
+
+
+def test_path_that_still_overflows_with_both_ends_uses_head_truncation() -> None:
+    """字体取整让"两侧都留"略超预算时退回头部截断, 保证不溢出."""
+    font = _PaddedFont()
+    path = "C:/Users/ycswh/Documents/saves"
+
+    fitted = fit_path(path, font, 130)
+
+    assert fitted == fit_text(path, font, 130)
+    assert font.measure(fitted) <= 130
 
 
 def test_cut_lands_on_the_space_when_the_next_character_is_itself_a_space() -> None:

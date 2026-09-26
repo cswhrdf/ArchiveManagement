@@ -23,6 +23,7 @@ from archive_management.i18n import tr
 from archive_management.services.audit import log_action
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import (
+    _BULLET,
     _center,
     confirm_dialog,
     info_dialog,
@@ -30,6 +31,11 @@ from archive_management.ui.dialogs import (
 )
 from archive_management.ui.models import MAX_KEEP_AUTO, ScheduleItem
 from archive_management.ui.palette import Palette
+from archive_management.ui.widgets import (
+    auto_scrollbar,
+    paint_button_disabled,
+    paint_button_enabled,
+)
 
 _ChangeCallback = Callable[[], None]
 
@@ -40,6 +46,38 @@ def _has_locations(backend: ArchiveService, game_id: str) -> bool:
         return bool(backend.list_locations(game_id))
     except ArchiveManagementError:  # 未知游戏等异常按"不可配置"处理
         return False
+
+
+def _blocked_panel(
+    parent: ctk.CTkToplevel, palette: Palette, blocked: Sequence[ScheduleItem]
+) -> None:
+    """把"不能创建定时任务"的游戏摆成一块警告卡片(26 号评审).
+
+    原来两个游戏名是用逗号拼在同一句里的: 名字一长就折到第二行, 而第二行只有名字、
+    没有任何说明文字, 看起来像多出来的一行数据。这里拆成三行各司其职 —— 原因(醒目的
+    危险色)、逐行的游戏名(“· ”项目符号, 一眼看出是列表)、怎么办(提示色)。
+    """
+    panel = ctk.CTkFrame(parent, fg_color=palette.raised, corner_radius=8)
+    panel.pack(fill="x", padx=24, pady=(12, 0))
+    for text, size, color, pady in (
+        (tr("dialog.schedule_add_blocked_title"), 12, palette.danger, (10, 2)),
+        (
+            "\n".join(f"{_BULLET}{item.game_name}" for item in blocked),
+            12,
+            palette.text_body,
+            (0, 0),
+        ),
+        (tr("dialog.schedule_add_blocked_hint"), 11, palette.text_hint, (4, 10)),
+    ):
+        ctk.CTkLabel(
+            panel,
+            text=text,
+            anchor="w",
+            justify="left",
+            wraplength=380,
+            font=ctk.CTkFont(size=size),
+            text_color=color,
+        ).pack(padx=12, pady=pady, anchor="w")
 
 
 def _error_dialog(parent: ctk.CTk, palette: Palette, message: str) -> None:
@@ -91,14 +129,16 @@ def edit_schedule(
         palette,
         title=tr("dialog.schedule_title", name=game_name),
         interval_label=tr("dialog.schedule_interval_label"),
-        interval_prompt=tr(
-            "dialog.schedule_prompt",
-            current=task.schedule_text or tr("task.unscheduled"),
-        ),
+        interval_prompt=tr("dialog.schedule_prompt"),
         keep_label=tr("dialog.keep_auto_label"),
         keep_prompt=tr("dialog.keep_auto_prompt", max=MAX_KEEP_AUTO),
         initial_interval=task.schedule_text,
         initial_keep=str(task.keep_auto),
+        # 当前排期单独一行: 塞在说明句尾时用户扫一眼找不到状态(25 号评审).
+        current=tr(
+            "dialog.schedule_current",
+            current=task.schedule_text or tr("task.unscheduled"),
+        ),
     )
     if edited is None:
         return False
@@ -138,9 +178,8 @@ def add_schedule_dialog(
 ) -> str | None:
     """选择要新增定时任务的游戏, 返回游戏 id; 取消或未选返回 None.
 
-    选择框可以直接输入内容来筛选游戏(输入即过滤下拉候选)。弹窗里写明"主要
-    用于统一管理, 为单个游戏配置更推荐去游戏设置", 并列出因"未配置存档位置"
-    而无法创建定时任务的游戏及其原因。
+    选择框可以直接输入内容来筛选游戏(输入即过滤下拉候选)。"统一管理"的推荐入口
+    写在窗口的副标题里, 这里不再重复一遍(26 号评审: 同一句指引两处投放)。
     """
     if not candidates:
         return None
@@ -156,9 +195,13 @@ def add_schedule_dialog(
         window,
         text=tr("dialog.schedule_add_title"),
         anchor="w",
-        font=ctk.CTkFont(size=14, weight="bold"),
+        font=ctk.CTkFont(size=15, weight="bold"),
         text_color=palette.text_primary,
-    ).pack(padx=24, pady=(20, 8), anchor="w")
+    ).pack(padx=24, pady=(18, 8), anchor="w")
+    # 标题与正文之间的分割线: 没有它, 粗体标题看起来就是第一个字段的标签(25 号同一处问题).
+    ctk.CTkFrame(window, height=1, fg_color=palette.border).pack(
+        fill="x", padx=24, pady=(0, 12)
+    )
     ctk.CTkLabel(
         window,
         text=tr("dialog.schedule_add_prompt"),
@@ -166,28 +209,6 @@ def add_schedule_dialog(
         font=ctk.CTkFont(size=12),
         text_color=palette.text_muted,
     ).pack(padx=24, anchor="w")
-    ctk.CTkLabel(
-        window,
-        text=tr("dialog.schedule_add_note"),
-        anchor="w",
-        justify="left",
-        wraplength=420,
-        font=ctk.CTkFont(size=12),
-        text_color=palette.text_hint,
-    ).pack(padx=24, pady=(8, 10), anchor="w")
-    if blocked:
-        ctk.CTkLabel(
-            window,
-            text=tr(
-                "dialog.schedule_add_blocked",
-                names=", ".join(item.game_name for item in blocked),
-            ),
-            anchor="w",
-            justify="left",
-            wraplength=420,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.danger,
-        ).pack(padx=24, pady=(0, 10), anchor="w")
 
     picker = ctk.CTkComboBox(
         window,
@@ -218,7 +239,17 @@ def add_schedule_dialog(
         picker.set(typed)
 
     picker.bind("<KeyRelease>", on_key)
-    picker.pack(padx=24, pady=(0, 16))
+    picker.pack(padx=24, pady=(6, 2))
+    # "可以打字筛选"写在控件正下方, 而不是藏在说明句里: 只靠外观看不出这个下拉能输入.
+    ctk.CTkLabel(
+        window,
+        text=tr("dialog.schedule_add_filter"),
+        anchor="w",
+        font=ctk.CTkFont(size=11),
+        text_color=palette.text_hint,
+    ).pack(padx=24, anchor="w")
+    if blocked:
+        _blocked_panel(window, palette, blocked)
 
     result: dict[str, str | None] = {"value": None}
 
@@ -240,7 +271,7 @@ def add_schedule_dialog(
         window.destroy()
 
     actions = ctk.CTkFrame(window, fg_color="transparent")
-    actions.pack(padx=24, pady=(0, 20), anchor="e")
+    actions.pack(fill="x", padx=24, pady=(16, 18), anchor="w")
     ctk.CTkButton(
         actions,
         text=tr("dialog.cancel"),
@@ -328,16 +359,19 @@ class ScheduleWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_muted,
         )
-        self._summary_label.grid(row=1, column=0, padx=16, pady=(2, 14), sticky="w")
-        ctk.CTkLabel(
+        self._summary_label.grid(row=1, column=0, padx=16, pady=(2, 0), sticky="w")
+        # 说明左对齐, 并且就排在统计下面(同一视觉块): 右对齐的中文断句读起来别扭,
+        # 而它与"共 N 个任务"本来就是在说同一件事(18 号评审)。
+        self._subtitle_label = ctk.CTkLabel(
             header,
             text=tr("schedule.subtitle"),
-            anchor="e",
-            justify="right",
-            wraplength=300,
+            anchor="w",
+            justify="left",
+            wraplength=620,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
-        ).grid(row=0, column=1, rowspan=2, padx=16, sticky="e")
+        )
+        self._subtitle_label.grid(row=2, column=0, padx=16, pady=(4, 14), sticky="w")
 
         toolbar = ctk.CTkFrame(container, fg_color="transparent")
         toolbar.grid(row=1, column=0, sticky="ew", pady=(12, 8))
@@ -363,6 +397,8 @@ class ScheduleWindow:
         )
         self._list_scroll.grid(row=2, column=0, sticky="nsew")
         self._list_scroll.grid_columnconfigure(0, weight=1)
+        # 只有一两个任务时右侧不该立着一条拖不动的滚动条(18 号评审).
+        auto_scrollbar(self._list_scroll)
 
         footer = ctk.CTkFrame(container, fg_color="transparent")
         footer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -468,14 +504,25 @@ class ScheduleWindow:
             font=ctk.CTkFont(size=14, weight="bold"),
         )
         icon.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=9)
+        # 标题 = "来自游戏"小标题 + 游戏名: 整行同色同粗时, 前缀读起来像超链接
+        # (18 号评审)。小标题用次要色小字号, 名字才是标题。
+        title = ctk.CTkFrame(row, fg_color="transparent")
+        title.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(9, 0))
+        ctk.CTkLabel(
+            title,
+            text=tr("schedule.from_game"),
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        ).pack(side="left")
         name = ctk.CTkLabel(
-            row,
-            text=item.game_label,
+            title,
+            text=item.game_name,
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        name.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(9, 0))
+        name.pack(side="left", padx=(6, 0))
         detail = ctk.CTkLabel(
             row,
             text=item.summary,
@@ -490,15 +537,25 @@ class ScheduleWindow:
             row,
             text=item.state_label,
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=palette.accent if item.interval_text else palette.text_muted,
+            text_color=self._state_color(item),
         )
         state.grid(row=0, column=2, rowspan=2, padx=(0, 14))
-        for widget in (row, icon, name, detail, state):
+        for widget in (row, icon, title, name, detail, state):
             widget.bind(
                 "<Button-1>",
                 lambda _event, gid=item.game_id: self._select(gid),
             )
-        return [row, icon, name, detail, state]
+        return [row, icon, title, name, detail, state]
+
+    def _state_color(self, item: ScheduleItem) -> str:
+        """启用状态的配色: 只有"已启用"是正向色.
+
+        "已暂停"原本也用浅绿, 与"已启用"无从区分(18 号评审); 现在暂停/归档一律用
+        次要文字色, 一眼能看出"当前不会跑"。
+        """
+        if item.archived or not item.enabled:
+            return self._palette.text_muted
+        return self._palette.accent
 
     def _select(self, game_id: str) -> None:
         self._selected = game_id
@@ -506,13 +563,11 @@ class ScheduleWindow:
         self._update_actions()
 
     def _paint_rows(self) -> None:
-        palette = self._palette
         for game_id, widgets in self._rows.items():
-            selected = game_id == self._selected
-            widgets[0].configure(
-                fg_color=palette.item_active if selected else palette.card,
-                border_color=palette.accent if selected else palette.card_border,
+            background, border = self._palette.selection_colors(
+                game_id == self._selected
             )
+            widgets[0].configure(fg_color=background, border_color=border)
 
     def _update_actions(self) -> None:
         selected = self._selected_item()
@@ -528,6 +583,29 @@ class ScheduleWindow:
                 )
             )
         self._add_btn.configure(state="normal" if self._addable() else "disabled")
+        self._paint_buttons()
+
+    def _paint_buttons(self) -> None:
+        """可行/禁用一眼可分: 四个按钮全是灰底时看不出哪个能用(18 号评审)."""
+        palette = self._palette
+        for button in (
+            self._add_btn,
+            self._edit_btn,
+            self._toggle_btn,
+            self._remove_btn,
+            self._close_btn,
+        ):
+            if str(button.cget("state")) == "disabled":
+                paint_button_disabled(button, palette)
+                continue
+            paint_button_enabled(
+                button,
+                palette,
+                fg_color=palette.raised,
+                text_color=palette.text_body,
+                hover_color=palette.item_hover,
+                border_color=palette.border,
+            )
 
     def _selected_item(self) -> ScheduleItem | None:
         return next(
@@ -657,6 +735,7 @@ class ScheduleWindow:
             title=tr("schedule.remove_title"),
             message=tr("schedule.remove_message", name=item.game_name),
             confirm_text=tr("schedule.remove_confirm"),
+            danger=True,
         )
         if not confirmed:
             return

@@ -118,9 +118,12 @@ def test_list_schedules_covers_every_game(service: DemoArchiveService) -> None:
     assert first.interval_text == "1d"
     assert first.enabled is True
     assert first.auto_count_label
-    assert "来自游戏" in first.game_label
+    # 副标题把周期/下次运行/保留份数拼在一起(单位与空值口径由展示模型决定).
+    assert first.next_run_text == tr("schedule.next_run", stamp=first.next_run_label)
+    assert first.auto_count_label in first.summary
     # 未配置的游戏中显示为未配置.
     assert items[-1].state_label == "未配置"
+    assert items[-1].next_run_text == tr("schedule.next_run_none")
 
 
 def test_get_detail_unknown_game_raises(service: DemoArchiveService) -> None:

@@ -55,11 +55,19 @@ from archive_management.ui.models import (
     HomeBoard,
     HomeGameItem,
     HomeSection,
+    chips_lines,
     poster_columns,
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
 from archive_management.ui.textfit import fit_text
+from archive_management.ui.widgets import (
+    auto_scrollbar,
+    paint_button_disabled,
+    paint_button_enabled,
+    sync_scrollbar,
+    track_wraplength,
+)
 
 _ChangeCallback = Callable[[], None]
 _DetailCallback = Callable[[str], None]
@@ -88,6 +96,12 @@ _TONE_KEYS: dict[str, str] = {"orange": "danger", "green": "success"}
 _DOT_COLUMN = 28
 # 表头与数据行的左右内边距: 左边给色块、右边给固定列块, 两侧结构一致才能上下对齐.
 _TABLE_SIDE_PAD = 10
+# 数据行右侧再留一点: 滚动条出现时它就贴在画布右边, 最后一列不该顶到那条竖线上.
+_SCROLL_INSET = 6
+# 表头的上下留白(见 _build_table 的 ``pady=(10, 6)``)。
+_HEAD_ROW_PAD = 16
+# 状态列最多折几行: 能换行就换行, 换行还放不下才补省略号(见 models.chips_lines).
+_STATE_MAX_LINES = 2
 # 名称块与固定列块之间的最小空隙.
 _TABLE_BLOCK_GAP = 12
 # 表头左边距 = 滚动区 10 + 数据行自己的 4(pack padx): 表头与数据行落在同一条竖线上.
@@ -106,13 +120,20 @@ _ALIGN_MAX_ATTEMPTS = 4
 # 事件来补救 —— 不重试就会一直停在兜底宽度的短文本上。
 _REFIT_MAX_ATTEMPTS = 8
 # 海报卡片尺寸: 固定宽高, 保证封面始终是竖屏(高比宽大); 封面暂时没有图片,
-# 用游戏名前两个字代替, 备份数量贴在封面右下角.
+# 用游戏名前两个字代替, 备份数量排在名称下方(不再压在封面上)。
 _POSTER_WIDTH = 190
-# 卡片高度要容下封面(250 + 上下间距 14)、名称(28)与活动时间(28 + 上下间距 12),
-# 合计 332; 留一点余量, 否则最后一行文字会被压到底边并盖住卡片的下边框。名称放
-# 不下时最多折两行(仍在 336 之内, 因此卡片尺寸不变)。
-_POSTER_HEIGHT = 336
+# 卡片高度要容下封面(250 + 上下间距 14)、名称(最多两行, 40)、备份数角标(15)与
+# 最近活动(15), 再留出名称与元信息之间的留白; 合计约 350, 取 366 留余量, 否则最后
+# 一行文字会被压到底边并盖住卡片的下边框。备份数角标**不再压在封面上**: 它原本
+# 盖住了封面里的游戏 logo, 现在与"最近活动"一起排在名称下方(第 5 号评审)。
+_POSTER_HEIGHT = 366
 _COVER_HEIGHT = 250
+# 名称与下方元信息之间的留白: 只靠字号差异区分标题与元信息, 读起来像同一段文字
+# 被截断(第 5 号评审)。
+_POSTER_TITLE_GAP = 6
+# 无封面时的占位字(游戏名前两个字): 34px 比其它卡片的标题大一倍, 一张占位卡因此
+# 看起来像另一个组件, 收到与卡片标题同级的 24px。
+_POSTER_PLACEHOLDER_SIZE = 24
 # 封面宽度 = 卡片宽度去掉左右各 8px 内缩(与 :meth:`HomePage._build_poster` 一致).
 _COVER_WIDTH = _POSTER_WIDTH - 16
 # 列表行头像里的图标边长(与 :data:`_DOT_COLUMN` 留出内缩).
@@ -203,6 +224,8 @@ class HomePage:
         self._selected: str | None = None
         # 每行的关键部件: 名称按真实宽度重裁、表头对齐都要用(键是游戏 id).
         self._row_parts: dict[str, _RowParts] = {}
+        # 本页创建的按钮与它们的样式: 可用/禁用切换时按这份登记重绘配色.
+        self._buttons: dict[ctk.CTkButton, str] = {}
         # 表头的左右内边距(会按实测差值调整, 见 _align_table_header).
         self._head_pads: tuple[int, int] = (_HEAD_LEFT_PAD, _TABLE_SIDE_PAD)
         # 表头对齐已经调过几轮(收敛后就归零).
@@ -430,6 +453,9 @@ class HomePage:
         card.grid(row=2, column=0, sticky="nsew", padx=24, pady=(0, 6))
         card.grid_columnconfigure(0, weight=1)
         card.grid_rowconfigure(1, weight=1)
+        # 海报模式会收起表头, 但那一行的高度要留着(见 _reserve_head_row): 行塌成 0 时
+        # 整个游戏区会往上跳表头那么高, 与列表模式对不上。
+        self._card = card
 
         self._head = ctk.CTkFrame(card, fg_color="transparent")
         # 左边距要跟数据行一致(滚动区 10 + 行自己的 4); 右边距随后由
@@ -477,6 +503,8 @@ class HomePage:
         )
         self._list_box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self._list_box.grid_columnconfigure(0, weight=1)
+        # 内容装得下就不显示滚动条(空库/三行数据时右侧那条拖不动的滑块会误导用户).
+        auto_scrollbar(self._list_box)
         # 宽度变化时重排海报: 启动首屏渲染时控件尺寸还没测量出来
         # (``winfo_width()`` 只有 1), 算出的列数会偏少 —— 4 款游戏会被排成两行。
         self._list_box.bind("<Configure>", self._on_list_box_resize)
@@ -486,6 +514,9 @@ class HomePage:
         palette = self._palette
         footer = ctk.CTkFrame(self._library, fg_color="transparent")
         footer.grid(row=3, column=0, sticky="ew", padx=24, pady=(0, 14))
+        # 空库时整行收起(见 _render_footer): 一屏空状态里再挂"共 0 款游戏 · 第 1/1 页"
+        # 只是噪声, 还要用户去分辨哪几个按钮是不能点的。
+        self._footer = footer
         footer.grid_columnconfigure(0, weight=1)
         self._summary_label = ctk.CTkLabel(
             footer,
@@ -566,26 +597,65 @@ class HomePage:
         style: str = "ghost",
         width: int = 96,
     ) -> ctk.CTkButton:
-        """按页面调色板创建一个按钮."""
-        palette = self._palette
-        colors = {
-            "accent": (palette.accent, palette.accent_soft_border, palette.accent_text),
-            "ghost": (palette.raised, palette.item_hover, palette.text_body),
-        }[style]
-        return ctk.CTkButton(
+        """按页面调色板创建一个按钮(样式登记下来, 之后按可用性重绘)."""
+        button = ctk.CTkButton(
             parent,
             text=text,
             command=command,
             width=width,
             height=32,
             corner_radius=8,
-            fg_color=colors[0],
-            hover_color=colors[1],
-            text_color=colors[2],
-            border_width=1 if style == "ghost" else 0,
-            border_color=palette.border,
             font=ctk.CTkFont(size=12, weight="bold"),
+            **self._style_colors(style),
         )
+        self._buttons[button] = style
+        return button
+
+    def _style_colors(self, style: str) -> dict[str, object]:
+        """按钮样式的常规配色(禁用态由 ``paint_button_disabled`` 另行压暗)."""
+        palette = self._palette
+        colors: dict[str, dict[str, object]] = {
+            "accent": {
+                "fg_color": palette.accent,
+                "hover_color": palette.accent_soft_border,
+                "text_color": palette.accent_text,
+                "border_width": 0,
+            },
+            "ghost": {
+                "fg_color": palette.raised,
+                "hover_color": palette.item_hover,
+                "text_color": palette.text_body,
+                "border_width": 1,
+                "border_color": palette.border,
+            },
+        }
+        return colors[style]
+
+    def _restyle_buttons(self) -> None:
+        """按当前可用性重绘本页按钮: 禁用态是更暗的底色 + 更暗的字.
+
+        "几乎一样"的禁用态等于没有禁用态 —— 分页的"上一页/下一页"在空库下曾与可用
+        态同色(第 1 号评审)。可用态也在这里重设, 所以按钮从禁用恢复可用时颜色会
+        跟着回来。
+        """
+        palette = self._palette
+        for button, style in self._buttons.items():
+            if str(button.cget("state")) == "disabled":
+                paint_button_disabled(button, palette)
+                continue
+            colors = self._style_colors(style)
+            paint_button_enabled(
+                button,
+                palette,
+                fg_color=str(colors["fg_color"]),
+                text_color=str(colors["text_color"]),
+                hover_color=str(colors["hover_color"]),
+                border_color=(
+                    None
+                    if "border_color" not in colors
+                    else str(colors["border_color"])
+                ),
+            )
 
     def _segmented(
         self, parent: ctk.CTkFrame, values: list[str], command: Callable[[str], None]
@@ -722,6 +792,7 @@ class HomePage:
             child.destroy()
         self._rows = {}
         self._artwork_images = {}
+        self._buttons = {}
         self._build()
         self.reload()
         self._activation.render(self._last_activation, enabled=self._activation_enabled)
@@ -782,6 +853,20 @@ class HomePage:
         self._render_tabs(board)
         self._render_filters(board)
         self._render_games()
+        self._render_footer(board)
+
+    def _render_footer(self, board: HomeBoard) -> None:
+        """底栏: 空库时整行收起, 否则显示统计与翻页控件.
+
+        空库里"共 0 款游戏 · 最近活跃 0 · 待处理 0 · 已归档 0"加"每页 30 / 上一页 /
+        第 1/1 页 / 下一页"整行照旧显示, 页面看起来像渲染了一半(第 1/2 号评审)。
+        筛选把结果筛空时**不算空库**: 那时用户正需要重新选筛选条件, 计数与页签上的
+        数量就是他的参照。
+        """
+        if board.empty_library:
+            self._footer.grid_remove()
+            return
+        self._footer.grid()
         self._summary_label.configure(
             text=board.summary, text_color=self._palette.text_body
         )
@@ -850,34 +935,51 @@ class HomePage:
         self._row_parts = {}
         self._align_attempts = 0
         self._refit_attempts = 0
-        if self._filter.layout is HomeLayout.LIST:
-            # 列表行用 pack 布局: 先把海报模式留下的列宽清干净.
-            self._apply_poster_columns(0)
-            self._head.grid()
-        else:
-            self._head.grid_remove()
+        self._apply_poster_columns(0)
         games = self._visible_games()
         board = self._board
         if not games or board is None:  # pragma: no cover - reload 之后才会渲染
+            # 空的时候**连表头一起收起来**: 一条数据都没有却摆着七个列头, 看起来
+            # 像"表格坏了"; 页面只留一条解释性空状态(含下一步做什么)。
+            self._head.grid_remove()
             if board is not None:
                 self._render_empty(board)
             self._selected = None
             self._update_actions()
+            self._sync_scrollbar()
             return
         if self._selected not in {item.game_id for item in games}:
             self._selected = games[0].game_id
         if self._filter.layout is HomeLayout.LIST:
+            self._head.grid()
+            self._reserve_head_row(reserve=False)
             for item in games:
                 row = self._build_row(item)
-                row.pack(fill="x", padx=4, pady=3)
+                row.pack(fill="x", padx=(4, _SCROLL_INSET), pady=3)
                 self._rows[item.game_id] = row
             # 名称按**实际可用宽度**裁剪, 而宽度要等布局完成才知道 —— 这里先排一次
             # (用兜底宽度), 首帧之后再精确重裁一次。
             self._schedule_list_sync()
         else:
+            self._head.grid_remove()
+            self._reserve_head_row(reserve=True)
             self._render_posters(games)
         self._paint_rows()
         self._update_actions()
+        self._sync_scrollbar()
+
+    def _sync_scrollbar(self) -> None:
+        """重绘之后再判一次滚动条要不要出现(内容条数刚变过)."""
+        sync_scrollbar(self._list_box)
+
+    def _reserve_head_row(self, *, reserve: bool) -> None:
+        """海报模式收起表头后, 游戏区的四边边距要一致.
+
+        收起表头时那一行会塌成 0 高, 游戏区就贴到了面板上沿 —— 上边距 0, 左右与下
+        边却各有 10px。这里把它的上边距补成与其余三边相同(不保留表头那一行, 那样
+        会多出一条明显的空白)。
+        """
+        self._list_box.grid(pady=(10, 10) if reserve else (0, 10))
 
     def _render_posters(self, games: list[HomeGameItem]) -> None:
         """海报模式: 按可用宽度决定每行张数, 再逐行放置卡片.
@@ -1093,31 +1195,13 @@ class HomePage:
             image=cover_image,
             fg_color="transparent",
             text_color=palette.text_primary,
-            font=ctk.CTkFont(size=34, weight="bold"),
+            font=ctk.CTkFont(size=_POSTER_PLACEHOLDER_SIZE, weight="bold"),
         )
         placeholder.grid(row=0, column=0, sticky="nsew")
-        # 底衬只用在**真的有封面图**的时候: 图上是什么颜色都有可能, 绿点与备份数
-        # 没有底衬会看不清; 而回落成名称占位时封面底色就是纯色, 标签的 transparent
-        # 取到的正是这个底色(与父容器完全一致), 于是底衬彻底看不见。
+        # 底衬只用在**真的有封面图**的时候: 图上是什么颜色都有可能, 绿点没有底衬会
+        # 看不清; 而回落成名称占位时封面底色就是纯色, 标签的 transparent 取到的正是
+        # 这个底色(与父容器完全一致), 于是底衬彻底看不见。
         backing = poster_backing(cover_image, palette)
-        # 右下角角标: 没关联存档位置时这里没有"备份数"可言, 直接说明原因.
-        badge = ctk.CTkLabel(
-            cover,
-            text=(
-                tr("home.poster_backups", count=item.backup_count)
-                if item.location_count
-                else tr("home.no_save_paths")
-            ),
-            corner_radius=6,
-            fg_color=backing,
-            text_color=(
-                palette.text_body
-                if item.location_count and item.backup_count
-                else palette.text_muted
-            ),
-            font=ctk.CTkFont(size=10, weight="bold"),
-        )
-        badge.grid(row=0, column=0, sticky="se", padx=6, pady=6)
         name_font = self._name_font
         name = ctk.CTkLabel(
             card,
@@ -1131,7 +1215,23 @@ class HomePage:
             font=name_font,
             text_color=palette.text_body,
         )
-        name.grid(row=1, column=0, sticky="ew", padx=10)
+        # 名称与下面的元信息之间留白: 两者只差字号时, 读起来像同一段被截断的文字。
+        name.grid(row=1, column=0, sticky="ew", padx=10, pady=(_POSTER_TITLE_GAP, 0))
+        # 备份数(或"无有效存档路径")排在名称下方而不是压在封面上: 压在封面上的角标
+        # 会盖住封面里的游戏 logo, 而它本来就是这个游戏的元信息, 与活动时间同一组。
+        meta_font = ctk.CTkFont(size=10, weight="bold")
+        badge = ctk.CTkLabel(
+            card,
+            text=fit_text(self._poster_meta(item), meta_font, _POSTER_TEXT_WIDTH),
+            anchor="w",
+            font=meta_font,
+            text_color=(
+                palette.text_body
+                if item.location_count and item.backup_count
+                else palette.text_muted
+            ),
+        )
+        badge.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 0))
         activity = ctk.CTkLabel(
             card,
             text=(
@@ -1143,7 +1243,7 @@ class HomePage:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        activity.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 10))
+        activity.grid(row=3, column=0, sticky="ew", padx=10, pady=(2, 10))
         widgets: list[ctk.CTkBaseClass] = [
             card,
             cover,
@@ -1164,6 +1264,16 @@ class HomePage:
                 "<Double-Button-1>", lambda _event, key=item.game_id: self._open(key)
             )
         return card
+
+    @staticmethod
+    def _poster_meta(item: HomeGameItem) -> str:
+        """海报卡片名称下方的元信息: 备份数; 没有关联存档位置时说明原因.
+
+        没有存档位置时说"0 备份"是误导(根本没地方备份), 因此直接给原因文案。
+        """
+        if item.location_count == 0:
+            return tr("home.no_save_paths")
+        return tr("home.poster_backups", count=item.backup_count)
 
     def _poster_status(self, cover: ctk.CTkFrame, backing: str) -> ctk.CTkLabel:
         """封面左下角的“启用中”绿点(调用方只在启用时创建它).
@@ -1213,24 +1323,31 @@ class HomePage:
         return picture
 
     def _render_empty(self, board: HomeBoard) -> None:
-        """空状态: 说明"库里没有游戏"还是"当前筛选没有匹配", 并给出下一步建议."""
+        """空状态: 说明"库里没有游戏"还是"当前筛选没有匹配", 并给出下一步建议.
+
+        表头与空表格骨架都已收起(见 :meth:`_render_games`), 这里就是这一页唯一的
+        内容: 一句结论 + 一句"下一步做什么"(例如"用右上角的「+ 添加游戏」")。
+        """
         palette = self._palette
-        ctk.CTkLabel(
+        title = ctk.CTkLabel(
             self._list_box,
             text=board.empty_message,
             anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=palette.text_body,
-        ).pack(fill="x", padx=8, pady=(12, 0))
-        ctk.CTkLabel(
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        title.pack(fill="x", padx=8, pady=(16, 0))
+        hint = ctk.CTkLabel(
             self._list_box,
             text=board.empty_hint,
             anchor="w",
             justify="left",
-            wraplength=700,
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
-        ).pack(fill="x", padx=8, pady=(2, 10))
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
+        )
+        hint.pack(fill="x", padx=8, pady=(6, 16))
+        # 说明文字跟着滚动区宽度换行: 写死的宽度在宽窗口里会提前折行, 像被截断。
+        track_wraplength(self._list_box, hint)
 
     def _build_row(self, item: HomeGameItem) -> ctk.CTkFrame:
         """一行游戏: 左侧"色块 + 名称"(占满剩余宽度) + 右侧贴靠的固定列块."""
@@ -1272,30 +1389,8 @@ class HomePage:
             "<Configure>", lambda event: self._on_name_resize(item.game_id, event)
         )
         self._row_parts[item.game_id] = _RowParts(left, columns, name, item.name)
-        # 状态标签也封顶: 标签变多时它会把整行撑宽(横向溢出), 超出部分补省略号.
-        chips = fit_text(" · ".join(item.chips), self._value_font, _COLUMNS[-1][1])
-        values = (
-            (item.platform_label, 0),
-            (str(item.location_count), 1),
-            (str(item.backup_count), 2),
-            (item.last_backup_label or "—", 3),
-            (item.activity_label or "—", 4),
-            (chips, 5),
-        )
         widgets: list[ctk.CTkBaseClass] = [row, left, columns, dot, name]
-        for text, index in values:
-            _key, width, anchor = _COLUMNS[index]
-            label = ctk.CTkLabel(
-                columns,
-                text=fit_text(text, self._value_font, width),
-                anchor=anchor,
-                font=self._value_font,
-                text_color=(
-                    palette.danger if item.risk and index == 5 else palette.text_muted
-                ),
-            )
-            label.grid(row=0, column=index, sticky="ew", padx=_cell_pad(index))
-            widgets.append(label)
+        widgets.extend(self._fill_row_columns(columns, item))
         for widget in widgets:
             widget.bind(
                 "<Button-1>", lambda _event, key=item.game_id: self._select(key)
@@ -1305,6 +1400,47 @@ class HomePage:
                 "<Double-Button-1>", lambda _event, key=item.game_id: self._open(key)
             )
         return row
+
+    def _fill_row_columns(
+        self, columns: ctk.CTkFrame, item: HomeGameItem
+    ) -> list[ctk.CTkBaseClass]:
+        """填右侧固定列块, 返回新加的单元格标签.
+
+        状态列是**唯一长度不受控**的列(标签数量可变): 能换行就换行, 换行还放不下
+        才补省略号, 而且绝不在标签中间断开(否则会读成"测…"这种半句话)。
+        """
+        palette = self._palette
+        status = chips_lines(
+            item.chips, self._value_font, _COLUMNS[-1][1], max_lines=_STATE_MAX_LINES
+        )
+        values = (
+            (item.platform_label, 0),
+            (str(item.location_count), 1),
+            (str(item.backup_count), 2),
+            (item.last_backup_label or "—", 3),
+            (item.activity_label or "—", 4),
+            (status, 5),
+        )
+        labels: list[ctk.CTkBaseClass] = []
+        for text, index in values:
+            _key, width, anchor = _COLUMNS[index]
+            label = ctk.CTkLabel(
+                columns,
+                text=text if index == 5 else fit_text(text, self._value_font, width),
+                anchor=anchor,
+                justify="left" if index == 5 else "center",
+                font=self._value_font,
+                text_color=(
+                    palette.danger if item.risk and index == 5 else palette.text_muted
+                ),
+            )
+            if index == 5:
+                # 状态列回到同一行时仍然不许溢出: wraplength 是硬上限, 换行由
+                # chips_lines 自己算好(每行都停在完整标签之后)。
+                label.configure(wraplength=width)
+            label.grid(row=0, column=index, sticky="ew", padx=_cell_pad(index))
+            labels.append(label)
+        return labels
 
     def _tone_color(self, tone: str) -> str:
         """把头像基调映射到调色板颜色."""
@@ -1318,15 +1454,14 @@ class HomePage:
         return colors[key]
 
     def _paint_rows(self) -> None:
-        """选中项用强调色描边, 其余保持卡片配色."""
-        palette = self._palette
+        """选中项用"描边 + 浅底", 其余保持卡片配色.
+
+        规则来自 :meth:`Palette.selection_colors`: 列表与海报共用同一套选中表达, 且
+        刻意不用主按钮那种实心强调色 —— "我选中了谁"与"哪里能点"是两件事。
+        """
         for key, row in self._rows.items():
-            selected = key == self._selected
-            row.configure(
-                fg_color=palette.item_active if selected else palette.card,
-                border_width=1,
-                border_color=palette.accent if selected else palette.card_border,
-            )
+            background, border = self._palette.selection_colors(key == self._selected)
+            row.configure(fg_color=background, border_width=1, border_color=border)
 
     def _update_pager(self) -> None:
         """刷新分页条(页码与上一页/下一页的可用性)."""
@@ -1338,14 +1473,7 @@ class HomePage:
         self._next_btn.configure(
             state="normal" if self._page_index + 1 < pages else "disabled"
         )
-        self._paint_disabled()
-
-    def _paint_disabled(self) -> None:
-        """禁用态按钮用弱化配色, 避免看起来仍可点击."""
-        palette = self._palette
-        for button in (self._prev_btn, self._next_btn):
-            if str(button.cget("state")) == "disabled":
-                button.configure(fg_color=palette.raised, text_color=palette.text_muted)
+        self._restyle_buttons()
 
     def _select(self, game_id: str) -> None:
         """选中一款游戏并刷新动作可用性."""
@@ -1417,15 +1545,8 @@ class HomePage:
         self._paint_buttons()
 
     def _paint_buttons(self) -> None:
-        """禁用态按钮统一用弱化配色."""
-        palette = self._palette
-        for button in self._action_buttons:
-            if str(button.cget("state")) == "disabled":
-                button.configure(fg_color=palette.raised, text_color=palette.text_muted)
-        if str(self._detail_btn.cget("state")) == "normal":
-            self._detail_btn.configure(
-                fg_color=palette.accent, text_color=palette.accent_text
-            )
+        """按可用性重绘动作按钮(禁用态统一压暗, 可用态回到各自样式)."""
+        self._restyle_buttons()
 
     def _on_view(self, view: HomeView) -> None:
         """切换统一视图."""

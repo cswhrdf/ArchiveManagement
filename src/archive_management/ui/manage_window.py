@@ -24,6 +24,7 @@ from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory, pick_file
 from archive_management.ui.schedule_window import edit_schedule
 from archive_management.ui.textfit import fit_text
+from archive_management.ui.widgets import attach_tooltip, auto_scrollbar
 
 _ChangeCallback = Callable[[], None]
 
@@ -39,6 +40,15 @@ def _kind_text(kind: PathKind) -> str:
 # 重命名对话框与游戏主页里都能看到)。
 _TITLE_TEXT_WIDTH = 118
 _TITLE_TEXT_LINES = 2
+
+_WINDOW_WIDTH = 600
+_WINDOW_PAD_Y = 16
+# 窗口高度下限(内容更矮时也至少这么高, 免得窗口像一条缝).
+_WINDOW_MIN_HEIGHT = 440
+# 位置列表的高度跟着内容走: 一条位置时只占一行的高度(不在卡片里空出一大块,
+# 15 号评审), 超过上限则由列表自己滚动。
+_LIST_MIN_HEIGHT = 88
+_LIST_MAX_HEIGHT = 200
 
 
 class ManageGameWindow:
@@ -79,7 +89,7 @@ class ManageGameWindow:
         window = ctk.CTkToplevel(self._parent)
         self._window = window
         window.title(tr("manage.title"))
-        window.geometry("600x600")
+        window.geometry(f"{_WINDOW_WIDTH}x{_WINDOW_MIN_HEIGHT}")
         window.resizable(False, False)
         window.transient(self._parent)
         window.grab_set()
@@ -135,11 +145,26 @@ class ManageGameWindow:
             width=88,
         )
         self._toggle_btn.pack(side="left", padx=(0, 6))
+        # 危险动作穿危险色: 与下方的"删除原始存档位置"一致(15 号评审)。
         self._delete_btn = self._make_button(
-            header_actions, tr("manage.delete_game"), self._on_delete_game, width=92
+            header_actions,
+            tr("manage.delete_game"),
+            self._on_delete_game,
+            width=92,
+            danger=True,
         )
         self._delete_btn.pack(side="left")
 
+        # 「定时备份」是一节小标题, 值单独一行用次要色: 它与"原始存档位置"不能
+        # 长得一模一样, 否则整窗自上而下没有层级(15 号评审)。
+        self._schedule_heading = ctk.CTkLabel(
+            container,
+            text=tr("manage.schedule_heading"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_body,
+        )
+        self._schedule_heading.grid(row=1, column=0, sticky="w", pady=(10, 0))
         self._schedule_state = ctk.CTkLabel(
             container,
             text="",
@@ -147,7 +172,7 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_muted,
         )
-        self._schedule_state.grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self._schedule_state.grid(row=2, column=0, sticky="w", pady=(2, 6))
 
         locations_title = ctk.CTkLabel(
             container,
@@ -156,43 +181,62 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_body,
         )
-        locations_title.grid(row=2, column=0, sticky="w", pady=(0, 6))
+        locations_title.grid(row=3, column=0, sticky="w", pady=(0, 6))
 
         self._list_scroll = ctk.CTkScrollableFrame(
-            container, fg_color=palette.panel, corner_radius=10
+            container,
+            fg_color=palette.panel,
+            corner_radius=10,
+            height=_LIST_MIN_HEIGHT,
         )
-        self._list_scroll.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
+        self._list_scroll.grid(row=4, column=0, sticky="ew", pady=(0, 8))
         self._list_scroll.grid_columnconfigure(0, weight=1)
-        container.grid_rowconfigure(3, weight=1)
+        auto_scrollbar(self._list_scroll)
 
+        # 备份目录是应用自己管理的目录, 正文只说"不用在这里配", 真实路径收进悬停提示:
+        # 把脚本/临时路径整条摊在正文里还会折行, 用户看不懂也用不上(15 号评审)。
         note = ctk.CTkLabel(
             container,
-            text=tr("manage.backup_note", path=self._backup_location),
+            text=tr("manage.backup_note"),
             anchor="w",
             wraplength=540,
             justify="left",
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        note.grid(row=4, column=0, sticky="w", pady=(0, 8))
+        note.grid(row=5, column=0, sticky="w", pady=(0, 8))
+        attach_tooltip(note, tr("manage.backup_note_tip", path=self._backup_location))
 
         action_bar = ctk.CTkFrame(container, fg_color="transparent")
-        action_bar.grid(row=5, column=0, sticky="w")
+        action_bar.grid(row=6, column=0, sticky="w")
         self._location_buttons: list[ctk.CTkButton] = []
-        for text, handler, width in (
-            (tr("loc.add_dir"), self._on_add_directory, 96),
-            (tr("loc.add_file"), self._on_add_file, 96),
-            (tr("loc.set_primary"), self._on_set_primary, 108),
-            (tr("loc.verify"), self._on_verify, 92),
-            (tr("loc.edit"), self._on_edit_path, 92),
-            (tr("loc.remove"), self._on_remove, 80),
+        # 两行两组: 第一行是"新增(主操作, 强调色) + 管理现有位置", 第二行只放破坏性的
+        # "删除"。六个按钮挤一行时总宽(96+96+108+92+92+80 = 564)已经等于容器可用宽度,
+        # 再加间距就必然溢出 —— 最右边的"删除"会被窗口边缘裁掉半颗(15 号评审的回归)。
+        for text, handler, width, gap, primary in (
+            (tr("loc.add_dir"), self._on_add_directory, 96, 0, True),
+            (tr("loc.add_file"), self._on_add_file, 96, 6, False),
+            (tr("loc.set_primary"), self._on_set_primary, 108, 20, False),
+            (tr("loc.verify"), self._on_verify, 92, 6, False),
+            (tr("loc.edit"), self._on_edit_path, 92, 6, False),
         ):
-            button = self._make_button(action_bar, text, handler, width=width)
-            button.pack(side="left", padx=(0, 6))
+            button = self._make_button(
+                action_bar, text, handler, width=width, primary=primary
+            )
+            button.grid(row=0, column=len(self._location_buttons), padx=(gap, 0))
             self._location_buttons.append(button)
+        remove = self._make_button(
+            action_bar,
+            tr("loc.remove"),
+            self._on_remove,
+            width=80,
+            danger=True,
+        )
+        remove.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._location_buttons.append(remove)
 
         danger_bar = ctk.CTkFrame(container, fg_color="transparent")
-        danger_bar.grid(row=6, column=0, sticky="w", pady=(8, 0))
+        danger_bar.grid(row=7, column=0, sticky="w", pady=(8, 0))
         self._delete_origin_btn = self._make_button(
             danger_bar,
             tr("loc.delete_origin"),
@@ -202,15 +246,19 @@ class ManageGameWindow:
         )
         self._delete_origin_btn.pack(side="left")
 
-        close = self._make_button(
-            container, tr("dialog.close"), self.close, width=96, danger=True
+        # 「关闭」是中性动作: 不穿危险色(15 号评审)。
+        self._close_btn = self._make_button(
+            container, tr("dialog.close"), self.close, width=96
         )
-        close.grid(row=7, column=0, sticky="e", pady=(10, 0))
+        self._close_btn.grid(row=8, column=0, sticky="e", pady=(10, 0))
 
         self._apply_archived_rules()
         self._render_state()
         self._render_schedule_state()
         self.refresh()
+        # 建窗阶段窗口还没映射: 要完整跑一轮事件循环, 位置列表的新高度才会传播到
+        # 窗口的请求尺寸上(只跑 idle 时量到的还是画布的默认高度)。
+        self._fit_window_height(settle=True)
 
     def _make_button(
         self,
@@ -220,18 +268,25 @@ class ManageGameWindow:
         *,
         width: int,
         danger: bool = False,
+        primary: bool = False,
     ) -> ctk.CTkButton:
         """创建一个符合当前调色板的按钮."""
         palette = self._palette
+        if danger:
+            face, ink = palette.danger, palette.danger_text
+        elif primary:
+            face, ink = palette.accent, palette.accent_text
+        else:
+            face, ink = palette.raised, palette.text_body
         return ctk.CTkButton(
             parent,
             text=text,
             width=width,
             height=30,
             corner_radius=7,
-            fg_color=palette.danger if danger else palette.raised,
+            fg_color=face,
             hover_color=palette.accent_soft_border if danger else palette.item_hover,
-            text_color=palette.danger_text if danger else palette.text_body,
+            text_color=ink,
             font=ctk.CTkFont(size=12),
             command=command,
         )
@@ -239,13 +294,24 @@ class ManageGameWindow:
     # -- 状态与列表 ---------------------------------------------------------
 
     def _render_state(self) -> None:
+        """右上角的状态文字.
+
+        它是一枚"状态"而不是标题: 用颜色与标题拉开层级(已启用=强调色, 已停用/
+        已归档=次要色), 与定时任务窗口里同类状态的取色口径一致。
+        """
+        palette = self._palette
         if self._archived:
-            self._state_label.configure(text=tr("manage.archived_label"))
+            self._state_label.configure(
+                text=tr("manage.archived_label"), text_color=palette.text_muted
+            )
             return
-        state = (
-            tr("manage.enabled_label") if self._enabled else tr("manage.disabled_label")
+        enabled = self._enabled
+        self._state_label.configure(
+            text=(
+                tr("manage.enabled_label") if enabled else tr("manage.disabled_label")
+            ),
+            text_color=palette.accent if enabled else palette.text_muted,
         )
-        self._state_label.configure(text=state)
 
     def _apply_archived_rules(self) -> None:
         """归档游戏在管理窗口里只保留"删除游戏".
@@ -264,7 +330,10 @@ class ManageGameWindow:
         """归档游戏被禁用的动作: 按钮已置灰, 这里兜住直接调用."""
         if action_allowed(action, archived=self._archived):
             return False
-        self._state_label.configure(text=tr("manage.archived_label"))
+        self._state_label.configure(
+            text=tr("manage.archived_label"),
+            text_color=self._palette.text_muted,
+        )
         return True
 
     def _render_schedule_state(self) -> None:
@@ -286,6 +355,34 @@ class ManageGameWindow:
         ):
             self._selected = None
         self._rebuild_rows()
+        self._fit_list_height()
+        self._fit_window_height()
+
+    def _fit_list_height(self) -> None:
+        """位置列表的高度跟着内容走(一条不空、多了滚动).
+
+        列表高度固定成两行时, 只有一条位置的窗口里就空出一大块(15 号评审); 这里按
+        内容请求夹到 [_LIST_MIN_HEIGHT, _LIST_MAX_HEIGHT]。
+        """
+        self._window.update_idletasks()
+        canvas = getattr(self._list_scroll, "_parent_canvas", None)
+        box = None if canvas is None else canvas.bbox("all")
+        content = 0 if box is None else int(box[3]) - int(box[1])
+        self._list_scroll.configure(
+            height=min(max(_LIST_MIN_HEIGHT, content), _LIST_MAX_HEIGHT)
+        )
+
+    def _fit_window_height(self, *, settle: bool = False) -> None:
+        """窗口高度按内容算: 位置列表定高之后, 多余的空白不再留在窗口里."""
+        if settle:
+            self._window.update()
+        else:
+            self._window.update_idletasks()
+        self._window.geometry(
+            f"{_WINDOW_WIDTH}x"
+            f"{max(_WINDOW_MIN_HEIGHT, int(self._window.winfo_reqheight()))}"
+        )
+        _center(self._parent, self._window)
 
     def _rebuild_rows(self) -> None:
         for child in self._list_scroll.winfo_children():
@@ -399,6 +496,8 @@ class ManageGameWindow:
             title=tr("manage.rename_title"),
             text=tr("manage.rename_prompt"),
             initial=self._name,
+            # 改名字这个弹窗与"新增游戏"长得一样, 不写清在改谁就只能靠猜(20 号评审)。
+            context=tr("dialog.rename_context", name=self._name),
         )
         if not name:
             return
@@ -450,8 +549,12 @@ class ManageGameWindow:
             self._window,
             self._palette,
             title=tr("manage.delete_title"),
-            message=tr("manage.delete_message", name=self._name, file=destination),
+            message=tr("manage.delete_message", name=self._name),
+            # 导出路径单独一行(带底色): 夹在句子里时它会把末句的句号挤到孤行,
+            # 折行后也不知道到哪里结束(24 号评审)。
+            detail=destination,
             confirm_text=tr("manage.delete_confirm"),
+            danger=True,
         )
         if not confirmed:
             return
@@ -574,6 +677,7 @@ class ManageGameWindow:
             title=tr("loc.remove_title"),
             message=tr("loc.remove_message", path=item.path),
             confirm_text=tr("loc.remove_confirm"),
+            danger=True,
         )
         if not confirmed:
             return

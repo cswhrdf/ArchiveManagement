@@ -5,7 +5,8 @@
 回落、状态落库都在后端完成; 队列本身是"最近一次轮询的结果"(内存值), 因此页面提供
 "刷新"让用户主动再探一次(它同时把轮询间隔退回最快档)。
 
-开关关闭时只显示一句"去哪里打开", 不显示空表: 关掉就该是完全不存在。
+开关关闭时只显示一句"去哪里打开", 不显示空表: 关掉就该是完全不存在。开启但队列为空
+时也只留一条解释性空状态(表头与空表格骨架一起收起), 免得看起来像"表格坏了"。
 """
 
 from __future__ import annotations
@@ -17,7 +18,14 @@ import customtkinter as ctk
 
 from archive_management.application.games import ActivationOutcome, QueueItem
 from archive_management.i18n import tr
+from archive_management.ui.models import format_stamp
 from archive_management.ui.palette import Palette
+from archive_management.ui.widgets import (
+    auto_scrollbar,
+    paint_button_disabled,
+    paint_button_enabled,
+    track_wraplength,
+)
 
 _MonitorCallback = Callable[[str], None]
 _DetailCallback = Callable[[str], None]
@@ -29,13 +37,8 @@ _PANEL_PAD = 10
 # 列顺序与宽度(序号 / 游戏 / 状态 / 首次观察到 / 最近一次探测), 最后一列是动作。
 _COLUMNS = ("order", "name", "state", "first_seen", "last_seen")
 _COLUMN_WIDTHS = (48, 260, 130, 150, 150)
-
-
-def _stamp(value: str) -> str:
-    """把 ISO 时间戳裁成"日期 + 分钟"(空值返回占位符)."""
-    if not value:
-        return "—"
-    return value[:16].replace("T", " ")
+# 动作列的宽度: 两个按钮(设为监控对象 + 打开详情)并排.
+_ACTIONS_WIDTH = 240
 
 
 class ActivationPanel:
@@ -57,6 +60,9 @@ class ActivationPanel:
         self._on_refresh = on_refresh
         self._outcome: ActivationOutcome | None = None
         self._enabled = False
+        # 按钮与它们的样式: 可用/禁用切换时按这份登记重绘配色.
+        self._styles: dict[ctk.CTkButton, str] = {}
+        self._row_widgets: list[ctk.CTkFrame] = []
         self.frame = ctk.CTkFrame(parent, fg_color=palette.background, corner_radius=0)
         self._build()
         self.paint()
@@ -69,32 +75,34 @@ class ActivationPanel:
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(2, weight=1)
 
-        header = ctk.CTkFrame(container, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_columnconfigure(0, weight=1)
+        # 标题行只有标题: "刷新"挪到说明那一行, 不再为单个按钮空出一整行(04/11).
         self._summary_label = ctk.CTkLabel(
-            header,
-            text="",
-            anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=palette.text_body,
-        )
-        self._summary_label.grid(row=0, column=0, sticky="w")
-        self._refresh_btn = self._button(
-            header, tr("activation.refresh"), self._refresh, width=88
-        )
-        self._refresh_btn.grid(row=0, column=1, sticky="e")
-
-        self._hint_label = ctk.CTkLabel(
             container,
             text="",
             anchor="w",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        self._summary_label.grid(row=0, column=0, sticky="w")
+
+        hint_row = ctk.CTkFrame(container, fg_color="transparent")
+        hint_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        hint_row.grid_columnconfigure(0, weight=1)
+        self._hint_label = ctk.CTkLabel(
+            hint_row,
+            text="",
+            anchor="nw",
             justify="left",
-            wraplength=900,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._hint_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._hint_label.grid(row=0, column=0, sticky="ew", padx=(0, 16))
+        # 与说明同排同基线: 说明折行时按钮仍然贴着右边.
+        self._refresh_btn = self._button(
+            hint_row, tr("activation.refresh"), self._refresh, width=88
+        )
+        self._refresh_btn.grid(row=0, column=1, sticky="ne")
+        track_wraplength(hint_row, self._hint_label, inset=104)
 
         table = ctk.CTkFrame(
             container,
@@ -106,6 +114,7 @@ class ActivationPanel:
         table.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         table.grid_columnconfigure(0, weight=1)
         table.grid_rowconfigure(1, weight=1)
+        self._table = table
 
         head = ctk.CTkFrame(table, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=_PANEL_PAD, pady=(10, 4))
@@ -118,6 +127,14 @@ class ActivationPanel:
                 font=ctk.CTkFont(size=11, weight="bold"),
                 text_color=palette.text_muted,
             ).grid(row=0, column=index, sticky="w", padx=(0, 8))
+        # 动作列也要有列名: 两个按钮不能悬在表头之外(12 号评审).
+        ctk.CTkLabel(
+            head,
+            text=tr("activation.column_actions"),
+            anchor="e",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=palette.text_muted,
+        ).grid(row=0, column=len(_COLUMNS), sticky="e")
 
         self._rows_box = ctk.CTkScrollableFrame(
             table, fg_color=palette.well, corner_radius=8
@@ -126,7 +143,30 @@ class ActivationPanel:
             row=1, column=0, sticky="nsew", padx=_PANEL_PAD, pady=(0, 10)
         )
         self._rows_box.grid_columnconfigure(0, weight=1)
-        self._row_widgets: list[ctk.CTkFrame] = []
+        auto_scrollbar(self._rows_box)
+
+        # 空队列时的解释性空状态: 与表格同格, 两者只显示一个.
+        self._empty = ctk.CTkFrame(container, fg_color="transparent")
+        self._empty.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
+        self._empty.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self._empty,
+            text=tr("activation.empty"),
+            anchor="w",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=palette.text_primary,
+        ).grid(row=0, column=0, sticky="w")
+        empty_hint = ctk.CTkLabel(
+            self._empty,
+            text=tr("activation.empty_hint"),
+            anchor="nw",
+            justify="left",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
+        )
+        empty_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        track_wraplength(self._empty, empty_hint)
+        self._empty.grid_remove()
 
     @staticmethod
     def _configure_columns(frame: ctk.CTkFrame) -> None:
@@ -135,7 +175,7 @@ class ActivationPanel:
             frame.grid_columnconfigure(
                 index, minsize=width, weight=1 if index == 1 else 0
             )
-        frame.grid_columnconfigure(len(_COLUMNS), minsize=240)
+        frame.grid_columnconfigure(len(_COLUMNS), minsize=_ACTIONS_WIDTH)
 
     def _button(
         self,
@@ -146,26 +186,79 @@ class ActivationPanel:
         style: str = "ghost",
         width: int = 96,
     ) -> ctk.CTkButton:
-        """按当前调色板创建一个按钮."""
-        palette = self._palette
-        colors = {
-            "accent": (palette.accent, palette.accent_soft_border, palette.accent_text),
-            "ghost": (palette.raised, palette.item_hover, palette.text_body),
-        }[style]
-        return ctk.CTkButton(
+        """按当前调色板创建一个按钮(样式登记下来, 之后按可用性重绘)."""
+        button = ctk.CTkButton(
             parent,
             text=text,
             command=command,
             width=width,
             height=30,
             corner_radius=8,
-            fg_color=colors[0],
-            hover_color=colors[1],
-            text_color=colors[2],
-            border_width=1 if style == "ghost" else 0,
-            border_color=palette.border,
             font=ctk.CTkFont(size=12, weight="bold"),
+            **self._style_colors(style),
         )
+        self._styles[button] = style
+        return button
+
+    def _style_colors(self, style: str) -> dict[str, object]:
+        """按钮样式的常规配色(禁用态另行压暗)."""
+        palette = self._palette
+        colors: dict[str, dict[str, object]] = {
+            "accent": {
+                "fg_color": palette.accent,
+                "hover_color": palette.accent_soft_border,
+                "text_color": palette.accent_text,
+                "border_width": 0,
+            },
+            "ghost": {
+                "fg_color": palette.raised,
+                "hover_color": palette.item_hover,
+                "text_color": palette.text_body,
+                "border_width": 1,
+                "border_color": palette.border,
+            },
+        }
+        return colors[style]
+
+    def _restyle_buttons(self, parent: ctk.CTkBaseClass) -> None:
+        """按可用性重绘 ``parent`` 子树里的按钮: 禁用态更暗, 可用态回到强调色.
+
+        同一个"设为监控对象"按钮因此只有两种样子: **当前监控对象 = 禁用态**(共用
+        全站禁用外观), 其它 = 可用态(强调色)。不再出现"灰的一大片说不清什么意思"
+        (12 号评审)。
+        """
+        palette = self._palette
+        for button, style in self._styles.items():
+            if not button.winfo_exists():
+                continue
+            if not self._is_inside(button, parent):
+                continue
+            if str(button.cget("state")) == "disabled":
+                paint_button_disabled(button, palette)
+                continue
+            colors = self._style_colors(style)
+            paint_button_enabled(
+                button,
+                palette,
+                fg_color=str(colors["fg_color"]),
+                text_color=str(colors["text_color"]),
+                hover_color=str(colors["hover_color"]),
+                border_color=(
+                    None
+                    if "border_color" not in colors
+                    else str(colors["border_color"])
+                ),
+            )
+
+    @staticmethod
+    def _is_inside(widget: ctk.CTkBaseClass, parent: ctk.CTkBaseClass) -> bool:
+        """``widget`` 是否在 ``parent`` 的控件树里(行级重绘只碰自己那一行)."""
+        current: object = widget
+        while current is not None:
+            if current is parent:
+                return True
+            current = getattr(current, "master", None)
+        return False
 
     # -- 渲染 ---------------------------------------------------------------
 
@@ -183,7 +276,7 @@ class ActivationPanel:
         self.paint()
 
     def paint(self) -> None:
-        """按当前状态刷新摘要、提示与队列列表."""
+        """按当前状态刷新摘要、提示、表格/空状态与队列列表."""
         if not self._enabled:
             self._paint_off()
             return
@@ -195,31 +288,49 @@ class ActivationPanel:
                 monitor=self._monitor_label(outcome),
                 count=len(items),
             ),
-            text_color=self._palette.text_body,
+            text_color=self._palette.text_primary,
         )
-        self._paint_hint(outcome, count=len(items))
-        self._render_rows(items)
+        self._paint_hint(outcome)
+        self._paint_table(bool(items))
+        if items:
+            self._render_rows(items)
+        else:
+            self._clear_rows()
 
     def _paint_off(self) -> None:
         """开关关闭: 不摆空表, 只说清去哪里打开."""
         self._summary_label.configure(
-            text=tr("activation.summary_off"), text_color=self._palette.text_muted
+            text=tr("activation.summary_off"),
+            text_color=self._palette.text_primary,
         )
         self._hint_label.configure(
             text=tr("activation.state_off"), text_color=self._palette.text_hint
         )
-        self._render_rows(())
+        self._clear_rows()
+        self._table.grid_remove()
+        self._empty.grid_remove()
 
-    def _paint_hint(self, outcome: ActivationOutcome | None, *, count: int) -> None:
-        """提示行: 固定说明 + 冲突数 + "暂停中 / 等待游戏启动"这类当下状态."""
+    def _paint_table(self, has_rows: bool) -> None:
+        """有队列才摆表格; 空队列只留一条解释性空状态(不显示表头与空表骨架)."""
+        if has_rows:
+            self._table.grid()
+            self._empty.grid_remove()
+        else:
+            self._table.grid_remove()
+            self._empty.grid()
+
+    def _paint_hint(self, outcome: ActivationOutcome | None) -> None:
+        """提示行: 固定说明 + 冲突数 + "已暂停"这类当下状态.
+
+        队列为空时不再补"等待游戏启动": 那一句已经由空状态承担, 两处重复反而像
+        两个都没说完(第 4/11 号评审)。
+        """
         conflicts = 0 if outcome is None else len(outcome.conflicts)
         hints = [tr("activation.hint")]
         if conflicts:
             hints.append(tr("activation.conflicts", count=conflicts))
         if outcome is not None and outcome.state.paused:
             hints.append(tr("activation.state_paused"))
-        elif not count:
-            hints.append(tr("activation.state_waiting"))
         self._hint_label.configure(
             text="  ".join(hints),
             text_color=self._palette.danger if conflicts else self._palette.text_hint,
@@ -232,22 +343,15 @@ class ActivationPanel:
             return tr("activation.monitor_none")
         return outcome.monitor.name
 
-    def _render_rows(self, items: tuple[QueueItem, ...]) -> None:
-        """重画队列列表(先清空: 位置与状态每次轮询都可能变)."""
+    def _clear_rows(self) -> None:
+        """清空队列行(表格收起或即将重画时调用)."""
         for row in self._row_widgets:
             row.destroy()
         self._row_widgets.clear()
-        if not items:
-            empty = ctk.CTkLabel(
-                self._rows_box,
-                text=tr("activation.empty"),
-                anchor="w",
-                font=ctk.CTkFont(size=12),
-                text_color=self._palette.text_hint,
-            )
-            empty.grid(row=0, column=0, sticky="w", padx=6, pady=10)
-            self._row_widgets.append(empty)
-            return
+
+    def _render_rows(self, items: tuple[QueueItem, ...]) -> None:
+        """重画队列列表(先清空: 位置与状态每次轮询都可能变)."""
+        self._clear_rows()
         for index, item in enumerate(items):
             self._render_row(index, item)
 
@@ -261,8 +365,8 @@ class ActivationPanel:
             str(item.position),
             item.game.name,
             self._state_text(item),
-            _stamp(item.first_seen_at),
-            _stamp(item.last_seen_at),
+            format_stamp(item.first_seen_at),
+            format_stamp(item.last_seen_at),
         )
         for column, value in enumerate(values):
             ctk.CTkLabel(
@@ -278,11 +382,12 @@ class ActivationPanel:
             actions,
             tr("activation.action_monitor"),
             partial(self._monitor, item),
-            style="ghost" if item.monitor else "accent",
+            style="accent",
             width=132,
         )
         monitor_btn.grid(row=0, column=0, padx=(0, 6))
         if item.monitor:
+            # 当前监控对象: 这一行唯一的"不可用"状态, 与全站禁用外观一致(不是另一种颜色).
             monitor_btn.configure(state="disabled")
         if self._on_open_detail is not None:
             self._button(
@@ -291,6 +396,7 @@ class ActivationPanel:
                 partial(self._open, item),
                 width=96,
             ).grid(row=0, column=1)
+        self._restyle_buttons(actions)
         self._row_widgets.append(row)
 
     @staticmethod
@@ -327,6 +433,8 @@ class ActivationPanel:
         self.frame.configure(fg_color=palette.background)
         for child in self.frame.winfo_children():
             child.destroy()
+        self._styles = {}
+        self._row_widgets = []
         self._build()
         self.paint()
 
