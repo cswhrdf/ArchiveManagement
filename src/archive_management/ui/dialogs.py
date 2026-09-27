@@ -20,6 +20,7 @@ from archive_management.domain import (
     normalize_tags,
 )
 from archive_management.i18n import tr
+from archive_management.ui.keyboard import bind_window_keys, focus_first
 from archive_management.ui.models import (
     BatchExportChoice,
     BatchExportOption,
@@ -42,6 +43,8 @@ from archive_management.ui.widgets import (
     auto_scrollbar,
     paint_button_disabled,
     paint_button_enabled,
+    paint_button_state,
+    paint_button_style,
 )
 
 # 文本类对话框的正文宽度: 提示、输入框与按钮行都按这个宽度左对齐, 三块不再各宽各的
@@ -58,6 +61,13 @@ _SCHEDULE_FIELD_WIDTH = 210
 _DIALOG_BODY_MAX = 760
 _DIALOG_BODY_MIN = 360
 _DIALOG_BODY_WIDTH = 518
+# 正文区之外那部分(标题/提示行/按钮行 + 上下内边距)的高度, 实测约 50px。
+# 80% 是**整个窗口**的预算, 不是正文区的预算: 只夹正文区的话 768 高的屏幕上窗口
+# 会变成 664(正文 614 + 正文之外 50), 底部的「导入」还是差 16px 出屏幕。
+_DIALOG_CHROME_HEIGHT = 52
+# 勾选行下面那行提示的左缩进: 24(正文距边) + 22(方框宽与它到文字的间距), 量出来是为了
+# 与复选框的**文字**左对齐 -- 这条对齐没法落在间距刻度上, 所以留个具名常量。
+_CHECK_HINT_PAD = (24 + 22, 24)
 
 # 摘要里的项目符号: "· " 开头的行会被渲染成悬挂缩进的一行(见 _bullet_block).
 _BULLET = "· "
@@ -162,8 +172,17 @@ def _centered_position(
     return f"+{max(x, 0)}+{max(y, 0)}"
 
 
-def _center(parent: ctk.CTk, window: ctk.CTkToplevel) -> None:
-    """把弹窗居中到主窗口上, 且不让它先在屏幕左上角闪一下.
+def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) -> None:
+    """显示对话框前的收尾: 键盘接线 + 居中, 且不让它先在屏幕左上角闪一下.
+
+    键盘那几件(Esc = 取消、回车 = 主操作、初始焦点、按钮进 Tab 链)都在这里接完,
+    所以"新加一个对话框忘了接键盘"不会发生 —— 所有对话框都会调这个函数。
+
+    ``modal``: Esc / 回车 / 打开就定焦都是**抓取式对话框**的约定, 常驻工作窗口
+    (设置、定时任务)要传 ``modal=False`` —— 实测: 设置窗口按 Esc 会直接把窗口关掉
+    (用户的意图是"退出快捷键录制"), 按回车会触发"切换主题"那颗主色按钮, 而且
+    一打开就把焦点定在"界面字号"下拉框上(键盘动不了的下拉框)。窗口本身仍然由
+    :func:`~archive_management.ui.keyboard.remember_palette` 的同一条路径取色。
 
     原实现是"``geometry("+0+0")`` → ``update()``(窗口真的出现在左上角) → 再挪到目标
     位置", 所以每次弹窗都会先闪一下左上角再跳过去(用户实测很多次)。两步测量现在都放在
@@ -178,6 +197,9 @@ def _center(parent: ctk.CTk, window: ctk.CTkToplevel) -> None:
     平台不支持透明度时(无合成器的 Linux)退化成"先按请求尺寸放个大概位置, 映射后再校正
     一次" —— 仍有一次小位移, 但不会再从屏幕左上角跳过来。
     """
+    # 接线放在最前面: 下面几步只是摆位置, 而窗口一旦可见用户就可能已经在按 Esc。
+    if modal:
+        bind_window_keys(window)
     window.withdraw()
     window.update_idletasks()
     window.geometry("+0+0")
@@ -203,6 +225,9 @@ def _center(parent: ctk.CTk, window: ctk.CTkToplevel) -> None:
     )
     if transparent:
         _set_alpha(window, 1.0)
+    # 定焦要等窗口真的映射出来(tk 会把"最后一次聚焦"记在这个窗口上).
+    if modal:
+        focus_first(window)
 
 
 def confirm_dialog(
@@ -240,7 +265,7 @@ def confirm_dialog(
         text_color=palette.text_body,
         font=ctk.CTkFont(size=13),
     )
-    label.pack(padx=24, pady=(22, 6), fill="x")
+    label.pack(padx=24, pady=(20, 6), fill="x")
     if detail:
         ctk.CTkLabel(
             window,
@@ -267,25 +292,22 @@ def confirm_dialog(
         text=no_text,
         width=96,
         height=32,
-        fg_color=palette.raised,
-        hover_color=palette.item_hover,
-        text_color=palette.text_body,
         command=lambda: choose(False),
     )
+    # 取消永远是次色, 破坏性动作的危险色来自 widgets.button_colors 这一处。
+    paint_button_style(cancel, palette, "ghost")
     cancel.pack(side="left", padx=(0, 10))
     ok = ctk.CTkButton(
         buttons,
         text=ok_text,
         width=96,
         height=32,
-        fg_color=palette.danger if danger else palette.accent,
-        hover_color=(palette.item_hover if danger else palette.accent_soft_border),
-        text_color=palette.danger_text if danger else palette.accent_text,
         command=lambda: choose(True),
     )
+    paint_button_style(ok, palette, "danger" if danger else "accent")
     ok.pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return bool(result and result[0])
 
@@ -312,20 +334,18 @@ def info_dialog(
         text_color=palette.text_body,
         font=ctk.CTkFont(size=13),
     )
-    label.pack(padx=24, pady=(22, 10), fill="x")
+    label.pack(padx=24, pady=(20, 10), fill="x")
 
     ok = ctk.CTkButton(
         window,
         text=tr("dialog.ok"),
         width=96,
         height=32,
-        fg_color=palette.accent,
-        hover_color=palette.accent_soft_border,
-        text_color=palette.accent_text,
         command=window.destroy,
     )
+    paint_button_style(ok, palette, "accent")
     ok.pack(pady=(0, 20))
-    _center(parent, window)
+    _present(parent, window)
 
 
 def ask_branch_name(
@@ -356,7 +376,7 @@ def ask_branch_name(
         text_color=palette.text_body,
         font=ctk.CTkFont(size=13),
     )
-    label.pack(padx=24, pady=(22, 8))
+    label.pack(padx=24, pady=(20, 8))
 
     entry = ctk.CTkEntry(
         window,
@@ -381,7 +401,7 @@ def ask_branch_name(
     entry.bind("<Return>", lambda _event: submit())
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(padx=24, pady=(0, 18))
+    buttons.pack(padx=24, pady=(0, 20))
     cancel = ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -405,7 +425,7 @@ def ask_branch_name(
     )
     ok.pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -446,7 +466,7 @@ def import_game_dialog(
         font=ctk.CTkFont(size=13),
         text_color=palette.text_body,
     )
-    name_text.pack(padx=24, pady=(22, 4), anchor="w")
+    name_text.pack(padx=24, pady=(20, 4), anchor="w")
     name_entry = ctk.CTkEntry(
         window,
         width=440,
@@ -551,7 +571,7 @@ def import_game_dialog(
     name_entry.bind("<Return>", lambda _event: submit())
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(padx=24, pady=(6, 18))
+    buttons.pack(padx=24, pady=(6, 20))
     add = ctk.CTkButton(
         buttons,
         text=add_text,
@@ -586,7 +606,7 @@ def import_game_dialog(
     )
     ok.pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -620,7 +640,7 @@ def edit_tags_dialog(
         font=ctk.CTkFont(size=13),
         text_color=palette.text_body,
     )
-    label.pack(padx=24, pady=(22, 2), anchor="w")
+    label.pack(padx=24, pady=(20, 2), anchor="w")
     hint = ctk.CTkLabel(
         window,
         text=tr("dialog.tags_hint"),
@@ -680,6 +700,8 @@ def edit_tags_dialog(
     def refresh_add_state() -> None:
         """行数到上限后不允许再加(上限与 normalize_tags 一致)."""
         add.configure(state=_add_state(len(entries), max_tags))
+        # 置灰必须连配色一起改: 只改 state 的话按钮底色仍是亮的(49 号评审).
+        paint_button_state(add, palette, "ghost")
 
     def remove_row(row: ctk.CTkFrame, entry: ctk.CTkEntry) -> None:
         """删掉一行; 删空了补一个空行, 窗户里总有一个输入框可用."""
@@ -738,9 +760,9 @@ def edit_tags_dialog(
         add_row("")
 
     rows.pack(padx=24, pady=(6, 4), fill="x")
-    buttons.pack(padx=24, pady=(6, 18))
+    buttons.pack(padx=24, pady=(6, 20))
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -867,7 +889,7 @@ def ask_text(
     )
     ok.pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -999,7 +1021,7 @@ def edit_backup_dialog(
     refresh_counter()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    buttons.pack(padx=24, pady=(0, 20), anchor="e")
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1021,7 +1043,7 @@ def edit_backup_dialog(
         command=submit,
     ).pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -1130,7 +1152,7 @@ def schedule_dialog(
     keep_entry.bind("<Return>", lambda _event: submit())
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(0, 18), anchor="w")
+    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1152,7 +1174,7 @@ def schedule_dialog(
         command=submit,
     ).pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -1216,6 +1238,9 @@ def restore_dialog(
             variable=variable,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
+            # 禁用态的字色也要来自调色板: 不给的话会落到 CustomTkinter 主题里的灰
+            # (与这套界面无关的另一个灰阶, 49 号评审)。
+            text_color_disabled=palette.text_disabled,
             # 勾选态不用主按钮那种实心绿: 一个是"选项状态", 一个是"执行"(23 号评审).
             fg_color=palette.accent_soft_border,
             hover_color=palette.accent_soft,
@@ -1232,7 +1257,7 @@ def restore_dialog(
             wraplength=400,
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
-        ).pack(padx=(46, 24), pady=(0, 10), anchor="w")
+        ).pack(padx=_CHECK_HINT_PAD, pady=(0, 10), anchor="w")
 
     option(safety_label, safety_hint, safety_var, available=safety_available)
 
@@ -1243,7 +1268,7 @@ def restore_dialog(
         window.destroy()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(0, 18), anchor="w")
+    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1265,7 +1290,7 @@ def restore_dialog(
         command=submit,
     ).pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -1315,7 +1340,7 @@ def import_package_dialog(
         wraplength=460,
         font=ctk.CTkFont(size=13),
         text_color=palette.text_body,
-    ).pack(padx=24, pady=(14, 6), anchor="w")
+    ).pack(padx=24, pady=(20, 6), anchor="w")
 
     if prompt.match_text:
         ctk.CTkLabel(
@@ -1418,7 +1443,7 @@ def import_package_dialog(
         window.destroy()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(0, 18), anchor="w")
+    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1441,7 +1466,7 @@ def import_package_dialog(
     ).pack(side="left")
 
     _fit_dialog_body(body, _dialog_body_height(window))
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -1539,6 +1564,8 @@ def _build_batch_game_list(
         variable=master_var,
         font=ctk.CTkFont(size=12),
         text_color=palette.text_body,
+        # 没有可见行时全选框是禁用的, 禁用字色必须来自调色板(49 号评审)。
+        text_color_disabled=palette.text_disabled,
         fg_color=palette.accent,
         hover_color=palette.accent_soft_border,
         border_color=palette.border,
@@ -1694,13 +1721,18 @@ def export_batch_dialog(
         height=32,
         command=lambda: _submit(),
     )
-    ctk.CTkButton(
+    cancel_button = ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
         width=96,
         height=32,
         command=window.destroy,
-    ).pack(side="left", padx=(0, 10))
+    )
+    # 两个按钮都要显式上色: 不写 fg_color 就会留着 CustomTkinter 的那个蓝
+    # (与调色板无关, 换主题也不会变) —— 48 号评审。
+    paint_button_style(ok_button, palette, "accent")
+    paint_button_style(cancel_button, palette, "ghost")
+    cancel_button.pack(side="left", padx=(0, 10))
 
     def paint_ok(ticked: Mapping[str, bool]) -> None:
         """一份都没勾选时把确认按钮禁用.
@@ -1711,13 +1743,7 @@ def export_batch_dialog(
         """
         if any(ticked.values()):
             ok_button.configure(state="normal")
-            paint_button_enabled(
-                ok_button,
-                palette,
-                fg_color=palette.accent,
-                text_color=palette.accent_text,
-                hover_color=palette.accent_soft_border,
-            )
+            paint_button_style(ok_button, palette, "accent")
         else:
             ok_button.configure(state="disabled")
             paint_button_disabled(ok_button, palette)
@@ -1742,9 +1768,9 @@ def export_batch_dialog(
         window.destroy()
 
     ok_button.pack(side="left")
-    buttons.pack(fill="x", padx=24, pady=(0, 18), anchor="w")
+    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -1920,7 +1946,7 @@ def batch_import_dialog(
         window.destroy()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(padx=24, pady=(0, 18), anchor="e")
+    buttons.pack(padx=24, pady=(0, 20), anchor="e")
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1942,7 +1968,7 @@ def batch_import_dialog(
         command=submit,
     ).pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result[0] if result else None
 
@@ -2118,9 +2144,10 @@ def _dialog_body(
 
 
 def _dialog_body_height(window: ctk.CTkToplevel) -> int:
-    """正文区的目标高度: 至多占屏幕的 80%, 并夹在上下限之间."""
+    """正文区的目标高度: 让对话框总高至多占屏幕的 80%, 并夹在上下限之间."""
     screen = int(window.winfo_screenheight())
-    return max(_DIALOG_BODY_MIN, min(_DIALOG_BODY_MAX, int(screen * 0.8)))
+    budget = int(screen * 0.8) - _DIALOG_CHROME_HEIGHT
+    return max(_DIALOG_BODY_MIN, min(_DIALOG_BODY_MAX, budget))
 
 
 def _fit_dialog_body(body: ctk.CTkScrollableFrame, cap: int) -> None:

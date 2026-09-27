@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import customtkinter as ctk
 
@@ -48,14 +47,18 @@ from archive_management.ui.models import (
     DiscoveryPage,
     GameSummary,
     MonitoredDirItem,
+    listable_candidates,
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
 from archive_management.ui.textfit import fit_path
+from archive_management.ui.typography import FONT_STRONG
 from archive_management.ui.widgets import (
+    ButtonStyle,
     auto_scrollbar,
     paint_button_disabled,
-    paint_button_enabled,
+    paint_button_style,
+    track_fit,
     track_wraplength,
 )
 
@@ -70,22 +73,10 @@ _PANEL_PAD = 10
 _SCROLL_INSET = 6
 # 说明文字的右侧预留: 同一行的筛选控件/按钮大概占这么宽, 说明不许压过去.
 _HINT_INSET = 190
-# 卡片正文的兜底宽度: 真实宽度要等布局完成(标签自己的 Configure)才知道.
+# 卡片正文的兜底宽度: 真实宽度要等布局完成(容器的 Configure)才知道.
 _CARD_TEXT_WIDTH = 680
-
-
-@dataclass
-class _FitTarget:
-    """一张卡片里"按宽度重新裁剪"的标签(安装路径与存档路径区).
-
-    候选行的宽度要等布局完成才知道, 所以先在构造时按兜底宽度裁一次, 之后由标签
-    自己的 ``<Configure>`` 按真实宽度重裁 —— 与主页列表的名称同一套做法。
-    路径一律走"中间省略"(尾部是目录名, 比盘符更值得留)。
-    """
-
-    label: ctk.CTkLabel
-    lines: tuple[str, ...]
-    fitted_width: int = 0
+# 卡片正文左右各 12 的内边距: 按容器宽度算可用宽度时要减掉.
+_CARD_TEXT_INSET = 24
 
 
 class DiscoveryPanel:
@@ -117,9 +108,7 @@ class DiscoveryPanel:
         self._selected_dir: str | None = None
         self._selected_candidate: str | None = None
         # 按钮与它们的样式: 可用/禁用切换时按这份登记重绘配色.
-        self._styles: dict[ctk.CTkButton, str] = {}
-        # 卡片内"按宽度重新裁剪"的标签(安装路径与存档路径区), 建行时登记.
-        self._fitted: dict[str, _FitTarget] = {}
+        self._styles: dict[ctk.CTkButton, ButtonStyle] = {}
         # 与卡片正文同规格的字体, 用来量文本宽度.
         self._path_font = ctk.CTkFont(size=12)
         # 这个页面的用途是"把发现的游戏加进游戏库", 因此默认只看待处理项.
@@ -263,13 +252,13 @@ class DiscoveryPanel:
             text_color=palette.text_hint,
         )
         self._dirs_hint.grid(
-            row=0, column=0, padx=(_PANEL_PAD, 16), pady=(14, 0), sticky="ew"
+            row=0, column=0, padx=(_PANEL_PAD, 16), pady=(16, 0), sticky="ew"
         )
         # 说明按可用宽度换行: 固定宽度在宽窗口里会提前折行, 看起来像被截断。
         track_wraplength(panel, self._dirs_hint, inset=_HINT_INSET)
 
         actions = ctk.CTkFrame(panel, fg_color="transparent")
-        actions.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="ne")
+        actions.grid(row=0, column=1, padx=_PANEL_PAD, pady=(16, 0), sticky="ne")
         self._add_dir_btn = self._button(
             actions,
             tr("discovery.dir_add"),
@@ -308,14 +297,14 @@ class DiscoveryPanel:
             corner_radius=8,
         )
         self._dirs_box.grid(
-            row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 14), sticky="nsew"
+            row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 16), sticky="nsew"
         )
         self._dirs_box.grid_columnconfigure(0, weight=1)
         auto_scrollbar(self._dirs_box)
 
     def _order_dir_buttons(self) -> None:
         """把"添加"放在最左边并贴近编辑/启停, "删除"拉开一段距离(避免误点)."""
-        self._remove_dir_btn.grid_configure(padx=(14, 0))
+        self._remove_dir_btn.grid_configure(padx=(16, 0))
 
     def _build_candidates(self, panel: ctk.CTkFrame) -> None:
         """探测结果页: 说明 + 筛选 + 导入/忽略/修正路径 + 整页高度的候选列表."""
@@ -332,13 +321,13 @@ class DiscoveryPanel:
             text_color=palette.text_hint,
         )
         self._hint_label.grid(
-            row=0, column=0, padx=(_PANEL_PAD, 16), pady=(14, 0), sticky="ew"
+            row=0, column=0, padx=(_PANEL_PAD, 16), pady=(16, 0), sticky="ew"
         )
         # 与筛选下拉分栏: 说明只占左列, 右列留给控件(两者不再互相挤压).
         track_wraplength(panel, self._hint_label, inset=_HINT_INSET)
 
         filters = ctk.CTkFrame(panel, fg_color="transparent")
-        filters.grid(row=0, column=1, padx=_PANEL_PAD, pady=(14, 0), sticky="ne")
+        filters.grid(row=0, column=1, padx=_PANEL_PAD, pady=(16, 0), sticky="ne")
         self._filter_box = ctk.CTkComboBox(
             filters,
             values=[item.label for item in CandidateFilter],
@@ -392,7 +381,7 @@ class DiscoveryPanel:
             corner_radius=8,
         )
         self._cand_box.grid(
-            row=2, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 14), sticky="nsew"
+            row=2, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 16), sticky="nsew"
         )
         self._cand_box.grid_columnconfigure(0, weight=1)
         auto_scrollbar(self._cand_box)
@@ -403,7 +392,7 @@ class DiscoveryPanel:
         text: str,
         command: Callable[[], None],
         *,
-        style: str = "ghost",
+        style: ButtonStyle = "ghost",
         width: int = 88,
     ) -> ctk.CTkButton:
         """按窗口调色板创建一个按钮(样式登记下来, 之后按可用性重绘)."""
@@ -415,43 +404,10 @@ class DiscoveryPanel:
             height=30,
             corner_radius=8,
             font=ctk.CTkFont(size=12, weight="bold"),
-            **self._style_colors(style),
         )
+        paint_button_style(button, self._palette, style)
         self._styles[button] = style
         return button
-
-    def _style_colors(self, style: str) -> dict[str, object]:
-        """按钮样式的常规配色(禁用态由 ``paint_button_disabled`` 另行压暗)."""
-        palette = self._palette
-        colors: dict[str, dict[str, object]] = {
-            "accent": {
-                "fg_color": palette.accent,
-                "hover_color": palette.accent_soft_border,
-                "text_color": palette.accent_text,
-                "border_width": 0,
-            },
-            "danger": {
-                "fg_color": palette.danger,
-                "hover_color": palette.item_hover,
-                "text_color": palette.danger_text,
-                "border_width": 0,
-            },
-            "danger_soft": {
-                "fg_color": palette.raised,
-                "hover_color": palette.item_hover,
-                "text_color": palette.danger,
-                "border_width": 1,
-                "border_color": palette.danger,
-            },
-            "ghost": {
-                "fg_color": palette.raised,
-                "hover_color": palette.item_hover,
-                "text_color": palette.text_body,
-                "border_width": 1,
-                "border_color": palette.border,
-            },
-        }
-        return colors[style]
 
     def _restyle_buttons(self) -> None:
         """按可用性重绘本页所有按钮: 禁用态统一压暗, 可用态回到各自样式.
@@ -464,19 +420,7 @@ class DiscoveryPanel:
             if str(button.cget("state")) == "disabled":
                 paint_button_disabled(button, palette)
                 continue
-            colors = self._style_colors(style)
-            paint_button_enabled(
-                button,
-                palette,
-                fg_color=str(colors["fg_color"]),
-                text_color=str(colors["text_color"]),
-                hover_color=str(colors["hover_color"]),
-                border_color=(
-                    None
-                    if "border_color" not in colors
-                    else str(colors["border_color"])
-                ),
-            )
+            paint_button_style(button, palette, style)
 
     # -- 数据加载与渲染 -----------------------------------------------------
 
@@ -485,10 +429,14 @@ class DiscoveryPanel:
 
         读取失败时保留上次内容并记录日志: 本方法在构造过程中也会被调用,
         让异常逃出去等于整个主窗口起不来(磁盘/数据库瞬时不可读时尤其明显)。
+
+        候选先过一遍 :func:`listable_candidates`: **已导入的不进这一页**(它就是
+        游戏库里的一款游戏, 在库里有完整动作), 因此底下的筛选/计数/空状态都不用
+        再关心它。
         """
         try:
             dirs = self._backend.list_monitored_directories()
-            candidates = self._backend.list_candidates()
+            candidates = listable_candidates(self._backend.list_candidates())
         except (ArchiveManagementError, sqlite3.Error) as exc:
             self._fail_read(exc)
             return
@@ -513,10 +461,15 @@ class DiscoveryPanel:
     def _render_counts(self) -> None:
         """按当前数据刷新底部计数文案(扫描完成后会被结果摘要覆盖).
 
-        **每个子页只报自己的数字**: 在监控目录页显示"候选 23 项 · 待处理 13 项"会
-        让人以为这一页也在统计别的东西(第 3/10 号评审)。探测结果页的第二行按处理
-        进度分列计数 —— 筛选到"已导入/已忽略"时如果一条都没有, 用户可以直接从这行
-        看出原因, 而不会以为筛选坏了。
+        **每个子页只报自己的数字, 而且只占一行**: 在监控目录页显示"候选 23 项 · 待处理
+        13 项"会让人以为这一页也在统计别的东西; 两行计数(第一行总数/待处理、第二行
+        待处理/已忽略)又是在说同一批数(第 3/10 号评审)。因此探测结果页把三种状态**并列
+        在同一行**里 —— 筛选到"已忽略"时一条都没有时, 用户仍能从这一行看出原因, 而
+        不用先找第二行。
+
+        分列里**只有未导入的两种状态**: 已导入的候选不进这一页(它们就是游戏库里的
+        游戏), 所以分母也不会把它们算进去。
+        第二行留给扫描结果(``_on_scan`` 会把"扫描了…"写进去)。
         """
         counts = self._status_counts()
         if self._page is DiscoveryPage.MONITORED:
@@ -531,21 +484,15 @@ class DiscoveryPanel:
                 "discovery.counts_candidates",
                 candidates=len(self._candidates),
                 pending=counts["new"],
+                ignored=counts["ignored"],
             ),
             text_color=self._palette.text_body,
         )
-        self._detail_label.configure(
-            text=tr(
-                "discovery.counts_detail",
-                new=counts["new"],
-                imported=counts["imported"],
-                ignored=counts["ignored"],
-            )
-        )
+        self._detail_label.configure(text="")
 
     def _status_counts(self) -> dict[str, int]:
         """按处理进度统计候选数量(空状态文案与底部计数共用)."""
-        counts = {"new": 0, "imported": 0, "ignored": 0}
+        counts = {"new": 0, "ignored": 0}
         for item in self._candidates:
             if item.status in counts:
                 counts[item.status] += 1
@@ -568,7 +515,7 @@ class DiscoveryPanel:
             self._selected_dir = self._dirs[0].directory_id
         for item in self._dirs:
             row = self._build_dir_row(item)
-            row.pack(fill="x", padx=(4, _SCROLL_INSET), pady=3)
+            row.pack(fill="x", padx=(4, _SCROLL_INSET), pady=2)
             self._dir_rows[item.directory_id] = row
         self._paint_dirs()
         self._update_actions()
@@ -586,7 +533,7 @@ class DiscoveryPanel:
         name.grid(row=0, column=0, padx=12, pady=(8, 0), sticky="ew")
         # 启用状态单独一个标签: "已停用"是要被注意的状态, 不该与"路径可用"同色.
         detail = ctk.CTkFrame(row, fg_color="transparent")
-        detail.grid(row=1, column=0, padx=12, pady=(1, 8), sticky="ew")
+        detail.grid(row=1, column=0, padx=12, pady=(2, 8), sticky="ew")
         state = ctk.CTkLabel(
             detail,
             text=item.state_label,
@@ -622,7 +569,7 @@ class DiscoveryPanel:
             box,
             text=title,
             anchor="w",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            font=ctk.CTkFont(size=FONT_STRONG, weight="bold"),
             text_color=self._palette.text_primary,
         )
         headline.pack(fill="x", padx=6, pady=(12, 0))
@@ -641,7 +588,6 @@ class DiscoveryPanel:
         for child in self._cand_box.winfo_children():
             child.destroy()
         self._cand_rows = {}
-        self._fitted = {}
         visible = [
             item
             for item in self._candidates
@@ -688,14 +634,17 @@ class DiscoveryPanel:
     def _build_candidate_row(self, item: CandidateItem) -> ctk.CTkFrame:
         row = ctk.CTkFrame(self._cand_box, corner_radius=8)
         row.grid_columnconfigure(0, weight=1)
+        title_text = self._candidate_title(item)
         name = ctk.CTkLabel(
             row,
-            text=self._candidate_title(item),
+            text=title_text,
             anchor="w",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=self._palette.text_primary,
         )
         name.grid(row=0, column=0, padx=12, pady=(8, 0), sticky="ew")
+        # 标题也要按真实宽度裁: 译名 + 括号里的原名可以很长, 不裁会被卡片硬切.
+        track_fit(row, name, (title_text,), inset=_CARD_TEXT_INSET)
         # 安装路径: 长路径中间省略, 宽度变化时重裁(与主页列表的名称同一套做法).
         path_text = self._clip_path(item.install_dir, _CARD_TEXT_WIDTH)
         path = ctk.CTkLabel(
@@ -706,7 +655,7 @@ class DiscoveryPanel:
             text_color=self._palette.text_muted,
         )
         path.grid(row=1, column=0, padx=12, pady=(2, 0), sticky="ew")
-        self._track_fit(f"path:{item.candidate_id}", path, (item.install_dir,))
+        track_fit(row, path, (item.install_dir,), path=True, inset=_CARD_TEXT_INSET)
         detail = ctk.CTkLabel(
             row,
             text=item.summary,
@@ -715,6 +664,7 @@ class DiscoveryPanel:
             text_color=self._palette.text_muted,
         )
         detail.grid(row=2, column=0, padx=12, pady=(2, 0), sticky="ew")
+        track_fit(row, detail, (item.summary,), inset=_CARD_TEXT_INSET)
         # 存档路径区分两层: 结论(一行)与路径(每条一行), 路径同样中间省略.
         conclusion = ctk.CTkLabel(
             row,
@@ -739,7 +689,7 @@ class DiscoveryPanel:
         )
         saves.grid(row=4, column=0, padx=12, pady=(2, 10), sticky="ew")
         if lines:
-            self._track_fit(f"saves:{item.candidate_id}", saves, lines)
+            track_fit(row, saves, lines, path=True, inset=_CARD_TEXT_INSET)
         for widget in (row, name, path, detail, conclusion, saves):
             widget.bind(
                 "<Button-1>",
@@ -757,31 +707,6 @@ class DiscoveryPanel:
     def _clip_lines(self, lines: tuple[str, ...], width: int) -> str:
         """多行文本逐行裁剪后拼起来(每行都不许溢出)."""
         return "\n".join(self._clip_path(line, width) for line in lines)
-
-    def _track_fit(
-        self,
-        key: str,
-        label: ctk.CTkLabel,
-        lines: tuple[str, ...],
-    ) -> None:
-        """登记一个"按真实宽度重裁"的标签(宽度要等布局完成才知道)."""
-        self._fitted[key] = _FitTarget(label, lines)
-        label.bind("<Configure>", lambda _event, name=key: self._refit(name), add="+")
-
-    def _refit(self, key: str) -> None:
-        """按标签当前宽度重裁: 宽度未知或没变就不动(免得改文本触发新的事件互相追).
-
-        列表重建后旧标签的 ``<Configure>`` 回调还会来一趟(那时它已经不在登记表里),
-        所以取不到目标就直接返回。
-        """
-        target = self._fitted.get(key)
-        if target is None:
-            return
-        width = int(target.label.winfo_width())
-        if width <= 1 or width == target.fitted_width:
-            return
-        target.fitted_width = width
-        target.label.configure(text=self._clip_lines(target.lines, width))
 
     @staticmethod
     def _candidate_title(item: CandidateItem) -> str:

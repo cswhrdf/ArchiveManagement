@@ -18,13 +18,27 @@ from archive_management.domain import GameAction, PathKind, action_allowed
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.dialogs import _center, ask_text, confirm_dialog, info_dialog
+from archive_management.ui.dialogs import (
+    _present,
+    ask_text,
+    confirm_dialog,
+    info_dialog,
+)
+from archive_management.ui.metrics import RADIUS_LG, RADIUS_MD
 from archive_management.ui.models import LocationItem, size_label
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory, pick_file
 from archive_management.ui.schedule_window import edit_schedule
-from archive_management.ui.textfit import fit_text
-from archive_management.ui.widgets import attach_tooltip, auto_scrollbar
+from archive_management.ui.widgets import (
+    ButtonStyle,
+    attach_tooltip,
+    auto_scrollbar,
+    card_surface_colors,
+    fit_label,
+    paint_button_state,
+    paint_button_style,
+    track_fit,
+)
 
 _ChangeCallback = Callable[[], None]
 
@@ -43,6 +57,8 @@ _TITLE_TEXT_LINES = 2
 
 _WINDOW_WIDTH = 600
 _WINDOW_PAD_Y = 16
+# 位置行里“路径那一列”要让开的宽度: 类型标签 56 + 左侧 10 + 右侧 8 + 路径自己的右内边距 8.
+_ROW_TEXT_INSET = 56 + 10 + 8 + 8
 # 窗口高度下限(内容更矮时也至少这么高, 免得窗口像一条缝).
 _WINDOW_MIN_HEIGHT = 440
 # 位置列表的高度跟着内容走: 一条位置时只占一行的高度(不在卡片里空出一大块,
@@ -80,6 +96,10 @@ class ManageGameWindow:
         self._items: list[LocationItem] = []
         self._selected: str | None = None
         self._rows: dict[str, list[ctk.CTkBaseClass]] = {}
+        # 鼠标悬停的那一行位置: 与主页卡片/详情页备份卡片同一套反馈.
+        self._hover: str | None = None
+        # 本窗口按钮与它们的样式: 归档置灰(以及恢复可用)时要按 state 重绘配色。
+        self._buttons: dict[ctk.CTkButton, ButtonStyle] = {}
         self._build()
 
     # -- 布局 ---------------------------------------------------------------
@@ -94,10 +114,10 @@ class ManageGameWindow:
         window.transient(self._parent)
         window.grab_set()
         window.configure(fg_color=palette.background)
-        _center(self._parent, window)
+        _present(self._parent, window)
 
         container = ctk.CTkFrame(window, fg_color=palette.background)
-        container.pack(fill="both", expand=True, padx=18, pady=16)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
         container.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(container, fg_color=palette.panel, corner_radius=10)
@@ -106,19 +126,14 @@ class ManageGameWindow:
         self._title_font = ctk.CTkFont(size=16, weight="bold")
         self._title_label = ctk.CTkLabel(
             header,
-            text=fit_text(
-                self._name,
-                self._title_font,
-                _TITLE_TEXT_WIDTH,
-                max_lines=_TITLE_TEXT_LINES,
-            ),
+            text="",
             anchor="w",
             justify="left",
             wraplength=_TITLE_TEXT_WIDTH,
             font=self._title_font,
             text_color=palette.text_primary,
         )
-        self._title_label.grid(row=0, column=0, padx=16, pady=(14, 0), sticky="w")
+        self._title_label.grid(row=0, column=0, padx=16, pady=(16, 0), sticky="w")
         self._state_label = ctk.CTkLabel(
             header,
             text="",
@@ -270,26 +285,35 @@ class ManageGameWindow:
         danger: bool = False,
         primary: bool = False,
     ) -> ctk.CTkButton:
-        """创建一个符合当前调色板的按钮."""
-        palette = self._palette
-        if danger:
-            face, ink = palette.danger, palette.danger_text
-        elif primary:
-            face, ink = palette.accent, palette.accent_text
-        else:
-            face, ink = palette.raised, palette.text_body
-        return ctk.CTkButton(
+        """创建一个符合当前调色板的按钮.
+
+        ``danger``/``primary`` 只是调用处的说法, 配色统一取自
+        :func:`archive_management.ui.widgets.button_colors` —— 危险色只有那一份
+        定义(48 号评审: 同一窗口里三个删除按钮的配色必须一模一样)。
+        """
+        style: ButtonStyle = "danger" if danger else "accent" if primary else "ghost"
+        button = ctk.CTkButton(
             parent,
             text=text,
             width=width,
             height=30,
-            corner_radius=7,
-            fg_color=face,
-            hover_color=palette.accent_soft_border if danger else palette.item_hover,
-            text_color=ink,
+            corner_radius=RADIUS_MD,
             font=ctk.CTkFont(size=12),
             command=command,
         )
+        paint_button_style(button, self._palette, style)
+        # 登记样式: 可用性变了要按当前 state 重画(归档后那一批置灰的按钮).
+        self._buttons[button] = style
+        return button
+
+    def _paint_buttons(self) -> None:
+        """按每个按钮的 state 重绘: 置灰的必须真的看起来置灰.
+
+        只 ``configure(state="disabled")`` 的话, 主色/危险色的底与描边会留在那里 ——
+        归档后整个窗口的按钮看起来都还可点(49 号评审)。
+        """
+        for button, style in self._buttons.items():
+            paint_button_state(button, self._palette, style)
 
     # -- 状态与列表 ---------------------------------------------------------
 
@@ -325,6 +349,7 @@ class ManageGameWindow:
             button.configure(state="disabled")
         for button in (self._rename_btn, self._schedule_btn, self._toggle_btn):
             button.configure(state="disabled")
+        self._paint_buttons()
 
     def _blocked(self, action: GameAction) -> bool:
         """归档游戏被禁用的动作: 按钮已置灰, 这里兜住直接调用."""
@@ -382,12 +407,14 @@ class ManageGameWindow:
             f"{_WINDOW_WIDTH}x"
             f"{max(_WINDOW_MIN_HEIGHT, int(self._window.winfo_reqheight()))}"
         )
-        _center(self._parent, self._window)
+        _present(self._parent, self._window)
 
     def _rebuild_rows(self) -> None:
         for child in self._list_scroll.winfo_children():
             child.destroy()
         self._rows = {}
+        # 行重建后悬停状态失效: 不清掉会指向已销毁的行.
+        self._hover = None
         if not self._items:
             empty = ctk.CTkLabel(
                 self._list_scroll,
@@ -404,11 +431,10 @@ class ManageGameWindow:
 
     def _build_row(self, index: int, item: LocationItem) -> None:
         palette = self._palette
-        selected = item.location_id == self._selected
         row = ctk.CTkFrame(
             self._list_scroll,
-            corner_radius=8,
-            fg_color=palette.item_active if selected else palette.raised,
+            corner_radius=RADIUS_MD,
+            fg_color=palette.raised,
         )
         row.grid(row=index, column=0, sticky="ew", padx=8, pady=4)
         row.grid_columnconfigure(1, weight=1)
@@ -417,7 +443,7 @@ class ManageGameWindow:
             row,
             text=_kind_text(item.path_kind),
             width=56,
-            corner_radius=9,
+            corner_radius=RADIUS_LG,
             font=ctk.CTkFont(size=11),
             fg_color=palette.accent_soft,
             text_color=palette.accent_soft_text,
@@ -432,9 +458,12 @@ class ManageGameWindow:
             text=title_text,
             anchor="w",
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=palette.text_primary if selected else palette.text_body,
+            text_color=palette.text_body,
         )
         title.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(8, 0))
+        # 路径可以很长: 按行内剩下的宽度**中间省略**(尾部是目录名, 比盘符值得留),
+        # 否则会被行硬切 —— 它自己是 pack/grid 到左边、宽度随文字变的, 不能拿来当依据。
+        track_fit(row, title, (title_text,), path=True, inset=_ROW_TEXT_INSET)
 
         note = ctk.CTkLabel(
             row,
@@ -450,21 +479,49 @@ class ManageGameWindow:
                 "<Button-1>",
                 lambda _event, lid=item.location_id: self._select(lid),
             )
+            # 悬停反馈: 与主页的卡片、详情页的备份卡片同一条规则(只重绘受影响的两行).
+            widget.bind(
+                "<Enter>",
+                lambda _event, lid=item.location_id: self._set_hover(lid),
+            )
+            widget.bind("<Leave>", lambda _event: self._set_hover(None))
         self._rows[item.location_id] = [row, title, note]
 
     def _paint_rows(self) -> None:
-        palette = self._palette
         for item in self._items:
-            widgets = self._rows.get(item.location_id)
-            if widgets is None:
-                continue
-            row, title, note = widgets
-            selected = item.location_id == self._selected
-            row.configure(fg_color=palette.item_active if selected else palette.raised)
-            title.configure(
-                text_color=palette.text_primary if selected else palette.text_body
-            )
-            note.configure(text_color=palette.success if item.ok else palette.danger)
+            self._paint_row(item.location_id)
+
+    def _row_colors(self, location_id: str) -> tuple[str, str]:
+        """一行位置该用的 (底色, 描边色): 选中 > 悬停 > 常规."""
+        return card_surface_colors(
+            self._palette,
+            selected=location_id == self._selected,
+            hovered=location_id == self._hover,
+        )
+
+    def _paint_row(self, location_id: str) -> None:
+        """只重绘一行位置(主题/选中/悬停都走它)."""
+        widgets = self._rows.get(location_id)
+        item = next(
+            (entry for entry in self._items if entry.location_id == location_id), None
+        )
+        if widgets is None or item is None:
+            return
+        row, _title, note = widgets
+        background, border = self._row_colors(location_id)
+        row.configure(fg_color=background, border_width=1, border_color=border)
+        note.configure(
+            text_color=self._palette.success if item.ok else self._palette.danger
+        )
+
+    def _set_hover(self, location_id: str | None) -> None:
+        """记录鼠标悬停的那一行, 只重绘受影响的两行."""
+        if self._hover == location_id:
+            return
+        previous, self._hover = self._hover, location_id
+        for key in (previous, location_id):
+            if key is not None:
+                self._paint_row(key)
 
     def _select(self, location_id: str) -> None:
         self._selected = location_id
@@ -508,13 +565,12 @@ class ManageGameWindow:
             return
         self._name = summary.name
         # 重命名后同样要重新裁剪: 新名字可能比原来的长.
-        self._title_label.configure(
-            text=fit_text(
-                self._name,
-                self._title_font,
-                _TITLE_TEXT_WIDTH,
-                max_lines=_TITLE_TEXT_LINES,
-            )
+        fit_label(
+            self._title_label,
+            self._name,
+            self._title_font,
+            _TITLE_TEXT_WIDTH,
+            max_lines=_TITLE_TEXT_LINES,
         )
         self._on_change()
 

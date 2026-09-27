@@ -75,6 +75,7 @@ from archive_management.ui.dialogs import (
 )
 from archive_management.ui.home_page import HomePage
 from archive_management.ui.manage_window import ManageGameWindow
+from archive_management.ui.metrics import RADIUS_LG, RADIUS_MD, RADIUS_PILL
 from archive_management.ui.models import (
     AppPage,
     BackupItem,
@@ -102,9 +103,18 @@ from archive_management.ui.palette import DEFAULT_THEME, Palette
 from archive_management.ui.pickers import pick_file, pick_save_file
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
-from archive_management.ui.textfit import fit_text
-from archive_management.ui.typography import install_font_scaling, set_base_font_px
-from archive_management.ui.widgets import UiKit, attach_tooltip
+from archive_management.ui.typography import (
+    FONT_STRONG,
+    install_font_scaling,
+    set_base_font_px,
+)
+from archive_management.ui.widgets import (
+    UiKit,
+    attach_tooltip,
+    card_surface_colors,
+    fit_label,
+    track_fit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +127,32 @@ _TONE_COLORS: dict[str, str] = {
 # 支持的最小窗口尺寸: 主页里那些固定宽度的行必须能放进"最小窗口下的内容区",
 # 否则在更窄的屏幕(窗口被窗口管理器再压小)上会越界并盖住描边。
 WINDOW_MIN_SIZE = (1200, 720)
+# 打开时的默认尺寸(设计尺寸): 屏幕装不下就按屏幕夹(见 initial_window_size)。
+WINDOW_DEFAULT_SIZE = (1360, 860)
+# 按屏幕夹尺寸时留出的余量: 标题栏 + 任务栏 + 一点呼吸空间。屏幕尺寸是整块屏幕
+# (不含任务栏信息), 所以只看 winfo_screenheight 会算出"贴到屏幕最下沿"的窗口。
+SCREEN_MARGIN = 96
+
+
+def initial_window_size(window: tk.Misc) -> tuple[int, int]:
+    """主窗口打开时的尺寸: 默认尺寸, 但不超出屏幕.
+
+    固定 1360x860 在 1366x768 / 1920x900 这类屏幕上比屏幕还高, 窗口下沿(底部状态
+    条)会落到屏幕外面去(与 16 号评审的"设置窗口比屏幕高"同一类问题)。宽度同理:
+    1366 宽的屏幕上 1360 会把窗口右沿顶到屏幕边上。
+
+    夹到最小尺寸为止: 最小尺寸是布局的硬下限(主页那些固定宽度的列需要它), 屏幕比
+    它更小时只能不夹 —— 再往下压会把内容挤出窗口。
+    """
+    width, height = WINDOW_DEFAULT_SIZE
+    screen_width = int(window.winfo_screenwidth()) - SCREEN_MARGIN
+    screen_height = int(window.winfo_screenheight()) - SCREEN_MARGIN
+    return (
+        max(WINDOW_MIN_SIZE[0], min(width, screen_width)),
+        max(WINDOW_MIN_SIZE[1], min(height, screen_height)),
+    )
+
+
 # 头部标题与概要卡里的游戏名**按控件实际宽度**裁剪: 窗口变宽就能多显示几个字。
 # 两个常量只是"控件尺寸还没测量出来时"的落位预算(取自最小窗口下的实测可用宽度:
 # 头部标题区 922px、概要卡信息区约 720px), 之后由 _refit_detail_names() 按真实
@@ -134,6 +170,8 @@ _TASK_NAME_WIDTH = 260
 _TASK_NAME_LINES = 2
 _TASK_VALUE_WIDTH = 260
 _RAIL_WIDTH = 350
+# 卡片副标题的左右内边距(见 _build_backup_card 的 padx=12).
+_CARD_DETAIL_INSET = 24
 # 分支视图中用于标示层级的连接符(与缩进配合).
 _BRANCH_MARK = "└ "
 # 当前节点标记: 后续备份/分支都从这个节点继续.
@@ -268,7 +306,8 @@ class ArchiveApp(ctk.CTk):
         self._activation_steps = 0
         self.title(title)
         self.minsize(*WINDOW_MIN_SIZE)
-        self.geometry("1360x860")
+        width, height = initial_window_size(self)
+        self.geometry(f"{width}x{height}")
         self.configure(fg_color=self.p.background)
 
         self._build_layout()
@@ -276,6 +315,11 @@ class ArchiveApp(ctk.CTk):
         self._load_first_game()
         # 软件打开后默认停在游戏主页(游戏很多时它比单个游戏的详情更有用).
         self._show_page(AppPage.HOME)
+        # 界面构建完就把调色板刷一遍. 不刷的话, 顶栏/状态栏/页面容器会一直是
+        # CustomTkinter 的默认灰, 顶栏那几个按钮还会是默认蓝 —— 而 "有游戏" 的
+        # 情况下会误打误撞被 _load_first_game 里的选中动作刷上色, 于是**空库首次
+        # 启动**才看得出问题(2026-09-27 实测: 顶栏与状态栏 #2b2b2b, 三个按钮 #1F6AA5).
+        self.kit.apply(self.p)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_job = self.after(100, self._poll_messages)
@@ -581,6 +625,20 @@ class ArchiveApp(ctk.CTk):
         )
         self._home_page.frame.grid(row=0, column=0, sticky="nsew")
         self._home_page.frame.grid_remove()
+        # 可用性会变的按钮: 状态一改就要按新 state 重画(禁用必须看起来禁用).
+        # 不在这个表里的按钮(各 tab、搜索、上一页/下一页…)的可用性从不变化。
+        self._stateful_buttons = (
+            self._add_game_btn,
+            self._import_btn,
+            self._backup_btn,
+            self._export_btn,
+            self._settings_game_btn,
+            self._cancel_btn,
+            self._restore_btn,
+            self._branch_btn,
+            self._rename_btn,
+            self._delete_btn,
+        )
         # 分页在第一次轮询之前就要显示开关状态(否则会先把"关闭"写出来再改口).
         self._home_page.refresh_activation(enabled=self._activation)
 
@@ -618,12 +676,12 @@ class ArchiveApp(ctk.CTk):
         logo = ctk.CTkFrame(
             parent, width=30, height=30, corner_radius=8, fg_color=self.p.accent
         )
-        logo.grid(row=0, column=0, padx=(18, 12), pady=11)
+        logo.grid(row=0, column=0, padx=(16, 12), pady=10)
         self.kit.register(lambda p: logo.configure(fg_color=p.accent))
         brand = self.kit.label(
             parent, tr("topbar.brand"), style="primary", size=16, weight="bold"
         )
-        brand.grid(row=0, column=1, padx=(0, 14), pady=10)
+        brand.grid(row=0, column=1, padx=(0, 16), pady=10)
 
         # 返回主页只在详情页显示(在主页时它没有意义).
         self._back_btn = self.kit.button(
@@ -637,11 +695,11 @@ class ArchiveApp(ctk.CTk):
         self._back_btn.grid(row=0, column=2, sticky="w")
 
         actions = ctk.CTkFrame(parent, fg_color="transparent")
-        actions.grid(row=0, column=3, sticky="e", padx=(0, 18))
+        actions.grid(row=0, column=3, sticky="e", padx=(0, 16))
         self._add_game_btn = self.kit.button(
             actions,
             tr("topbar.add_game"),
-            style="accent",
+            kind="primary",
             command=self._on_add_game,
             width=104,
             height=34,
@@ -699,7 +757,7 @@ class ArchiveApp(ctk.CTk):
         self._export_btn = self.kit.button(
             header,
             tr("action.export"),
-            style="accent",
+            kind="primary",
             command=self._on_export,
             width=104,
             height=38,
@@ -739,10 +797,10 @@ class ArchiveApp(ctk.CTk):
         self._feedback_label = self.kit.label(
             statusbar, tr("status.ready"), style="muted", size=12
         )
-        self._feedback_label.pack(side="left", padx=18, pady=4)
+        self._feedback_label.pack(side="left", padx=16, pady=4)
 
         self._service_card = ctk.CTkFrame(statusbar, fg_color="transparent")
-        self._service_card.pack(side="right", padx=18, pady=4)
+        self._service_card.pack(side="right", padx=16, pady=4)
         self._service_dot = ctk.CTkLabel(
             self._service_card,
             text="●",
@@ -762,14 +820,14 @@ class ArchiveApp(ctk.CTk):
         self._hero.grid_rowconfigure(0, weight=1)
 
         left = ctk.CTkFrame(self._hero, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="nsew", padx=(24, 8), pady=14)
+        left.grid(row=0, column=0, sticky="nsew", padx=(24, 8), pady=16)
 
         self._hero_tile = ctk.CTkLabel(
             left,
             text="",
             width=84,
             height=84,
-            corner_radius=12,
+            corner_radius=RADIUS_LG,
             fg_color=self._tone_color(None),
             text_color="#ffffff",
             font=ctk.CTkFont(size=28, weight="bold"),
@@ -780,7 +838,7 @@ class ArchiveApp(ctk.CTk):
 
         info = ctk.CTkFrame(left, fg_color="transparent")
         # expand=True: 信息块占满色块右边的全部宽度, 名称因此能"撑满一行".
-        info.pack(side="left", fill="both", expand=True, padx=(18, 0))
+        info.pack(side="left", fill="both", expand=True, padx=(16, 0))
         self.kit.label(info, tr("hero.current_game"), style="muted", size=11).pack(
             anchor="w", pady=(2, 0)
         )
@@ -791,7 +849,7 @@ class ArchiveApp(ctk.CTk):
         self._hero_name_label.configure(wraplength=_HERO_TEXT_WIDTH, justify="left")
         self._hero_name_label.pack(fill="x", anchor="w", pady=(2, 0))
         self._hero_location_label = self.kit.label(info, "", style="body", size=13)
-        self._hero_location_label.pack(anchor="w", pady=(3, 0))
+        self._hero_location_label.pack(anchor="w", pady=(2, 0))
         self._hero_verified_label = ctk.CTkLabel(
             info, text="", font=ctk.CTkFont(size=12, weight="bold")
         )
@@ -809,7 +867,7 @@ class ArchiveApp(ctk.CTk):
         )
 
         stats = ctk.CTkFrame(self._hero, fg_color="transparent")
-        stats.grid(row=0, column=1, sticky="e", padx=(8, 24), pady=14)
+        stats.grid(row=0, column=1, sticky="e", padx=(8, 24), pady=16)
 
         recent = ctk.CTkFrame(stats, fg_color="transparent")
         recent.pack(side="left", padx=(0, 24))
@@ -888,12 +946,12 @@ class ArchiveApp(ctk.CTk):
         self._backup_btn = self.kit.button(
             parent,
             tr("action.backup_now"),
-            style="accent",
+            kind="primary",
             command=self._on_backup,
             width=150,
             height=36,
         )
-        self._backup_btn.grid(row=0, column=6, padx=14, pady=10, sticky="e")
+        self._backup_btn.grid(row=0, column=6, padx=16, pady=10, sticky="e")
 
     def _new_tab(
         self, parent: ctk.CTkFrame, view: ViewKind, text: str
@@ -904,7 +962,7 @@ class ArchiveApp(ctk.CTk):
             text=text,
             width=120,
             height=36,
-            corner_radius=7,
+            corner_radius=RADIUS_MD,
             command=lambda: self._switch_view(view),
             font=ctk.CTkFont(size=13, weight="bold"),
         )
@@ -919,7 +977,7 @@ class ArchiveApp(ctk.CTk):
             state="readonly",
             width=176,
             height=36,
-            corner_radius=7,
+            corner_radius=RADIUS_MD,
             command=self._on_filter_change,
             font=ctk.CTkFont(size=12),
         )
@@ -968,9 +1026,9 @@ class ArchiveApp(ctk.CTk):
         self._list_title = self.kit.label(
             self._list_panel, "", style="h2", size=16, weight="bold"
         )
-        self._list_title.grid(row=0, column=0, padx=18, pady=(16, 0), sticky="w")
+        self._list_title.grid(row=0, column=0, padx=16, pady=(16, 0), sticky="w")
         self._list_sub = self.kit.label(self._list_panel, "", style="muted", size=12)
-        self._list_sub.grid(row=1, column=0, padx=18, pady=(2, 8), sticky="w")
+        self._list_sub.grid(row=1, column=0, padx=16, pady=(2, 8), sticky="w")
         self._list_scroll = self.kit.scroll_frame(self._list_panel, bg_key="well")
         self._list_scroll.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
@@ -995,33 +1053,33 @@ class ArchiveApp(ctk.CTk):
         panel.grid_columnconfigure(0, weight=1)
 
         self.kit.label(panel, tr("sel.title"), style="h2", size=15, weight="bold").grid(
-            row=0, column=0, padx=18, pady=(14, 4), sticky="w"
+            row=0, column=0, padx=16, pady=(16, 4), sticky="w"
         )
         self._selected_name = self.kit.label(
             panel, "", style="body", size=14, weight="bold"
         )
-        self._selected_name.grid(row=1, column=0, padx=18, pady=(0, 2), sticky="w")
+        self._selected_name.grid(row=1, column=0, padx=16, pady=(0, 2), sticky="w")
         self._selected_meta = self.kit.label(panel, "", style="muted", size=12)
-        self._selected_meta.grid(row=2, column=0, padx=18, pady=(0, 4), sticky="w")
+        self._selected_meta.grid(row=2, column=0, padx=16, pady=(0, 4), sticky="w")
 
         line = ctk.CTkFrame(panel, height=1, fg_color="transparent")
-        line.grid(row=3, column=0, sticky="ew", padx=18, pady=(4, 6))
+        line.grid(row=3, column=0, sticky="ew", padx=16, pady=(4, 6))
         self.kit.register(lambda p: line.configure(fg_color=p.border))
 
         self.kit.label(panel, tr("sel.summary"), style="muted", size=11).grid(
-            row=4, column=0, padx=18, pady=(0, 2), sticky="w"
+            row=4, column=0, padx=16, pady=(0, 2), sticky="w"
         )
         self._selected_files = self.kit.label(panel, "", style="body", size=12)
-        self._selected_files.grid(row=5, column=0, padx=18, pady=(0, 2), sticky="w")
+        self._selected_files.grid(row=5, column=0, padx=16, pady=(0, 2), sticky="w")
         self._selected_state = self.kit.label(panel, "", style="muted", size=11)
-        self._selected_state.grid(row=6, column=0, padx=18, pady=(0, 4), sticky="w")
+        self._selected_state.grid(row=6, column=0, padx=16, pady=(0, 4), sticky="w")
 
         actions = ctk.CTkFrame(panel, fg_color="transparent")
-        actions.grid(row=7, column=0, padx=18, pady=(6, 12), sticky="w")
+        actions.grid(row=7, column=0, padx=16, pady=(6, 12), sticky="w")
         self._restore_btn = self.kit.button(
             actions,
             tr("action.restore"),
-            style="accent",
+            kind="primary",
             command=self._on_restore,
             width=158,
             height=32,
@@ -1037,7 +1095,7 @@ class ArchiveApp(ctk.CTk):
         )
         self._branch_btn.pack(side="left")
         actions_second = ctk.CTkFrame(panel, fg_color="transparent")
-        actions_second.grid(row=8, column=0, padx=18, pady=(0, 12), sticky="w")
+        actions_second.grid(row=8, column=0, padx=16, pady=(0, 12), sticky="w")
         self._rename_btn = self.kit.button(
             actions_second,
             tr("action.rename_backup"),
@@ -1050,7 +1108,7 @@ class ArchiveApp(ctk.CTk):
         self._delete_btn = self.kit.button(
             actions_second,
             tr("action.delete_backup"),
-            style="danger",
+            kind="destructive",
             command=self._on_delete_backup,
             width=150,
             height=32,
@@ -1064,20 +1122,22 @@ class ArchiveApp(ctk.CTk):
 
         self.kit.label(
             panel, tr("task.title"), style="h2", size=15, weight="bold"
-        ).grid(row=0, column=0, padx=18, pady=(14, 8), sticky="w")
+        ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
         # 任务名自己占满一整行(右边只留状态): 早先它和"备份目标"那条长路径挤同两列,
         # 亏空从名称列扣, "每 5m 备份 · 保留 3 份"被静默截成"每 5m 备份 · 保"。
         self._task_name_label = self.kit.label(
             panel, "", style="body", size=13, weight="bold"
         )
         self._task_name_label.configure(wraplength=_TASK_NAME_WIDTH, justify="left")
-        self._task_name_label.grid(row=1, column=0, padx=18, sticky="ew")
+        self._task_name_label.grid(row=1, column=0, padx=16, sticky="ew")
         self._task_state_label = self.kit.label(panel, "", style="muted", size=12)
-        self._task_state_label.grid(row=1, column=1, padx=(8, 18), sticky="e")
+        self._task_state_label.grid(row=1, column=1, padx=(8, 16), sticky="e")
 
-        self._task_progress = ctk.CTkProgressBar(panel, height=8, corner_radius=4)
+        self._task_progress = ctk.CTkProgressBar(
+            panel, height=8, corner_radius=RADIUS_PILL
+        )
         self._task_progress.grid(
-            row=2, column=0, columnspan=2, padx=18, pady=(8, 4), sticky="ew"
+            row=2, column=0, columnspan=2, padx=16, pady=(8, 4), sticky="ew"
         )
         self.kit.register(
             lambda p: self._task_progress.configure(
@@ -1087,7 +1147,7 @@ class ArchiveApp(ctk.CTk):
 
         self._task_progress_label = self.kit.label(panel, "", style="hint", size=12)
         self._task_progress_label.grid(
-            row=3, column=0, padx=18, pady=(0, 8), sticky="w"
+            row=3, column=0, padx=16, pady=(0, 8), sticky="w"
         )
         self._cancel_btn = self.kit.button(
             panel,
@@ -1097,34 +1157,34 @@ class ArchiveApp(ctk.CTk):
             width=86,
             height=26,
         )
-        self._cancel_btn.grid(row=3, column=1, padx=(8, 18), pady=(0, 8), sticky="e")
+        self._cancel_btn.grid(row=3, column=1, padx=(8, 16), pady=(0, 8), sticky="e")
         self._cancel_btn.configure(state="disabled")
 
         # 说明与它的值各占一行(值拿满宽度): 长路径不再需要和别的列抢位置。
         self.kit.label(panel, tr("task.next"), style="muted", size=12).grid(
-            row=4, column=0, columnspan=2, padx=18, sticky="w"
+            row=4, column=0, columnspan=2, padx=16, sticky="w"
         )
         self._task_next = self.kit.label(panel, "", style="body", size=12)
         self._task_next.configure(wraplength=_TASK_VALUE_WIDTH, justify="left")
         self._task_next.grid(
-            row=5, column=0, columnspan=2, padx=18, pady=(2, 0), sticky="ew"
+            row=5, column=0, columnspan=2, padx=16, pady=(2, 0), sticky="ew"
         )
 
         self.kit.label(panel, tr("task.target"), style="muted", size=12).grid(
-            row=6, column=0, columnspan=2, padx=18, pady=(8, 0), sticky="w"
+            row=6, column=0, columnspan=2, padx=16, pady=(8, 0), sticky="w"
         )
         # 备份目标是完整路径, 必须换行显示, 否则会被卡片裁掉.
         self._task_target = self.kit.label(panel, "", style="hint", size=12)
         self._task_target.configure(wraplength=_TASK_VALUE_WIDTH, justify="left")
         self._task_target.grid(
-            row=7, column=0, columnspan=2, padx=18, pady=(2, 0), sticky="ew"
+            row=7, column=0, columnspan=2, padx=16, pady=(2, 0), sticky="ew"
         )
 
         # 快捷键不在任务状态卡里展示: 它属于全局设置, 统一在"设置"窗口里查看与修改。
         self._task_hint = self.kit.label(panel, "", style="hint", size=12)
         self._task_hint.configure(wraplength=250, justify="left")
         self._task_hint.grid(
-            row=8, column=0, columnspan=2, padx=18, pady=(12, 12), sticky="w"
+            row=8, column=0, columnspan=2, padx=16, pady=(12, 12), sticky="w"
         )
 
     # ---------------------------------------------------------------- 数据装载
@@ -1344,35 +1404,32 @@ class ArchiveApp(ctk.CTk):
         if not self._detail_name:
             return
         title_budget = self._name_budget(self._title_label, _HEADER_TEXT_WIDTH)
-        self._title_label.configure(
-            wraplength=title_budget,
-            text=fit_text(
-                self._detail_name,
-                self._title_font,
-                title_budget,
-                max_lines=_HEADER_NAME_LINES,
-            ),
+        self._title_label.configure(wraplength=title_budget)
+        fit_label(
+            self._title_label,
+            self._detail_name,
+            self._title_font,
+            title_budget,
+            max_lines=_HEADER_NAME_LINES,
         )
         # 副标题里带存档位置(可能是很长的路径): 同样封顶两行, 头部高度有上限.
         subtitle_budget = self._name_budget(self._subtitle_label, _HEADER_TEXT_WIDTH)
-        self._subtitle_label.configure(
-            wraplength=subtitle_budget,
-            text=fit_text(
-                self._detail_subtitle,
-                self._subtitle_font,
-                subtitle_budget,
-                max_lines=_HEADER_NAME_LINES,
-            ),
+        self._subtitle_label.configure(wraplength=subtitle_budget)
+        fit_label(
+            self._subtitle_label,
+            self._detail_subtitle,
+            self._subtitle_font,
+            subtitle_budget,
+            max_lines=_HEADER_NAME_LINES,
         )
         hero_budget = self._name_budget(self._hero_name_label, _HERO_TEXT_WIDTH)
-        self._hero_name_label.configure(
-            wraplength=hero_budget,
-            text=fit_text(
-                self._detail_name,
-                self._hero_name_font,
-                hero_budget,
-                max_lines=_HERO_NAME_LINES,
-            ),
+        self._hero_name_label.configure(wraplength=hero_budget)
+        fit_label(
+            self._hero_name_label,
+            self._detail_name,
+            self._hero_name_font,
+            hero_budget,
+            max_lines=_HERO_NAME_LINES,
         )
 
     def _refit_detail_names(self) -> None:
@@ -1407,6 +1464,7 @@ class ArchiveApp(ctk.CTk):
         self._task_target.configure(text=task.target_label)
         self._task_hint.configure(text=tr("task.hint"))
         self._cancel_btn.configure(state="normal" if task.cancellable else "disabled")
+        self.kit.repaint_button(self._cancel_btn, self.p)
         # 右下角的服务状态: 服务正常 + 备份占用(原本显示在侧边栏的状态卡里).
         self._service_label.configure(
             text=f"{tr('status.service_ok')} · {self._usage_text}"
@@ -1421,13 +1479,12 @@ class ArchiveApp(ctk.CTk):
         width = int(self._task_name_label.winfo_width())
         budget = width if width > 1 else _TASK_NAME_WIDTH
         self._task_name_label.configure(wraplength=budget)
-        self._task_name_label.configure(
-            text=fit_text(
-                text,
-                self._task_name_label.cget("font"),
-                budget,
-                max_lines=_TASK_NAME_LINES,
-            )
+        fit_label(
+            self._task_name_label,
+            text,
+            self._task_name_label.cget("font"),
+            budget,
+            max_lines=_TASK_NAME_LINES,
         )
 
     def _show_task_progress(self, running: bool) -> None:
@@ -1648,7 +1705,7 @@ class ArchiveApp(ctk.CTk):
         badge = ctk.CTkLabel(
             card,
             text=f" {item.kind_label} ",
-            corner_radius=11,
+            corner_radius=RADIUS_LG,
             font=ctk.CTkFont(size=11),
         )
         badge.grid(row=0, column=2, padx=(0, 12), pady=(10, 2), sticky="e")
@@ -1656,23 +1713,31 @@ class ArchiveApp(ctk.CTk):
             card,
             text=self._card_title(item),
             anchor="w",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            font=ctk.CTkFont(size=FONT_STRONG, weight="bold"),
             text_color=self.p.text_primary,
         )
         title.grid(
             row=1, column=0, columnspan=3, padx=(indent, 12), pady=(2, 0), sticky="w"
         )
+        # 标题是单行的: 卡片宽度不够时补省略号, 而不是让文字被卡片硬切(也免得它把
+        # 卡片的请求宽度撞大、把列表撑出横向滚动); 完整的标题在悬停提示里看.
+        full_title = self._card_title(item)
+        track_fit(card, title, (full_title,), inset=indent + 12)
+        attach_tooltip(title, full_title)
         detail_text = self._card_detail(item)
         detail = ctk.CTkLabel(
             card,
             text=detail_text,
             anchor="w",
             justify="left",
-            wraplength=560,
             font=ctk.CTkFont(size=11),
             text_color=self.p.text_muted,
         )
         detail.grid(row=2, column=0, columnspan=3, padx=12, pady=(0, 10), sticky="w")
+        # 副标题自己断行到两行 + 省略号, 并挂完整文本的悬停提示: 写死的 wraplength 在窄
+        # 窗口里会把行顶出卡片, 而一整段没空格的中日韩文字 Tk 根本断不开(实测 1038px/815px)。
+        track_fit(card, detail, (detail_text,), inset=_CARD_DETAIL_INSET, max_lines=2)
+        attach_tooltip(detail, detail_text)
 
         def paint(
             palette: Palette,
@@ -1703,20 +1768,13 @@ class ArchiveApp(ctk.CTk):
     ) -> None:
         selected = item.backup_id == self._backup_id
         hovered = item.backup_id == self._hover_id
+        background, border = card_surface_colors(
+            palette, selected=selected, hovered=hovered
+        )
+        card.configure(fg_color=background, border_width=1, border_color=border)
         if selected:
-            card.configure(
-                fg_color=palette.accent_soft,
-                border_width=1,
-                border_color=palette.accent_soft_border,
-            )
             title.configure(text_color=palette.accent_soft_text)
         else:
-            # 卡片色 + 描边, 与列表凹槽底色拉开对比(浅色主题下也不至于白上加白).
-            card.configure(
-                fg_color=palette.card_hover if hovered else palette.card,
-                border_width=1,
-                border_color=palette.card_border,
-            )
             title.configure(text_color=palette.text_primary)
         when.configure(text_color=palette.text_body)
         detail.configure(text_color=palette.text_muted)
@@ -1792,6 +1850,7 @@ class ArchiveApp(ctk.CTk):
             self._branch_btn.configure(state="disabled")
             self._rename_btn.configure(state="disabled")
             self._delete_btn.configure(state="disabled")
+            self._paint_button_states()
             return
         self._selected_name.configure(text=item.display_title)
         self._selected_meta.configure(
@@ -1839,6 +1898,7 @@ class ArchiveApp(ctk.CTk):
     def _update_actions(self) -> None:
         busy = self._busy
         game = self._game
+        self._apply_entry_states(busy)
         can_do_backup = (
             game is not None
             and game.has_locations
@@ -1861,6 +1921,26 @@ class ArchiveApp(ctk.CTk):
         self._delete_btn.configure(
             state=_node_state(game, "backup_delete", ready=nodes_ready)
         )
+        self._paint_button_states()
+
+    def _apply_entry_states(self, busy: bool) -> None:
+        """忙碌期间收起这两个"点了没反应"的入口.
+
+        它们的处理器第一句就是"正在忙就直接返回", 所以忙的时候必须置灰: 无效控件
+        要看起来无效, 而不是等用户点了再什么都不发生。
+        """
+        state = "disabled" if busy else "normal"
+        self._add_game_btn.configure(state=state)
+        self._import_btn.configure(state=state)
+
+    def _paint_button_states(self) -> None:
+        """按每个按钮**当前的 state**重画可用性会变的那一批.
+
+        与 state 分开做一次是因为两者必须同时成立: 只改 state 的话, 主色/危险色的
+        按钮被禁用后仍是亮的(49 号评审)。
+        """
+        for button in self._stateful_buttons:
+            self.kit.repaint_button(button, self.p)
 
     def _on_backup(self) -> None:
         game = self._game
@@ -1952,7 +2032,12 @@ class ArchiveApp(ctk.CTk):
         force = plan.process.running
         backup_id = item.backup_id
         self._set_busy(True)
-        self._feedback(FeedbackKind.PENDING, tr("action.restore_pending"))
+        # 进行中要说清"正在把哪一份恢复到哪里": 只有"正在恢复备份…"的话, 用户看不出
+        # 这一条属于哪一款游戏(I-7: 进行中的状态必须可辨识).
+        self._feedback(
+            FeedbackKind.PENDING,
+            tr("action.restore_pending", name=game.name, title=item.title),
+        )
 
         def work() -> str:
             return self.backend.run_restore(
@@ -2132,7 +2217,11 @@ class ArchiveApp(ctk.CTk):
             self._reload_data()
 
         self._set_busy(True)
-        self._feedback(FeedbackKind.PENDING, tr("action.delete_pending"))
+        # 进行中说清\"删的是哪一份\": 分支根节点连带的删除量由结果文案给出(I-7).
+        self._feedback(
+            FeedbackKind.PENDING,
+            tr("action.delete_pending", title=item.display_title),
+        )
         self._submit(work, ok)
 
     def _selected_item(self) -> BackupItem | None:
@@ -2676,6 +2765,8 @@ class ArchiveApp(ctk.CTk):
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self._update_actions()
+        # 主页的长操作入口与主窗口共用同一份忙碌事实(它不走 _submit)。
+        self._home_page.set_busy(busy)
 
     def _submit(
         self,

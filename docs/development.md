@@ -12,7 +12,7 @@ uv run pre-commit install
 
 开发依赖按**作业**拆成五组（`test` / `coverage` / `quality` / `analysis` / `package`，见 `pyproject.toml` 的 `[dependency-groups]`）：CI 里每个作业只装自己需要的那一组（`uv sync --locked --no-default-groups --group ...`，另外靠顶层 `UV_NO_SYNC=1` 拦住 `uv run` 的隐式 sync），本地则通过 `[tool.uv] default-groups` 一次装齐，所以上面的命令与以前完全一样。要只跑某一类检查时也可以手动 `uv sync --no-default-groups --group test`（注意它会把其它组从 `.venv` 里卸掉）。
 
-上面的命令在**仓库根目录**执行。本项目以工具形式开发、**不作为包安装**（不发布到 PyPI，也不声明 `[project.scripts]`），自身源码靠仓库根的 `.env` 进入导入路径：`uv run` 会自动加载它（内容是 `PYTHONPATH=src`），所以 `python -m archive_management` 不需要安装就能运行。绕过 `uv run`（例如直接调用 `.venv\Scripts\python.exe -m archive_management`）时该文件不会生效，需要自己设置 `PYTHONPATH=src`；个人本地覆盖请另建 `.env.local` 并用 `uv run --env-file .env.local ...`——仓库自带的 `.env` 会被提交，不要往里放密钥。
+上面的命令在**仓库根目录**执行。本项目以工具形式开发、**不作为包安装**（不发布到 PyPI，也不声明 `[project.scripts]`），自身源码靠仓库根的 `.env`（内容是 `PYTHONPATH=src`）进入导入路径，所以 `python -m archive_management` 不需要安装就能运行。**`.env` 不是 uv 读的**：实测 uv 0.12.10 / 0.12.19 都不会自动加载它，`[tool.uv]` 里也没有可用的 `env-file` 选项；它只在 **VS Code 的集成终端**里生效（Python 扩展按 `python.terminal.useEnvFile` 把 `python.envFile`（默认 `${workspaceFolder}/.env`）里的变量注入终端环境）。在纯终端（Windows Terminal / WSL 等）里需要自己带上它：`uv run --env-file .env python -m archive_management ...`、`UV_ENV_FILE=.env uv run ...` 或 `PYTHONPATH=src uv run ...`。绕过 `uv run` 直接调用 `.venv` 里的解释器（Windows 是 `.venv\Scripts\python.exe`，Linux 是 `.venv/bin/python`）时该文件不会生效，需要自己设置 `PYTHONPATH=src`；个人本地覆盖请另建 `.env.local` 并用 `uv run --env-file .env.local ...`——仓库自带的 `.env` 会被提交，不要往里放密钥。
 
 项目采用 `src` 布局（包名 `archive_management`），业务层不直接调用 Tkinter、HTTP 或文件系统：领域模型与用例通过接口注入基础设施，便于替换实现与测试。
 
@@ -33,16 +33,16 @@ packaging/               # PyInstaller spec
 ## 命令行
 
 ```shell
-uv run python -m archive_management init --root .\dev-data    # 初始化目录/配置/日志/数据库
-uv run python -m archive_management doctor --root .\dev-data  # 健康检查（平台、目录、数据库版本）
-uv run python -m archive_management gui --root .\dev-data     # 启动图形界面
+uv run python -m archive_management init --root ./dev-data    # 初始化目录/配置/日志/数据库
+uv run python -m archive_management doctor --root ./dev-data  # 健康检查（平台、目录、数据库版本）
+uv run python -m archive_management gui --root ./dev-data     # 启动图形界面
 uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检（自动关闭）
 ```
 
 - 不带子命令运行时默认执行 `init`。
 - `--root` 可以把全部数据收敛到指定目录（便携模式与开发调试），此时配置、数据、日志、缓存都在该目录下；不加则使用系统约定的应用目录。
 - 全局 `--verbose` 本次启动就打开调试日志（默认只记录 INFO 及以上的高风险操作）；同一个开关也可以在软件设置里拨（写入 `config.json` 的 `logging.debug`，默认关闭，拨完立即生效）。
-- 命令要在**仓库根目录**执行：仓库根的 `.env` 提供 `PYTHONPATH=src`（`uv run` 自动加载），其中的 `src` 是相对当前目录解析的。
+- 命令要在**仓库根目录**执行：`.env` 提供 `PYTHONPATH=src`，其中的 `src` 是相对当前目录解析的；在非 VS Code 的终端里还要按上一节的办法把它传给 `uv run`（`--env-file .env`、`UV_ENV_FILE=.env` 或 `PYTHONPATH=src`）。
 
 ## 配置文件
 

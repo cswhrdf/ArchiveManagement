@@ -14,7 +14,8 @@ import customtkinter as ctk
 import pytest
 
 import archive_management.ui.widgets as widgets
-from archive_management.ui.palette import DARK
+from archive_management.ui.palette import DARK, LIGHT
+from archive_management.ui.widgets import BUTTON_STYLES, DESTRUCTIVE_STYLES
 
 pytestmark = [
     pytest.mark.ui,
@@ -35,6 +36,12 @@ class _FakeCtkWidget:
 
     def configure(self, **kwargs: Any) -> None:
         self.kwargs.update(kwargs)
+
+    def cget(self, option: str) -> Any:
+        """按真实控件的契约读回选项(``state`` 默认 ``normal``: 重绘要按它取色)."""
+        if option in self.kwargs:
+            return self.kwargs[option]
+        return "normal" if option == "state" else None
 
 
 @pytest.fixture
@@ -146,6 +153,68 @@ def test_buttons_painted_by_each_style(kit: widgets.UiKit) -> None:
     ghost = buttons["ghost"]
     assert ghost.kwargs["fg_color"] == DARK.raised
     assert ghost.kwargs["border_color"] == DARK.border
+
+
+@pytest.mark.parametrize("palette", [DARK, LIGHT])
+def test_destructive_styles_stay_inside_the_danger_range(palette: Any) -> None:
+    """ "危险操作的颜色范围"就是这两种样式, 而且两套主题下都真的带危险色.
+
+    这条把 I-2 那句"删除类按钮的颜色必须落在危险色范围内"钉在 `widgets` 层:
+    范围变了 (例如把主色也算进去) 会立刻变红。
+    """
+    assert set(DESTRUCTIVE_STYLES) <= set(BUTTON_STYLES)
+    assert "accent" not in DESTRUCTIVE_STYLES, "主色不是危险色"
+    for style in DESTRUCTIVE_STYLES:
+        colors = widgets.button_colors(palette, style)
+        assert palette.danger in (colors.fg, colors.text), f"{style} 没带危险色"
+
+
+def test_every_action_kind_maps_to_its_own_style(kit: widgets.UiKit) -> None:
+    """动作性质与样式**一一对应**, 且 ``kind=`` 真的按性质取色(I-10).
+
+    两个性质共用一种样式的话, "从实测颜色反推性质"这条判据就不再成立(守卫靠的就是这个反推),
+    所以这里把一一对应本身钉住; 顺便验一下 `UiKit.button(kind=...)` 与 `style=` 等价。
+    """
+    styles = [widgets.style_for(kind) for kind in widgets.ACTION_KINDS]
+    assert len(set(styles)) == len(widgets.ACTION_KINDS), "性质与样式必须一一对应"
+    assert set(styles) <= set(BUTTON_STYLES)
+
+    by_kind = kit.button(kit, "按性质", kind="primary")
+    by_style = kit.button(kit, "按样式", style="accent")
+    kit.apply(DARK)
+    assert by_kind.kwargs["fg_color"] == by_style.kwargs["fg_color"] == DARK.accent
+    assert by_kind.kwargs["fg_color"] == widgets.button_colors(DARK, "accent").fg
+
+
+def test_button_styles_share_one_source_and_danger_is_its_own_color(
+    kit: widgets.UiKit,
+) -> None:
+    """四种样式的配色只有一处定义, 且危险色不等于主色(48 号评审).
+
+    "破坏性动作穿危险色"要成立, 前提是危险色**只**在一个地方定义: 这里把它钉住 ——
+    :func:`widgets.button_colors` 是唯一出处, 登记式的按钮与就地创建的按钮
+    (对话框成对的取消/确认、窗口页脚)取到的必须是同一份颜色。
+    """
+    styles: tuple[widgets.ButtonStyle, ...] = ("accent", "danger", "soft", "ghost")
+    colors = {style: widgets.button_colors(DARK, style) for style in styles}
+
+    assert colors["danger"].fg == DARK.danger
+    assert colors["danger"].text == DARK.danger_text
+    assert colors["danger"].fg != colors["accent"].fg, "危险色不能与主色同色"
+    assert colors["ghost"].border == DARK.border, "次要按钮要描边"
+    assert colors["accent"].border is None, "主色/危险色不描边"
+    triples = {(item.fg, item.hover, item.text) for item in colors.values()}
+    assert len(triples) == len(styles), "四种样式必须互相区分"
+
+    manual = ctk.CTkButton(kit)
+    widgets.paint_button_style(manual, DARK, "danger")
+    registered = kit.button(kit, "删除", style="danger")
+    kit.apply(DARK)
+    for key in ("fg_color", "hover_color", "text_color"):
+        assert manual.kwargs[key] == registered.kwargs[key], (
+            f"临时按钮的 {key} 与登记式不一致"
+        )
+    assert manual.kwargs["fg_color"] == colors["danger"].fg
 
 
 def test_button_registers_and_repaints(kit: widgets.UiKit) -> None:
@@ -556,3 +625,36 @@ def test_paint_button_disabled_dims_background_text_and_border() -> None:
     assert button.kwargs["fg_color"] == DARK.raised
     assert button.kwargs["text_color"] == DARK.text_body
     assert button.kwargs["border_width"] == 1
+
+
+def test_card_surface_colors_put_selection_before_hover() -> None:
+    """卡片/行的配色规则: 选中 > 悬停 > 常规, 而且**悬停不改选中的样子**.
+
+    这是"我选中了谁"与"哪里能点"两件事的落点: 选中用浅底 + 描边, 悬停只提底色;
+    鼠标划过已选中的卡片时必须还是选中的样子, 否则用户会以为自己刚才选错了。
+    """
+    assert widgets.card_surface_colors(DARK, selected=True, hovered=False) == (
+        DARK.accent_soft,
+        DARK.accent_soft_border,
+    )
+    assert widgets.card_surface_colors(DARK, selected=True, hovered=True) == (
+        DARK.accent_soft,
+        DARK.accent_soft_border,
+    ), "悬停不能盖掉选中"
+    assert widgets.card_surface_colors(DARK, selected=False, hovered=True) == (
+        DARK.card_hover,
+        DARK.card_border,
+    )
+    assert widgets.card_surface_colors(DARK, selected=False, hovered=False) == (
+        DARK.card,
+        DARK.card_border,
+    )
+    # 两套主题都要成立: 规则不是"深色主题下碰巧看起来对"。
+    assert widgets.card_surface_colors(LIGHT, selected=False, hovered=True) == (
+        LIGHT.card_hover,
+        LIGHT.card_border,
+    )
+    assert widgets.card_surface_colors(LIGHT, selected=True, hovered=True) == (
+        LIGHT.accent_soft,
+        LIGHT.accent_soft_border,
+    )

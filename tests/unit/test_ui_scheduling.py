@@ -120,10 +120,16 @@ class _NameLabel:
     def __init__(self) -> None:
         """从空文本开始."""
         self.writes: list[str] = []
+        self.bound: list[str] = []
 
     def configure(self, *, text: str) -> None:
         """记录一次文本重设."""
         self.writes.append(text)
+
+    def bind(self, sequence: str, *_args: Any, **_kwargs: Any) -> str:
+        """裁剪会被省掉的尾巴时, 标签上会挂悬停提示(记下绑过哪些事件)."""
+        self.bound.append(sequence)
+        return ""
 
 
 class _Font:
@@ -154,12 +160,18 @@ def test_row_name_fit_skips_unknown_and_unchanged_widths() -> None:
     HomePage._fit_row_name(page, parts, 50)  # 第一次按 50px 裁
     HomePage._fit_row_name(page, parts, 50)  # 同一宽度: 不重写
     HomePage._fit_row_name(page, parts, 80)  # 变宽: 重新裁
+    HomePage._fit_row_name(page, parts, 200)  # 宽到放得下整串: 不再裁
 
     assert label.writes == [
         fit_text(full, cast(Any, _Font()), 50),
         fit_text(full, cast(Any, _Font()), 80),
+        full,
     ]
-    assert parts.fitted_width == 80
+    assert parts.fitted_width == 200
+    # 被裁掉的时候要挂悬停提示(完整内容还能看到): 裁了两次但只绑一遍(提示文案就地换,
+    # 不重复绑事件); 不再被裁时也不新增绑定。
+    assert label.bound.count("<Enter>") == 1, label.bound
+    assert set(label.bound) == {"<Enter>", "<Leave>", "<Button-1>", "<Destroy>"}
 
 
 def test_row_name_label_watches_its_own_width() -> None:

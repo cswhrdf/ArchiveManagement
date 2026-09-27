@@ -54,6 +54,16 @@ class _FakeWidget:
     def configure(self, **kwargs: Any) -> None:
         self.kwargs.update(kwargs)
 
+    def cget(self, option: str) -> Any:
+        """按真实控件的契约读回选项.
+
+        ``state`` 是"禁用必须看起来禁用"那条判据的输入(``paint_button_state``
+        要读它), Tk 侧没写过时默认是 ``normal``。
+        """
+        if option in self.kwargs:
+            return self.kwargs[option]
+        return "normal" if option == "state" else None
+
     def pack(self, **_kwargs: Any) -> None:
         # 记录是否在显示中: 批量导出的筛选会 pack/pack_forget 整行.
         self.packed = True
@@ -235,6 +245,12 @@ class _FakeWindow(_FakeWidget):
         self.destroyed = False
         # 调用流水(居中实现要靠它证明"窗口可见时已经位于最终位置").
         self.calls: list[str] = []
+        # 窗口级绑定(常驻窗口不该吃 Esc/回车, 判据靠它).
+        self.binds: list[tuple[str, Any, dict[str, Any]]] = []
+
+    def bind(self, _sequence: str, _callback: Any, **_kwargs: Any) -> None:
+        """记录窗口级绑定的序列名与回调."""
+        self.binds.append((_sequence, _callback, _kwargs))
 
     def title(self, value: str) -> None:
         self.window_title = value
@@ -451,6 +467,27 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _FakeParent:
     parent = _FakeParent([], [], [], [], [], [], [])
     _install_fakes(monkeypatch, parent)
     return parent
+
+
+def test_present_gives_window_keys_only_to_modal_windows(
+    harness: _FakeParent,
+) -> None:
+    """窗口级 Esc/回车/定焦只属于抓取式对话框(12 号实测反馈).
+
+    常驻窗口(设置、定时任务)调到 ``modal=False``: 不许绑 ``<Escape>``/``<Return>``
+    —— 实测设置窗口按 Esc 会直接关窗、按回车会按到"切换主题"那颗主色按钮。
+    对话框那条路必须保持原样。
+    """
+    resident = _FakeWindow()
+    dialogs._present(harness, resident, modal=False)
+    assert [sequence for sequence, *_ in resident.binds] == []
+    assert resident.calls[0] == "withdraw()", "不接键盘也不能影响居中"
+
+    modal = _FakeWindow()
+    dialogs._present(harness, modal, modal=True)
+    sequences = [sequence for sequence, *_ in modal.binds]
+    assert "<Escape>" in sequences
+    assert "<Return>" in sequences
 
 
 def test_confirm_ok_returns_true(harness: _FakeParent) -> None:
@@ -1347,10 +1384,12 @@ def test_import_package_dialog_shows_the_summary_and_the_match(
 
 
 def test_dialog_body_height_is_clamped_to_the_screen() -> None:
-    """28 号评审: 长对话框的正文高度按屏幕的 80% 封顶, 并夹在上下限之间.
+    """28 号评审: 长对话框的正文高度按屏幕封顶, 并夹在上下限之间.
 
-    正文区要自己滚, 底部的按钮才不会被切出屏幕 —— 533x832 的导入弹窗在 768/900 高的
-    屏幕上就是这个下场。
+    口径是**整个窗口**不超过屏幕可用高度的 80%(optimizations.csv 35 号), 所以正文区的
+    预算要先扣掉"正文之外"那段固定高度(`_DIALOG_CHROME_HEIGHT`, 实测约 50px)。只夹
+    正文区的旧口径在 768 高的屏上会把窗口顶到 664(正文 614 + 正文之外 50), 底部的
+    「导入」照样差 16px 出屏幕 —— 本用例当初只钉了正文区那一半, 漏的正是这 16px。
     """
 
     class _Screen:
@@ -1362,8 +1401,18 @@ def test_dialog_body_height_is_clamped_to_the_screen() -> None:
         def winfo_screenheight(self) -> int:
             return self._height
 
-    assert dialogs._dialog_body_height(_Screen(800)) == 640, "矮屏取屏幕的 80%"
+    # 屏幕够高时用上限: 不跟着屏幕一起涨.
     assert dialogs._dialog_body_height(_Screen(1080)) == dialogs._DIALOG_BODY_MAX
+    # 屏幕矮时按 80% 扣掉正文之外那段.
+    budget = dialogs._dialog_body_height(_Screen(800))
+    assert budget == int(800 * 0.8) - dialogs._DIALOG_CHROME_HEIGHT, (
+        "矮屏取 80% 再扣正文之外"
+    )
+    # 真正要守住的是这条: 窗口总高(正文 + 正文之外)落在 80% 以内.
+    assert budget + dialogs._DIALOG_CHROME_HEIGHT <= int(800 * 0.8), (
+        "总高必须落在屏幕 80% 内"
+    )
+    # 屏幕再矮也不压到下限以下(此时靠正文区自己滚保证内容可达).
     assert dialogs._dialog_body_height(_Screen(400)) == dialogs._DIALOG_BODY_MIN
 
 
@@ -1754,6 +1803,55 @@ def test_batch_import_dialog_merging_without_a_target_keeps_it_empty(
     choice = result.choices["Demo.archive.zip"]
     assert choice.strategy == STRATEGY_MERGE
     assert choice.target_game_id is None
+
+
+def test_batch_import_dialog_starts_in_merge_mode_when_the_row_says_so(
+    harness: _FakeParent,
+) -> None:
+    """模型层给出"合并"作默认值时, 对话框要**开局就是合并态**.
+
+    "库里已有同一款就默认合并"这条要求落在两处: 默认值由 ``models._batch_row`` 给
+    (那里有它自己的用例), 对话框把它读进单选变量并**开局就启用**目标下拉框 —— 否则
+    用户还得先点一下单选框才会亮起来。两处都断言, 只改一处不会绿。
+    """
+    args = _batch_import_args()
+    args["prompt"] = models.BatchImportPrompt(
+        summary="包内 1 款游戏",
+        hint="逐款选择导入方式",
+        rows=(
+            models.BatchImportRow(
+                entry="Demo.archive.zip",
+                name="Demo",
+                meta="Windows · AppID 730",
+                match_text="库里疑似同一款游戏: 星际拓荒(已默认选中)",
+                locations=_rows(),
+                strategies=models.import_strategies(has_targets=True),
+                targets=_targets(),
+                strategy=STRATEGY_MERGE,
+                target_game_id="7",
+            ),
+        ),
+    )
+
+    def check_the_initial_state() -> None:
+        merge = next(
+            radio
+            for radio in _batch_strategy_radios(harness)[0]
+            if radio.value == STRATEGY_MERGE
+        )
+        assert merge.variable is not None
+        assert merge.variable.get() == STRATEGY_MERGE, "开局就选中合并"
+        assert harness.combos[0].kwargs.get("state") == "normal", "开局就能选目标"
+
+    harness.click_text = tr("dialog.import_confirm")
+    harness.on_wait = check_the_initial_state
+
+    result = dialogs.batch_import_dialog(harness, DARK, **args)
+
+    assert result is not None
+    assert result.choices["Demo.archive.zip"] == models.ImportChoice(
+        strategy=STRATEGY_MERGE, target_game_id="7", locations={0: "D:/saves"}
+    )
 
 
 def test_batch_import_dialog_disables_targets_until_merging(

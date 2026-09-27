@@ -37,6 +37,45 @@ BASE_FONT_PX = DEFAULT_BASE_FONT_PX
 #: 设置窗口列出的可选基准字号。
 FONT_CHOICES = BASE_FONT_CHOICES
 
+# -- 字号阶梯 ---------------------------------------------------------------
+# 界面里的字号只许用这几档(px 口径, 会随"基准字号"等比缩放)。实测 2026-09-27: 173 处
+# ``CTkFont(size=...)`` 里有 8 处落在阶梯外(14 与 16 混用), 按角色收敛 --
+# **卡片/列表标题与按钮强调同档(13)**, 窗口与页面的标题才用 16。
+
+#: 角标: 海报角上的备份数、状态点这类"数字/符号"。
+FONT_TINY = 10
+#: 次要说明、表头、提示行。
+FONT_HINT = 11
+#: 正文(默认)。
+FONT_BODY = 12
+#: 强调正文: 按钮、列表行标题、卡片标题。
+FONT_STRONG = 13
+#: 状态点、角标这类"靠字形大小决定视觉直径"的圆点(与强调正文同档)。
+FONT_GLYPH = FONT_STRONG
+#: 面板小标题(h2)。
+FONT_SUBTITLE = 15
+#: 窗口与页面标题。
+FONT_TITLE = 16
+#: 详情页滚到顶时的大号游戏名。
+FONT_HERO = 20
+#: 详情页标题。
+FONT_PAGE_TITLE = 26
+#: 海报/头像占位图里的那个大写字母。
+FONT_PLACEHOLDER = 28
+
+#: 阶梯的全部档位(守卫按这张表判 ``CTkFont(size=...)``).
+FONT_SCALE = (
+    FONT_TINY,
+    FONT_HINT,
+    FONT_BODY,
+    FONT_STRONG,
+    FONT_SUBTITLE,
+    FONT_TITLE,
+    FONT_HERO,
+    FONT_PAGE_TITLE,
+    FONT_PLACEHOLDER,
+)
+
 
 @dataclass(frozen=True)
 class FontScale:

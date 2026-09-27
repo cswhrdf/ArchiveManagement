@@ -1412,14 +1412,16 @@ class SqlArchiveService:
     def run_delete_backup(self, game_id: str, backup_id: str) -> str:
         """按分支树删除备份: 同线路节点让后续上移, 分支根节点连带子分支."""
         _game, gid = self._game_ref(game_id)
-        self._require_backup(gid, backup_id)
+        node = self._require_backup(gid, backup_id)
+        # 名字要在删之前取: 结果文案要说清"删的是哪一份"(I-7).
+        title = self._node_title(node)
         plan = self._backups.delete_node(gid, int(backup_id), cascade=True)
         self._touch()
         if plan.mode is DeletionMode.CASCADE:
             return tr("result.delete_cascade", count=plan.removed_count)
         if plan.mode is DeletionMode.SHIFT:
-            return tr("result.delete_shift")
-        return tr("result.delete_single")
+            return tr("result.delete_shift", title=title)
+        return tr("result.delete_single", title=title)
 
     def run_export(self, game_id: str, destination: str) -> str:
         """把这款游戏(含全部备份内容)导出到 ``destination``, 返回本地化提示.

@@ -15,22 +15,139 @@ from __future__ import annotations
 import tkinter as tk
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Literal
 
 import customtkinter as ctk
 
+from archive_management.ui.keyboard import (
+    install_keyboard_support,
+    remember_palette,
+    set_focus_paint,
+)
 from archive_management.ui.palette import Palette
 from archive_management.ui.rendering import apply_border_rendering_fix
+from archive_management.ui.textfit import MeasurableFont, fit_path, fit_text
 from archive_management.ui.textundo import apply_input_undo_support
 
 apply_border_rendering_fix()
 apply_input_undo_support()
+# 键盘可用性(Tab 可达 / 焦点环 / 空格回车激活)也在类上打一次补丁: 控件是就地创建的
+# 还是走 UiKit 都自动接上, 调用点不需要记得做任何事(见 ui.keyboard)。
+install_keyboard_support()
 _PaletteKey = str
 _Repaint = Callable[..., None]
 _Unsubscribe = Callable[[], None]
 
 LabelStyle = Literal["primary", "body", "muted", "hint", "h2"]
-ButtonStyle = Literal["accent", "danger", "ghost", "soft"]
+ButtonStyle = Literal["accent", "danger", "danger_soft", "ghost", "soft"]
+# **动作性质**: "这个按钮是干什么的" —— 业务代码只声明性质, 穿什么颜色由
+# :data:`ACTION_STYLES` 一处决定(I-10: 重要功能键的配色也要能断言)。
+# ``primary`` = 这一屏最该做的事; ``destructive`` = 破坏性动作; 其余是次要动作。
+ActionKind = Literal["primary", "secondary", "destructive", "destructive_soft"]
+
+# 全部动作性质(顺序无关, 只用于"把实测颜色反推回性质"这类遍历)。
+ACTION_KINDS: tuple[ActionKind, ...] = (
+    "primary",
+    "secondary",
+    "destructive",
+    "destructive_soft",
+)
+
+# 性质 -> 样式的**唯一定义处**: 改这里就能同时影响所有同类按钮。
+ACTION_STYLES: dict[ActionKind, ButtonStyle] = {
+    "primary": "accent",
+    "secondary": "ghost",
+    "destructive": "danger",
+    "destructive_soft": "danger_soft",
+}
+
+# 全部按钮样式(顺序无关, 只用于"把实测颜色反推回样式"这类遍历)。
+BUTTON_STYLES: tuple[ButtonStyle, ...] = (
+    "accent",
+    "danger",
+    "danger_soft",
+    "ghost",
+    "soft",
+)
+# **破坏性动作允许的样式范围**: 只能穿危险色实底或危险色描边(或处于禁用态)。
+# "删除类按钮的颜色必须落在这个范围内"这件事只有这一处定义 —— 守卫按它判定,
+# 新加一个删除按钮却上了主色/中性色时会直接变红, 不需要有人去维护文案表。
+DESTRUCTIVE_STYLES: tuple[ButtonStyle, ...] = ("danger", "danger_soft")
+
+
+# 样式 -> 性质的反查(把实测颜色/样式反推回性质时用; 与 ACTION_STYLES 互为反正)。
+_KIND_FOR_STYLE: dict[ButtonStyle, ActionKind] = {
+    mapped: kind for kind, mapped in ACTION_STYLES.items()
+}
+
+
+def style_for(kind: ActionKind) -> ButtonStyle:
+    """把动作性质翻译成样式名(业务代码只该写性质)."""
+    return ACTION_STYLES[kind]
+
+
+# **聚焦时的换色规则**(用户实测: "聚焦框在实底按钮上看起来只是按钮缩小了一圈"):
+# 主色/危险色实底上任何亮色环都看不出(实测 1.27:1), 所以聚焦时把这类按钮换成对应的
+# 软底样式 —— 换完之后那一档亮色(深色主题)/深色(浅色主题)环立刻有 **10:1 以上**,
+# 而且**两套主题各自只剩一个抢眼的环色**(见 ``docs/testing.md``)。
+# 只换配色、不换功能: 软底样式仍在 ``DESTRUCTIVE_STYLES`` 允许范围内。
+FOCUS_STYLE: dict[str, ButtonStyle] = {
+    "accent": "soft",
+    "danger": "danger_soft",
+}
+
+
+def focus_paint(palette: Palette, style: str) -> dict[str, str]:
+    """聚焦时该写给控件的颜色(没有对应软底样式的样式返回空表 = 只换焦点环)."""
+    mapped = FOCUS_STYLE.get(style)
+    if mapped is None:
+        return {}
+    colors = button_colors(palette, mapped)
+    return {
+        "fg_color": colors.fg,
+        "hover_color": colors.hover,
+        "text_color": colors.text,
+    }
+
+
+@dataclass(frozen=True)
+class ButtonColors:
+    """一个按钮样式的配色(``border`` 为 None 表示不描边)."""
+
+    fg: str
+    hover: str
+    text: str
+    border: str | None = None
+
+
+def button_colors(palette: Palette, style: ButtonStyle) -> ButtonColors:
+    """按钮样式的**唯一定义处**: 每种样式用哪些 token 只在这里写一次.
+
+    走 ``UiKit`` 登记的按钮与对话框/页脚里就地创建的按钮都从这里取色, 于是
+    "破坏性动作用危险色"只需要改这一处(24 号评审: 删除不能与导入/保存共用
+    同一个安全色主按钮)。
+    """
+    if style == "accent":
+        return ButtonColors(
+            palette.accent, palette.accent_soft_border, palette.accent_text
+        )
+    if style == "danger":
+        # 悬停色用 item_hover: 调色板里没有"更深的危险色", 而拿主色的深绿去
+        # 悬停红按钮会闪出一层青, 反而更怪。
+        return ButtonColors(palette.danger, palette.item_hover, palette.danger_text)
+    if style == "soft":
+        return ButtonColors(
+            palette.accent_soft, palette.accent_soft_border, palette.accent_soft_text
+        )
+    if style == "danger_soft":
+        # "描边 + 危险色文字": 破坏性动作在同一行里不该比主操作更抢眼(10 号评审)。
+        return ButtonColors(
+            palette.raised, palette.item_hover, palette.danger, palette.danger
+        )
+    return ButtonColors(
+        palette.raised, palette.item_hover, palette.text_body, palette.border
+    )
 
 
 class UiKit:
@@ -46,6 +163,9 @@ class UiKit:
         self._active: set[int] = set()
         self._next_token = 0
         self._buttons: dict[ctk.CTkButton, ButtonStyle] = {}
+        # 最近一次 apply 的调色板: 按钮一创建就把"当前这套色"记在它和它所在的窗口上,
+        # 焦点环才有颜色可用(见 keyboard.ring_color)。
+        self._palette: Palette | None = None
 
     # -- 登记 ---------------------------------------------------------------
 
@@ -138,12 +258,19 @@ class UiKit:
         text: str,
         style: ButtonStyle = "ghost",
         *,
+        kind: ActionKind | None = None,
         command: Callable[[], None] | None = None,
         width: int = 100,
         height: int = 34,
         corner_radius: int = 7,
     ) -> ctk.CTkButton:
-        """创建并登记一个指定样式的按钮."""
+        """创建并登记一个指定样式(或动作性质)的按钮.
+
+        ``kind`` 是推荐写法: 业务代码声明"这个按钮是干什么的", 颜色由一处映射决定;
+        ``style`` 保留给"就是想要某个具体样子"的少数场合(两个都给了以 ``kind`` 为准)。
+        """
+        if kind is not None:
+            style = style_for(kind)
         button = ctk.CTkButton(
             parent,
             text=text,
@@ -153,7 +280,10 @@ class UiKit:
             corner_radius=corner_radius,
             font=ctk.CTkFont(size=13, weight="bold"),
         )
+        button._action_kind = kind
         self._buttons[button] = style
+        if self._palette is not None:
+            remember_palette(button, self._palette)
         self.register(lambda p, w=button, s=style: self._paint_button(w, p, s))
         return button
 
@@ -164,6 +294,7 @@ class UiKit:
 
         已退订或已销毁(引发 ``TclError``)的控件会被安全跳过。
         """
+        self._palette = palette
         for token, repaint in list(self._repaints):
             if token not in self._active:
                 continue
@@ -205,32 +336,20 @@ class UiKit:
         palette: Palette,
         style: ButtonStyle,
     ) -> None:
-        if style == "accent":
-            button.configure(
-                fg_color=palette.accent,
-                hover_color=palette.accent_soft_border,
-                text_color=palette.accent_text,
-            )
-        elif style == "danger":
-            button.configure(
-                fg_color=palette.danger,
-                hover_color=palette.accent_soft_border,
-                text_color=palette.danger_text,
-            )
-        elif style == "soft":
-            button.configure(
-                fg_color=palette.accent_soft,
-                hover_color=palette.accent_soft_border,
-                text_color=palette.accent_soft_text,
-            )
-        else:  # ghost
-            button.configure(
-                fg_color=palette.raised,
-                hover_color=palette.item_hover,
-                text_color=palette.text_body,
-                border_width=1,
-                border_color=palette.border,
-            )
+        # 配色只有一处(button_colors), 这里不重复写颜色; 禁用态也必须一起保留,
+        # 否则切主题会把禁用按钮重新画成亮的。
+        paint_button_state(button, palette, style)
+
+    def repaint_button(self, button: ctk.CTkButton, palette: Palette) -> None:
+        """按按钮**当前的 state**重画它(样式取登记时的那一个).
+
+        可用性变化后调用: 状态与配色必须一起改, 只改 state 会让禁用按钮留着
+        主色/危险色的底(49 号评审)。未登记的按钮直接忽略。
+        """
+        style = self._buttons.get(button)
+        if style is None:
+            return
+        paint_button_state(button, palette, style)
 
 
 def paint_button_enabled(
@@ -246,7 +365,11 @@ def paint_button_enabled(
 
     同时写 ``text_color_disabled``: CustomTkinter 在禁用时**只**用它渲染文字,
     只改 ``text_color`` 是看不见效果的(这是一个很容易踩的坑)。
+
+    这里也是按钮记下"当前这套色"的地方: 焦点环的强调色由它决定(见
+    :func:`keyboard.ring_color`), 所以不需要每个对话框再传一次调色板。
     """
+    remember_palette(button, palette)
     button.configure(
         fg_color=fg_color,
         hover_color=hover_color,
@@ -257,12 +380,43 @@ def paint_button_enabled(
     )
 
 
+def paint_button_style(
+    button: ctk.CTkButton,
+    palette: Palette,
+    style: ButtonStyle,
+) -> None:
+    """把**没走 UiKit 登记**的按钮按样式画好.
+
+    对话框里成对的 取消/确认、窗口页脚上的按钮都是就地创建的(随窗口一起销毁,
+    不需要登记重绘), 但配色仍然必须来自 :func:`button_colors` —— 否则就会出现
+    "取消按钮留着 CustomTkinter 默认蓝"这种漏网(48 号评审: 取消永远是次色)。
+
+    顺便把**样式**与**动作性质**记在按钮上: 对话框的"回车 = 主操作"靠它找到主按钮
+    (见 :func:`keyboard.primary_button`), 守卫也靠它把实测颜色反推回性质。
+    """
+    button._button_style = style
+    button._action_kind = _KIND_FOR_STYLE.get(style)
+    colors = button_colors(palette, style)
+    paint_button_enabled(
+        button,
+        palette,
+        fg_color=colors.fg,
+        text_color=colors.text,
+        hover_color=colors.hover,
+        border_color=colors.border,
+    )
+
+
 def paint_button_disabled(button: ctk.CTkButton, palette: Palette) -> None:
     """把按钮画成禁用态: 更暗的底色 + 更暗的字.
 
     "几乎一样"的禁用态等于没有禁用态 —— 用户会一直点它。这里三样一起压暗
     (底、字、描边), 与同一行的可用按钮形成明确对比。
+
+    禁用的按钮同时被**摘出 Tab 链**(见 :func:`keyboard.sync_tab_chain`): 键盘用户
+    不该把 Tab 浪费在一个按不动的控件上。
     """
+    remember_palette(button, palette)
     button.configure(
         fg_color=palette.disabled_bg,
         hover_color=palette.disabled_bg,
@@ -271,6 +425,49 @@ def paint_button_disabled(button: ctk.CTkButton, palette: Palette) -> None:
         border_width=1,
         border_color=palette.disabled_border,
     )
+
+
+def button_is_disabled(button: ctk.CTkButton) -> bool:
+    """按钮当前是否禁用(读 Tk 的 state, 而不是各自记的布尔量)."""
+    return str(button.cget("state")) == "disabled"
+
+
+def paint_button_state(
+    button: ctk.CTkButton,
+    palette: Palette,
+    style: ButtonStyle,
+) -> None:
+    """按按钮**当前的 state**上色: 禁用就压暗, 否则按样式画.
+
+    可用性一变就要调它 —— 只 ``configure(state=...)`` 而不重绘的按钮会留着原来的
+    底色: 主色/危险色的按钮被禁用后仍然亮着, 用户会一直点它(49 号评审: 主窗口与
+    游戏管理窗口的禁用按钮看起来完全可点)。主题重绘也走这里, 因此"切主题把禁用
+    按钮画回亮的"不会再发生。
+    """
+    if button_is_disabled(button):
+        paint_button_disabled(button, palette)
+        return
+    paint_button_style(button, palette, style)
+
+
+def card_surface_colors(
+    palette: Palette, *, selected: bool, hovered: bool
+) -> tuple[str, str]:
+    """卡片/列表行的 (底色, 描边色): **选中 > 悬停 > 常规**.
+
+    全应用只允许这一条规则 —— 详情页的备份卡片、主页的列表行与海报卡、发现页的候选/
+    目录行、游戏管理窗口的位置行都走它。两件事必须同时成立:
+
+    * **选中的表达是"浅底 + 描边"**, 不是主按钮那种实心强调色: "我选中了谁"与
+      "哪里能点"是两件事(见 :meth:`Palette.selection_colors`);
+    * **悬停不能盖掉选中** —— 悬停在一张已选中的卡片上时, 它看起来必须还是选中的,
+      否则鼠标一划过就"忘了"刚才选了谁。
+    """
+    if selected:
+        return palette.selection_colors(True)
+    if hovered:
+        return palette.card_hover, palette.card_border
+    return palette.selection_colors(False)
 
 
 def scrollbar_needed(
@@ -481,6 +678,60 @@ def auto_scrollbar(frame: ctk.CTkScrollableFrame) -> None:
     request()
 
 
+def track_fit(
+    container: ctk.CTkBaseClass,
+    label: ctk.CTkLabel,
+    lines: tuple[str, ...],
+    *,
+    path: bool = False,
+    inset: int | Callable[[], int] = 0,
+    max_lines: int = 1,
+) -> None:
+    """把 ``lines`` 按**容器**的实际宽度裁好填进 ``label``, 宽度变化时重裁.
+
+    为什么宽度取容器而不是 label 自己: label 若是被内容撑开的(``pack(side="left")``、
+    ``grid(sticky="w")``), 它自己的宽度就等于文字宽度 —— 把文字裁短会让它跟着变窄,
+    下一轮又裁得更短, 越裁越短。被 ``fill``/``sticky="ew"`` 拉伸的那个容器宽度与文本
+    无关, 才算得稳。
+
+    宽度还没量出来(<=1)或没变时都不动, 避免"改文本 -> 新事件 -> 再裁"互相追。
+    裁剪用 :func:`fit_text`(尾部省略号), 传 ``path=True`` 换 :func:`fit_path`
+    (中间省略, 保留最有用的尾段)。``max_lines > 1`` 时先自己断行到上限再补省略号 ——
+    **不能靠 ``wraplength`` 顶这半边**: Tk 只在空格处断, 一整段没有空格的中日韩文字
+    实测会被摆在 1038px 的一行里(容器只有 815px), 照样硬裁。
+    ``inset`` 可以给个函数 —— 前面的小标题/图标宽度要等控件建好才知道。
+    """
+
+    def budget() -> int:
+        gap = inset() if callable(inset) else inset
+        return int(container.winfo_width()) - gap
+
+    def clip(text: str, width: int) -> str:
+        font = label.cget("font")
+        if path:
+            return fit_path(text, font, width)
+        return fit_text(text, font, width, max_lines=max_lines)
+
+    state = {"width": 0}
+
+    def resize(_event: object = None) -> None:
+        try:
+            width = budget()
+            if width <= 1 or width == state["width"]:
+                return
+            state["width"] = width
+            shown = [clip(line, width) for line in lines]
+            label.configure(text="\n".join(shown))
+            # 真的裁掉了就把完整文本挂成悬停提示: 省略号只是"还有下文"的记号,
+            # 看不到下文就等于静默截断(I-3)。宽回来以后又完整了则把提示撤掉 ——
+            # 提示与可见文字一样的时候只会碍事。
+            sync_tooltip(label, full="\n".join(lines), shown="\n".join(shown))
+        except tk.TclError:  # 控件已销毁: 回调作废
+            return
+
+    container.bind("<Configure>", resize, add="+")
+
+
 def track_wraplength(
     container: ctk.CTkBaseClass,
     label: ctk.CTkLabel,
@@ -508,8 +759,9 @@ def track_wraplength(
 
 
 # 悬停多久才弹出提示: 短到"停一下就有", 长到鼠标划过不会到处闪。
-_TOOLTIP_DELAY_MS = 350
-# 提示与鼠标控件的间距(像素)与内衬。
+# 提示文案记在控件上的属性名: 让"省了尾巴的地方到底挂没挂提示"能量出来(I-3)。
+_TOOLTIP_ATTR = "_archive_tooltip"
+_TOOLTIP_DELAY_MS = 350  # 提示与鼠标控件的间距(像素)与内衬。
 _TOOLTIP_GAP = 6
 _TOOLTIP_PAD = (10, 5)
 # 提示是浮在界面之上的临时层, 固定用深色底 + 浅色字(两种主题下都读得清, 也是
@@ -554,6 +806,60 @@ def _open_tooltip(anchor: ctk.CTkBaseClass, message: str) -> tk.Toplevel | None:
     return window
 
 
+def tooltip_text(widget: ctk.CTkBaseClass) -> str:
+    """该控件挂着的悬停提示文案(没有提示就返回空串).
+
+    被省略号截掉的文字, 唯一能看到全文的路就是悬停提示 —— 所以"这里到底挂没挂"
+    必须是可量的事实, 而不是靠读代码记得(守卫按它断言, 见 I-3)。
+    """
+    attached = getattr(widget, _TOOLTIP_ATTR, "")
+    if callable(attached):
+        with suppress(Exception):
+            return str(attached())
+        return ""
+    return str(attached or "")
+
+
+def detach_tooltip(widget: ctk.CTkBaseClass) -> None:
+    """撤掉悬停提示(文案不再被截断时调用)."""
+    setattr(widget, _TOOLTIP_ATTR, "")
+
+
+def sync_tooltip(
+    widget: ctk.CTkBaseClass, *, full: str, shown: str | None = None
+) -> None:
+    """按"有没有被截断"自动挂上/撤掉悬停提示(``shown=None`` 就自己去读控件).
+
+    这是全应用**唯一**一处"裁了就得能给全文"的落点: :func:`track_fit` 与
+    :func:`fit_label` 都走它, 所以不存在"某处忘了挂提示"这种漏网(I-3)。
+    """
+    if shown is None:
+        shown = str(widget.cget("text"))
+    if shown == full:
+        detach_tooltip(widget)
+        return
+    attach_tooltip(widget, full)
+
+
+def fit_label(
+    label: ctk.CTkLabel,
+    text: str,
+    font: MeasurableFont,
+    width: int,
+    *,
+    max_lines: int = 1,
+) -> None:
+    """把 ``text`` 裁进 ``label``, 并在真的裁掉时把完整文本挂成悬停提示.
+
+    一次性裁剪(不跟随宽度变化)的场合用它, 与 :func:`track_fit` 同一条纪律:
+    **裁剪与提示绑在一起**, 不留给调用方"记得再挂一次"。中间省略的路径形态走
+    :func:`track_fit` 的 ``path=True``(那里才需要按容器宽度反复重裁)。
+    """
+    shown = fit_text(text, font, width, max_lines=max_lines)
+    label.configure(text=shown)
+    sync_tooltip(label, full=text, shown=shown)
+
+
 def attach_tooltip(widget: ctk.CTkBaseClass, text: str | Callable[[], str]) -> None:
     """给控件挂一个悬停提示.
 
@@ -569,6 +875,11 @@ def attach_tooltip(widget: ctk.CTkBaseClass, text: str | Callable[[], str]) -> N
     """
     window: tk.Toplevel | None = None
     job: str | None = None
+    if getattr(widget, _TOOLTIP_ATTR, None) is not None:
+        # 同一控件再挂一次: 只换文案, 不重复绑事件(否则一次悬停会弹出好几层)。
+        setattr(widget, _TOOLTIP_ATTR, text)
+        return
+    setattr(widget, _TOOLTIP_ATTR, text)
 
     def cancel() -> None:
         """撤掉已排队的弹出任务(没有排队就什么都不做)."""
@@ -592,7 +903,9 @@ def attach_tooltip(widget: ctk.CTkBaseClass, text: str | Callable[[], str]) -> N
         """弹出提示(文本为空时不出一个空框)."""
         nonlocal window, job
         job = None
-        message = text() if callable(text) else text
+        # 文案在弹出那一刻才读: 同一控件可以反复挂/撤(= 文本被裁 / 不再被裁),
+        # 不必为了换文案再绑一次事件。
+        message = tooltip_text(widget)
         if message:
             window = _open_tooltip(widget, message)
 
@@ -606,3 +919,7 @@ def attach_tooltip(widget: ctk.CTkBaseClass, text: str | Callable[[], str]) -> N
     widget.bind("<Leave>", lambda _event: hide(), add="+")
     widget.bind("<Button-1>", lambda _event: hide(), add="+")
     widget.bind("<Destroy>", lambda _event: hide(), add="+")
+
+
+# 焦点态要换哪套颜色也回插回去(颜色只在本模块的 ``button_colors`` 一处定义)。
+set_focus_paint(focus_paint)

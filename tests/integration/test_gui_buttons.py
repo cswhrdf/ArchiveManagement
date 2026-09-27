@@ -236,6 +236,18 @@ def _label_texts(widget: Any) -> list[str]:
     return found
 
 
+def _labels_of(widget: Any) -> list[Any]:
+    """递归收集控件树里所有 CTkLabel(裁剪类断言用它定位标签)."""
+    import customtkinter as ctk
+
+    found: list[Any] = []
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkLabel):
+            found.append(child)
+        found.extend(_labels_of(child))
+    return found
+
+
 def _button_texts(widget: Any) -> list[str]:
     """递归收集控件树里所有按钮的文案(便于断言某个动作已从界面移除)."""
     import customtkinter as ctk
@@ -817,7 +829,9 @@ def test_discovery_panel_scans_filters_and_imports_candidate(
             palette=Palette.for_theme(app._theme),
         )
         assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
-        assert len(panel._candidates) == 6
+        # 已导入的候选(cand-1)不进这一页: 它是游戏库里的一款游戏, 在库里有完整动作.
+        assert len(panel._candidates) == 5
+        assert "cand-1" not in {item.candidate_id for item in panel._candidates}
         # 未选中有效候选时"导入"不可用(候选 4 的路径已失效).
         panel._select_candidate("cand-4")
         assert str(panel._import_btn.cget("state")) == "disabled"
@@ -846,10 +860,67 @@ def test_discovery_panel_scans_filters_and_imports_candidate(
 
         assert len(app.backend.list_games()) == before + 1
         imported = next(
-            item for item in panel._candidates if item.candidate_id == "cand-2"
+            item
+            for item in app.backend.list_candidates()
+            if item.candidate_id == "cand-2"
         )
         assert imported.status == "imported"
         assert imported.game_id is not None
+        # 导入之后它就从这一页收走了(转而在游戏库里查看).
+        assert "cand-2" not in {item.candidate_id for item in panel._candidates}
+        assert "cand-2" not in panel._cand_rows
+    finally:
+        app.destroy()
+
+
+def test_discovery_panel_hides_already_imported_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已导入的候选不进发现页: 它们是游戏库里的游戏, 在库里有完整动作.
+
+    演示数据里 cand-1("星际拓荒")就是"已导入"的那一条 —— 夹具先自证它存在, 再钉住
+    三件事: 列表里没有它、筛选项里没有"已导入"、底栏的分母也不算它。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.models import CandidateFilter
+    from archive_management.ui.palette import Palette
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app),
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
+        )
+        imported = {
+            item.candidate_id for item in app.backend.list_candidates(status="imported")
+        }
+        assert imported == {"cand-1"}, "夹具失效: 演示数据里应当正好有一条已导入候选"
+
+        # ① 列表里没有它(切到"全部"也一样), 但后端那条记录仍然留着.
+        listed = {item.candidate_id for item in panel._candidates}
+        assert listed & imported == set()
+        assert len(listed) == len(app.backend.list_candidates()) - len(imported)
+        panel._on_filter_change(CandidateFilter.ALL.label)
+        assert set(panel._cand_rows) & imported == set()
+
+        # ② 筛选枚举里也没有"已导入"这一项(它的动作只在游戏库里).
+        assert [item.value for item in CandidateFilter] == ["all", "new", "ignored"]
+
+        # ③ 底栏分母按"这一页真的会列出来的条数"算, 三种状态并列在**同一行**里.
+        pending = sum(1 for item in panel._candidates if item.status == "new")
+        ignored = sum(1 for item in panel._candidates if item.status == "ignored")
+        assert panel._summary_label.cget("text") == tr(
+            "discovery.counts_candidates",
+            candidates=len(listed),
+            pending=pending,
+            ignored=ignored,
+        )
+        # 第二行留给扫描结果: 不再重复同一批数(03 号评审的两行计数重复).
+        assert panel._detail_label.cget("text") == ""
     finally:
         app.destroy()
 
@@ -972,6 +1043,8 @@ def test_discovery_panel_candidate_actions_need_a_valid_candidate(
         panel.reload()
         before = app.backend.list_candidates()
         assert before, "演示数据里应该至少有候选游戏"
+        # 这一页只列未导入的候选(cand-1 已导入, 只在游戏库里), 所以挑一条真在列表里的.
+        listed = next(item for item in panel._candidates if item.status == "new")
 
         # ① 没选候选。
         panel._selected_candidate = None
@@ -984,7 +1057,7 @@ def test_discovery_panel_candidate_actions_need_a_valid_candidate(
         panel._on_ignore()
         panel._on_relocate()
         # ③ 真实候选, 但导入对话框被取消、修正路径没填新路径。
-        panel._select_candidate(before[0].candidate_id)
+        panel._select_candidate(listed.candidate_id)
         panel._on_import()
         panel._on_relocate()
         _pump(app)
@@ -1127,11 +1200,11 @@ def test_discovery_default_filter_is_pending_with_filter_aware_empty_state(
         assert any("已忽略 1" in text for text in texts)
         assert tr("discovery.candidates_empty") not in texts
 
-        # 切到"已忽略"就能看到刚忽略的那条(筛选本身工作正常).
+        # 切到"已忽略"就能看到刚忽略的那条(筛选本身工作正常), 底栏同一行里数得到它.
         panel._on_filter_change(CandidateFilter.IGNORED.label)
         _pump(app)
         assert set(panel._cand_rows) == {target.candidate_id}
-        assert "已忽略 1" in str(panel._detail_label.cget("text"))
+        assert "已忽略 1" in str(panel._summary_label.cget("text"))
     finally:
         app.destroy()
 
@@ -1276,9 +1349,14 @@ def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
         panel._on_scan()
         _pump(app)
         item = panel._candidates[0]
-        path_key = f"path:{item.candidate_id}"
-        label = panel._fitted[path_key].label
+        row = panel._cand_rows[item.candidate_id]
         _pump(app)
+
+        # 这条候选行里只有安装路径是长文本(没有存档路径那样只剩结论一行), 所以
+        # "带省略号的标签"就是它 —— 裁剪本身由 ui.widgets.track_fit 按容器宽度做.
+        clipped = [label for label in _labels_of(row) if "…" in str(label.cget("text"))]
+        assert len(clipped) == 1, "这条候选行里应该只有一个被裁的标签(安装路径)"
+        label = clipped[0]
 
         shown = str(label.cget("text"))
         width = int(label.winfo_width())
@@ -1299,13 +1377,14 @@ def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
         # 没有存档路径时只剩结论那一行(调用方据此决定不登记重裁).
         assert panel._save_lines(item) == item.save_label
 
-        # 列表重建后旧标签的 <Configure> 回调还会来一趟: 忽略掉这条候选之后它就再也
-        # 取不到目标了 —— 这时必须直接返回, 不能再往已销毁的控件上写文本.
+        # 忽略这条候选后整个列表重建: 旧行(连同它上面的 <Configure> 绑定)被销毁,
+        # 不可能再往已销毁的控件上写文本 —— 旧实现是靠"登记表里取不到目标就返回"
+        # 兜住同一个问题的, 现在结构上就不会发生。
         panel._select_candidate(item.candidate_id)
         panel._on_ignore()
         _pump(app)
-        assert path_key not in panel._fitted
-        panel._refit(path_key)
+        assert item.candidate_id not in panel._cand_rows
+        assert not row.winfo_exists(), "旧行必须随重建销毁"
     finally:
         app.destroy()
 
@@ -1322,7 +1401,9 @@ def test_home_page_switches_between_library_and_discovery(
     _pump(app)
     page = app._home_page
     panel = page._discovery
-    assert len(panel._candidates) == 6
+    # 已导入的候选只出现在游戏库里, 发现分区不列它们.
+    assert len(panel._candidates) == 5
+    assert "cand-1" not in {item.candidate_id for item in panel._candidates}
     assert [item.directory_id for item in panel._dirs] == ["dir-1", "dir-2"]
 
     page._show_section(HomeSection.DISCOVERY)
@@ -1471,6 +1552,15 @@ def _card_labels(card: Any) -> list[Any]:
     return [child for child in card.winfo_children() if isinstance(child, ctk.CTkLabel)]
 
 
+def _binds_enter(widget: Any) -> bool:
+    """这个控件是否接上了 ``<Enter>``.
+
+    CustomTkinter 重写了 ``bind``: 查询式 ``widget.bind("<Enter>")`` 一律返回 ``None``,
+    真正的绑定落在它内部的 canvas 上(实测), 所以这里读 ``_canvas``。
+    """
+    return bool(widget._canvas.bind("<Enter>"))
+
+
 def test_home_page_hides_the_table_and_footer_when_the_library_is_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1592,6 +1682,66 @@ def test_list_and_poster_selection_share_the_soft_accent(
     assert str(card.cget("fg_color")) == palette.accent_soft
     assert str(card.cget("border_color")) == palette.accent_soft_border
     assert str(page._rows["outer-wilds"].cget("fg_color")) == palette.card
+
+
+def test_cards_highlight_on_hover_without_losing_the_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """悬停与选中是两件事: 未选中悬停只提底色, 已选中的卡片悬停仍是"选中"的样子.
+
+    悬停反馈原来只长在**详情页的备份卡片**上, 主页的列表行与海报卡没有 —— 同一类
+    控件(可点、可选中)在两种页面上行为不一致(第 5 号评审)。规则只有一条, 落在
+    ``widgets.card_surface_colors``: 选中 > 悬停 > 常规。
+    """
+    from archive_management.domain import HomeLayout
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        page = app._home_page
+        palette = page._palette
+        page._select("shanhai")
+        _pump(app)
+        assert _binds_enter(page._rows["outer-wilds"]), "列表行要绑悬停"
+
+        # ① 未选中的那一行悬停: 底色提到 card_hover, 描边不变.
+        page._set_hover("outer-wilds")
+        _pump(app)
+        assert str(page._rows["outer-wilds"].cget("fg_color")) == palette.card_hover
+        assert (
+            str(page._rows["outer-wilds"].cget("border_color")) == palette.card_border
+        )
+
+        # ② 已选中的那一行也悬停: 必须还是"选中"的样子(悬停不得盖掉选中).
+        page._set_hover("shanhai")
+        _pump(app)
+        assert str(page._rows["shanhai"].cget("fg_color")) == palette.accent_soft
+        assert (
+            str(page._rows["shanhai"].cget("border_color"))
+            == palette.accent_soft_border
+        )
+
+        # ③ 鼠标移开: 两张都回到各自的常态.
+        page._set_hover(None)
+        _pump(app)
+        assert str(page._rows["outer-wilds"].cget("fg_color")) == palette.card
+        assert str(page._rows["shanhai"].cget("fg_color")) == palette.accent_soft
+
+        # ④ 海报卡接的是同一套, 而且卡片与它的子控件都会触发(否则移到文字上会闪掉).
+        page._on_layout_change(HomeLayout.POSTER.label)
+        _pump(app)
+        card = page._rows["outer-wilds"]
+        assert _binds_enter(card), "海报卡要绑悬停"
+        page._set_hover("outer-wilds")
+        _pump(app)
+        assert str(card.cget("fg_color")) == palette.card_hover
+        assert all(_binds_enter(child) for child in card.winfo_children()), (
+            "子控件也要触发同一张卡片的悬停"
+        )
+    finally:
+        app.destroy()
 
 
 def test_poster_card_keeps_its_meta_below_the_title(

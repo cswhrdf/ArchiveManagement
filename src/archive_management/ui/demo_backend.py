@@ -362,13 +362,17 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
 )
 
 
-def _delete_result_text(plan: DeletionPlan) -> str:
-    """删除操作的结果文案: 连带子分支 / 顶替父节点 / 单节点三种."""
+def _delete_result_text(plan: DeletionPlan, title: str) -> str:
+    """删除操作的结果文案: 连带子分支 / 顶替父节点 / 单节点三种.
+
+    ``title`` 是**被删掉的那一份**的名字: 只说"已删除该备份"等于没说删了什么
+    (I-7: 结果要说清"删了什么").
+    """
     if plan.mode is DeletionMode.CASCADE:
         return tr("result.delete_cascade", count=plan.removed_count)
     if plan.mode is DeletionMode.SHIFT:
-        return tr("result.delete_shift")
-    return tr("result.delete_single")
+        return tr("result.delete_shift", title=title)
+    return tr("result.delete_single", title=title)
 
 
 def _same_path(left: str, right: str) -> bool:
@@ -572,6 +576,14 @@ class DemoArchiveService:
         self._simulate()
         self._require_game(game_id)
         plan = self.plan_delete(game_id, backup_id)
+        title = next(
+            (
+                item.title
+                for item in self._items.get(game_id, ())
+                if item.backup_id == backup_id
+            ),
+            backup_id,
+        )
         _nodes, mapping = self._nodes_of(game_id)
         reverse = {value: key for key, value in mapping.items()}
         removed = {
@@ -585,7 +597,7 @@ class DemoArchiveService:
         if self._current.get(game_id) in removed:
             self._restore_current_after_delete(game_id, plan, reverse)
         self._revision += 1
-        return _delete_result_text(plan)
+        return _delete_result_text(plan, title)
 
     def _reparent_shifted_child(
         self, game_id: str, plan: DeletionPlan, reverse: dict[int, str]

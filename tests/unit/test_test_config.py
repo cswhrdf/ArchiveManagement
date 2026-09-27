@@ -104,10 +104,12 @@ def test_the_cli_runs_without_installing_the_project(
 ) -> None:
     """ "不作为包安装"与仓库根的 ``.env`` 是配套的: 少任何一个, CLI 都导入不了自身.
 
-    实测(2026-09-18): 只有 ``[tool.uv] package = false`` 时, README/docs 里的
-    ``uv run python -m archive_management ...`` 会以 ``No module named
-    archive_management`` 结束; ``.env`` 里的 ``PYTHONPATH=src`` 由 ``uv run`` 自动
-    加载, 命令才成立。改安装方式就必须同步改 ``.env`` 与文档里的说明。
+    只有 ``[tool.uv] package = false`` 时, README/docs 里的 CLI 命令会以
+    ``No module named archive_management`` 结束, 所以 ``.env`` 必须提供
+    ``PYTHONPATH=src``。**uv 不会读这个 .env**: 实测 uv 0.12.10/0.12.19 都不自动加载
+    它(``[tool.uv]`` 也没有可用的 ``env-file``), 它只在 VS Code 集成终端里由 Python
+    扩展注入; 纯终端要显式传 ``--env-file .env`` 或 ``PYTHONPATH=src``(文档已写明)。
+    改安装方式就必须同步改 ``.env`` 与文档里的说明。
     """
     root = Path(str(pytestconfig.rootpath))
     with (root / "pyproject.toml").open("rb") as handle:

@@ -61,11 +61,15 @@ from archive_management.ui.models import (
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
 from archive_management.ui.textfit import fit_text
+from archive_management.ui.typography import FONT_GLYPH
 from archive_management.ui.widgets import (
     auto_scrollbar,
+    card_surface_colors,
+    fit_label,
     paint_button_disabled,
     paint_button_enabled,
     sync_scrollbar,
+    sync_tooltip,
     track_wraplength,
 )
 
@@ -219,9 +223,13 @@ class HomePage:
         self._activation_enabled = False
         self._board: HomeBoard | None = None
         self._rows: dict[str, ctk.CTkFrame] = {}
+        # 鼠标悬停的那一张卡(列表行/海报卡共用): 与详情页的备份卡片同一套反馈.
+        self._hover: str | None = None
         # 封面/图标: CTkImage 必须被持有引用, 否则会被垃圾回收成空白.
         self._artwork_images: dict[str, ctk.CTkImage] = {}
         self._selected: str | None = None
+        # 主窗口是否正在跑长操作: 主页的长操作入口与它共用同一份事实(见 set_busy)。
+        self._busy = False
         # 每行的关键部件: 名称按真实宽度重裁、表头对齐都要用(键是游戏 id).
         self._row_parts: dict[str, _RowParts] = {}
         # 本页创建的按钮与它们的样式: 可用/禁用切换时按这份登记重绘配色.
@@ -280,7 +288,7 @@ class HomePage:
         )
         # 与游戏库保持完全相同的页边距: 发现分区的卡片不能贴着窗口边缘.
         self._discovery.frame.grid(
-            row=1, column=0, sticky="nsew", padx=24, pady=(0, 14)
+            row=1, column=0, sticky="nsew", padx=24, pady=(0, 16)
         )
         self._discovery.frame.grid_remove()
 
@@ -292,7 +300,7 @@ class HomePage:
             on_refresh=self._on_activation_refresh,
         )
         self._activation.frame.grid(
-            row=1, column=0, sticky="nsew", padx=24, pady=(0, 14)
+            row=1, column=0, sticky="nsew", padx=24, pady=(0, 16)
         )
         self._activation.frame.grid_remove()
         self._paint_section_tabs()
@@ -422,11 +430,14 @@ class HomePage:
         self._tags_btn = self._button(
             actions, tr("home.action_tags"), self._on_edit_tags, width=88
         )
-        self._archive_btn = self._button(
-            actions, tr("home.action_archive"), self._on_archive, width=96
-        )
+        # 创建顺序 = Tk 的 Tab 顺序, 所以这里必须与下面 grid 的列顺序一致:
+        # 先建"启动"再建"归档", 否则 Tab 会先从归档走到启动(实测反馈, Tk 的
+        # tk_focusNext 按窗口的堆叠顺序走, 与 grid 的 row/column 无关)。
         self._enable_btn = self._button(
             actions, tr("home.action_enable"), self._on_toggle_enabled, width=88
+        )
+        self._archive_btn = self._button(
+            actions, tr("home.action_archive"), self._on_archive, width=96
         )
         self._action_buttons = (
             self._detail_btn,
@@ -513,7 +524,7 @@ class HomePage:
         """底栏: 左侧是计数, 右下角是"每页条数 + 翻页"控件."""
         palette = self._palette
         footer = ctk.CTkFrame(self._library, fg_color="transparent")
-        footer.grid(row=3, column=0, sticky="ew", padx=24, pady=(0, 14))
+        footer.grid(row=3, column=0, sticky="ew", padx=24, pady=(0, 16))
         # 空库时整行收起(见 _render_footer): 一屏空状态里再挂"共 0 款游戏 · 第 1/1 页"
         # 只是噪声, 还要用户去分辨哪几个按钮是不能点的。
         self._footer = footer
@@ -639,7 +650,11 @@ class HomePage:
         跟着回来。
         """
         palette = self._palette
-        for button, style in self._buttons.items():
+        for button, style in list(self._buttons.items()):
+            if not button.winfo_exists():
+                # 渲染重建后留下的旧登记: 摘掉, 别去碰已经不存在的控件。
+                self._buttons.pop(button, None)
+                continue
             if str(button.cget("state")) == "disabled":
                 paint_button_disabled(button, palette)
                 continue
@@ -933,6 +948,8 @@ class HomePage:
             child.destroy()
         self._rows = {}
         self._row_parts = {}
+        # 列表重建后悬停状态失效: 不清掉会指向已销毁的卡片.
+        self._hover = None
         self._align_attempts = 0
         self._refit_attempts = 0
         self._apply_poster_columns(0)
@@ -955,7 +972,7 @@ class HomePage:
             self._reserve_head_row(reserve=False)
             for item in games:
                 row = self._build_row(item)
-                row.pack(fill="x", padx=(4, _SCROLL_INSET), pady=3)
+                row.pack(fill="x", padx=(4, _SCROLL_INSET), pady=2)
                 self._rows[item.game_id] = row
             # 名称按**实际可用宽度**裁剪, 而宽度要等布局完成才知道 —— 这里先排一次
             # (用兜底宽度), 首帧之后再精确重裁一次。
@@ -1145,7 +1162,7 @@ class HomePage:
         if width <= 1 or parts.fitted_width == width:
             return
         parts.fitted_width = width
-        parts.label.configure(text=fit_text(parts.full_name, self._name_font, width))
+        fit_label(parts.label, parts.full_name, self._name_font, width)
 
     def _on_name_resize(self, game_id: str, event: tk.Event) -> None:
         """名称标签自己的宽度变了 → **立刻**裁这一行.
@@ -1205,15 +1222,16 @@ class HomePage:
         name_font = self._name_font
         name = ctk.CTkLabel(
             card,
-            text=fit_text(
-                item.name, name_font, _POSTER_TEXT_WIDTH, max_lines=_POSTER_NAME_LINES
-            ),
+            text="",
             anchor="w",
             justify="left",
             # 同上: wraplength 兜住测量误差, 最多两行, 不会溢出卡片.
             wraplength=_POSTER_TEXT_WIDTH,
             font=name_font,
             text_color=palette.text_body,
+        )
+        fit_label(
+            name, item.name, name_font, _POSTER_TEXT_WIDTH, max_lines=_POSTER_NAME_LINES
         )
         # 名称与下面的元信息之间留白: 两者只差字号时, 读起来像同一段被截断的文字。
         name.grid(row=1, column=0, sticky="ew", padx=10, pady=(_POSTER_TITLE_GAP, 0))
@@ -1222,7 +1240,7 @@ class HomePage:
         meta_font = ctk.CTkFont(size=10, weight="bold")
         badge = ctk.CTkLabel(
             card,
-            text=fit_text(self._poster_meta(item), meta_font, _POSTER_TEXT_WIDTH),
+            text="",
             anchor="w",
             font=meta_font,
             text_color=(
@@ -1232,6 +1250,7 @@ class HomePage:
             ),
         )
         badge.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 0))
+        fit_label(badge, self._poster_meta(item), meta_font, _POSTER_TEXT_WIDTH)
         activity = ctk.CTkLabel(
             card,
             text=(
@@ -1263,6 +1282,12 @@ class HomePage:
             widget.bind(
                 "<Double-Button-1>", lambda _event, key=item.game_id: self._open(key)
             )
+            # 悬停在卡片与它的子控件上都要算"在这一张卡片里", 否则鼠标移到文字上时
+            # 反馈会闪掉(与详情页的备份卡片同一套做法).
+            widget.bind(
+                "<Enter>", lambda _event, key=item.game_id: self._set_hover(key)
+            )
+            widget.bind("<Leave>", lambda _event: self._set_hover(None))
         return card
 
     @staticmethod
@@ -1323,31 +1348,53 @@ class HomePage:
         return picture
 
     def _render_empty(self, board: HomeBoard) -> None:
-        """空状态: 说明"库里没有游戏"还是"当前筛选没有匹配", 并给出下一步建议.
+        """空状态: 卡片内**居中**摆一句结论 + 一句下一步 + 一个当场能点的动作.
 
-        表头与空表格骨架都已收起(见 :meth:`_render_games`), 这里就是这一页唯一的
-        内容: 一句结论 + 一句"下一步做什么"(例如"用右上角的「+ 添加游戏」")。
+        原先只有左上角两行小字, 却占着整张卡片 —— 密度低到像渲染失败(02 号评审的
+        判据: 空状态要在卡片内居中, 且卡片里有一个**可点的主操作**)。于是这里把
+        两块文字居中, 并在"库里真的没有游戏"时摆一个主色按钮直接送到「游戏发现」;
+        筛选筛空时不摆按钮: 那时要改的是筛选条件, 不是"去发现"。
         """
         palette = self._palette
+        holder = ctk.CTkFrame(self._list_box, fg_color="transparent")
+        holder.pack(expand=True, fill="both")
         title = ctk.CTkLabel(
-            self._list_box,
+            holder,
             text=board.empty_message,
-            anchor="w",
+            anchor="center",
+            justify="center",
             font=ctk.CTkFont(size=15, weight="bold"),
             text_color=palette.text_primary,
         )
-        title.pack(fill="x", padx=8, pady=(16, 0))
+        title.pack(fill="x", padx=24, pady=(16, 0))
         hint = ctk.CTkLabel(
-            self._list_box,
+            holder,
             text=board.empty_hint,
-            anchor="w",
-            justify="left",
+            anchor="center",
+            justify="center",
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        hint.pack(fill="x", padx=8, pady=(6, 16))
+        hint.pack(fill="x", padx=24, pady=(6, 16))
         # 说明文字跟着滚动区宽度换行: 写死的宽度在宽窗口里会提前折行, 像被截断。
-        track_wraplength(self._list_box, hint)
+        track_wraplength(holder, hint, inset=48)
+        self._empty_action = None
+        if board.empty_library:
+            self._empty_action = self._button(
+                holder,
+                tr("home.empty_go_discovery"),
+                lambda: self._show_section(HomeSection.DISCOVERY),
+                style="accent",
+                width=132,
+            )
+            self._empty_action.pack(pady=(0, 20))
+            # 空状态每次渲染都重建, 而它进的是一张"按可用性重绘"的登记表 —— 销毁时
+            # 必须把登记摘掉, 否则下一轮重绘会去碰一个已经不存在的控件(TclError)。
+            self._empty_action.bind(
+                "<Destroy>",
+                lambda _event, item=self._empty_action: self._buttons.pop(item, None),
+                add="+",
+            )
 
     def _build_row(self, item: HomeGameItem) -> ctk.CTkFrame:
         """一行游戏: 左侧"色块 + 名称"(占满剩余宽度) + 右侧贴靠的固定列块."""
@@ -1367,7 +1414,7 @@ class HomePage:
             image=icon_image,
             width=_DOT_COLUMN,
             anchor="center",
-            font=ctk.CTkFont(size=14),
+            font=ctk.CTkFont(size=FONT_GLYPH),
             text_color=self._tone_color(item.tone),
         )
         dot.pack(side="left")
@@ -1382,6 +1429,7 @@ class HomePage:
             font=self._name_font,
             text_color=palette.text_body,
         )
+        sync_tooltip(name, full=item.name)
         name.pack(side="left", fill="x", expand=True, padx=(_NAME_PAD, 0))
         # 名称标签盯住自己的宽度: 容器事件不一定来(见 _on_name_resize), 而"名称按当前
         # 宽度裁好"是要对用户兑现的。
@@ -1399,6 +1447,11 @@ class HomePage:
             widget.bind(
                 "<Double-Button-1>", lambda _event, key=item.game_id: self._open(key)
             )
+            # 悬停反馈: 与海报卡、详情页的备份卡片同一套(只重绘受影响的两张).
+            widget.bind(
+                "<Enter>", lambda _event, key=item.game_id: self._set_hover(key)
+            )
+            widget.bind("<Leave>", lambda _event: self._set_hover(None))
         return row
 
     def _fill_row_columns(
@@ -1426,7 +1479,7 @@ class HomePage:
             _key, width, anchor = _COLUMNS[index]
             label = ctk.CTkLabel(
                 columns,
-                text=text if index == 5 else fit_text(text, self._value_font, width),
+                text="",
                 anchor=anchor,
                 justify="left" if index == 5 else "center",
                 font=self._value_font,
@@ -1437,7 +1490,13 @@ class HomePage:
             if index == 5:
                 # 状态列回到同一行时仍然不许溢出: wraplength 是硬上限, 换行由
                 # chips_lines 自己算好(每行都停在完整标签之后)。
-                label.configure(wraplength=width)
+                label.configure(wraplength=width, text=text)
+                # chips_lines 会把放不下的标签换到第二行、再放不下才补省略号;
+                # " · ".join 是完整内容 —— 挂上悬停提示, 省掉的尾巴才看得到(这里
+                # 不能再用 fit_label: 那会把已经折好的状态列重新压回一行)。
+                sync_tooltip(label, full=" · ".join(item.chips), shown=text)
+            else:
+                fit_label(label, text, self._value_font, width)
             label.grid(row=0, column=index, sticky="ew", padx=_cell_pad(index))
             labels.append(label)
         return labels
@@ -1458,10 +1517,40 @@ class HomePage:
 
         规则来自 :meth:`Palette.selection_colors`: 列表与海报共用同一套选中表达, 且
         刻意不用主按钮那种实心强调色 —— "我选中了谁"与"哪里能点"是两件事。
+        悬停与选中也是两件事: **选中优先**(悬停不改选中的样子), 未选中悬停才提出
+        :attr:`Palette.card_hover`(与详情页的备份卡片同一个 token)。
         """
-        for key, row in self._rows.items():
-            background, border = self._palette.selection_colors(key == self._selected)
+        for key in self._rows:
+            self._paint_row(key)
+
+    def _row_colors(self, game_id: str) -> tuple[str, str]:
+        """一张卡片该用的 (底色, 描边色): 选中 > 悬停 > 常规."""
+        return card_surface_colors(
+            self._palette,
+            selected=game_id == self._selected,
+            hovered=game_id == self._hover,
+        )
+
+    def _paint_row(self, game_id: str) -> None:
+        """只重绘一张卡片(悬停是高频交互, 全量重绘开销大)."""
+        row = self._rows.get(game_id)
+        if row is None:
+            return
+        background, border = self._row_colors(game_id)
+        try:
             row.configure(fg_color=background, border_width=1, border_color=border)
+        except tk.TclError:
+            # 卡片刚好随重绘被销毁: 忽略这一次局部重绘.
+            return
+
+    def _set_hover(self, game_id: str | None) -> None:
+        """记录鼠标悬停的那一张卡片, 只重绘受影响的两张."""
+        if self._hover == game_id:
+            return
+        previous, self._hover = self._hover, game_id
+        for key in (previous, game_id):
+            if key is not None:
+                self._paint_row(key)
 
     def _update_pager(self) -> None:
         """刷新分页条(页码与上一页/下一页的可用性)."""
@@ -1509,6 +1598,9 @@ class HomePage:
         入口, 因此它仍然可用, 只是按钮改名为"删除游戏"。
         """
         item = self._item()
+        # 批量导出与选中的那一行无关(它在对话框里多选), 因此不随选中态变化 ——
+        # 只有主窗口在跑长操作时才收起它(那时点了也不会弹框)。
+        self._export_batch_btn.configure(state="disabled" if self._busy else "normal")
         if item is None:
             for button in self._action_buttons:
                 button.configure(state="disabled")
@@ -1526,7 +1618,7 @@ class HomePage:
         (导出在详情页); 其余按钮由 ``item.allow`` 统一判掉。
         """
         self._backup_btn.configure(
-            state="normal" if item.backup_enabled else "disabled"
+            state="normal" if item.backup_enabled and not self._busy else "disabled"
         )
         self._location_btn.configure(
             state="normal" if item.allow("locations") else "disabled"
@@ -1547,6 +1639,16 @@ class HomePage:
     def _paint_buttons(self) -> None:
         """按可用性重绘动作按钮(禁用态统一压暗, 可用态回到各自样式)."""
         self._restyle_buttons()
+
+    def set_busy(self, busy: bool) -> None:
+        """主窗口报告长操作开始/结束: 忙碌期间收起本页的长操作入口.
+
+        主页的动作是同步执行的(不经主窗口的忙碌通路), 所以只有两个走主窗口或其
+        处理器会因 busy 静默返回的入口需要置灰 —— "立即备份"与"批量导出":
+        前者会与正在跑的备份抢同一个后端操作槽, 后者点了根本不会弹框.
+        """
+        self._busy = busy
+        self._update_actions()
 
     def _on_view(self, view: HomeView) -> None:
         """切换统一视图."""

@@ -3,6 +3,11 @@
 颜色取自设计稿 ``docs/archive-management-ui.svg``(深色)与其
 ``*-light.svg``(浅色)中的色值映射。控件按当前主题统一取色,保证
 主题切换只改颜色、不改布局与操作语义。
+
+**浅色主题的强调色、危险色、次要文字与禁用文字按对比度判据重新取过值**
+(深色主题的原值本来就达标): 原来 accent 2.44:1、danger 2.75:1、
+text_muted 4.17:1、text_disabled 1.84:1,都低于本仓库自己定的下限; 取色依据与
+逐对量测见 :mod:`archive_management.ui.contrast` 与 ``docs/testing.md``。
 """
 
 from __future__ import annotations
@@ -42,8 +47,7 @@ class Palette:
     accent_soft_border: str  # 强调淡底描边
     danger: str  # 危险/主操作珊瑚色
     danger_text: str  # 危险按钮上的文字
-    item_hover: str  # 列表项悬浮
-    item_active: str  # 列表项选中底
+    item_hover: str  # 列表项/凸起控件悬浮
     hero_bg: str  # 概要卡渐变起始色
     badge_manual_bg: str  # “手动”徽章
     badge_manual_text: str
@@ -52,6 +56,8 @@ class Palette:
     badge_safety_bg: str  # “恢复前安全点”徽章(与手动/自动必须是三种可区分的颜色)
     badge_safety_text: str
     success: str  # 状态成功点
+    focus_ring: str  # 键盘焦点环(普通底色上): 专用于焦点, 不参与任何语义
+    focus_ring_on_fill: str  # 键盘焦点环(主色/危险色实底按钮上): 同上
 
     @classmethod
     def for_theme(cls, name: str) -> Palette:
@@ -99,7 +105,6 @@ DARK = Palette(
     danger="#d97852",
     danger_text="#26140e",
     item_hover="#16233a",
-    item_active="#183c45",
     hero_bg="#1c314d",
     badge_manual_bg="#3a3342",
     badge_manual_text="#e1c8ed",
@@ -108,6 +113,12 @@ DARK = Palette(
     badge_safety_bg="#4a3b22",
     badge_safety_text="#f2d6a4",
     success="#55d6be",
+    # 焦点环**专用**色(不参与任何语义): 实测"每套主题一个颜色"做不到 ——
+    # 深色主题的普通底色都很暗(需要亮环, 最差 9.50:1), 而主色/危险色实底很亮
+    # (需要深环, 最差 6.76:1), 两者合并后最优也只有 1.87:1。因此分两档:
+    # 亮青在暗底/暗面板上一眼可见; 深青黑在主色与危险色实底上都至少 6.7:1。
+    focus_ring="#8ee6ff",
+    focus_ring_on_fill="#04141c",
 )
 
 LIGHT = Palette(
@@ -125,19 +136,18 @@ LIGHT = Palette(
     text_primary="#1b2735",
     text_body="#405168",
     text_hint="#4c5d73",
-    text_muted="#657589",
-    text_disabled="#a3b0be",
+    text_muted="#5c6b7d",
+    text_disabled="#8090a2",
     disabled_bg="#e6ebef",
     disabled_border="#dde3e9",
-    accent="#2fae97",
+    accent="#197a68",
     accent_text="#ffffff",
     accent_soft="#d9eee8",
     accent_soft_text="#087765",
-    accent_soft_border="#9fd0c2",
-    danger="#d97852",
+    accent_soft_border="#3f8f7b",
+    danger="#b0431f",
     danger_text="#ffffff",
     item_hover="#f0f4f6",
-    item_active="#d9eee9",
     hero_bg="#e5f0ee",
     badge_manual_bg="#f0e2f2",
     badge_manual_text="#70427b",
@@ -145,5 +155,9 @@ LIGHT = Palette(
     badge_auto_text="#4d5d70",
     badge_safety_bg="#f7e7c9",
     badge_safety_text="#8a5a12",
-    success="#1e9b80",
+    success="#157a63",
+    # 浅色主题的普通底色都很亮(需要深环, 最差 16.87:1), 而主色/危险色实底是深色
+    # (需要亮环, 最差 4.58:1) —— 与深色主题同一套两档思路(量测见 DARK 那段注释)。
+    focus_ring="#0d1b2a",
+    focus_ring_on_fill="#f2f7f4",
 )

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -685,17 +685,33 @@ class MonitoredDirItem:
 
 
 class CandidateFilter(StrEnum):
-    """探测结果筛选(与下拉选项一一对应)."""
+    """探测结果筛选(与下拉选项一一对应).
+
+    **只在"还没导入"的候选上筛选**: 已经导入的候选就是游戏库里的那一款游戏, 发现页
+    不再呈现它们(这里既没有它们的动作, 又会让"待处理"的分母失真)。因此 ``ALL``
+    的口径是"全部**未导入**的候选"(待处理 + 已忽略)。
+    """
 
     ALL = "all"
     NEW = "new"
-    IMPORTED = "imported"
     IGNORED = "ignored"
 
     @property
     def label(self) -> str:
         """返回下拉框与日志中使用的展示文案."""
         return tr(f"discovery.filter_{self.value}")
+
+
+def listable_candidates(
+    items: Iterable[CandidateItem],
+) -> list[CandidateItem]:
+    """挑出"游戏发现"要展示的候选: 已导入的一律不再出现.
+
+    已经导入的候选已经是游戏库里的一款游戏(库里有它的全部动作: 备份/恢复/导出/
+    删除), 留在发现页只会让人以为它还没处理 —— 它出现在两处而两处说法不同时,
+    用户不知道信哪个。
+    """
+    return [item for item in items if item.status != "imported"]
 
 
 @dataclass(frozen=True)
@@ -1365,9 +1381,10 @@ def batch_import_prompt(
 ) -> BatchImportPrompt:
     """把批量体检结果与游戏库映射成批量导入对话框的文案与逐行选项.
 
-    每一行的默认值都与单包对话框一致: 策略默认"新建", 目标游戏预选"疑似同一款"
-    (没有匹配就是库里的第一款), 存档位置只预填本机已存在的那些。行顺序与包内清单
-    一致 —— 用户看到的顺序就是导出时的顺序。
+    每一行的默认值: **库里已经有一款同一游戏时策略默认"合并到现有游戏"**(包就是同一
+    款游戏的更多备份), 否则默认"新建"; 目标游戏预选"疑似同一款"(没有匹配就是库里的
+    第一款), 存档位置只预填本机已存在的那些。行顺序与包内清单一致 —— 用户看到的顺序
+    就是导出时的顺序。
     """
     return BatchImportPrompt(
         summary=tr(
@@ -1436,7 +1453,13 @@ def unique_targets(
 def _batch_row(
     item: BatchGameInspection, games: Sequence[GameSummary]
 ) -> BatchImportRow:
-    """一行: 游戏标识 + 存档位置 + 策略与目标候选(默认值与单包对话框一致)."""
+    """一行: 游戏标识 + 存档位置 + 策略与目标候选.
+
+    策略默认值分两种: **包里的游戏在库里已经有一份时默认"合并到现有游戏"** —— 这种包
+    就是同一款游戏的更多备份, 默认"新建"会让库里多出一款重复的游戏; 没检测到同一款时
+    (库里没有 / 对不上)才默认"新建"。目标游戏的预选与单包对话框一致: "疑似同一款"排
+    最前并预选。
+    """
     inspection = item.inspection
     matching = (
         None
@@ -1452,7 +1475,8 @@ def _batch_row(
         locations=tuple(_import_location(loc) for loc in inspection.locations),
         strategies=import_strategies(has_targets=bool(targets)),
         targets=targets,
-        strategy=STRATEGY_NEW,
+        # 有匹配就一定选得到目标(库里非空), 所以"合并"一定在选项里。
+        strategy=STRATEGY_MERGE if matching else STRATEGY_NEW,
         target_game_id=_selected_target(targets),
     )
 

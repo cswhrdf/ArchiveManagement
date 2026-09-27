@@ -147,7 +147,7 @@ class ActivationPanel:
 
         # 空队列时的解释性空状态: 与表格同格, 两者只显示一个.
         self._empty = ctk.CTkFrame(container, fg_color="transparent")
-        self._empty.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
+        self._empty.grid(row=2, column=0, sticky="nsew", pady=(16, 0))
         self._empty.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             self._empty,
@@ -359,7 +359,7 @@ class ActivationPanel:
         """画一行: 序号 / 名称 / 状态 / 两个时间 + 监控与详情动作."""
         palette = self._palette
         row = ctk.CTkFrame(self._rows_box, fg_color="transparent")
-        row.grid(row=index, column=0, sticky="ew", pady=1)
+        row.grid(row=index, column=0, sticky="ew", pady=2)
         self._configure_columns(row)
         values = (
             str(item.position),

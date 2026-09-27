@@ -24,20 +24,26 @@ from archive_management.services.audit import log_action
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import (
     _BULLET,
-    _center,
+    _present,
     confirm_dialog,
     info_dialog,
     schedule_dialog,
 )
 from archive_management.ui.models import MAX_KEEP_AUTO, ScheduleItem
 from archive_management.ui.palette import Palette
+from archive_management.ui.typography import FONT_STRONG
 from archive_management.ui.widgets import (
+    ButtonStyle,
     auto_scrollbar,
     paint_button_disabled,
-    paint_button_enabled,
+    paint_button_style,
+    track_fit,
+    track_wraplength,
 )
 
 _ChangeCallback = Callable[[], None]
+# 行内说明文字的左右内边距: 左侧让开图标列, 右侧留一点.
+_DETAIL_INSET = 60
 
 
 def _has_locations(backend: ArchiveService, game_id: str) -> bool:
@@ -197,7 +203,7 @@ def add_schedule_dialog(
         anchor="w",
         font=ctk.CTkFont(size=15, weight="bold"),
         text_color=palette.text_primary,
-    ).pack(padx=24, pady=(18, 8), anchor="w")
+    ).pack(padx=24, pady=(20, 8), anchor="w")
     # 标题与正文之间的分割线: 没有它, 粗体标题看起来就是第一个字段的标签(25 号同一处问题).
     ctk.CTkFrame(window, height=1, fg_color=palette.border).pack(
         fill="x", padx=24, pady=(0, 12)
@@ -271,7 +277,7 @@ def add_schedule_dialog(
         window.destroy()
 
     actions = ctk.CTkFrame(window, fg_color="transparent")
-    actions.pack(fill="x", padx=24, pady=(16, 18), anchor="w")
+    actions.pack(fill="x", padx=24, pady=(16, 20), anchor="w")
     ctk.CTkButton(
         actions,
         text=tr("dialog.cancel"),
@@ -297,7 +303,7 @@ def add_schedule_dialog(
         font=ctk.CTkFont(size=12),
     ).pack(side="left")
 
-    _center(parent, window)
+    _present(parent, window)
     parent.wait_window(window)
     return result["value"]
 
@@ -321,6 +327,7 @@ class ScheduleWindow:
         self._items: list[ScheduleItem] = []
         self._selected: str | None = None
         self._rows: dict[str, list[ctk.CTkBaseClass]] = {}
+        self._button_styles: dict[ctk.CTkButton, ButtonStyle] = {}
         self._build()
         self.reload()
 
@@ -335,10 +342,11 @@ class ScheduleWindow:
         window.resizable(False, False)
         window.transient(self._parent)
         window.configure(fg_color=palette.background)
-        _center(self._parent, window)
+        # 常驻窗口不接窗口级的 Esc/回车/定焦: 那三件事是对话框的约定(见 _present)。
+        _present(self._parent, window, modal=False)
 
         container = ctk.CTkFrame(window, fg_color=palette.background)
-        container.pack(fill="both", expand=True, padx=18, pady=16)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(2, weight=1)
 
@@ -351,7 +359,7 @@ class ScheduleWindow:
             anchor="w",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=palette.text_primary,
-        ).grid(row=0, column=0, padx=16, pady=(14, 0), sticky="w")
+        ).grid(row=0, column=0, padx=16, pady=(16, 0), sticky="w")
         self._summary_label = ctk.CTkLabel(
             header,
             text="",
@@ -371,7 +379,7 @@ class ScheduleWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._subtitle_label.grid(row=2, column=0, padx=16, pady=(4, 14), sticky="w")
+        self._subtitle_label.grid(row=2, column=0, padx=16, pady=(4, 16), sticky="w")
 
         toolbar = ctk.CTkFrame(container, fg_color="transparent")
         toolbar.grid(row=1, column=0, sticky="ew", pady=(12, 8))
@@ -388,7 +396,12 @@ class ScheduleWindow:
         )
         self._toggle_btn.pack(side="left", padx=(8, 0))
         self._remove_btn = self._make_button(
-            toolbar, tr("schedule.remove"), self._on_remove, palette, width=96
+            toolbar,
+            tr("schedule.remove"),
+            self._on_remove,
+            palette,
+            width=96,
+            style="danger",
         )
         self._remove_btn.pack(side="left", padx=(8, 0))
 
@@ -423,22 +436,21 @@ class ScheduleWindow:
         palette: Palette,
         *,
         width: int,
+        style: ButtonStyle = "ghost",
     ) -> ctk.CTkButton:
-        """创建一个与整体风格一致的小按钮."""
-        return ctk.CTkButton(
+        """创建一个与整体风格一致的小按钮(配色来自 widgets.button_colors)."""
+        button = ctk.CTkButton(
             parent,
             text=text,
             command=command,
             width=width,
             height=30,
             corner_radius=8,
-            fg_color=palette.raised,
-            hover_color=palette.raised,
-            text_color=palette.text_body,
-            border_width=1,
-            border_color=palette.border,
             font=ctk.CTkFont(size=12),
         )
+        self._button_styles[button] = style
+        paint_button_style(button, palette, style)
+        return button
 
     # -- 数据 ---------------------------------------------------------------
 
@@ -501,20 +513,21 @@ class ScheduleWindow:
             corner_radius=8,
             fg_color=palette.accent,
             text_color=palette.accent_text,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            font=ctk.CTkFont(size=FONT_STRONG, weight="bold"),
         )
-        icon.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=9)
+        icon.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=8)
         # 标题 = "来自游戏"小标题 + 游戏名: 整行同色同粗时, 前缀读起来像超链接
         # (18 号评审)。小标题用次要色小字号, 名字才是标题。
         title = ctk.CTkFrame(row, fg_color="transparent")
-        title.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(9, 0))
-        ctk.CTkLabel(
+        title.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
+        prefix = ctk.CTkLabel(
             title,
             text=tr("schedule.from_game"),
             anchor="w",
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
-        ).pack(side="left")
+        )
+        prefix.pack(side="left")
         name = ctk.CTkLabel(
             title,
             text=item.game_name,
@@ -523,23 +536,33 @@ class ScheduleWindow:
             text_color=palette.text_primary,
         )
         name.pack(side="left", padx=(6, 0))
+        # 名字按“标题行剩下的宽度”裁: 名字本身可以很长, 不裁会被行硬切(它自己不能
+        # 用来当宽度依据 —— pack 到左边的标签, 宽度就是文字宽度)。
+        track_fit(
+            title,
+            name,
+            (item.game_name,),
+            inset=lambda: prefix.winfo_reqwidth() + 6,
+        )
         detail = ctk.CTkLabel(
             row,
             text=item.summary,
             anchor="w",
             justify="left",
-            wraplength=380,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        detail.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 9))
+        detail.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+        # 与其它页一致: 成段说明跟着容器的实际宽度换行(写死的 wraplength 在窄
+        # 窗口里会把行顶出卡片).
+        track_wraplength(row, detail, inset=_DETAIL_INSET)
         state = ctk.CTkLabel(
             row,
             text=item.state_label,
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=self._state_color(item),
         )
-        state.grid(row=0, column=2, rowspan=2, padx=(0, 14))
+        state.grid(row=0, column=2, rowspan=2, padx=(0, 16))
         for widget in (row, icon, title, name, detail, state):
             widget.bind(
                 "<Button-1>",
@@ -586,26 +609,17 @@ class ScheduleWindow:
         self._paint_buttons()
 
     def _paint_buttons(self) -> None:
-        """可行/禁用一眼可分: 四个按钮全是灰底时看不出哪个能用(18 号评审)."""
+        """可行/禁用一眼可分: 四个按钮全是灰底时看不出哪个能用(18 号评审).
+
+        启用态按各自登记的样式重画(删除是危险色), 不是一律刷成中性色 ——
+        否则这里会把危险色洗掉(48 号评审: 同一窗口内删除的配色要一致)。
+        """
         palette = self._palette
-        for button in (
-            self._add_btn,
-            self._edit_btn,
-            self._toggle_btn,
-            self._remove_btn,
-            self._close_btn,
-        ):
+        for button, style in self._button_styles.items():
             if str(button.cget("state")) == "disabled":
                 paint_button_disabled(button, palette)
                 continue
-            paint_button_enabled(
-                button,
-                palette,
-                fg_color=palette.raised,
-                text_color=palette.text_body,
-                hover_color=palette.item_hover,
-                border_color=palette.border,
-            )
+            paint_button_style(button, palette, style)
 
     def _selected_item(self) -> ScheduleItem | None:
         return next(

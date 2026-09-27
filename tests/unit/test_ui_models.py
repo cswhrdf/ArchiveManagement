@@ -66,6 +66,7 @@ from archive_management.ui.models import (
     home_board,
     import_prompt,
     import_strategies,
+    listable_candidates,
     poster_columns,
     size_label,
     target_game_id,
@@ -580,13 +581,21 @@ def test_candidate_is_not_importable_when_path_unusable_or_handled() -> None:
 
 
 def test_candidate_filter_labels_and_values() -> None:
-    assert [item.value for item in CandidateFilter] == [
-        "all",
-        "new",
-        "imported",
-        "ignored",
-    ]
+    # 没有 "已导入": 已导入的候选是游戏库里的游戏, 发现页不再呈现它们。
+    assert [item.value for item in CandidateFilter] == ["all", "new", "ignored"]
     assert CandidateFilter.NEW.label == tr("discovery.filter_new")
+
+
+def test_listable_candidates_hide_the_imported_ones() -> None:
+    """已导入的候选不进发现页, 其余状态一条都不能少."""
+    items = (
+        _candidate(),
+        replace(_candidate(), candidate_id="cand-2", status="imported", game_id="7"),
+        replace(_candidate(), candidate_id="cand-3", status="ignored"),
+    )
+    kept = listable_candidates(items)
+    assert [item.status for item in kept] == ["new", "ignored"]
+    assert "cand-2" not in {item.candidate_id for item in kept}
 
 
 def test_monitored_dir_item_summary_reports_state_and_scan_time() -> None:
@@ -1241,8 +1250,11 @@ def _batch_inspection(*, app_id: int | None = 730) -> BatchInspection:
     )
 
 
-def test_batch_import_prompt_defaults_every_row_to_new_with_a_prefilled_path() -> None:
-    """逐行默认值: 策略"新建"、目标预选库里的第一款、只预填本机已存在的位置."""
+def test_batch_import_prompt_defaults_to_new_without_a_matching_game() -> None:
+    """库里没有同一款时逐行默认:
+
+    策略"新建"、目标预选库里的第一款、只预填本机已存在的位置。
+    """
     prompt = batch_import_prompt(_batch_inspection(), [_packaged_game("7", "别的游戏")])
 
     row = prompt.rows[0]
@@ -1271,6 +1283,29 @@ def test_batch_import_prompt_defaults_every_row_to_new_with_a_prefilled_path() -
         size=size_label(0),
     )
     assert prompt.hint
+
+
+def test_batch_import_prompt_defaults_to_merge_when_the_library_has_the_game() -> None:
+    """检测到库里已有同一款: 策略默认"合并到现有游戏", 目标预选那一款.
+
+    这种包就是同一款游戏的更多备份, 默认"新建"会让库里多出一款重复的游戏。
+    """
+    inspection = replace(_inspection(), matching_game_id=7)
+    batch = BatchInspection(
+        path=Path("batch.archive.zip"),
+        games=(BatchGameInspection(entry="a.archive.zip", inspection=inspection),),
+    )
+    games = [_packaged_game("7", "Demo"), _packaged_game("9", "别的游戏")]
+
+    row = batch_import_prompt(batch, games).rows[0]
+
+    assert [key for key, _text in row.strategies][:2] == [STRATEGY_NEW, STRATEGY_MERGE]
+    assert row.strategy == STRATEGY_MERGE, "库里有同一款时默认合并"
+    assert row.target_game_id == "7", "预选的就是疑似同一款"
+    assert row.match_text == tr("dialog.import_match", name="Demo")
+    # 目标候选也把"疑似同一款"排在最前(与单包对话框一致).
+    assert [option.game_id for option in row.targets] == ["7", "9"]
+    assert [option.selected for option in row.targets] == [True, False]
 
 
 def test_batch_import_prompt_without_app_id_or_library_games_offers_no_merge() -> None:

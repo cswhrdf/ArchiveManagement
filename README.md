@@ -22,16 +22,16 @@
 
 ```shell
 uv sync --locked                                              # 安装依赖(本地默认装全部开发组)，不安装当前项目本身
-uv run python -m archive_management init --root .\dev-data    # 初始化目录/配置/数据库
-uv run python -m archive_management doctor --root .\dev-data  # 健康检查
-uv run python -m archive_management gui --root .\dev-data     # 启动图形界面
+uv run python -m archive_management init --root ./dev-data    # 初始化目录/配置/数据库
+uv run python -m archive_management doctor --root ./dev-data  # 健康检查
+uv run python -m archive_management gui --root ./dev-data     # 启动图形界面
 uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检(自动关闭)
 uv run pre-commit install                                     # 安装 Git 提交钩子
 ```
 
 不带子命令运行时默认执行 `init`；`--root` 可以把全部数据收敛到指定目录，便于便携使用与调试。首次启动是空库：用顶栏的"+ 添加游戏"录入游戏或游戏发现中导入已发现的游戏，再在游戏设置里添加"原始存档位置"，之后即可备份、创建分支与恢复。命令行参数与配置文件（含内容非法时自动还原为默认值的行为）见 [docs/development.md](docs/development.md)。
 
-上面的命令都在**仓库根目录**执行。本项目以工具形式开发、**不作为包安装**：仓库根的 `.env`（`uv run` 会自动加载）把 `src` 加进 `PYTHONPATH`，所以 `python -m archive_management` 不需要安装就能运行；绕过 `uv run` 直接调用 `.venv` 里的解释器时它不会生效，需要自己设置 `PYTHONPATH=src`。
+上面的命令都在**仓库根目录**执行。本项目以工具形式开发、**不作为包安装**：仓库根的 `.env` 提供 `PYTHONPATH=src`，所以 `python -m archive_management` 不需要安装就能导入自身源码。注意 **uv 不会读这个 `.env`**：它只在 **VS Code 的集成终端**里生效（Python 扩展按 `python.terminal.useEnvFile` 注入 `python.envFile`，默认 `${workspaceFolder}/.env`）；在纯终端（Windows Terminal / WSL 等）里请自己带上它 —— `uv run --env-file .env python -m archive_management ...`、`UV_ENV_FILE=.env uv run ...` 或 `PYTHONPATH=src uv run ...`。绕过 `uv run` 直接调用 `.venv` 里的解释器时它同样不会生效，需要自己设置 `PYTHONPATH=src`。
 
 ## 平台支持
 

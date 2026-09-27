@@ -36,7 +36,7 @@ from archive_management.services.hotkeys import (
     format_accelerator,
     tk_token,
 )
-from archive_management.ui.dialogs import _center
+from archive_management.ui.dialogs import _present
 from archive_management.ui.palette import Palette
 from archive_management.ui.typography import FONT_CHOICES
 from archive_management.ui.widgets import auto_scrollbar
@@ -48,7 +48,7 @@ _ToggleTheme = Callable[[], str]
 # 窗口固定宽度 + 边距; 高度按内容算: 说明文字会随语言换行, 写死高度会把底部的
 # 说明与"关闭"按钮裁到窗口外面(用户看不到也点不到)。
 _WINDOW_WIDTH = 480
-_WINDOW_PAD_X = 18
+_WINDOW_PAD_X = 16
 _WINDOW_PAD_Y = 16
 _WINDOW_MIN_HEIGHT = 500
 # 滚动区与固定页脚之间的间距(与 _footer 的 pady 一致).
@@ -206,7 +206,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._appearance_title.grid(row=0, column=0, padx=16, pady=(14, 2), sticky="w")
+        self._appearance_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
         self._appearance_hint = ctk.CTkLabel(
             self._appearance_panel,
             text=tr("settings.appearance_hint"),
@@ -229,7 +229,7 @@ class SettingsWindow:
             text_color=palette.accent_text,
             font=ctk.CTkFont(size=12),
         )
-        self._toggle_btn.grid(row=0, column=1, rowspan=2, padx=16, pady=14)
+        self._toggle_btn.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
         self._theme_label = ctk.CTkLabel(
             self._appearance_panel,
             text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}")),
@@ -248,7 +248,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
         )
-        self._font_label.grid(row=3, column=0, padx=16, pady=(0, 14), sticky="w")
+        self._font_label.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="w")
         self._font_box = ctk.CTkComboBox(
             self._appearance_panel,
             values=[self._font_label_of(size) for size in FONT_CHOICES],
@@ -268,7 +268,7 @@ class SettingsWindow:
             command=self._on_font_selected,
         )
         self._font_box.set(self._font_label_of(self._base_font_px))
-        self._font_box.grid(row=3, column=1, padx=16, pady=(0, 14))
+        self._font_box.grid(row=3, column=1, padx=16, pady=(0, 16))
 
         self._language_panel = ctk.CTkFrame(
             self._body,
@@ -286,7 +286,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._language_title.grid(row=0, column=0, padx=16, pady=(14, 2), sticky="w")
+        self._language_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
         self._language_hint = ctk.CTkLabel(
             self._language_panel,
             text=tr("settings.language_hint"),
@@ -315,7 +315,7 @@ class SettingsWindow:
             dropdown_font=ctk.CTkFont(size=12),
         )
         self._language_box.set(self._locale_label(self._language))
-        self._language_box.grid(row=0, column=1, rowspan=2, padx=16, pady=14)
+        self._language_box.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
         self._language_label = ctk.CTkLabel(
             self._language_panel,
             text=tr(
@@ -329,7 +329,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._language_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
         )
 
         self._logging_panel = ctk.CTkFrame(
@@ -348,7 +348,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._logging_title.grid(row=0, column=0, padx=16, pady=(14, 2), sticky="w")
+        self._logging_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
         self._logging_hint = ctk.CTkLabel(
             self._logging_panel,
             text=tr("settings.logging_hint"),
@@ -372,7 +372,7 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_debug_switch(self._debug)
-        self._debug_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=14)
+        self._debug_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
         self._debug_label = ctk.CTkLabel(
             self._logging_panel,
             text=self._debug_state_text(),
@@ -383,7 +383,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._debug_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
         )
 
         self._activation_panel = ctk.CTkFrame(
@@ -402,7 +402,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._activation_title.grid(row=0, column=0, padx=16, pady=(14, 2), sticky="w")
+        self._activation_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
         self._activation_hint = ctk.CTkLabel(
             self._activation_panel,
             text=tr("settings.activation_hint"),
@@ -426,7 +426,7 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_activation_switch(self._activation)
-        self._activation_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=14)
+        self._activation_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
         self._activation_label = ctk.CTkLabel(
             self._activation_panel,
             text=self._activation_state_text(),
@@ -437,7 +437,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._activation_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
         )
 
         self._shortcut_panel = ctk.CTkFrame(
@@ -457,20 +457,24 @@ class SettingsWindow:
             text_color=palette.text_primary,
         )
         self._shortcut_title.grid(
-            row=0, column=0, columnspan=2, padx=16, pady=(14, 6), sticky="w"
+            row=0, column=0, columnspan=2, padx=16, pady=(16, 6), sticky="w"
         )
 
         # 每个动作一行: 左侧是动作名, 右侧是可点击的"按键区域".
         self._shortcut_buttons: dict[str, ctk.CTkButton] = {}
+        # 左侧动作名要留住引用: 切主题时要跟着重绘(否则它会留着旧主题的正文色).
+        self._shortcut_labels: list[ctk.CTkLabel] = []
         for index, (action, label_key) in enumerate(_SHORTCUT_ROWS):
             row = 1 + index
-            ctk.CTkLabel(
+            label = ctk.CTkLabel(
                 self._shortcut_panel,
                 text=tr(label_key),
                 anchor="w",
                 font=ctk.CTkFont(size=12),
                 text_color=palette.text_body,
-            ).grid(row=row, column=0, padx=16, pady=(0, 8), sticky="w")
+            )
+            label.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="w")
+            self._shortcut_labels.append(label)
             button = ctk.CTkButton(
                 self._shortcut_panel,
                 text=format_accelerator(self._shortcuts.get(action, "")),
@@ -538,7 +542,7 @@ class SettingsWindow:
             column=0,
             columnspan=2,
             padx=16,
-            pady=(4, 14),
+            pady=(4, 16),
             sticky="w",
         )
         self._paint_shortcuts()
@@ -590,7 +594,8 @@ class SettingsWindow:
         window.geometry(
             f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, min(content_height, available))}"
         )
-        _center(self._parent, window)
+        # 常驻窗口不接窗口级的 Esc/回车/定焦: 那三件事是对话框的约定(见 _present)。
+        _present(self._parent, window, modal=False)
 
     def _toggle_text(self) -> str:
         """按钮文案: 点击后会切到的主题."""
@@ -758,6 +763,10 @@ class SettingsWindow:
         # 两个下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
         for box in (self._font_box, self._language_box):
             _paint_combo(box, palette)
+        # 快捷键行的动作名也是文字控件, 漏在重绘表外时它会留着**旧主题**的正文色
+        # (浅色主题的深灰文字落在深色面板上, 就是一条几乎看不见的淡灰字)。
+        for label in self._shortcut_labels:
+            label.configure(text_color=palette.text_body)
         self._theme_label.configure(
             text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}"))
         )
@@ -799,11 +808,19 @@ class SettingsWindow:
         self._paint_shortcuts()
 
     def _on_key_press(self, event: tk.Event) -> str:
-        """累计按下的按键(白名单之外的键只提示, 不参与组合)."""
+        """累计按下的按键(白名单之外的键只提示, 不参与组合); Esc 直接退出录制.
+
+        Esc 在这里处理而不是留给窗口级绑定: 设置窗口是常驻窗口, 不该"按 Esc 就关掉"
+        (实测反馈), 而录制中按 Esc 的意图是"这一行我不改了"。
+        """
         if self._capturing is None:
             return "break"
         self._cancel_pending_finish()
-        token = tk_token(str(event.keysym))
+        keysym = str(event.keysym)
+        if keysym == "Escape":
+            self._finish_capture(canceled=True)
+            return "break"
+        token = tk_token(keysym)
         if token is None:
             self._error = tr("hotkey.err_unknown_key")
         else:

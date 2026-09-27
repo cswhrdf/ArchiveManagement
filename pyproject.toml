@@ -85,8 +85,10 @@ path = "src/archive_management/packaging.py"
 # 本项目以工具形式开发, **不作为包安装**(不发布到 PyPI): uv 只负责解析与安装依赖。
 # 因此这里也不声明 `[project.scripts]`(声明了也装不上, 只会让每次 uv sync 打印
 # "Skipping installation of entry points")。实际入口有两个:
-# 1. `uv run python -m archive_management ...` —— 靠仓库根的 `.env`(PYTHONPATH=src,
-#    `uv run` 会自动加载)把 src 加进导入路径, 所以不安装也能运行(见 docs/development.md);
+# 1. `uv run python -m archive_management ...` —— 靠仓库根的 `.env`(PYTHONPATH=src)把 src
+#    加进导入路径, 所以不安装也能运行(见 docs/development.md)。注意 **uv 不会读这个 .env**,
+#    它只在 VS Code 集成终端里由 Python 扩展注入; 纯终端要显式传 `--env-file .env` 或
+#    `PYTHONPATH=src`(实测 uv 0.12.10 / 0.12.19 都不自动加载, [tool.uv] 也没有该选项);
 # 2. PyInstaller 打包出的可执行文件(见 packaging/archive-management.spec; 它用 pathex
 #    指向 src, 与上面的机制无关)。
 package = false
