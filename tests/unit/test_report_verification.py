@@ -605,6 +605,14 @@ _COVERAGE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </coverage>
 """
 
+# 达标的一份(合计 (99+99)/(100+100) = 99% > fail_under 95): 结论行的"通过"分支靠它。
+_COVERAGE_XML_PASSING = """<?xml version="1.0" encoding="UTF-8"?>
+<coverage line-rate="0.99" branch-rate="0.99" lines-covered="99" lines-valid="100"
+          branches-covered="99" branches-valid="100">
+  <packages/>
+</coverage>
+"""
+
 
 def test_coverage_item_lands_in_the_platform_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -618,7 +626,7 @@ def test_coverage_item_lands_in_the_platform_environment(
     module = _load_script("create_allure_coverage")
     results = tmp_path / "allure-results"
     coverage_xml = tmp_path / "coverage.xml"
-    coverage_xml.write_text(_COVERAGE_XML, encoding="utf-8")
+    coverage_xml.write_text(_COVERAGE_XML_PASSING, encoding="utf-8")
     monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
     monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
 
@@ -638,6 +646,48 @@ def test_coverage_item_lands_in_the_platform_environment(
     assert platform not in payload["fullName"]
     assert platform not in payload["historyId"]
     assert "按包统计" in payload["description"]
+    # 结论行就在描述开头: 报告里不用再去另一条结论项里对数字。
+    assert payload["description"].startswith("## 结论")
+    assert "当前覆盖率 99.00% 大于预期覆盖率 95%, 验证通过。" in payload["description"]
+
+
+def test_coverage_item_fails_the_platform_when_below_the_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """低于门槛时这一项直接是失败, 并把结论写成失败原因(报告里的红/绿必须是真结论).
+
+    门槛用 ``fail_under`` 的口径: 合计覆盖率 =(行覆盖 + 分支覆盖)/(行总数 + 分支总数),
+    这份夹具是 (9+8)/(10+10) = 85%。
+    """
+    module = _load_script("create_allure_coverage")
+    results = tmp_path / "allure-results"
+    coverage_xml = tmp_path / "coverage.xml"
+    coverage_xml.write_text(_COVERAGE_XML, encoding="utf-8")
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(module, "COVERAGE_XML", coverage_xml)
+    monkeypatch.setattr(module, "RAW_REPORT_FILES", (coverage_xml,))
+
+    module.main([])
+
+    payload = json.loads(next(results.glob("*-result.json")).read_text("utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["statusDetails"]["message"].startswith("当前覆盖率 85.00%")
+    assert "验证未通过" in payload["description"]
+    # 原始报告照旧带上: 结论红了更要能下载下来看细节。
+    assert [item["name"] for item in payload["attachments"]] == ["coverage.xml"]
+
+
+def test_coverage_threshold_comes_from_pyproject() -> None:
+    """结论文案里的门槛必须与 pyproject 的 fail_under 同源(读配置, 不另写一份常量)."""
+    import tomllib
+
+    module = _load_script("create_allure_coverage")
+    pyproject = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    fail_under = pyproject["tool"]["coverage"]["report"]["fail_under"]
+
+    assert module.coverage_threshold() == float(fail_under)
+    assert module.verdict_text(0.96, module.coverage_threshold()).endswith("验证通过。")
+    assert "验证未通过" in module.verdict_text(0.9, module.coverage_threshold())
 
 
 def test_coverage_item_platform_comes_from_the_flag(
@@ -1474,10 +1524,14 @@ def test_coverage_conclusion_without_any_data_is_broken(tmp_path: Path) -> None:
     assert rows == []
 
 
-def test_coverage_conclusion_item_is_written_by_the_summary(
+def test_the_summary_writes_no_separate_coverage_conclusion_item(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """汇总脚本要把覆盖率总结论写成一条结论项(而不是只写进总账)."""
+    """覆盖率结论写在各平台的 `Coverage report` 项里, 汇总脚本不再单出一条结论项.
+
+    以前汇总脚本会另写一条 `Coverage conclusion`(平台 unknown) —— 同一个数字在报告里
+    出现两次, 还得两条对着看。现在结论行跟着平台自己那条走, 汇总只把它写进运行总账。
+    """
     module = _load_script("create_allure_summary")
     results = tmp_path / "allure-results"
     results.mkdir()
@@ -1497,10 +1551,19 @@ def test_coverage_conclusion_item_is_written_by_the_summary(
 
     assert module.main() == 0
 
-    item = _summary_item(results, "Coverage conclusion")
-    assert item["status"] == "failed"
-    assert "90.00%" in item["description"]
-    assert "95%" in item["statusDetails"]["message"]
+    names = [
+        json.loads(path.read_text(encoding="utf-8"))["name"]
+        for path in sorted(results.glob("*-result.json"))
+    ]
+    assert "Coverage conclusion" not in names
+    assert not hasattr(module, "COVERAGE_CONCLUSION_TITLE")
+    # 结论仍然看得见: 总账里逐平台列出数字与达标结论, 并指向各平台自己那一项。
+    ledger = module.run_ledger(
+        results, module.result_payloads(results), None, [], ["Windows"]
+    )
+    assert "## 覆盖率" in ledger
+    assert "`Coverage report`" in ledger
+    assert "| Windows |" in ledger
 
 
 def test_coverage_fail_under_matches_pyproject() -> None:

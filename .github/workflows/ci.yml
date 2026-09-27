@@ -223,7 +223,7 @@ jobs:
           uv sync --locked --no-default-groups --group test --group quality
           uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK after repair')"
 
-      - name: Install Xvfb (Linux)
+      - name: Install Xvfb and a CJK font (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -235,7 +235,12 @@ jobs:
             fi
           done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          # fonts-noto-cjk 不是可选项: 界面是中文的, 而 Tk 的量宽全靠当前字体的字形度量
+          # —— 裸 runner 上没有任何中日韩字体时, 汉字会被量成近乎零宽, "按宽度裁剪/折行"
+          # 的判定因此得出"放得下"的结论, 长路径不省略、状态列不折行(2026-09-27 实测:
+          # Linux 分片里 test_discovery_rows_clip_long_paths... 与 test_state_column_never_
+          # shows_half_a_chip 两条红, 而 Windows 上绿)。
+          sudo apt-get install -y xvfb fonts-noto-cjk
 
       - name: Pytest with coverage (Linux)
         if: runner.os == 'Linux'
@@ -404,6 +409,8 @@ jobs:
       - name: Attach coverage report to Allure
         # 脚本把覆盖率摘要写成一条结果(按平台归到各环境), 并把原始 coverage.xml 作为
         # 附件一起放进 allure-results —— 报告里能直接下载原始数据, 不只是渲染好的表。
+        # 描述开头就是达标结论("当前覆盖率 X% 大于预期覆盖率 Y%, 验证通过。"): 低于
+        # fail_under 时这一项本身直接是 failed, 不再另写一条汇总结论项。
         # --platform 是这个平台的展示名: 这台机器是 Ubuntu, 但它合并的是那个平台的数据,
         # 宿主平台自己认(platform.system()) 会把结论标成 Linux。
         if: always()

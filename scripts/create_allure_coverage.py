@@ -1,5 +1,11 @@
 """根据 pytest-cov 生成的 Cobertura XML 创建可读的 Allure 结果.
 
+每一项都自带**结论行**: 描述开头第一句就是"当前覆盖率 X% 大于/小于预期覆盖率 Y%,
+验证通过/未通过", 状态也跟着这个结论走(达不到门槛写 ``failed``, 文件缺失或改不了写
+``broken``)—— 平台与结论在同一处, 不需要再去另一条 "覆盖率总结论" 里对。门槛读的是
+``pyproject.toml`` 的 ``[tool.coverage.report] fail_under``(与 CI 的 ``coverage report``
+同一处配置)。
+
 除了把覆盖率摘要写进描述, **原始覆盖率报告会作为附件一并放进 Allure 结果目录**
 (默认是 ``coverage.xml``) —— 与性能/安全汇总项(``scripts/create_allure_summary.py``)
 同一做法: 报告里能直接下载原始数据, 而不只是看到一张渲染过的表。HTML 报告是整站,
@@ -16,6 +22,7 @@ import argparse
 import json
 import platform
 import time
+import tomllib
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
@@ -24,6 +31,9 @@ from typing import Any
 
 RESULTS_DIRECTORY = Path("allure-results")
 COVERAGE_XML = Path("coverage.xml")
+# 覆盖率门槛所在位置: 脚本就在仓库里跑(CI 的每个报告作业都检出了仓库), 因此直接读配置,
+# 不在这里再写一份常量 —— 门槛改一处, 结论与 CI 的门禁步骤一起跟着改。
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 # 作为附件带进报告的原始覆盖率报告: 存在哪个带哪个。Cobertura XML 是主数据源,
 # 另外两个是可选的附加输出 —— 以后在 CI 里加 `coverage.json`、或把终端的
 # `--cov-report=term-missing` 输出重定向成文件时, 不用改代码就会一并带上。
@@ -97,6 +107,80 @@ def count_text(attributes: dict[str, str], covered: str, valid: str) -> str:
     covered_count = attributes.get(covered, "-")
     valid_count = attributes.get(valid, "-")
     return f"{covered_count}/{valid_count}"
+
+
+def coverage_threshold() -> float:
+    """覆盖率门槛(读 pyproject 的 ``[tool.coverage.report] fail_under``).
+
+    与 CI 里强制门槛的 ``coverage report`` 用的是同一份配置: 读不到就报错退出, 不能用
+    一个猜出来的门槛写结论 —— 那比没有结论更坏。
+    """
+    try:
+        config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+        return float(config["tool"]["coverage"]["report"]["fail_under"])
+    except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
+        raise SystemExit(f"读不到覆盖率门槛({exc}): {PYPROJECT}") from exc
+
+
+def combined_rate(attributes: dict[str, str]) -> float | None:
+    """合计覆盖率(0~1); 拿不到计数时退回行覆盖率, 全都没有则给 None.
+
+    与 ``create_allure_summary.py`` 同一口径: ``fail_under`` 比的是 coverage.py 的
+    TOTAL 一列, 即 ``(行覆盖 + 分支覆盖) / (行总数 + 分支总数)``; 只拿行覆盖率会与
+    CI 的门禁结论对不上。
+    """
+
+    def number(name: str) -> float | None:
+        try:
+            return float(attributes[name])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    line = number("line-rate")
+    covered_lines = number("lines-covered")
+    covered_branches = number("branches-covered")
+    valid_lines = number("lines-valid")
+    valid_branches = number("branches-valid")
+    if (
+        covered_lines is None
+        or covered_branches is None
+        or valid_lines is None
+        or valid_branches is None
+    ):
+        return line
+    valid = valid_lines + valid_branches
+    return (covered_lines + covered_branches) / valid if valid > 0 else line
+
+
+def verdict_text(rate: float, threshold: float) -> str:
+    """结论行(报告里一眼能看到的那一句)."""
+    if rate * 100 >= threshold:
+        return f"当前覆盖率 {rate * 100:.2f}% 大于预期覆盖率 {threshold:g}%, 验证通过。"
+    gap = threshold - rate * 100
+    return (
+        f"当前覆盖率 {rate * 100:.2f}% 小于预期覆盖率 {threshold:g}%, "
+        f"验证未通过(差 {gap:.2f} 个百分点)。"
+    )
+
+
+def verdict_section(rate: float | None, threshold: float) -> tuple[str, str, str]:
+    """结论段与它决定的状态 ``(Markdown, 状态, 失败原因)``.
+
+    读不到数字时给 ``broken`` —— "读不到"绝不能当成通过。
+    """
+    if rate is None:
+        return (
+            "## 结论\n\n覆盖率数字读不到(缺少行/分支计数, 也不是合法的 Cobertura XML)。\n",
+            "broken",
+            "覆盖率数字读不到",
+        )
+    text = verdict_text(rate, threshold)
+    passed = rate * 100 >= threshold
+    return (
+        f"## 结论\n\n{text}\n",
+        "passed" if passed else "failed",
+        "" if passed else text,
+    )
 
 
 def markdown_cell(value: str) -> str:
@@ -200,10 +284,15 @@ def write_result(result: dict[str, Any], result_id: str) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """创建一条包含覆盖率摘要与原始报告附件的 Allure 结果."""
+    """创建一条包含覆盖率结论与原始报告附件的 Allure 结果.
+
+    描述的第一段就是结论行(如"当前覆盖率 98.05% 大于预期覆盖率 95%, 验证通过。"), 状态
+    跟结论走: 达不到门槛 ``failed``(失败原因写同一句), 文件缺失/改不了 ``broken``。
+    """
     result_id = str(uuid.uuid4())
     timestamp = time.time_ns() // 1_000_000
     name = resolve_platform(parse_args(argv).platform)
+    threshold = coverage_threshold()
     attachments = raw_report_attachments(result_id)
     result: dict[str, Any] = {
         "uuid": result_id,
@@ -247,7 +336,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         write_result(result, result_id)
         return
 
-    result["description"] = with_raw_report_note(build_description(root), attachments)
+    section, status, message = verdict_section(combined_rate(root.attrib), threshold)
+    result["status"] = status
+    if message:
+        result["statusDetails"] = {"message": message}
+    result["description"] = with_raw_report_note(
+        section + "\n" + build_description(root), attachments
+    )
     write_result(result, result_id)
 
 

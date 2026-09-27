@@ -137,7 +137,9 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 - 每条安全结论记录：类别、场景、输入摘要、期望拦截行为、实际结果、是否拦截。
 - 环境信息记录：操作系统与平台族、Python 版本与实现、提交 SHA、分支与 CI run id、测试类别是否执行、覆盖率门槛（`scripts/create_allure_summary.py` 写入`allure-results/environment.properties`）。
 - 覆盖率摘要由 `scripts/create_allure_coverage.py` 生成；性能与安全结果由`scripts/create_allure_summary.py` 生成，原始 JSON/CSV 作为附件保留，保证结论可下载、可追溯。覆盖率摘要项同样**把原始 `coverage.xml` 作为附件**带进报告（脚本按 `RAW_REPORT_FILES` 逐个收集，存在哪个带哪个：以后加 `coverage.json` 或把 `--cov-report=term-missing` 的输出重定向成文件，不改代码就会一并附上）；HTML 报告是整站，仍旧作为 `coverage-<os>` artifact 上传。
-- **汇总结论项的状态由数据决定（报告不许骗人）**：`scripts/create_allure_summary.py` 除了写环境信息，还会为每一类结果写"结论项"。安全（`Security findings`，见 §4）之外的另外两类：性能 `Performance baseline` —— 只要有一条测量 `passed` 为假就写 `failed`（描述里给出基准名/取值/阈值），结果文件缺失则写 `broken` 并说明原因（**不是**"没有这条"）；覆盖率 `Coverage conclusion` —— **每个跑出用例结果的平台都要有一份达标的覆盖率结论**，缺一份（报告作业挂了、产物没合并进来）或合计覆盖率低于 `pyproject.toml` 的 `[tool.coverage.report] fail_under` 都写 `failed`，描述里给出行/分支/合计的百分比与门槛。覆盖率的"合计"按 coverage.py 的口径算：`(行覆盖 + 分支覆盖) / (行总数 + 分支总数)`，与 `fail_under` 比的就是它（`scripts/create_allure_summary.py` 的 `test_coverage_fail_under_matches_pyproject` 把脚本常量与配置钉在一起）。
+- **汇总结论项的状态由数据决定（报告不许骗人）**：`scripts/create_allure_summary.py` 除了写环境信息，还会为每一类结果写"结论项"。
+  - 性能 `Performance baseline` —— 只要有一条测量 `passed` 为假就写 `failed`（描述里给出基准名/取值/阈值），结果文件缺失则写 `broken` 并说明原因（**不是**"没有这条"）。
+  - 覆盖率**不另出结论项**：每个平台的 `Coverage report` 项自己就是结论 —— 描述开头第一句固定是"当前覆盖率 X% 大于/小于预期覆盖率 Y%, 验证通过/未通过"（X 按 coverage.py 的 TOTAL 口径算：`(行覆盖 + 分支覆盖) / (行总数 + 分支总数)`，Y 读 `pyproject.toml` 的 `[tool.coverage.report] fail_under`），低于门槛时那一项的状态直接是 `failed`（失败原因就是这句），读不到 XML 或数字时是 `broken`。缺平台（报告作业挂了、产物没合并进来）的情况由运行总账的覆盖率一节指出（`scripts/create_allure_summary.py`），不会因为"没有这一条"而静静变绿。同一份数字以前曾在报告里出现两次（一条 `Coverage report` + 一条 `Coverage conclusion`），现在只看一处。
 - **运行总账里的性能/覆盖率两节与安全同一风格**：覆盖率一节给每平台一行（行覆盖率/分支覆盖率/合计/门槛/结论 + 原始报告归属），性能一节给每平台一行（基准数/未达标数/结论），安全一节给（结论条数/未拦截条数/失败用例/结论）。任一个"结论"列都不是猜的，而是从原始数据算出来的。
 - **「有意不统计的覆盖」是报告首页的一份全局附件**（`allure-coverage-exclusions.md`，由 `scripts/create_allure_summary.py` 生成、由仓库根 `allurerc.mjs` 的 `globalAttachments` 收进报告「全局附件」页签）：数据来自 `src/**/*.py` 里的 `# pragma: no cover` / `# pragma: no branch` 标记与 `pyproject.toml` 的 `exclude_also`，按文件列出 `路径:行号 — 标记 — 原因`，并给出 `no cover` / `no branch` / `exclude_also` 的条数与「写入问题」（缺原因、原因太短或占位、`no branch` 标在无分支的行上等）。解析规则与 `tests/unit/test_coverage_pragmas.py` **共用同一份实现**（定义在 `scripts/create_allure_summary.py`，守卫直接导入它），所以"守卫认可的写法"与"报告列出来的写法"永远一致；一条豁免都没有时清单会明确写出"没有"，而不是留白。
 - **平台以 Allure 的"环境"维度呈现**（这是看出"结果来自哪台机器"的主路径）：每个用例都会写入 `env` 标签（取值就是平台展示名），仓库根的 **`allurerc.mjs`** 用 matcher 把它映射成 Allure 3 的环境。于是一份合并报告里会出现 `Windows` / `Linux` 两个环境（macOS 屏蔽期间；环境选择器、用例详情页的「环境」分页都在这个维度上），而不是只能从参数或套件名后缀里去认平台。
@@ -179,7 +181,7 @@ GUI 用例的环境守卫会把建窗口期的 `TclError` 写成 `pytest.skip("t
 
 现在的规矩（见 `tests/tk_guard.py`）：
 
-- **只有已知的环境症状**才允许跳过：解释器加载不了 Tcl/Tk 库数据（`tcl_findLibrary` / `init.tcl` / `tk.tcl` / `Can't find a usable …`），或者根本没有显示环境（`no display name` 等）。前一组只可能由 **Tcl 自己**在装库时说出（即使用例完全不碰文件也可能撞上），与用例断言的东西无关；`tk.tcl` 这一条是 2026-09-26 补上的 —— 现场是 `test_gui_buttons.py` 整模块跑时偶有一条用例在建 Tk 根时报 `couldn't read file <...>/tk.tcl`，单跑必过，且把新增用例全部 deselect 后仍会复现。
+- **只有已知的环境症状**才允许跳过：解释器加载不了 Tcl/Tk 库数据（`tcl_findLibrary` / `init.tcl` / `tk.tcl` / `auto.tcl` / `Can't find a usable …`），或者根本没有显示环境（`no display name` 等）。前一组只可能由 **Tcl 自己**在装库时说出（即使用例完全不碰文件也可能撞上），与用例断言的东西无关；`tk.tcl` 这一条是 2026-09-26 补上的 —— 现场是 `test_gui_buttons.py` 整模块跑时偶有一条用例在建 Tk 根时报 `couldn't read file <...>/tk.tcl`，单跑必过，且把新增用例全部 deselect 后仍会复现。`auto.tcl` 是 2026-09-27 补上的：同一批用例里换了一个文件名（`couldn't read file <...>/auto.tcl`，那是 `init.tcl` 自己 source 的引导脚本），本机确认过 Tcl 库目录与文件都在、`TCL_LIBRARY` 也没被改，属同一种瞬时读失败（没进白名单时它会被 `gui_app` 直接重抛，于是计成一条真失败）。
 - **白名单只列 Tcl 自己的库数据文件名**：把 `couldn't read file` 或 `can't find a usable` 这类通用说法整个收进来，会把“应用自己要读的文件打不开”（例如某张封面图找不到）也归成环境问题 —— 那正是这一节开头记的那个错误。两种拼法都能被文件名本身命中（`Can't find a usable tk.tcl` 命中 `tk.tcl`），所以不必放宽。
 - 原因前缀是 `tk 环境不可用` 但症状不在清单里时，`tests/conftest.py` 的用例报告钩子**把它改成失败**并给出判定依据 —— 要么修掉，要么删掉那条用例，不留下永远不跑的用例。
 - `tests/gui_support.gui_app` 同理：非已知抖动的 `TclError` **不重试**，直接抛出（重试也修不好）。
@@ -193,6 +195,14 @@ GUI 用例的环境守卫会把建窗口期的 `TclError` 写成 `pytest.skip("t
 补的守卫刻意不依赖平台：用例把 `normalize_path` 换成 **POSIX 风格的替身**（`posixpath.normpath` + 手写的工作目录前缀），于是 Windows 上也能复现 Linux 的形态差异（`tests/unit/test_ui_demo.py::test_demo_duplicate_locations_are_caught_for_unusual_path_forms`）。判据是"去掉修法后这条用例必须在**本机**就红"—— 实测在 Windows 上换回旧写法立刻复现了 CI 的那条 `DID NOT RAISE`。
 
 **通用做法**：遇到"只有某个平台红"的失败，先定位它依赖哪一种形态差异（路径分隔符与大小写、`normpath` 是否幂等、`dir_fd` 相对路径、显示服务、字体度量），再把那个差异做成替身搬进用例 —— 否则这条用例永远只在 CI 的一半平台上有效。
+
+**2026-09-27 实测（同一类失败，但错在用例的"前提"上）**：Linux 分片里两条 GUI 用例红 —— `test_discovery_rows_clip_long_paths_and_ignore_stale_refits` 报"长安装路径必须被裁"、`test_state_column_never_shows_half_a_chip` 报"两行放得下就不该只排一行"，本机（有中日韩字体）全绿。根因是**裸 Ubuntu runner 上没有中日韩字体**，Tk 把汉字量成近乎零宽，于是"这条路径／这串标签一定放不下"这个**前提**在那边不成立。两边都要改：CI 侧装上 `fonts-noto-cjk`（与 `xvfb` 同一步，见 `ci.yml`），用例侧三条纪律：
+
+- **前提只用拉丁字符表达**：夹具里放足量的长拉丁串（长的目录层级、`very-long-tag-01` 这类 16 字标签），再断言"量出来的宽度确实放不下"。拉丁字符在任何字体下都能量出宽度，所以这条前提在每个平台都成立；用汉字表达的前提在缺字体的机器上恒为假。
+- **前提写成强制断言，不要写成 `if`**：`if font.measure(...) > width: assert …` 在前提不成立时会**一条断言都不执行** —— 用例永远绿的，等于没测。上面第一条假红就是这么来的（本机也从未执行过那两条断言）。
+- **期望值不能与被测值同源**：`budget = label.winfo_width()` 看着像"真实宽度"，可面板一旦**没被摆放**，标签就是按内容自适应宽度 —— 实测 `width` 恰等于整条路径的度量值（1407px），于是 `measure(shown) <= width` 永远成立，把裁剪函数改成 `return text` 也照样绿。夹具必须给容器一个**被框定的宽度**（`CTkFrame(width=…)` + `grid_propagate(False)` + `place()`；注意 CTk 的 `place` 不接受 `width`/`height`，尺寸要给构造函数），否则"放不下就该裁"根本不存在。
+
+三条合起来才让"咬合验证"有落点：改坏 `discovery_page._clip_path`（→`return text`）必须报 `assert 1407 <= 658`，改坏 `models.chips_lines`（→ 不换行只裁剪）必须报 `assert '\n' in 'Steam · 已备份 · very-long-tag-01 · very…'`；恢复后两条都绿。
 
 ### 同一路径只有一条位置：判重靠"落库即规范化"
 
@@ -278,8 +288,7 @@ uv run python scripts/verify_allure_report.py allure-report --results allure-res
 
 只在 CI 出现、本地怎么跑都不复现的失败，事后能拿到的往往只有一行 traceback。所以用例失败时会自动把现场挂到**该用例的 Allure 结果**上（`tests/crash_capture.py`）：
 
-- **崩溃现场 dump**：`coredumpy` 把最深一层栈帧的局部变量与对象属性写成 `crash-dumps/<用例>.dump`（在 `.gitignore` 里），附件与摘要都会写明落点。本地打开：`coredumpy load <文件>`（进 pdb），或在 VSCode 里用 coredumpy 扩展右键「Load with coredumpy」；只想知道哪个 dump 是哪条用例，用 `coredumpy peek crash-dumps`。
-- **界面截图**：本用例创建的窗口（`tests/gui_support.py` 的登记表）在失败时的画面。Windows 走 `ImageGrab.grab(window=hwnd)` 按**窗口句柄**抓：窗口被别的窗口盖住（全屏游戏、多个用例窗口叠放）也拍得到，也不受显示缩放影响（Tk 报逻辑坐标、按屏幕区域抓拿的是物理像素，缩放不是 100% 时会错位；本次就是用这条修掉的）；Linux 按屏幕区域抓（需要 `DISPLAY`，CI 由 xvfb 提供），macOS 同（需要屏幕录制权限）——抓不到时只在摘要里写一句原因，绝不影响用例结果。
+- **崩溃现场 dump**：`coredumpy` 把最深一层栈帧的局部变量与对象属性写成 `crash-dumps/<用例>.dump`（在 `.gitignore` 里），附件与摘要都会写明落点。本地打开：`coredumpy load <文件>`（进 pdb），或在 VSCode 里用 coredumpy 扩展右键「Load with coredumpy」；只想知道哪个 dump 是哪条用例，用 `coredumpy peek crash-dumps`。  **报告里只给下载链接**：dump 的附件媒体类型挂的是 `application/octet-stream`（见 `tests/crash_capture.py` 的 `DUMP_MEDIA_TYPE`）—— Allure 对不认识的类型不渲染预览区。以前按 `text/plain` 挂时，它会尝试把整份（实测上兆字节的）JSON 读进预览区渲染，**一打开报告页面就卡死**；换成不认识的类型后附件只提供下载（文件名带 `.dump` 后缀，下载下来可直接 `coredumpy load`）。- **界面截图**：本用例创建的窗口（`tests/gui_support.py` 的登记表）在失败时的画面。Windows 走 `ImageGrab.grab(window=hwnd)` 按**窗口句柄**抓：窗口被别的窗口盖住（全屏游戏、多个用例窗口叠放）也拍得到，也不受显示缩放影响（Tk 报逻辑坐标、按屏幕区域抓拿的是物理像素，缩放不是 100% 时会错位；本次就是用这条修掉的）；Linux 按屏幕区域抓（需要 `DISPLAY`，CI 由 xvfb 提供），macOS 同（需要屏幕录制权限）——抓不到时只在摘要里写一句原因，绝不影响用例结果。
 - **失败现场摘要**：平台 / Python / 提交号 + dump 与截图落点 + 复现命令，让报告里不只有一堆附件。
 
 三条纪律写在模块注释里：留证**绝不改变用例结果**（每一步各自兜底，整段编排外面还有一层，出错只打一行日志）、**失败才留证**（通过的用例不产生任何文件）、**有上限**（递归深度默认 5、单次 dump 时限 20s、超过 25 MiB 的 dump 只记落点不挂附件、最多 3 张截图，同一用例只留一次——失败后 teardown 常跟着再报一次错）。参数：`--crash-dump-dir`（默认 `crash-dumps`）与 `--crash-dump-depth`（`0` = 关掉 dump，仍留摘要）。

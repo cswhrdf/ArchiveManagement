@@ -5,7 +5,9 @@
 
 1. **崩溃现场 dump**(`coredumpy <https://github.com/gaogaotiantian/coredumpy>`_): 把最深一层
    栈帧的局部变量与对象属性写成 JSON, 事后 ``coredumpy load <文件>``(或 VSCode 的 coredumpy
-   扩展)就能像断在现场一样翻当时的变量 —— 这是"难以复现的问题"最缺的东西;
+   扩展)就能像断在现场一样翻当时的变量 —— 这是"难以复现的问题"最缺的东西。它在报告里按
+   :data:`DUMP_MEDIA_TYPE` 的媒体类型挂上去: Allure 对不认识的类型**只给下载链接、不渲染
+   预览**, 因此打开报告不会因为把上兆字节的 JSON 读进预览区而卡死;
 2. **界面截图**: 本用例创建的窗口(``tests/gui_support.py`` 的登记表)在失败时的画面, 直接贴进
    报告的当前用例 —— "界面画歪了/被裁了/卡住了"这类问题, 一行文字说不过一张图。Windows 按
    窗口句柄抓(被别的窗口盖住也拍得到, 详见 :func:`_grab_screen`), 其它平台按屏幕区域抓;
@@ -46,6 +48,10 @@ from allure_commons.types import AttachmentType
 # 现场文件的落点: 仓库根下的独立目录(已在 .gitignore 里), 便于本地 `coredumpy load`。
 DUMP_DIRECTORY = Path("crash-dumps")
 DUMP_EXTENSION = ".dump"
+# dump 附件的媒体类型: 用 Allure **不认识**的二进制类型, 报告里就只给一个下载链接,
+# 不会再开一块预览区。coredumpy 的 dump 是纯文本(JSON), 以前按 ``text/plain`` 挂,
+# Allure 会把整份文件读进来渲染 —— 实测上兆字节的 dump 一打开就把页面卡死。
+DUMP_MEDIA_TYPE = "application/octet-stream"
 # 递归深度: 5 层足够看清"谁带着什么参数调到了这里"; 再深就开始翻 GUI 控件与数据库连接的对象图,
 # 又慢又大(实测 Tk 窗口的失败栈在 depth=5 时 dump 约 1 MiB)。
 DEFAULT_DEPTH = 5
@@ -69,10 +75,15 @@ Grabber = Callable[[Any, Box], Any]
 
 @dataclass(frozen=True)
 class Evidence:
-    """一条待挂到当前用例报告上的现场证据."""
+    """一条待挂到当前用例报告上的现场证据.
+
+    ``attachment_type`` 可以是 :class:`AttachmentType` 枚举, 也可以直接给一个媒体类型
+    字符串(如 :data:`DUMP_MEDIA_TYPE`) —— allure 拿到字符串就原样写进结果的 ``type``,
+    因此可以避开它认识的那几种类型, 只要一个下载链接。
+    """
 
     name: str
-    attachment_type: AttachmentType
+    attachment_type: AttachmentType | str
     body: bytes | None = None
     path: Path | None = None
 
@@ -310,7 +321,7 @@ def failure_evidence(
             evidence.append(
                 Evidence(
                     name=f"崩溃现场 dump · {dump_path.name}",
-                    attachment_type=allure.attachment_type.TEXT,
+                    attachment_type=DUMP_MEDIA_TYPE,
                     path=dump_path,
                 )
             )
@@ -338,9 +349,16 @@ def attach(evidence: Sequence[Evidence]) -> None:
     """把证据挂到当前用例的 Allure 报告上(大文件走 ``attach.file``, 不读进内存)."""
     for item in evidence:
         if item.path is not None:
+            # 给 media type 是字符串的附件补上真实后缀: allure 只在拿到枚举时才从枚举里
+            # 推后缀, 否则会把文件存成 ``<uuid>-attachment.attach``, 下载下来是个没后缀的
+            # 文件(``coredumpy load`` 还得自己改名).
+            suffix = item.path.suffix.lstrip(".")
             # allure 没给 attach.file 标注类型(attach 有), 但大文件只能走它: 不读进内存。
             allure.attach.file(  # type: ignore[no-untyped-call]
-                str(item.path), name=item.name, attachment_type=item.attachment_type
+                str(item.path),
+                name=item.name,
+                attachment_type=item.attachment_type,
+                extension=suffix or None,
             )
         else:
             allure.attach(

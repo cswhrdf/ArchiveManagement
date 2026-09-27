@@ -26,7 +26,7 @@ TK_SKIP_PREFIX = "tk 环境不可用"
 #
 # Tcl 库数据那一组为什么能算环境问题: 这几句话只可能由 **Tcl 自己**在装库时说出
 # ("Can't find a usable init.tcl/tk.tcl"、"invalid command name tcl_findLibrary"、
-# "couldn't read file .../tk.tcl"), 与用例断言的东西无关。uv 托管的 standalone
+# "couldn't read file .../tk.tcl|auto.tcl"), 与用例断言的东西无关。uv 托管的 standalone
 # 构建偶发这种情况(上游 astral-sh/uv#7036), 也是本仓库 CI 上"同进程反复建/销窗口,
 # 偶有一条用例建窗口时报 couldn't read file <...>/tk.tcl"的原因。
 #
@@ -38,8 +38,10 @@ KNOWN_TK_SKIP_MARKERS = (
     # uv 托管的 standalone 构建偶尔缺 Tcl/Tk 数据文件(上游 astral-sh/uv#7036)。
     "tcl_findlibrary",
     "init.tcl",
-    # Tk 侧的库数据文件: 它读不出来时解释器同样起不来。
+    # Tcl/Tk 侧的库数据文件: 它们读不出来时解释器同样起不来。`auto.tcl` 是
+    # init.tcl 自己 source 的引导脚本(2026-09-27 实测撞到, 与 tk.tcl 同一件事)。
     "tk.tcl",
+    "auto.tcl",
     # 真的没有显示环境(无头 Linux 且没有 xvfb)。
     "no display name",
     "couldn't connect to display",

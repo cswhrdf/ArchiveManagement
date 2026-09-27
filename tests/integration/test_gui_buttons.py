@@ -1202,18 +1202,36 @@ def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
     """候选行的长安装路径按"中间省略"裁进卡片; 行重建后旧标签的回调不再写已销毁控件.
 
     回归 08/09 号评审: 长路径既不换行也不省略, 会直接顶到卡片右边缘。
+    两条断言分工(2026-09-27 重写, 原版在两个平台上都"不会执行"):
+
+    * 比对**同一个裁剪函数**在同一宽度下的输出 —— 比文本不比像素, 与字体库无关,
+      钉的是"布局停在上一次窄宽度"这类回归;
+    * "放不下就必须裁"由夹具里的**拉丁字符**保证: 缺中日韩字体的环境(裸 Linux
+      runner)量汉字近乎零宽, 但拉丁字符在任何字体下都能量出来, 所以这条重想
+      在哪个平台都真的会执行。
     """
     from archive_management.domain import GameCandidate
     from archive_management.infrastructure.database import Database
     from archive_management.services.platform_scan import LocalGameScanner
-    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.discovery_page import _CARD_TEXT_WIDTH, DiscoveryPanel
     from archive_management.ui.palette import Palette
     from archive_management.ui.sql_backend import SqlArchiveService
 
     db = Database(tmp_path / "clip.db")
     db.migrate()
     games = tmp_path / "Games"
-    deep = games / "Alpha" / "一个很深的目录层级" / "再来一层目录" / "存档目录"
+    # 路径刻意长到"任何字体都放不下": 拉丁字符每个都能被量出宽度(中日韩字体缺失也
+    # 一样), 所以下面"必须裁"那一条在每个平台都真的会被执行到。
+    deep = (
+        games
+        / "Alpha"
+        / "one-very-long-directory-name-level"
+        / "another-long-directory-name-level"
+        / "third-long-directory-name-level"
+        / "一个很深的目录层级"
+        / "再来一层目录"
+        / "存档目录"
+    )
     deep.mkdir(parents=True)
 
     def fake_scan(
@@ -1240,9 +1258,21 @@ def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
-        panel = DiscoveryPanel(
-            ctk.CTkFrame(app), backend=service, palette=Palette.for_theme(app._theme)
+        # 面板必须被**框定宽度**: 没被摆放的容器里每个控件都按内容自适应宽度, 标签宽度
+        # 就等于文本宽度 —— 那样 `width` 与被测文本同源, "放不下就该裁"永远不会成立
+        # (2026-09-27 实测: 标签宽 1407 == 整条路径的度量值, 于是那两条断言从没跑过).
+        host = ctk.CTkFrame(
+            app, fg_color="transparent", width=_CARD_TEXT_WIDTH + 40, height=420
         )
+        # CTk 的 place 不接受 width/height(尺寸给构造函数), 且固定尺寸不许被内容撑大.
+        host.grid_propagate(False)
+        host.place(x=0, y=0)
+        host.grid_columnconfigure(0, weight=1)
+        host.grid_rowconfigure(0, weight=1)
+        panel = DiscoveryPanel(
+            host, backend=service, palette=Palette.for_theme(app._theme)
+        )
+        panel.frame.grid(row=0, column=0, sticky="nsew")
         panel._on_scan()
         _pump(app)
         item = panel._candidates[0]
@@ -1251,11 +1281,20 @@ def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
         _pump(app)
 
         shown = str(label.cget("text"))
+        width = int(label.winfo_width())
+        assert width > 1, "夹具没给标签宽度约束, 下面的断言会退化成循环论证"
+        font = panel._path_font
+        # 期望值用同一个裁剪函数算(比文本, 不比像素): 钉的是"布局停在上一次窄宽度".
+        assert shown == panel._clip_path(item.install_dir, width), (
+            "标签里显示的就是裁剪后的文本"
+        )
+        assert font.measure(shown) <= width, f"路径溢出卡片: {shown!r}"
+        # 非循环的"必须被裁": 只量路径里的**拉丁字符** —— 缺中日韩字体的环境照样能量出
+        # 它们的宽度, 所以这条前提在每个平台都成立(2026-09-27 假红就是因为夹具里全是汉字).
+        ascii_only = "".join(ch for ch in item.install_dir if ord(ch) < 0x2E80)
+        assert font.measure(ascii_only) > width, f"夹具路径不够长: {ascii_only!r}"
         assert shown != item.install_dir, "长安装路径必须被裁"
         assert "…" in shown, f"路径要中间省略: {shown!r}"
-        width = int(label.winfo_width())
-        if width > 1:
-            assert panel._path_font.measure(shown) <= width, f"路径溢出卡片: {shown!r}"
 
         # 没有存档路径时只剩结论那一行(调用方据此决定不登记重裁).
         assert panel._save_lines(item) == item.save_label
@@ -1604,21 +1643,30 @@ def test_poster_card_keeps_its_meta_below_the_title(
 def test_state_column_never_shows_half_a_chip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """状态列放不下时先换行再补省略号, 不许出现"测…"这种半句话(第 6 号评审)."""
+    """状态列放不下时先换行再补省略号, 不许出现"测…"这种半句话(第 6 号评审).
+
+    "放不下"由夹具里的**拉丁字符**保证: 裸 Linux runner 上缺中日韩字体时汉字近乎
+    零宽(2026-09-27 实测就在那里假红), 而 16 字的拉丁标签在任何字体下都远超 200px,
+    所以下面三条强制断言在每个平台都真的会执行。
+    """
     from archive_management.ui.demo_backend import DemoArchiveService
-    from archive_management.ui.home_page import _STATE_MAX_LINES
+    from archive_management.ui.home_page import _COLUMNS, _STATE_MAX_LINES
+    from archive_management.ui.models import chips_lines
 
     _patch_dialogs(monkeypatch)
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(app)
     page = app._home_page
-    # 三个满长(16 字)标签 + 平台/备份状态: 一定塞不进 200px 的状态列.
+    # 六个满长(16 字)标签 + 平台/备份状态: 一定塞不进 200px 的状态列.
     app.backend.set_game_tags(
         "outer-wilds",
         [
-            "一二三四五六七八九十一二三四五六",
-            "二二三四五六七八九十一二三四五六",
-            "三二三四五六七八九十一二三四五六",
+            "very-long-tag-01",
+            "very-long-tag-02",
+            "very-long-tag-03",
+            "very-long-tag-04",
+            "very-long-tag-05",
+            "very-long-tag-06",
         ],
     )
     page.reload()
@@ -1628,7 +1676,14 @@ def test_state_column_never_shows_half_a_chip(
     label = page._row_parts["outer-wilds"].columns.winfo_children()[-1]
     text = str(label.cget("text"))
     lines = text.split("\n")
+    column = _COLUMNS[-1][1]
+    font = page._value_font
+    assert text == chips_lines(item.chips, font, column, max_lines=_STATE_MAX_LINES), (
+        "状态列显示的应当是排布函数在当前字体/列宽下的结果"
+    )
     assert 1 <= len(lines) <= _STATE_MAX_LINES
+    full = " · ".join(item.chips)
+    assert font.measure(full) > column, f"夹具要长到 200px 放不下: {full!r}"
     assert "\n" in text, f"两行放得下就不该只排一行: {text!r}"
     assert text.endswith("…"), f"第二行还放不下时要补省略号: {text!r}"
     for line in lines:

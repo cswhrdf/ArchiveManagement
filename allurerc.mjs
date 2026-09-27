@@ -33,7 +33,7 @@ export default {
   name: "存档管理工具 · 测试报告",
   // `allure open <报告目录>`(以及 `allure generate --open`)默认使用这个端口.
   // CLI 不传 --port 时才会用到它; 端口被占用就临时换一个: `allure open allure-report --port 8081`.
-  port: "8080",
+  port: "9000",
   // 历史趋势: CI 作业会把上一次成功运行的历史文件下载回 .allure/history.jsonl,
   // 生成报告时把本次结果追加上去(条数上限 40), 于是报告里能看到跨运行的趋势。
   historyPath: "./.allure/history.jsonl",

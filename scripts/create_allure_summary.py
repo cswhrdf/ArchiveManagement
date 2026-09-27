@@ -1,15 +1,16 @@
 """把性能与安全测试结果汇总进 Allure 报告.
 
-汇总要做四件事:
+汇总要做五件事:
 
 1. 写入环境信息(操作系统、Python、提交 SHA、测试类别、覆盖率门槛、本次涉及的
    平台), 让每份报告都能回答"这次结果是在哪个平台、哪个提交上跑出来的";
 2. 把 ``performance-results.json`` / ``security-results.json`` 转成 Allure 里
    可检索的测试项: 指标表写进描述, 原始 JSON/CSV 作为附件, 保证结论可下载;
    每个平台各写一条(名称/参数/标签都带平台), 三个平台的安全结论不会互相覆盖。
-   性能与覆盖率的结论项同样**由数据决定状态**: 有一条基准冲破预算就写 ``failed``,
-   某个有用例结果的平台缺一份覆盖率结论(或覆盖率低于 ``fail_under``)也写 ``failed`` ——
-   报告里的红/绿必须是真实结论, 不能因为"文件不在"就默默变绿;
+   性能与安全结论项同样**由数据决定状态**: 有一条基准冲破预算就写 ``failed``; 覆盖率
+   的"达没达标"由各平台的 ``Coverage report`` 项自己承担(描述开头就是结论行, 低于门槛
+   直接写 ``failed``), 这里只把各平台的数字汇总进运行总账 —— 报告里不再单独多出一个
+   "Coverage conclusion" 条目;
 3. 写一份"运行总账"到 ``allure-run-ledger.md``(Markdown 附件: 报告里会**渲染**成
    表格与标题, 而不是丢一屏纯文本; 仓库根的 ``allurerc.mjs`` 按这个文件名把它收进报告
    首页「全局附件」): 质量门逐项结论 + 覆盖率(各平台, 数字取自原始 XML) + 性能一行
@@ -76,9 +77,6 @@ FAILING_STATUSES = ("failed", "broken")
 # 守卫 test_coverage_fail_under_matches_pyproject 会把两处钉在一起. 汇总作业不装任何依赖,
 # 所以这里写常量而不是去解析配置.
 COVERAGE_THRESHOLD = "95"
-# 覆盖率总结论项的标题: 与 create_allure_coverage.py 写的原始报告项 `Coverage report` 分工
-# 不同 —— 那一条承载原始 XML(状态只说明"报告生成出来了"), 这一条才是"达没达标"的结论.
-COVERAGE_CONCLUSION_TITLE = "Coverage conclusion"
 # 平台缺一份覆盖率结论项时用的哨兵状态(Allure 自己的状态里没有它, 不会与真实状态撞车).
 MISSING_STATUS = "missing"
 # 有意不统计的覆盖(豁免清单): 与运行总账一样放在仓库根, 由 allurerc.mjs 的
@@ -485,36 +483,6 @@ def coverage_conclusion(
     if not rows:
         return "broken", ["本次运行没有任何覆盖率结论项, 也没有可据以判断的平台"], rows
     return ("failed" if failures else "passed"), failures, rows
-
-
-def coverage_digest(status: str, failures: list[str]) -> str:
-    """覆盖率结论项开头的"结论"段: 一眼看出这次覆盖率过没过."""
-    if status == "passed":
-        return "## 结论\n\n**通过** —— 每个有用例结果的平台都有一份达标的覆盖率结论。\n"
-    lines = ["## 结论", "", f"**未通过**({len(failures)} 条):", ""]
-    lines += [f"- {_cell(item)}" for item in failures]
-    return "\n".join(lines) + "\n"
-
-
-def coverage_table(rows: list[tuple[str, str, str, str, str, str]]) -> str:
-    """覆盖率数字表: 平台 / 行 / 分支 / 合计 / 门槛 / 结论."""
-    lines = [
-        "## 按平台",
-        "",
-        "| 平台 | 行覆盖率 | 分支覆盖率 | 合计 | 门槛 | 结论 |",
-        "| --- | ---: | ---: | ---: | ---: | --- |",
-    ]
-    lines += ["| " + " | ".join(_cell(value) for value in row) + " |" for row in rows]
-    if not rows:
-        lines.append("| 没有数据 | - | - | - | - | - |")
-    lines += [
-        "",
-        "- 合计覆盖率按 coverage.py 的口径算: (行覆盖 + 分支覆盖) / (行总数 + 分支总数), "
-        "与 `fail_under` 比的就是它。",
-        "- 有意不统计的豁免(每条标记的原因)见报告首页「全局附件」的 "
-        "`allure-coverage-exclusions.md`。",
-    ]
-    return "\n".join(lines) + "\n"
 
 
 def is_pragma_line(text: str) -> bool:
@@ -931,6 +899,12 @@ def run_ledger(
     )
     lines += [
         f"- 结论: {verdict} —— 每个有用例结果的平台都要有一份达标的覆盖率结论。",
+        "- 每个平台的结论行与百分比就在它自己的 `Coverage report` 项里(描述开头); "
+        "低于门槛时那一项直接是失败。",
+        "- 合计覆盖率按 coverage.py 的口径算: (行覆盖 + 分支覆盖) / (行总数 + 分支总数), "
+        "与 `fail_under` 比的就是它。",
+        "- 有意不统计的豁免(每条标记的原因)见报告首页「全局附件」的 "
+        "`allure-coverage-exclusions.md`。",
         "",
         "| 平台 | 行覆盖率 | 分支覆盖率 | 合计 | 门槛 | 结论 | 原始报告 |",
         "| --- | ---: | ---: | ---: | ---: | --- | --- |",
@@ -1220,26 +1194,6 @@ def _write_security_results(results_dir: Path) -> None:
         )
 
 
-def _write_coverage_conclusion(results_dir: Path, platforms: list[str]) -> None:
-    """写覆盖率总结论: 每个有用例结果的平台都要有一份达标的覆盖率结论."""
-    expected = [name for name in platforms if name not in {"unknown", ""}]
-    status, failures, rows = coverage_conclusion(
-        results_dir, result_payloads(results_dir), expected
-    )
-    write_result(
-        results_dir,
-        result_id=str(uuid.uuid4()),
-        category="coverage-conclusion",
-        title=COVERAGE_CONCLUSION_TITLE,
-        description=coverage_digest(status, failures) + "\n" + coverage_table(rows),
-        attachments=[],
-        platform="unknown",
-        status=status,
-        status_message="; ".join(failures),
-    )
-    print(f"覆盖率结论已写入 Allure: {len(rows)} 个平台({status})")
-
-
 def _write_coverage_exclusions() -> None:
     """写"有意不统计的覆盖"清单(报告首页「全局附件」的一份附件)."""
     COVERAGE_EXCLUSIONS_REPORT.write_text(
@@ -1277,7 +1231,6 @@ def main() -> int:
 
     _write_performance_result(results_dir, performance)
     _write_security_results(results_dir)
-    _write_coverage_conclusion(results_dir, platforms)
     _write_coverage_exclusions()
 
     if performance is None:

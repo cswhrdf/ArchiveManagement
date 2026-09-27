@@ -186,16 +186,20 @@ def test_only_the_known_tk_symptoms_count_as_an_environment_problem() -> None:
 
 
 def test_the_tk_library_data_flake_is_recognised_in_every_its_spellings() -> None:
-    """Tk 侧库数据读不出来(`tk.tcl`)也算已知环境抖动, 与 init.tcl 同等看待.
+    """Tcl/Tk 侧库数据读不出来(`tk.tcl` / `auto.tcl`)也算已知环境抖动.
 
-    现场(2026-09-26): `test_gui_buttons.py` 整模块跑时偶有一条用例在建 Tk 根时报
-    `couldn't read file <...>/tk.tcl`, 单跑必过, 且与新增用例无关 —— 与
-    `tcl_findLibrary` / `init.tcl` 是同一件事(Tcl/Tk 库数据加载不了)。
+    现场: 2026-09-26 是 `couldn't read file <...>/tk.tcl`, 2026-09-27 是
+    `couldn't read file <...>/auto.tcl`(init.tcl 自己 source 的引导脚本) ——
+    两者都是建 Tk 根时报错、单跑必过、与用例断言无关, 与 `tcl_findLibrary` /
+    `init.tcl` 是同一件事(Tcl/Tk 库数据加载不了)。
     """
     assert tk_guard.is_known_tk_skip(
         'couldn\'t read file "C:/x/tcl/tk8.6/tk.tcl": no such file or directory'
     )
     assert tk_guard.is_known_tk_skip("Can't find a usable tk.tcl in the following ...")
+    assert tk_guard.is_known_tk_skip(
+        'couldn\'t read file "C:/x/tcl/tcl8.6/auto.tcl": no such file or directory'
+    )
 
 
 def test_a_plain_file_read_failure_is_not_an_environment_problem() -> None:

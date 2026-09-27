@@ -358,6 +358,10 @@ def test_failure_evidence_attaches_dump_and_screenshot(
     assert dump.path is not None
     assert dump.path.parent == tmp_path
     assert dump.path.is_file()
+    # dump 的媒体类型必须是 Allure **不认识**的那一类: 认识 text/* 时它会把整份
+    # 上兆字节的 JSON 读进预览区渲染, 打开报告就卡死(用户实测反馈)。
+    assert dump.attachment_type == crash_capture.DUMP_MEDIA_TYPE
+    assert not str(dump.attachment_type).startswith(("text/", "image/"))
     summary = _summary_text(evidence)
     assert "tests/unit/test_x.py::test_y" in summary
     assert "ValueError: boom" in summary
@@ -387,7 +391,12 @@ def test_failure_evidence_says_when_there_is_no_window(
 def test_attach_sends_files_by_path_and_bodies_inline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """大文件(dump)按路径交给 allure, 小内容(截图)直接给字节, 都要带上名字与类型."""
+    """大文件(dump)按路径交给 allure, 小内容(截图)直接给字节, 都要带上名字与类型.
+
+    按路径的那条还要带真实后缀(``dump``): allure 只在附件类型是枚举时才从枚举里推后缀,
+    给字符串媒体类型时必须自己带, 否则存成 ``.attach``, 下载下来得先改名才能 ``coredumpy
+    load``。
+    """
     calls: list[tuple[str, str, Any]] = []
 
     class _Allure:
@@ -405,8 +414,13 @@ def test_attach_sends_files_by_path_and_bodies_inline(
                 calls.append(("body", name, (body, attachment_type)))
 
             @staticmethod
-            def file(source: str, name: str = "", attachment_type: Any = None) -> None:
-                calls.append(("file", name, (source, attachment_type)))
+            def file(
+                source: str,
+                name: str = "",
+                attachment_type: Any = None,
+                extension: str | None = None,
+            ) -> None:
+                calls.append(("file", name, (source, attachment_type, extension)))
 
         attach = _Attach()
 
@@ -421,7 +435,7 @@ def test_attach_sends_files_by_path_and_bodies_inline(
             ),
             crash_capture.Evidence(
                 name="dump",
-                attachment_type=allure.attachment_type.TEXT,
+                attachment_type=crash_capture.DUMP_MEDIA_TYPE,
                 path=Path("crash-dumps/x.dump"),
             ),
         ]
@@ -432,7 +446,7 @@ def test_attach_sends_files_by_path_and_bodies_inline(
         (
             "file",
             "dump",
-            (str(Path("crash-dumps/x.dump")), allure.attachment_type.TEXT),
+            (str(Path("crash-dumps/x.dump")), crash_capture.DUMP_MEDIA_TYPE, "dump"),
         ),
     ]
 
