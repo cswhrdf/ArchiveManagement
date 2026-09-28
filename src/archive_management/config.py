@@ -114,6 +114,38 @@ class UiSettings(BaseModel):
     base_font_px: int = Field(default=DEFAULT_BASE_FONT_PX, ge=11, le=28)
 
 
+# 记住的窗口几何的取值上限: 真机上的多屏虚拟桌面也不会超出它(坐标还可以是负的),
+# 手改配置写个天文数字没有意义, 直接拒绝。
+MAX_WINDOW_VALUE = 20000
+
+
+class WindowSettings(BaseModel):
+    """主窗口上次关闭时的尺寸与位置: 关窗时写入, 下次打开照它摆.
+
+    **四项缺一项就当没记过** —— 只有宽高没有位置(或反过来)拼不出一个完整的窗口,
+    所以每个字段都可以是 ``None``, 由 :meth:`geometry` 统一判齐。这也让"逐字段修复"
+    能把写坏的那一项单独剔除、其余三项留在文件里(下次关窗再补上)。
+
+    最大化/最小化/全屏时关闭**不写**这一项(跳过 = 保留上一次记下的值), 见
+    :func:`archive_management.ui.main_window.current_window_geometry`。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    width: int | None = Field(default=None, ge=1, le=MAX_WINDOW_VALUE)
+    height: int | None = Field(default=None, ge=1, le=MAX_WINDOW_VALUE)
+    # 位置可以是**负数**: 摆在主屏左边的显示器上时坐标就是负的, 所以这里不设 ge=0。
+    x: int | None = Field(default=None, ge=-MAX_WINDOW_VALUE, le=MAX_WINDOW_VALUE)
+    y: int | None = Field(default=None, ge=-MAX_WINDOW_VALUE, le=MAX_WINDOW_VALUE)
+
+    def geometry(self) -> tuple[int, int, int, int] | None:
+        """四项齐全时返回 ``(宽, 高, x, y)``; 缺一项就返回 ``None``(当作没记过)."""
+        width, height, x, y = self.width, self.height, self.x, self.y
+        if width is None or height is None or x is None or y is None:
+            return None
+        return (width, height, x, y)
+
+
 class AppConfig(BaseModel):
     """应用级配置."""
 
@@ -127,6 +159,8 @@ class AppConfig(BaseModel):
     hotkeys: HotkeySettings = Field(default_factory=HotkeySettings)
     activation: ActivationSettings = Field(default_factory=ActivationSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+    # 上次关闭时的窗口尺寸与位置(默认全空 = 没记过, 用设计尺寸打开)。
+    window: WindowSettings = Field(default_factory=WindowSettings)
 
     @field_validator("language")
     @classmethod

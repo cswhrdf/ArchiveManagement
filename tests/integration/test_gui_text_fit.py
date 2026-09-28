@@ -36,7 +36,7 @@ from archive_management.ui.backend import ArchiveService
 from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import ArchiveApp
 from archive_management.ui.manage_window import ManageGameWindow
-from archive_management.ui.models import HomeBoard, HomeSection
+from archive_management.ui.models import HomeBoard, HomeSection, ViewKind
 
 pytestmark = [
     pytest.mark.integration,
@@ -57,7 +57,7 @@ _LONG_NAME = (
 ) * 3
 _LONG_PATH = "D:\\SteamLibrary\\steamapps\\common\\" + "VeryLongFolderName\\" * 6
 _LONG_TITLE = "恢复之前自动创建的安全点(超长的备份标题示例)" * 3
-_LONG_NOTE = "描述会显示在备份卡片上, 这里故意写得很长很长很长很长很长很长很长" * 3
+_LONG_NOTE = "这是一条故意写得很长很长的描述, 用来撑出省略号, 再长一点, 再长一点吧" * 3
 # 状态列的内容 = 平台 + 备份状态 + 风险 (+ 停用/归档) + 自定义标签: 四个长标签足以
 # 把它顶到"换行 + 省略号"那一条路上(见 models.chips_lines)。
 _LONG_TAGS = (
@@ -146,10 +146,41 @@ def _labels(root: Any) -> list[Any]:
     return found
 
 
+def _flush_delayed(app: ArchiveApp) -> None:
+    """把"延后跑"的重排任务直接跑一次(不靠时间).
+
+    详情页的名称重裁与主页的"表头对齐 + 名称重裁"都是 ``after(60ms)`` 的任务: 用例里
+    真正流逝的时间很短, CI 上它们可能**还没跑**, 于是量到的是按旧宽度裁出来的文本 ——
+    "夹具的长文本必须带省略号"那一条就会假红(本地机器快一点就恰好跑到了, 所以只在 CI
+    上红了两个平台)。
+
+    直接调一次: 这与 ``test_gui_buttons`` 里冲刷 ``_refit_detail_names`` 的做法一致。
+    """
+    app._refit_job = None
+    app._refit_detail_names()
+    page = getattr(app, "_home_page", None)
+    if page is not None:
+        page.cancel_list_sync()
+        page._sync_list_layout()
+
+
 def _widest_line(widget: Any, text: str) -> int:
     """文本里最宽的一行(多行文本按行分别量)."""
     font = widget.cget("font")
     return int(max(font.measure(line) for line in text.splitlines()))
+
+
+def _needed_width(widget: Any, text: str) -> int:
+    """这个标签**需要**多宽才不被裁.
+
+    会自己换行的标签(``wraplength`` > 0)不能拿"整段文字的宽度"去比: Tk 已经按
+    ``wraplength`` 断过行了, 该比的是断行之后最宽的那一行 —— 也就是控件自己的
+    ``winfo_reqwidth()``。实测右侧栏那条说明正是这种: 整段文字 413px、控件 240px,
+    但断行后最宽的一行只有 240px —— **一个字都没被裁**, 拿整段去比就是假红。
+    """
+    if int(widget.cget("wraplength") or 0) > 0:
+        return int(widget.winfo_reqwidth())
+    return _widest_line(widget, text)
 
 
 def _problems(name: str, container: Any, *, expect_truncation: bool) -> list[str]:
@@ -171,11 +202,11 @@ def _problems(name: str, container: Any, *, expect_truncation: bool) -> list[str
         width = int(widget.winfo_width())
         if width <= 1:
             continue  # 还没布局, 量不出结论
-        widest = _widest_line(widget, text)
-        if widest > width:
+        needed = _needed_width(widget, text)
+        if needed > width:
             problems.append(
-                f"{name}: 文字比控件还宽 —— Tk 会裁掉且不补省略号 "
-                f"(宽 {width} < 文字 {widest}) | {text[:80]!r}"
+                f"{name}: 文字需要的宽度超过控件 —— Tk 会裁掉且不补省略号 "
+                f"(控件 {width} < 需要 {needed}) | {text[:80]!r}"
             )
         texts.append(text)
     if expect_truncation and not any("…" in text for text in texts):
@@ -223,7 +254,19 @@ def _areas(app: ArchiveApp) -> list[tuple[str, Any, bool]]:
     games = list(app.backend.list_games())
     app._open_game_detail(games[0].game_id)
     _pump(app)
+    # 分支视图自 I-9 起是**图画布**(框里的文字由 tree_view 自己用 fit_text 裁), 这里要
+    # 量的是"按卡片铺出来的列表" —— 切到时间线才是那一块。图画布自己的裁剪判据在
+    # tests/integration/test_gui_branch_graph.py 里(画布 item 的实测宽度 ≤ 框宽)。
+    app._switch_view(ViewKind.TIMELINE)
+    _pump(app)
     found.append(("详情备份列表", app._list_scroll, True))
+    # 右侧「选中备份」面板: 超长备份名**只有这一处**能读全 —— 从前它不在量测清单里,
+    # 于是被 Tk 硬裁且不补省略号也没人发现(它既不是列表也不是表格)。
+    # 选中"当前节点": 它在图上与列表里必然都在, 所以之后就算重排一次也不会被清掉
+    # (按"列表第一项"选的话, 它可能被时段筛选排除, 量到的就是空状态 —— 实测踩过)。
+    current = next(item for item in app._items if item.is_current)
+    app._select_backup(current)
+    found.append(("右侧选中备份面板", app._rail_scroll, True))
 
     schedules = app._open_schedule_window()
     _pump(app)
@@ -252,6 +295,9 @@ def test_list_and_table_text_is_never_clipped_without_an_ellipsis(
     try:
         for width, height in WIDTHS:
             app.geometry(f"{width}x{height}")
+            _pump(app)
+            # 重裁是延后的任务: 先把它真跑一次, 否则量的是按旧宽度裁的文本(见 _flush_delayed).
+            _flush_delayed(app)
             _pump(app)
             areas = [
                 (f"{width}-{name}", container, expect)

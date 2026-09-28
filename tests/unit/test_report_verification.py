@@ -2066,3 +2066,22 @@ def test_run_ledger_includes_the_native_quality_gate(
     assert "Quality Gate failed" in ledger
     assert "\x1b" not in ledger, "CLI 输出的颜色码不能进报告"
     assert "退出码: 1" not in ledger, "退出码翻成结论后不该再原文照抄"
+
+
+def test_the_gate_category_matches_what_the_scripts_write() -> None:
+    """ "工程门禁"分类、写入脚本与运行总账必须用同一对类别标签。
+
+    三处分别是: ``allurerc.mjs`` 的 ``categories`` 规则(挑选质量检查结果)、
+    ``scripts/create_allure_quality.py`` 写结果时打的标签、``scripts/create_allure_summary.py``
+    收集这些结果时的判据。任一处改名而另外两处没跟着改都不会报错 —— 只会静默地"门禁失败
+    不再进那个分类"或"运行总账里不再列质量检查", 所以要有守卫把三处钉在一起。
+    """
+    writer = _load_script("create_allure_quality")
+    summary = _load_script("create_allure_summary")
+    gate = _ALLURE_CONFIG.read_text(encoding="utf-8").split("gate-quality-check", 1)[1]
+    matched = re.search(r'labels:\s*\{\s*([A-Za-z]+):\s*"([^"]+)"\s*\}', gate)
+    assert matched is not None, "配置里要有按类别标签挑选的分类规则"
+
+    label, value = matched.group(1), matched.group(2)
+    assert label == writer.CATEGORY_LABEL == summary.QUALITY_CATEGORY_LABEL
+    assert value == writer.CATEGORY_VALUE == summary.QUALITY_CATEGORY

@@ -921,5 +921,98 @@ def attach_tooltip(widget: ctk.CTkBaseClass, text: str | Callable[[], str]) -> N
     widget.bind("<Destroy>", lambda _event: hide(), add="+")
 
 
+class HoverTip:
+    """自己管"什么时候显示、显示在哪"的悬停提示(一个控件里有**多个**可悬停对象时用).
+
+    为什么不能直接用 :func:`attach_tooltip`: 它的触发点是控件自己的 ``<Enter>``/``<Leave>``
+    —— 对一个画布不够用。鼠标在画布里从框 A 移到框 B **不会**再来一次 ``<Enter>``, 于是提示
+    会一直挂着 A 的文案(比"没有提示"更糟)。所以这里把时机与落点交给调用方, 而窗口的样式
+    (底色/描边/留白/间距)仍然与 :func:`attach_tooltip` 共用同一组常量 —— 全应用的提示看起来
+    必须是同一种东西。
+
+    ``text`` / ``visible`` 两个只读属性是给守卫用的: "这里到底挂没挂提示"必须是可量的事实。
+    """
+
+    def __init__(self, anchor: tk.Misc) -> None:
+        """记住锚点控件(提示窗口挂在它下面, 随它一起销毁)."""
+        self._anchor = anchor
+        self._window: tk.Toplevel | None = None
+        self._label: tk.Label | None = None
+        self._text = ""
+
+    @property
+    def text(self) -> str:
+        """现在挂着的文案(没挂窗口时是空串)."""
+        return self._text if self._window is not None else ""
+
+    @property
+    def visible(self) -> bool:
+        """提示窗口现在是不是真的开着."""
+        return self._window is not None
+
+    def show(self, text: str, *, root_x: int, root_y: int) -> None:
+        """在屏幕坐标 ``(root_x, root_y)`` 旁边弹出/更新提示; ``text`` 为空等同于收起."""
+        if not text:
+            self.hide()
+            return
+        if self._window is None and not self._create():
+            return
+        if self._label is not None:
+            # 已经开着就只换文案 —— 关掉再开会让提示在屏幕上闪一下.
+            self._label.configure(text=text)
+        self._text = text
+        self._move(root_x, root_y)
+
+    def hide(self) -> None:
+        """收起提示(没开着就什么都不做)."""
+        current, self._window = self._window, None
+        self._label, self._text = None, ""
+        if current is not None:
+            with suppress(tk.TclError):
+                current.destroy()
+
+    def _create(self) -> bool:
+        """建出提示窗口与标签(锚点已经销毁时返回 False, 不抛)."""
+        try:
+            window = tk.Toplevel(self._anchor)
+            window.overrideredirect(True)
+            window.attributes("-topmost", True)
+            label = tk.Label(
+                window,
+                text="",
+                justify="left",
+                background=_TOOLTIP_BG,
+                foreground=_TOOLTIP_FG,
+                padx=_TOOLTIP_PAD[0],
+                pady=_TOOLTIP_PAD[1],
+                highlightthickness=1,
+                highlightbackground=_TOOLTIP_BORDER,
+            )
+            label.pack()
+        except tk.TclError:
+            return False
+        self._window, self._label = window, label
+        return True
+
+    def _move(self, root_x: int, root_y: int) -> None:
+        """把提示挪到给定屏幕坐标下方; 下方放不下就翻到上方, 横向夹进屏幕."""
+        window = self._window
+        if window is None:  # pragma: no cover - 只在本类的 show 里调用
+            return
+        try:
+            window.update_idletasks()
+            width = int(window.winfo_reqwidth())
+            height = int(window.winfo_reqheight())
+            screen_width = int(window.winfo_screenwidth())
+            screen_height = int(window.winfo_screenheight())
+            left = min(max(0, root_x), max(0, screen_width - width))
+            top = root_y + _TOOLTIP_GAP
+            if top + height > screen_height:
+                top = max(0, root_y - height - _TOOLTIP_GAP)
+            window.geometry(f"+{left}+{top}")
+        except tk.TclError:
+            self.hide()
+
+
 # 焦点态要换哪套颜色也回插回去(颜色只在本模块的 ``button_colors`` 一处定义)。
 set_focus_paint(focus_paint)

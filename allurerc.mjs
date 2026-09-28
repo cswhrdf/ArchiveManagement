@@ -23,9 +23,10 @@
  *   `allure generate ...`), 否则 CLI 找不到它, 环境会静默退化成 default ——
  *   `scripts/verify_allure_report.py` 会在自检时把这种情况报成失败。
  *
- * 本仓库实际设了六项: 报告标题(`name`)、默认端口(`port`)、历史趋势(`historyPath` /
- * `appendHistory` / `historyLimit`)、界面语言、环境映射(三个平台 + 一个 `Common`
- * 环境)与全局附件(`globalAttachments`)。
+ * 本仓库实际设了九项: 报告标题(`name`)、默认端口(`port`)、历史趋势(`historyPath` /
+ * `appendHistory` / `historyLimit`)、运行变量(`variables`)、界面语言、全局附件
+ * (`globalAttachments`)、失败归类(`categories`)、质量门(`qualityGate`)与环境映射
+ * (三个平台 + 一个 `Common` 环境, 外加启动期校验用的 `allowedEnvironments`)。
  * 其它可用键、以及"生成后自动打开浏览器""单 HTML 报告"为什么故意不设, 见下面各项的注释。
  */
 export default {
@@ -39,6 +40,17 @@ export default {
   historyPath: "./.allure/history.jsonl",
   appendHistory: true,
   historyLimit: 40,
+  // 运行变量: 显示在报告**顶部**, 用来放"读者需要、但报告里看不出来"的稳定事实。
+  // 只写跨运行不变的东西: 每次运行都会变的(提交号/分支/run id/时间/平台)由
+  // `allure-results/environment.properties` 与运行总账负责, 写在这里只会立刻过期。
+  // 各平台自己的事实(CI 镜像)放在 `environments` 里的**按环境变量**中, 切环境时跟着变。
+  variables: {
+    // 与 pyproject.toml 的 [tool.coverage.report] fail_under 一致(守卫会核对)。
+    "覆盖率门槛": "95%",
+    // 本地默认只收集前两类(见 pyproject.toml 的 testpaths): 读报告的人看到没有性能/安全
+    // 结果时, 第一反应往往是"漏跑了" —— 这里直接说明那是有意的。
+    "用例分层": "unit / integration 每次跑 · performance / security 只在 CI",
+  },
   plugins: {
     // Awesome 报告(默认报告)的界面选项.
     awesome: {
@@ -53,6 +65,14 @@ export default {
       },
     },
   },
+  // 环境 id 白名单(启动期校验): `environments` 里声明的**每个** id 都必须在这里列出,
+  // 否则 `allure generate` 直接以 Internal Error 退出 —— 实测 3.18.0 的原文:
+  //   config.environments: environment id "common" is not listed in allowedEnvironments
+  // 为什么要它: 环境维度是本仓库报告的主路径, 而"加一个平台"要动的地方不止一处(配置里的
+  // matcher、CI 的三个矩阵、汇总作业的 --expect-platforms)。以前漏改这里只会静默少一个
+  // 环境, 现在报告根本生成不出来, 且错误信息直接点名是哪个 id。守卫:
+  // tests/unit/test_test_config.py 断言这份清单恰好等于 `environments` 的键集合。
+  allowedEnvironments: ["windows", "macos", "linux", "common"],
   // 环境映射: 平台 / 公共检查 → 环境(靠结果上的 env 标签匹配, 见文件头说明).
   //
   // 其它可用但这里不写的键(需要时临时用 CLI 参数覆盖即可):
@@ -73,6 +93,75 @@ export default {
   // `# pragma: no cover` / `# pragma: no branch` 的位置与原因 + exclude_also) ——
   // 后者的数据来自真实源码, 由 scripts/create_allure_summary.py 生成。
   globalAttachments: ["allure-run-ledger.md", "allure-coverage-exclusions.md"],
+  // 失败归类(Categories): 把"失败/损坏"的结果按**错误文本**分门别类, 与默认的
+  // Product errors / Test errors 并存 —— 被某条规则命中的结果会被它"消费"掉, 不再落回默认分类。
+  //
+  // 为什么要它: 报告的默认分类只分"断言失败"与"环境损坏", 看不出"这是仓库里记过的已知
+  // 环境问题"还是"真回归"。分类只影响**呈现**, 不影响质量门(有失败照样红) —— 它的价值是
+  // 让下一个人少花时间在已经被解释过的环境问题上。
+  //
+  // 三条规则(每条都能追溯到仓库里的记录, 别凭印象加):
+  // 1. Tk/Tcl 库不可用 —— 症状清单的权威来源是 tests/tk_guard.py 的 KNOWN_TK_SKIP_MARKERS
+  //    (uv 托管构建偶发读不到 Tcl/Tk 库数据, 上游 astral-sh/uv#7036)。这里用**数组**匹配器:
+  //    数组内每项是与(AND)、数组之间是或(OR), 于是"message 里有"或"trace 里有"都算命中
+  //    (实测 3.18.0: 两种形态都落位)。
+  //    正则带 `i`: 与 tests/tk_guard.is_known_tk_skip 的语义保持一致 —— Tcl 自己的报错里是
+  //    `tcl_findLibrary`, 而白名单里写的是小写, 只按大小写敏感匹配就会漏掉一半拼法。
+  //    **注意它的覆盖面**: 已知症状在 GUI 用例里会被 tk_guard 转成**跳过**(跳过不进分类),
+  //    所以这条规则抓的是"同一个问题以失败/损坏形态冒出来"的残余情形(没有守卫的地方、
+  //    夹具收尾期、或异常被别的异常包住时)。加上 layer 限定是为了掐掉一个会误判的形态:
+  //    我们自己的守卫用例(tests/unit/test_gui_retry.py)在失败信息里**会打印整份症状清单**,
+  //    不限定层就会把"单测失败"说成"Tk 环境问题"。
+  // 2. 数据库瞬时读失败 —— 全量跑里出现过一次的已知偶发(见 PLAN.md)。
+  // 3. 工程门禁未通过 —— 脚本写入的质量检查结果带 testCategory=quality, 它们失败时
+  //    不该混进"用例失败"(那是"代码没过门禁", 不是"哪条用例坏了")。
+  //
+  // groupBy 里的 layer/status/environment 是内建选择器(取自结果标签), 用来在分类内部再
+  // 分层; 每个分类还会默认再按错误消息聚一次(groupByMessage 默认 true)。
+  // 两条要留意的语义: matchers 里 `labels` 的字符串会被当**正则**用(这里的取值没有元字符,
+  // 安全); 没被任何规则命中的普通失败照旧落进默认分类(实测专门验过这一条, 否则分类会把
+  // 无关失败也吞进去)。
+  categories: {
+    rules: [
+      {
+        id: "env-tk-library",
+        name: "环境:Tk/Tcl 库不可用",
+        matchers: [
+          {
+            statuses: ["failed", "broken"],
+            labels: { layer: /integration|e2e/ },
+            message:
+              /tcl_findLibrary|init\.tcl|tk\.tcl|auto\.tcl|no display name|couldn't connect to display|no \$display environment variable/i,
+          },
+          {
+            statuses: ["failed", "broken"],
+            labels: { layer: /integration|e2e/ },
+            trace:
+              /tcl_findLibrary|init\.tcl|tk\.tcl|auto\.tcl|no display name|couldn't connect to display|no \$display environment variable/i,
+          },
+        ],
+        groupBy: ["layer", "status"],
+      },
+      {
+        id: "env-transient-database",
+        name: "环境:数据库瞬时读失败",
+        matchers: {
+          statuses: ["failed", "broken"],
+          message: /unsupported file format|database disk image is malformed/,
+        },
+        groupBy: ["layer"],
+      },
+      {
+        id: "gate-quality-check",
+        name: "工程门禁:质量检查未通过",
+        matchers: {
+          statuses: ["failed", "broken"],
+          labels: { testCategory: "quality" },
+        },
+        groupBy: ["environment", "status"],
+      },
+    ],
+  },
   /**
    * 质量门(Allure 原生): 规则写在这里, CI 在汇总作业里用
    * `allure quality-gate --config allurerc.mjs allure-results` 跑一遍, 用它的退出码当门禁。
@@ -138,6 +227,8 @@ export default {
   environments: {
     windows: {
       name: "Windows",
+      // 按环境的运行变量: 选中该环境时显示在报告顶部(与顶层 `variables` 合并)。
+      variables: { "CI 镜像": "windows-latest" },
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "Windows"),
     },
@@ -145,11 +236,13 @@ export default {
       // macOS 暂时屏蔽(2026-09-21): CI 里没有这个平台的作业, 所以正常情况下报告里不会出现
       // 这个环境。matcher 保留着 —— 本地在 macOS 上跑一次就能看到它, 恢复 CI 矩阵时也不用改。
       name: "macOS",
+      variables: { "CI 镜像": "macos-latest(当前 CI 未启用)" },
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "macOS"),
     },
     linux: {
       name: "Linux",
+      variables: { "CI 镜像": "ubuntu-latest" },
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "Linux"),
     },
@@ -164,6 +257,7 @@ export default {
     common: {
       // 名字与三个平台保持同一种风格(单个英文词)、与环境 id 一致。
       name: "Common",
+      variables: { "执行方": "Ubuntu 上的公共检查(结论与平台无关)" },
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "common"),
     },

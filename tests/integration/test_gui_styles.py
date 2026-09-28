@@ -184,9 +184,27 @@ def _buttons(root: Any) -> list[tuple[str, str, str, str, str, str]]:
     return found
 
 
+def _defocus(window: Any) -> None:
+    """把焦点从窗口里的控件挪回窗口自己(量配色要的是"没聚焦"的样子).
+
+    **量之前必须失焦**: 聚焦时实底按钮会换成对应的软底配色(用户要的"看得见"),
+    那时量到的不是"这个界面把按钮画成了什么样"。CI 的时序恰好是"窗口一建出来
+    定焦就已经生效"(本地相反), 于是同一个实现会在 CI 里报"危险色按钮少了一颗"
+    —— 那是量具的错, 不是配色的错。
+    """
+    for _ in range(3):
+        window.update_idletasks()
+        focused = window.focus_get()
+        if focused is None or focused is window:
+            return
+        window.focus_force()
+        window.update()
+
+
 def _record(case: str, window: Any) -> None:
-    """记下一个界面的全部按钮(量之前先让窗口真的布局出来)."""
+    """记下一个界面的全部按钮(量之前先让窗口真的布局出来、并把焦点放下)."""
     window.update_idletasks()
+    _defocus(window)
     for parent, text, handler, color, text_color, state in _buttons(window):
         _RECORDS.append(_Painted(case, parent, text, handler, color, text_color, state))
 
@@ -369,7 +387,6 @@ def _cases(app: Any) -> list[tuple[str, Callable[[], None]]]:
                     title="重命名",
                     name_label="名称",
                     desc_label="描述",
-                    desc_prompt="最多 200 字",
                     initial_name="手动备份",
                     initial_desc="说明",
                 ),

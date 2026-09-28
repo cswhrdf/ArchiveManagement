@@ -81,7 +81,7 @@ _LONG_NAME = (
 ) * 2
 _LONG_PATH = "D:\\SteamLibrary\\steamapps\\common\\" + "VeryLongFolderName\\" * 6
 _LONG_TITLE = "恢复之前自动创建的安全点(超长的备份标题示例)" * 2
-_LONG_NOTE = "描述会显示在备份卡片上, 这里故意写得很长很长很长很长很长很长很长" * 2
+_LONG_NOTE = "这是一条故意写得很长很长的描述, 用来撑出省略号, 再长一点, 再长一点吧" * 2
 _LONG_TAGS = (
     "超长的标签名示例一",
     "超长的标签名示例二",
@@ -387,7 +387,6 @@ def _cases(app: Any) -> list[tuple[str, Callable[[], None]]]:
                     title="重命名",
                     name_label="名称",
                     desc_label="描述",
-                    desc_prompt="最多 200 字",
                     initial_name="手动备份",
                     initial_desc="说明",
                 ),

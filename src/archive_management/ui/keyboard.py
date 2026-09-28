@@ -315,6 +315,9 @@ def make_reachable(
         inner.bind("<space>", on_activate)
         inner.bind("<Return>", on_activate)
     widget._keyboard_reachable = True
+    # 把"没聚焦时的原样"挂在控件上, 让别处(主按钮识别)也能看到它 —— 焦点态是临时
+    # 改写的, 谁都不该拿焦点态当"这颗按钮是什么按钮"的依据。
+    widget._focus_saved = saved
     return True
 
 
@@ -373,7 +376,7 @@ def _button_candidates(window: tk.Misc, wanted: list[str]) -> dict[str, tk.Misc]
     for child in walk(window):
         if not isinstance(child, ctk.CTkButton):
             continue
-        color = _cget(child, "fg_color")
+        color = resting_fill(child)
         style = str(getattr(child, "_button_style", ""))
         key = color if color in wanted else style
         if key in allowed and key not in found:
@@ -425,11 +428,15 @@ def set_focus_paint(provider: Callable[[Palette, str], dict[str, str]]) -> None:
 
 
 def _focus_style(widget: object) -> str | None:
-    """取该按钮的样式名: 先看登记的样式, 没有就按**实测底色**反推主色/危险色.
+    """取该按钮的样式名: 先看登记的样式, 没有就按**没聚焦时**的底色反推主色/危险色.
 
     实测有四处对话框的主按钮是就地创建、直接写 ``fg_color=palette.accent`` 的
     (没有登记样式), 所以不能只看 ``_button_style`` —— 否则恰恰是用户报的那几颗
     按钮拿不到换色。
+
+    认色必须认**没聚焦时**的底色(见 :func:`resting_fill`): 焦点态已经把实底换成了
+    软底, 拿它去比 ``accent``/``danger`` 永远比不上 —— 那会让"重新聚焦一次"这种
+    正常时序把按钮认成"不是主按钮"。
     """
     style = getattr(widget, "_button_style", "")
     if isinstance(style, str) and style:
@@ -437,7 +444,7 @@ def _focus_style(widget: object) -> str | None:
     palette = _palette_for(widget)
     if palette is None:
         return None
-    fill = _cget(widget, "fg_color").lower()
+    fill = resting_fill(widget).lower()
     for candidate in ("accent", "danger"):
         value = getattr(palette, candidate, None)
         if isinstance(value, str) and value.lower() == fill:
@@ -466,6 +473,22 @@ def _cget(widget: object, option: str) -> str:
     with suppress(tk.TclError, AttributeError, ValueError):
         return str(reader(option))
     return ""
+
+
+def resting_fill(widget: object) -> str:
+    """取按钮**没聚焦时**的底色(焦点态不算数).
+
+    聚焦会把实底按钮换成对应的软底配色, 于是"看底色认按钮"的整套机制(主按钮
+    识别、配色守卫)在焦点落上去之后就会认错: 危险色按钮被认成软危险、主色按钮
+    直接认不出来。实测症状是**回车确认失效**(窗口里找不到主按钮了)与"配色不合规"
+    的假红 —— CI 的时序恰好是"先定焦、后测量", 本地反之, 同一份代码就时红时绿。
+
+    所以: 接上键盘线的控件会把原样存在 :attr:`_focus_saved` 里, 有它就认原样。
+    """
+    saved = getattr(widget, "_focus_saved", None)
+    if isinstance(saved, dict) and "fg_color" in saved:
+        return str(saved["fg_color"])
+    return _cget(widget, "fg_color")
 
 
 def _palette_of(window: tk.Misc) -> Palette | None:

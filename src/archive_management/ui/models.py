@@ -32,8 +32,10 @@ from archive_management.domain import (
     SavePathCandidate,
     SaveSource,
     TreeInput,
+    TreeNode,
     action_allowed,
     branch_lineage,
+    build_tree,
     keep_surviving,
     tree_depths,
 )
@@ -571,6 +573,28 @@ def branch_order(
         if node_id in by_id
     ]
     return _with_branch_labels(ordered, lineage)
+
+
+def branch_tree(
+    items: list[BackupItem], *, include_safety: bool = False
+) -> list[TreeNode]:
+    """分支视图要画的那棵**剪枝后**的树(深度优先序, 每个节点带着它的孩子).
+
+    与 :func:`branch_order` 是同一条输入管线(``keep_surviving`` +
+    ``visible_in_branch_view``), 差别只在这一个出口: ``branch_order`` 只留下
+    ``{节点: 层深}``, **孩子关系被丢掉了** —— 而铺一张图必须知道"每个节点有哪些孩子、
+    顺序如何"。所以这里直接把 :func:`~archive_management.domain.tree.build_tree` 的结果
+    交出去(它同时给出 ``children``、``depth`` 与深度优先序)。
+
+    两者只要有一条判据不对齐就会画出"指向不存在节点的线", 因此它们必须**同源**: 都走
+    ``keep_surviving``(父节点被过滤时子节点上移到最近存活祖先)。守卫:
+    ``tests/unit/test_ui_tree_layout.py`` 里那条"把中间节点过滤掉, 剩下的仍是一棵连续的树"。
+    """
+    inputs = keep_surviving(
+        _tree_inputs(items),
+        visible_in_branch_view(items, include_safety=include_safety),
+    )
+    return build_tree(inputs)
 
 
 def group_by_parent(items: list[BackupItem]) -> list[BackupItem]:

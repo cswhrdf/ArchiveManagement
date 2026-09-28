@@ -20,7 +20,7 @@ from archive_management.domain import (
     normalize_tags,
 )
 from archive_management.i18n import tr
-from archive_management.ui.keyboard import bind_window_keys, focus_first
+from archive_management.ui.keyboard import bind_window_keys, focus_first, walk
 from archive_management.ui.models import (
     BatchExportChoice,
     BatchExportOption,
@@ -61,9 +61,16 @@ _SCHEDULE_FIELD_WIDTH = 210
 _DIALOG_BODY_MAX = 760
 _DIALOG_BODY_MIN = 360
 _DIALOG_BODY_WIDTH = 518
-# 正文区之外那部分(标题/提示行/按钮行 + 上下内边距)的高度, 实测约 50px。
+# 模态对话框的舒适线: 评审约定的"弹窗不超过屏幕可用高度的 80%"。
+_DIALOG_COMFORT = 0.8
+# 正文区之外那部分(标题/提示行/按钮行 + 上下内边距)的高度, **估算**约 50px。
 # 80% 是**整个窗口**的预算, 不是正文区的预算: 只夹正文区的话 768 高的屏幕上窗口
 # 会变成 664(正文 614 + 正文之外 50), 底部的「导入」还是差 16px 出屏幕。
+#
+# 估算值有个已知的偏差: 这一部分的高度由**字体**和窗口管理器决定, 实测同一份代码
+# Linux 上比 Windows 高 7 像素 —— 于是正文区顶到上限的对话框会整窗超出舒适线
+# (CI 实测 621 > 614)。所以建完窗口之后还要按**实测**收一次(见
+# :func:`_clamp_to_comfort_line`), 这个常量只负责"还没法量的时候"的初值。
 _DIALOG_CHROME_HEIGHT = 52
 # 勾选行下面那行提示的左缩进: 24(正文距边) + 22(方框宽与它到文字的间距), 量出来是为了
 # 与复选框的**文字**左对齐 -- 这条对齐没法落在间距刻度上, 所以留个具名常量。
@@ -172,8 +179,42 @@ def _centered_position(
     return f"+{max(x, 0)}+{max(y, 0)}"
 
 
+def _dialog_comfort_limit(window: ctk.CTkToplevel) -> int:
+    """该窗口的舒适线上限(屏幕可用高度的 80%)."""
+    return int(int(window.winfo_screenheight()) * _DIALOG_COMFORT)
+
+
+def _clamp_to_comfort_line(window: ctk.CTkToplevel) -> None:
+    """把建好的窗口收进舒适线: 超出多少就把正文区收掉多少(内容由它自己滚).
+
+    ``_DIALOG_CHROME_HEIGHT`` 是估算值, 而"正文区之外"的高度由字体与窗口管理器决定
+    —— 实测同一份代码 Linux 上比 Windows 高 7 像素, 于是正文区顶到上限的对话框会
+    整窗超出舒适线(CI 实测: 768 高的屏幕上 621 > 614)。这里用**实测**的整窗高补齐
+    那几像素, 而不是把估算值再调大一点(调大就会在 Windows 上白留一块空白)。
+
+    只收正文区(不缩内容): 收到下限为止, 矮屏上宁可让正文区滚也不能把内容切掉。
+    没有滚动正文区的对话框(短提示框)本来就不会超线, 直接返回。
+
+    正文区是**递归找**的: 实测批量导入把它套在一层卡片容器里(不是窗口的直接子控件,
+    只找一层就会漏掉它, 那时这条夹取看起来"跑了但什么都没做")。
+    """
+    limit = _dialog_comfort_limit(window)
+    window.update_idletasks()
+    body = next(
+        (child for child in walk(window) if isinstance(child, ctk.CTkScrollableFrame)),
+        None,
+    )
+    if body is None:
+        return
+    overflow = int(window.winfo_reqheight()) - limit
+    if overflow <= 0:
+        return
+    current = int(body.cget("height"))
+    body.configure(height=max(_DIALOG_BODY_MIN, current - overflow))
+
+
 def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) -> None:
-    """显示对话框前的收尾: 键盘接线 + 居中, 且不让它先在屏幕左上角闪一下.
+    """显示对话框前的收尾: 键盘接线 + 居中 + 收进舒适线, 且不让它先在屏幕左上角闪一下.
 
     键盘那几件(Esc = 取消、回车 = 主操作、初始焦点、按钮进 Tab 链)都在这里接完,
     所以"新加一个对话框忘了接键盘"不会发生 —— 所有对话框都会调这个函数。
@@ -200,6 +241,9 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     # 接线放在最前面: 下面几步只是摆位置, 而窗口一旦可见用户就可能已经在按 Esc。
     if modal:
         bind_window_keys(window)
+        # 舒适线只对**模态弹窗**约定(见 docs/testing.md): 常驻工作窗口有自己的最小
+        # 尺寸, 屏幕再矮也不该把它们压矮(见 test_gui_sizes 的"工作窗口只守硬线")。
+        _clamp_to_comfort_line(window)
     window.withdraw()
     window.update_idletasks()
     window.geometry("+0+0")
@@ -901,7 +945,6 @@ def edit_backup_dialog(
     title: str,
     name_label: str,
     desc_label: str,
-    desc_prompt: str,
     initial_name: str = "",
     initial_desc: str = "",
     limit: int = 200,
@@ -909,7 +952,10 @@ def edit_backup_dialog(
     """在同一个窗口里编辑备份名称与描述; 取消返回 None.
 
     ``limit`` 为描述的字数上限: 超限时不会提交并把计数器标红, 避免静默
-    截断用户输入(服务层还会再校验一次).
+    截断用户输入(服务层还会再校验一次)。
+
+    描述的去处**不写提示**: 它只在时间线卡片与右侧选中面板里显示, 而分支视图
+    是一张图(框里没有描述) —— "描述会显示在备份卡片上" 这句在默认视图里就是错的。
     """
     window = ctk.CTkToplevel(parent)
     window.title(title)
@@ -976,16 +1022,7 @@ def edit_backup_dialog(
         font=ctk.CTkFont(size=11),
         text_color=palette.text_muted,
     )
-    counter.pack(padx=24, pady=(0, 10), anchor="e")
-    ctk.CTkLabel(
-        window,
-        text=desc_prompt,
-        anchor="w",
-        justify="left",
-        wraplength=420,
-        font=ctk.CTkFont(size=11),
-        text_color=palette.text_muted,
-    ).pack(padx=24, pady=(0, 12), anchor="w")
+    counter.pack(padx=24, pady=(0, 20), anchor="e")
 
     result: list[tuple[str, str]] = []
 
@@ -2145,8 +2182,7 @@ def _dialog_body(
 
 def _dialog_body_height(window: ctk.CTkToplevel) -> int:
     """正文区的目标高度: 让对话框总高至多占屏幕的 80%, 并夹在上下限之间."""
-    screen = int(window.winfo_screenheight())
-    budget = int(screen * 0.8) - _DIALOG_CHROME_HEIGHT
+    budget = _dialog_comfort_limit(window) - _DIALOG_CHROME_HEIGHT
     return max(_DIALOG_BODY_MIN, min(_DIALOG_BODY_MAX, budget))
 
 

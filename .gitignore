@@ -166,9 +166,6 @@ activemq-data/
 
 # Environments
 .env
-# 例外: 仓库自带的开发用 .env(只放 PYTHONPATH=src), 让"不作为包安装"时
-# `uv run python -m archive_management ...` 也能导入自身源码。它必须保持无密钥。
-!.env
 .envrc
 .venv
 env/

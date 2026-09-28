@@ -29,6 +29,7 @@ from archive_management.config import (
     AppConfig,
     ConfigLoad,
     HotkeySettings,
+    WindowSettings,
     load_or_repair_config,
     save_config,
 )
@@ -75,7 +76,12 @@ from archive_management.ui.dialogs import (
 )
 from archive_management.ui.home_page import HomePage
 from archive_management.ui.manage_window import ManageGameWindow
-from archive_management.ui.metrics import RADIUS_LG, RADIUS_MD, RADIUS_PILL
+from archive_management.ui.metrics import (
+    RADIUS_LG,
+    RADIUS_MD,
+    RADIUS_NONE,
+    RADIUS_PILL,
+)
 from archive_management.ui.models import (
     AppPage,
     BackupItem,
@@ -103,6 +109,7 @@ from archive_management.ui.palette import DEFAULT_THEME, Palette
 from archive_management.ui.pickers import pick_file, pick_save_file
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
+from archive_management.ui.tree_view import TreeView
 from archive_management.ui.typography import (
     FONT_STRONG,
     install_font_scaling,
@@ -134,22 +141,92 @@ WINDOW_DEFAULT_SIZE = (1360, 860)
 SCREEN_MARGIN = 96
 
 
+def fit_window_size(size: tuple[int, int], screen: tuple[int, int]) -> tuple[int, int]:
+    """把窗口尺寸夹进屏幕: 不超出 ``屏幕 - SCREEN_MARGIN``, 但不低于最小尺寸.
+
+    最小尺寸是布局的硬下限(主页那些固定宽度的列需要它), 屏幕比它更小时只能不夹 ——
+    再往下压会把内容挤出窗口。
+    """
+    return (
+        max(WINDOW_MIN_SIZE[0], min(size[0], screen[0] - SCREEN_MARGIN)),
+        max(WINDOW_MIN_SIZE[1], min(size[1], screen[1] - SCREEN_MARGIN)),
+    )
+
+
 def initial_window_size(window: tk.Misc) -> tuple[int, int]:
-    """主窗口打开时的尺寸: 默认尺寸, 但不超出屏幕.
+    """主窗口打开时的默认尺寸: 设计尺寸, 但不超出屏幕.
 
     固定 1360x860 在 1366x768 / 1920x900 这类屏幕上比屏幕还高, 窗口下沿(底部状态
     条)会落到屏幕外面去(与 16 号评审的"设置窗口比屏幕高"同一类问题)。宽度同理:
     1366 宽的屏幕上 1360 会把窗口右沿顶到屏幕边上。
 
-    夹到最小尺寸为止: 最小尺寸是布局的硬下限(主页那些固定宽度的列需要它), 屏幕比
-    它更小时只能不夹 —— 再往下压会把内容挤出窗口。
+    尺寸的夹法是 :func:`fit_window_size`(记住的几何也走同一条)。
     """
-    width, height = WINDOW_DEFAULT_SIZE
-    screen_width = int(window.winfo_screenwidth()) - SCREEN_MARGIN
-    screen_height = int(window.winfo_screenheight()) - SCREEN_MARGIN
-    return (
-        max(WINDOW_MIN_SIZE[0], min(width, screen_width)),
-        max(WINDOW_MIN_SIZE[1], min(height, screen_height)),
+    return fit_window_size(
+        WINDOW_DEFAULT_SIZE,
+        (int(window.winfo_screenwidth()), int(window.winfo_screenheight())),
+    )
+
+
+def open_window_geometry(saved: WindowSettings, *, screen: tuple[int, int]) -> str:
+    """算出主窗口打开时的 geometry 串: 有记住的整套几何就用它, 否则用设计尺寸.
+
+    尺寸走 :func:`fit_window_size`(换了更小的屏幕也不会出屏); 位置**夹回屏幕内** ——
+    上次摆在另一台显示器上、这次那台屏幕不在了(或分辨率变小)时, 记下来的 x/y 会落在
+    屏幕外, 直接把窗口摆到屏幕外等于"打开就找不到窗口"。
+    """
+    geometry = saved.geometry()
+    if geometry is None:
+        width, height = fit_window_size(WINDOW_DEFAULT_SIZE, screen)
+        return f"{width}x{height}"
+    width, height = fit_window_size(geometry[:2], screen)
+    x = min(max(0, geometry[2]), max(0, screen[0] - width))
+    y = min(max(0, geometry[3]), max(0, screen[1] - height))
+    return f"{width}x{height}+{x}+{y}"
+
+
+def _window_state(window: tk.Wm) -> str:
+    """``wm state`` 的取值; 读不到(窗口已销毁)时返回 ``"unknown"``, 调用方按"不记"处理."""
+    try:
+        return str(window.state())
+    except tk.TclError:  # pragma: no cover - 窗口已经销毁
+        return "unknown"
+
+
+def _window_flag(window: tk.Wm, name: str) -> bool:
+    """读一个布尔窗口属性; 该平台没有这个属性(或读不到)时按 ``False`` 处理."""
+    try:
+        return bool(window.attributes(name))
+    except tk.TclError:
+        return False
+
+
+def current_window_geometry(window: tk.Tk) -> WindowSettings | None:
+    """读窗口当前的尺寸与位置; 最大化/最小化/全屏时返回 ``None``(这次跳过这一项).
+
+    三种状态都不是"用户摆出来的那一套", 所以都不记(跳过 = 保留上一次记下的值):
+
+    * ``state() != "normal"`` —— Windows 上最大化是 ``zoomed``、最小化是 ``iconic``;
+      实测最大化时读到的是 **3440x1369+-8+-8**(整块屏幕), 记下来下次打开就不是用户
+      摆的那个大小了(而且下次打开也不该直接最大化);
+    * ``-zoomed`` —— X11 上的最大化**不改 state**(仍是 ``normal``), 只有这个属性为 1;
+      Windows 没有这个属性(实测报 ``bad attribute``), 读不到就当没最大化;
+    * ``-fullscreen`` —— 全屏时 state 同样不变(实测仍是 ``normal``), 不判这条会把
+      "整块屏幕"当成用户摆的尺寸记下来。
+
+    位置读的是 ``winfo_x/y`` 而不是 ``winfo_rootx/rooty``: 前者与 ``geometry("+x+y")``
+    是**同一套坐标**(实测在这台 Windows 上 ``root`` 比 ``x`` 大 8/31 —— 那是窗口边框
+    与标题栏), 拿 root 坐标去复原会让窗口每开一次就往下右漂一格。
+    """
+    if _window_state(window) != "normal":
+        return None
+    if _window_flag(window, "-zoomed") or _window_flag(window, "-fullscreen"):
+        return None
+    return WindowSettings(
+        width=int(window.winfo_width()),
+        height=int(window.winfo_height()),
+        x=int(window.winfo_x()),
+        y=int(window.winfo_y()),
     )
 
 
@@ -170,11 +247,16 @@ _TASK_NAME_WIDTH = 260
 _TASK_NAME_LINES = 2
 _TASK_VALUE_WIDTH = 260
 _RAIL_WIDTH = 350
+# 右侧「选中备份」面板里的文字宽度: 面板宽不跟窗口走(轨道固定 ``_RAIL_WIDTH``, 去掉
+# 滚动条约 17px —— 实测内宽 333px), 两侧各 16px 的 padx。所以这里可以拿常量兜底 ——
+# "还没量出来"也算得对, 不像头部只能拿设计预算先顶着。
+_SELECTED_PANEL_WIDTH = 333
+_SELECTED_TEXT_INSET = 32
+# 面板里"文件摘要"那一行的上限行数(它可能是一条很长的备注, 见 sel.digest)。
+_SELECTED_FILES_LINES = 2
 # 卡片副标题的左右内边距(见 _build_backup_card 的 padx=12).
 _CARD_DETAIL_INSET = 24
-# 分支视图中用于标示层级的连接符(与缩进配合).
-_BRANCH_MARK = "└ "
-# 当前节点标记: 后续备份/分支都从这个节点继续.
+# 当前节点标记: 后续备份/分支都从这个节点继续(图里画在小字那一行, 卡片上写在标题前).
 _CURRENT_MARK = "●"
 # 导出包默认的文件名后缀: 保存对话框里预填的名字由游戏名派生(`<slug>.archive.zip`),
 # 用户仍可改成别的名字或目录.
@@ -267,6 +349,8 @@ class ArchiveApp(ctk.CTk):
         self._detail_name = ""
         self._detail_subtitle = ""
         self._refit_job: str | None = None
+        # 右侧面板三行的**完整**文本(名称/元信息/摘要): 同样要在宽度变化后重裁。
+        self._selected_texts: tuple[str, str, str] = ("", "", "")
         # 消息轮询任务的 id(destroy() 里要撤掉, 见那里的说明)。
         self._poll_job: str | None = None
 
@@ -306,8 +390,7 @@ class ArchiveApp(ctk.CTk):
         self._activation_steps = 0
         self.title(title)
         self.minsize(*WINDOW_MIN_SIZE)
-        width, height = initial_window_size(self)
-        self.geometry(f"{width}x{height}")
+        self._apply_window_geometry(loaded.config.window)
         self.configure(fg_color=self.p.background)
 
         self._build_layout()
@@ -331,6 +414,11 @@ class ArchiveApp(ctk.CTk):
         if smoke_seconds is not None:
             # 冒烟自检也走正常关闭路径, 确保调度器/快捷键被释放.
             self.after(int(smoke_seconds * 1000), self._on_close)
+
+    def _apply_window_geometry(self, saved: WindowSettings) -> None:
+        """按记住的尺寸与位置打开窗口(没记住就用设计尺寸, 见 :func:`open_window_geometry`)."""
+        screen = (int(self.winfo_screenwidth()), int(self.winfo_screenheight()))
+        self.geometry(open_window_geometry(saved, screen=screen))
 
     # ---------------------------------------------------------------- 快捷键
 
@@ -1031,6 +1119,20 @@ class ArchiveApp(ctk.CTk):
         self._list_sub.grid(row=1, column=0, padx=16, pady=(2, 8), sticky="w")
         self._list_scroll = self.kit.scroll_frame(self._list_panel, bg_key="well")
         self._list_scroll.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        # 分支视图不用滚动容器而是图画布(见 I-9): 两块同格叠放, 同一时间只显示一个。
+        # 图画布自己拿 ``well`` 当底色(与滚动区一致), 所以切视图时那块区域的底色不变。
+        self._branch_host = self.kit.frame(
+            self._list_panel, bg_key="well", corner_radius=RADIUS_NONE
+        )
+        self._branch_host.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self._branch_host.grid_remove()
+        self._tree_view = TreeView(
+            self._branch_host,
+            on_select=self._select_backup,
+            on_hover=self._on_graph_hover,
+        )
+        self._tree_view.frame.pack(fill="both", expand=True)
+        self.kit.register(self._tree_view.redraw)
 
         # 右侧 rail: 选中备份 + 定时任务.
         # 用可滚动容器承载: 两块面板都按内容高度排布, 窗口变矮时也不会把
@@ -1051,6 +1153,8 @@ class ArchiveApp(ctk.CTk):
         panel = self.kit.frame(parent, bg_key="panel", border_key="border")
         panel.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         panel.grid_columnconfigure(0, weight=1)
+        # 面板宽度是这三行文字的"可用宽度"来源(见 _fit_selected_text)。
+        self._selected_panel = panel
 
         self.kit.label(panel, tr("sel.title"), style="h2", size=15, weight="bold").grid(
             row=0, column=0, padx=16, pady=(16, 4), sticky="w"
@@ -1257,6 +1361,7 @@ class ArchiveApp(ctk.CTk):
         self._render_selected(None)
         self._render_task(self.backend.task_status(None))
         self._update_actions()
+        self._show_area(graph=False)
         for child in self._list_scroll.winfo_children():
             child.destroy()
         empty = self.kit.label(
@@ -1396,6 +1501,32 @@ class ArchiveApp(ctk.CTk):
         width = label.winfo_width()
         return width if width > 1 else fallback
 
+    def _set_selected_texts(self, name: str, meta: str, files: str) -> None:
+        """写下右侧面板三行的**完整**文本, 再按当前宽度裁一次."""
+        self._selected_texts = (name, meta, files)
+        self._fit_selected_text()
+
+    def _fit_selected_text(self) -> None:
+        """把右侧面板的三行文字裁进面板宽度里(与详情页头部同一条纪律).
+
+        面板宽度固定(所以这里不像头部那样必须等 ``<Configure>``), 但**超长备份名只有
+        这一处能读全** —— 从前它直接被 Tk 硬裁且不补省略号, 用户看到的是半句话;
+        现在裁掉的部分补省略号, 完整内容挂在悬停提示上(``fit_label`` 一并做了)。
+        """
+        name, meta, files = self._selected_texts
+        budget = (
+            self._name_budget(self._selected_panel, _SELECTED_PANEL_WIDTH)
+            - _SELECTED_TEXT_INSET
+        )
+        rows = (
+            (self._selected_name, name, 1),
+            (self._selected_meta, meta, 1),
+            (self._selected_files, files, _SELECTED_FILES_LINES),
+        )
+        for label, text, lines in rows:
+            label.configure(wraplength=budget)
+            fit_label(label, text, label.cget("font"), budget, max_lines=lines)
+
     def _set_detail_names(self) -> None:
         """按各控件**当前宽度**裁剪名称: 窗口变宽就多显示几个字.
 
@@ -1437,6 +1568,7 @@ class ArchiveApp(ctk.CTk):
         self._refit_job = None
         if self._page is AppPage.DETAIL:
             self._set_detail_names()
+            self._fit_selected_text()
 
     def _on_content_resize(self, _event: tk.Event) -> None:
         """内容区尺寸变化: 名称的可用宽度变了, 延后重新裁一次.
@@ -1587,9 +1719,10 @@ class ArchiveApp(ctk.CTk):
         self._current_id = None if current is None else current.backup_id
         # 先按来源筛选再排序: 显式筛选"安全点"时, 分支视图也应把它们显示出来.
         selected = filter_by_source_label(self._items, self._filter_source.get())
+        include_safety = self._filter_source.get() == SourceFilter.SAFETY.label
         ordered, title, sub = self._ordered_for_view(
             selected,
-            include_safety=(self._filter_source.get() == SourceFilter.SAFETY.label),
+            include_safety=include_safety,
         )
         self._list_title.configure(text=title)
         self._list_sub.configure(text=sub)
@@ -1603,6 +1736,10 @@ class ArchiveApp(ctk.CTk):
 
         self._clear_cards()
         if not items:
+            # 空状态回到滚动容器里显示; 同时把图清空, 否则隐藏的画布会留着上一批框
+            # ("切视图不残留"这条判据量的就是它)。
+            self._tree_view.set_items([])
+            self._show_area(graph=False)
             empty = self.kit.label(
                 self._list_scroll,
                 tr("list.empty_filtered"),
@@ -1611,7 +1748,24 @@ class ArchiveApp(ctk.CTk):
             )
             empty.pack(padx=10, pady=16)
             return
+        if self._view == ViewKind.BRANCH:
+            # 分支视图: 喂**剪枝后**的树, 由画布铺图(见 ui/tree_view.py).
+            self._tree_view.set_items(items, include_safety=include_safety)
+            self._tree_view.redraw(self.p)
+            self._tree_view.select(self._backup_id, self.p)
+            self._show_area(graph=True)
+            return
+        self._show_area(graph=False)
         self._build_cards(items)
+
+    def _show_area(self, *, graph: bool) -> None:
+        """切左侧主体显示的是图画布还是滚动容器(空状态与时间线用后者)."""
+        if graph:
+            self._list_scroll.grid_remove()
+            self._branch_host.grid()
+            return
+        self._branch_host.grid_remove()
+        self._list_scroll.grid()
 
     def _ordered_for_view(
         self, selected: list[BackupItem], *, include_safety: bool
@@ -1661,10 +1815,13 @@ class ArchiveApp(ctk.CTk):
         self._paint_card_by_id(self._backup_id)
 
     def _card_title(self, item: BackupItem) -> str:
-        """卡片标题: 分支层级缩进 + 当前节点标记."""
-        prefix = _BRANCH_MARK * item.depth
+        """卡片标题: 当前节点标记 + 名称.
+
+        层级前缀(``└`` 重复)已经退场 —— 分支视图改用图画布表达层级, 而时间线里
+        ``depth`` 恒为 0, 那个前缀本来就一直是空的。
+        """
         marker = f"{_CURRENT_MARK} " if item.is_current else ""
-        return f"{prefix}{marker}{item.display_title}"
+        return f"{marker}{item.display_title}"
 
     def _card_detail(self, item: BackupItem) -> str:
         """卡片副标题.
@@ -1819,12 +1976,22 @@ class ArchiveApp(ctk.CTk):
 
         滚轮滚动时指针下的卡片会不断变化, 若每次都触发全量重绘, 卡片越多
         越卡(拖动滚动条不会有这种开销, 所以看起来“滚轮卡、拖条不卡”).
+
+        分支视图里对应的对象是"图上那两个框": 画布自己算命中, 这里只负责把
+        id 交给它(同一套优先级: 选中 > 悬停 > 常规)。
         """
         if self._hover_id == backup_id:
             return
         previous, self._hover_id = self._hover_id, backup_id
+        if self._view == ViewKind.BRANCH:
+            self._tree_view.set_hovered(backup_id, self.p)
+            return
         self._paint_card_by_id(previous)
         self._paint_card_by_id(backup_id)
+
+    def _on_graph_hover(self, node_id: str | None) -> None:
+        """图上的指针换了框: 走与卡片同一条悬停路径(状态只有一份)."""
+        self._set_hover(node_id)
 
     def _select_backup(self, item: BackupItem) -> None:
         previous, self._backup_id = self._backup_id, item.backup_id
@@ -1837,14 +2004,15 @@ class ArchiveApp(ctk.CTk):
         )
         self._render_selected(item)
         self._update_actions()
+        if self._view == ViewKind.BRANCH:
+            self._tree_view.select(item.backup_id, self.p)
+            return
         self._paint_card_by_id(previous)
         self._paint_card_by_id(item.backup_id)
 
     def _render_selected(self, item: BackupItem | None) -> None:
         if item is None:
-            self._selected_name.configure(text=tr("sel.none"))
-            self._selected_meta.configure(text=tr("sel.hint"))
-            self._selected_files.configure(text="")
+            self._set_selected_texts(tr("sel.none"), tr("sel.hint"), "")
             self._selected_state.configure(text="")
             self._restore_btn.configure(state="disabled")
             self._branch_btn.configure(state="disabled")
@@ -1852,12 +2020,10 @@ class ArchiveApp(ctk.CTk):
             self._delete_btn.configure(state="disabled")
             self._paint_button_states()
             return
-        self._selected_name.configure(text=item.display_title)
-        self._selected_meta.configure(
-            text=f"{item.created_label}  ·  {item.branch_label}"
-        )
-        self._selected_files.configure(
-            text=item.sub or tr("sel.digest", size=item.size_label)
+        self._set_selected_texts(
+            item.display_title,
+            f"{item.created_label}  ·  {item.branch_label}",
+            item.sub or tr("sel.digest", size=item.size_label),
         )
         self._selected_state.configure(
             text=(
@@ -2141,7 +2307,6 @@ class ArchiveApp(ctk.CTk):
             title=tr("dialog.rename_title"),
             name_label=tr("dialog.rename_label"),
             desc_label=tr("dialog.describe_label"),
-            desc_prompt=tr("dialog.describe_prompt", limit=MAX_NOTE_LENGTH),
             initial_name=item.display_title,
             initial_desc=item.sub,
             limit=MAX_NOTE_LENGTH,
@@ -2712,8 +2877,37 @@ class ArchiveApp(ctk.CTk):
         )
         return None
 
+    def _remember_window_geometry(self) -> None:
+        """把窗口当前的尺寸与位置写回配置(最大化/最小化/全屏时**跳过这一项**).
+
+        跳过等于保留上一次记下的值 —— 用户最大化后用关窗退出时, 下次打开应该还是他
+        摆的那个大小(见 :func:`current_window_geometry`)。写不进去(没有配置路径、
+        磁盘不可写)只记日志: 退出流程不能被这件事拦住。
+        """
+        if self._paths is None:
+            return
+        saved = current_window_geometry(self)
+        if saved is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        config.window = saved
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存窗口尺寸失败: %s", exc)
+            return
+        log_action(
+            "ui.window_geometry",
+            basic=True,
+            width=saved.width,
+            height=saved.height,
+            x=saved.x,
+            y=saved.y,
+        )
+
     def _on_close(self) -> None:
-        """退出前释放调度器与快捷键监听, 避免遗留后台线程."""
+        """退出前记住窗口的尺寸位置, 再释放调度器与快捷键监听, 避免遗留后台线程."""
+        self._remember_window_geometry()
         self._hotkeys.shutdown()
         try:
             self.backend.shutdown()

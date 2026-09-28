@@ -71,7 +71,9 @@ jobs:
       - name: Install dependencies
         # 只装这个作业要用的组(见 pyproject 的 [dependency-groups]): 构建前的门禁要
         # 质量组(ruff/mypy)与测试组(pytest --cov), 打包要 package 组(pyinstaller)。
-        run: uv sync --locked --no-default-groups --group test --group quality --group package
+        # `--no-install-project`: 打包靠 spec 里的 pathex 指向 src, 不需要把项目装进 .venv
+        # (见 pyproject 的 [tool.uv]; 与 ci.yml 的其它作业一致)。
+        run: uv sync --locked --no-default-groups --group test --group quality --group package --no-install-project
 
       - name: Run build checks
         run: |

@@ -15,6 +15,7 @@ from archive_management.config import (
     AppConfig,
     HotkeySettings,
     LoggingSettings,
+    WindowSettings,
     load_config,
     load_or_repair_config,
     parse_config,
@@ -198,6 +199,69 @@ def test_parse_rejects_unknown_logging_fields(
         load_config(path)
 
 
+# ---------------------------------------------------------------- 窗口几何
+
+
+def test_window_geometry_defaults_to_unset() -> None:
+    """首次运行没记过窗口几何: 四项全空, ``geometry()`` 交回 None(用设计尺寸打开)."""
+    assert AppConfig().window == WindowSettings()
+    assert WindowSettings().geometry() is None
+
+
+def test_window_geometry_round_trips(tmp_path: Path) -> None:
+    """记住的尺寸与位置能写回文件并原样读回."""
+    path = tmp_path / "config.json"
+    config = AppConfig()
+    config.window = WindowSettings(width=1100, height=700, x=120, y=90)
+
+    save_config(config, path)
+
+    assert load_config(path).window.geometry() == (1100, 700, 120, 90)
+
+
+def test_a_half_remembered_window_counts_as_unset() -> None:
+    """四项缺一项就当没记过: 只有宽高没有位置(或反过来)拼不出一个完整的窗口."""
+    assert WindowSettings(width=1100, height=700, x=120).geometry() is None
+    assert WindowSettings(width=1100, height=700).geometry() is None
+    assert WindowSettings(x=120, y=90).geometry() is None
+    assert WindowSettings(width=1100, height=700, x=120, y=90).geometry() == (
+        1100,
+        700,
+        120,
+        90,
+    )
+
+
+def test_window_position_may_be_negative() -> None:
+    """位置允许为负: 摆在主屏左边的显示器上时坐标就是负的(不夹成 0)."""
+    assert WindowSettings(width=800, height=600, x=-1920, y=-40).geometry() == (
+        800,
+        600,
+        -1920,
+        -40,
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"zoom": True},
+        {"width": 1100, "height": 700, "x": 0, "y": 0, "fullscreen": False},
+    ],
+)
+def test_parse_rejects_unknown_window_fields(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    """严格校验同样适用于新加的这一段: 拼错的字段要被拒绝, 而不是静默忽略."""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"version": 1, "window": payload}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError):
+        load_config(path)
+
+
 def test_load_rejects_malformed_json(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     path.write_text("{ not valid json", encoding="utf-8")
@@ -272,6 +336,9 @@ def test_load_or_reset_keeps_a_valid_config_untouched(tmp_path: Path) -> None:
         ({"hotkeys": {"save": "1"}}, ("hotkeys.save",)),
         ({"ui": {"base_font_px": 99}}, ("ui.base_font_px",)),
         ({"ui": "big"}, ("ui",)),
+        ({"window": {"width": 0}}, ("window.width",)),
+        ({"window": {"x": 999_999}}, ("window.x",)),
+        ({"window": "wide"}, ("window",)),
     ],
 )
 def test_load_or_repair_keeps_valid_fields_and_drops_only_bad_ones(

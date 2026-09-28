@@ -6,13 +6,13 @@
 - [uv](https://docs.astral.sh/uv/)（依赖与虚拟环境管理）
 
 ```shell
-uv sync --locked     # 安装依赖（本地默认装全部开发组），不安装当前项目本身
+uv sync --locked     # 安装依赖
 uv run pre-commit install
 ```
 
 开发依赖按**作业**拆成五组（`test` / `coverage` / `quality` / `analysis` / `package`，见 `pyproject.toml` 的 `[dependency-groups]`）：CI 里每个作业只装自己需要的那一组（`uv sync --locked --no-default-groups --group ...`，另外靠顶层 `UV_NO_SYNC=1` 拦住 `uv run` 的隐式 sync），本地则通过 `[tool.uv] default-groups` 一次装齐，所以上面的命令与以前完全一样。要只跑某一类检查时也可以手动 `uv sync --no-default-groups --group test`（注意它会把其它组从 `.venv` 里卸掉）。
 
-上面的命令在**仓库根目录**执行。本项目以工具形式开发、**不作为包安装**（不发布到 PyPI，也不声明 `[project.scripts]`），自身源码靠仓库根的 `.env`（内容是 `PYTHONPATH=src`）进入导入路径，所以 `python -m archive_management` 不需要安装就能运行。**`.env` 不是 uv 读的**：实测 uv 0.12.10 / 0.12.19 都不会自动加载它，`[tool.uv]` 里也没有可用的 `env-file` 选项；它只在 **VS Code 的集成终端**里生效（Python 扩展按 `python.terminal.useEnvFile` 把 `python.envFile`（默认 `${workspaceFolder}/.env`）里的变量注入终端环境）。在纯终端（Windows Terminal / WSL 等）里需要自己带上它：`uv run --env-file .env python -m archive_management ...`、`UV_ENV_FILE=.env uv run ...` 或 `PYTHONPATH=src uv run ...`。绕过 `uv run` 直接调用 `.venv` 里的解释器（Windows 是 `.venv\Scripts\python.exe`，Linux 是 `.venv/bin/python`）时该文件不会生效，需要自己设置 `PYTHONPATH=src`；个人本地覆盖请另建 `.env.local` 并用 `uv run --env-file .env.local ...`——仓库自带的 `.env` 会被提交，不要往里放密钥。
+上面的命令可以在**任意目录**执行。项目以**可编辑包**装进 `.venv`（`pyproject.toml` 的 `[tool.uv] package = true`）：`uv sync` 往 site-packages 里放的只是一个指向 `src` 的 `.pth`（几十字节）与一份 dist-info，**源码不进 site-packages**、改代码不需要重装，因此 `python -m archive_management` 与绕过 `uv run` 直接调用 `.venv` 里的解释器（Windows 是 `.venv\Scripts\python.exe`，Linux 是 `.venv/bin/python`）都能导入自身源码，不再需要 `PYTHONPATH`。CI 里则相反：用例靠 pytest 的 `pythonpath` 导入源码、静态检查靠 `mypy_path`，所以每处 `uv sync` 都带 `--no-install-project`（不构建、也不必下载构建后端），只有质量作业装一次并跑一次 CLI 冒烟 —— 见 [testing.md](testing.md) 第 6 节与 `.github/workflows/ci.yml`。
 
 项目采用 `src` 布局（包名 `archive_management`），业务层不直接调用 Tkinter、HTTP 或文件系统：领域模型与用例通过接口注入基础设施，便于替换实现与测试。
 
@@ -42,11 +42,12 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - 不带子命令运行时默认执行 `init`。
 - `--root` 可以把全部数据收敛到指定目录（便携模式与开发调试），此时配置、数据、日志、缓存都在该目录下；不加则使用系统约定的应用目录。
 - 全局 `--verbose` 本次启动就打开调试日志（默认只记录 INFO 及以上的高风险操作）；同一个开关也可以在软件设置里拨（写入 `config.json` 的 `logging.debug`，默认关闭，拨完立即生效）。
-- 命令要在**仓库根目录**执行：`.env` 提供 `PYTHONPATH=src`，其中的 `src` 是相对当前目录解析的；在非 VS Code 的终端里还要按上一节的办法把它传给 `uv run`（`--env-file .env`、`UV_ENV_FILE=.env` 或 `PYTHONPATH=src`）。
 
 ## 配置文件
 
-配置文件是配置目录下的 `config.json`（主题、全局快捷键、日志参数），由 pydantic 严格校验：未知字段、版本不符、非法快捷键都直接拒绝。
+配置文件是配置目录下的 `config.json`（主题、全局快捷键、日志参数、界面字号与上次关闭时的窗口尺寸位置），由 pydantic 严格校验：未知字段、版本不符、非法快捷键都直接拒绝。
+
+`window` 段（`width`/`height`/`x`/`y`）是程序自己写的：关窗时记下主窗口当时的尺寸与位置（**最大化/最小化/全屏关闭时跳过这一项**，见 `ui/main_window.py` 的 `current_window_geometry`），下次打开时夹进当前屏幕再用；四项缺一项就当没记过（用设计尺寸）。手改这四个值时超范围会被逐字段修复剔掉，不会把窗口摆到屏幕外。
 
 **内容非法时会自动把文件还原为默认值**，并在日志/界面里说明（CLI 的 `init` 与 `doctor` 会在输出里列出一行"配置还原"），应用照常启动；原文件会改名保留为同一目录下的`config.json.invalid`，方便对照自己改错了什么——既不让写坏的配置卡住启动，也不静默丢掉用户的改动。
 
@@ -82,7 +83,7 @@ uv run xenon --max-absolute B --max-modules F --max-average F src # 复杂度门
 
 **复杂度的两把尺子同分**：门槛取 `10`，与 Ruff 的 `[tool.ruff.lint.mccabe] max-complexity`完全相同；Radon 的等级对应 1-5 / 6-10 / 11-20 / …，所以“不超过 10”就是“最差只能到 B 级”，`xenon` 的模块级与平均复杂度不设限（Ruff 并不检查这两项）。但两者的**刻度不同**：Radon 会把 `with`、`assert`、布尔运算也算作分支，同一段代码通常比 Ruff 的 C901 高 2~5 分，因此写新函数时以 Radon 为准（`radon cc --min C src` 当前为空，说明全部函数都在 B 级以内）。`tests/unit/test_report_verification.py` 里有守卫，保证两处数值不会各自漂移。
 
-`deptry` 的两处说明：本项目不作为包安装，所以 `known_first_party` 里同时列了 `archive_management` 与 `tests` 下的共享辅助模块。
+`deptry` 的两处说明：CI 的静态分析作业带 `--no-install-project`（项目没装进 `.venv`），依赖是按"仓库源码"解析的，所以 `known_first_party` 里同时列了 `archive_management` 与 `tests` 下的共享辅助模块。
 
 `bandit` 只扫 `src`：用例里满是 `assert` 与故意构造的脏数据，扫它们只会制造噪音；运行期行为由 `tests/security` 负责（两者互补：Bandit 拦“写法危险”，安全用例拦“行为可被利用”）。
 
@@ -105,7 +106,7 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 
 1. `uv run pytest --alluredir=allure-results`
 1. `allure generate allure-results --output allure-report`
-1. `allure open allure-report`（标题、界面语言与端口都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）
+1. `allure open allure-report`（标题、界面语言、端口、失败归类、运行变量与环境白名单都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）
 （完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
 
 用例失败时会**自动留现场**（coredumpy dump + 界面截图 + 摘要，机制与纪律见 [testing.md](testing.md) 第 6 节）：dump 落在仓库根的 `crash-dumps/`（已被忽略），用 `coredumpy load crash-dumps/<用例>.dump` 进 pdb，或在 VSCode 里用 coredumpy 扩展右键打开；不想留就加 `--crash-dump-depth=0`。

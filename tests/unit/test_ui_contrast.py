@@ -32,6 +32,8 @@ pytestmark = [
 ]
 
 # 文字会出现在哪些底色上(控件实际会用的组合, 取调色板里的全部表面色)。
+# 两个**悬停**底色也算在内: 卡片/行在鼠标划过来时会换成它们, 上面的文字并没有跟着变 ——
+# 实测漏登记的那个(深色 card_hover 上的 text_muted)只有 3.80:1。
 SURFACES: tuple[str, ...] = (
     "background",
     "topbar",
@@ -39,6 +41,8 @@ SURFACES: tuple[str, ...] = (
     "panel",
     "raised",
     "card",
+    "card_hover",
+    "item_hover",
     "well",
     "input_bg",
 )
@@ -93,8 +97,8 @@ ALL_PAIRS: tuple[tuple[str, str], ...] = (
 
 THEMES = {"dark": DARK, "light": LIGHT}
 # 兜底: 登记的配对数(改动登记表时必须一起改, 免得"删掉一对"悄悄溜过去)。
-_EXPECTED_TEXT_PAIRS = 38
-_EXPECTED_DISABLED_PAIRS = 9
+_EXPECTED_TEXT_PAIRS = 46
+_EXPECTED_DISABLED_PAIRS = 11
 _EXPECTED_STATE_PAIRS = 13
 
 

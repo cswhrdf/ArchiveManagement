@@ -447,22 +447,31 @@ def test_polling_survives_a_transient_database_failure(
 
 
 def test_default_view_is_branch_tree_and_hides_old_auto_backups() -> None:
-    """默认展示分支树; 分支树只保留最新一份自动备份, 时间线展示全部."""
+    """默认展示分支树; 分支树只保留最新一份自动备份, 时间线展示全部.
+
+    分支视图自 I-9 起是**图画布**(不再建卡片), 所以"这一屏显示了几个节点"要量
+    ``app._tree_view.node_ids``; 时间线仍然用卡片。
+    """
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.models import ViewKind
 
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(app)
-    app._select_game("outer-wilds")
+    app._open_game_detail("outer-wilds")
     assert app._view == ViewKind.BRANCH
-    branch_cards = len(app._cards)
+    branch_nodes = len(app._tree_view.node_ids)
     total_items = len(app._items)
+    assert app._cards == {}, "分支视图不建卡片"
 
     app._switch_view(ViewKind.TIMELINE)
     _pump(app)
 
     assert len(app._cards) == total_items
-    assert branch_cards < total_items
+    assert branch_nodes < total_items
+
+    app._switch_view(ViewKind.BRANCH)
+    _pump(app)
+    assert len(app._tree_view.node_ids) == branch_nodes
 
 
 def test_delete_and_rename_buttons_update_backups(
@@ -1669,6 +1678,9 @@ def test_list_and_poster_selection_share_the_soft_accent(
     palette = page._palette
     page._select("shanhai")
     _pump(app)
+    # CI 上鼠标可能正好压在某一行的位置上(实测真发生过), 那会给它加上悬停底色 ——
+    # 这条量的是"选中表达", 所以先显式把悬停清掉再读(不 pump: 不给别的事件插队的机会).
+    page._set_hover(None)
     selected = page._rows["shanhai"]
     other = page._rows["outer-wilds"]
     assert str(selected.cget("fg_color")) == palette.accent_soft
@@ -1678,6 +1690,7 @@ def test_list_and_poster_selection_share_the_soft_accent(
 
     page._on_layout_change(HomeLayout.POSTER.label)
     _pump(app)
+    page._set_hover(None)
     card = page._rows["shanhai"]
     assert str(card.cget("fg_color")) == palette.accent_soft
     assert str(card.cget("border_color")) == palette.accent_soft_border
@@ -1692,6 +1705,11 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
     悬停反馈原来只长在**详情页的备份卡片**上, 主页的列表行与海报卡没有 —— 同一类
     控件(可点、可选中)在两种页面上行为不一致(第 5 号评审)。规则只有一条, 落在
     ``widgets.card_surface_colors``: 选中 > 悬停 > 常规。
+
+    **设完悬停立刻读**(不中间再 ``_pump``): 主页有一个"延后重排"
+    (``_schedule_list_sync``), 它跑起来会重建行并把悬停复位 —— CI 的时间线恰好让它
+    落在 ``_pump`` 里, 于是刚设的悬停被清掉、量到的是"没悬停"(本地反而量不到这个
+    时序)。重绘本身是同步的(``configure`` 当场生效), 所以读之前不需要 pump。
     """
     from archive_management.domain import HomeLayout
     from archive_management.ui.demo_backend import DemoArchiveService
@@ -1708,7 +1726,6 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
 
         # ① 未选中的那一行悬停: 底色提到 card_hover, 描边不变.
         page._set_hover("outer-wilds")
-        _pump(app)
         assert str(page._rows["outer-wilds"].cget("fg_color")) == palette.card_hover
         assert (
             str(page._rows["outer-wilds"].cget("border_color")) == palette.card_border
@@ -1716,7 +1733,6 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
 
         # ② 已选中的那一行也悬停: 必须还是"选中"的样子(悬停不得盖掉选中).
         page._set_hover("shanhai")
-        _pump(app)
         assert str(page._rows["shanhai"].cget("fg_color")) == palette.accent_soft
         assert (
             str(page._rows["shanhai"].cget("border_color"))
@@ -1725,7 +1741,6 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
 
         # ③ 鼠标移开: 两张都回到各自的常态.
         page._set_hover(None)
-        _pump(app)
         assert str(page._rows["outer-wilds"].cget("fg_color")) == palette.card
         assert str(page._rows["shanhai"].cget("fg_color")) == palette.accent_soft
 
@@ -1735,7 +1750,6 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
         card = page._rows["outer-wilds"]
         assert _binds_enter(card), "海报卡要绑悬停"
         page._set_hover("outer-wilds")
-        _pump(app)
         assert str(card.cget("fg_color")) == palette.card_hover
         assert all(_binds_enter(child) for child in card.winfo_children()), (
             "子控件也要触发同一张卡片的悬停"
@@ -5812,18 +5826,18 @@ def test_gui_safety_point_stays_out_of_branch_view(
 
         safety_id = next(item.backup_id for item in app._items if item.safety)
 
-        # 时间线可见, 分支树隐藏.
+        # 时间线用卡片(安全点画得出来), 分支图的框里默认没有它。
         app._switch_view(ViewKind.TIMELINE)
         _pump(app)
         assert safety_id in app._cards
         app._switch_view(ViewKind.BRANCH)
         _pump(app)
-        assert safety_id not in app._cards
-        # 显式筛选"恢复前安全点"时, 分支树也能定向到它们.
+        assert safety_id not in app._tree_view.node_ids
+        # 显式筛选"恢复前安全点"时, 分支图也能定向到它们(筛选是用户的明确要求).
         app._filter_source.set(SourceFilter.SAFETY.label)
         app._on_filter_change(SourceFilter.SAFETY.label)
         _pump(app)
-        assert safety_id in app._cards
+        assert safety_id in app._tree_view.node_ids
     finally:
         app.destroy()
 

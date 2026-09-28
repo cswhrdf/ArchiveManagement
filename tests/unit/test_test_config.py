@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import ast
-import os
 import re
 import tomllib
 from collections.abc import Callable
@@ -35,6 +34,7 @@ from allure_pytest.utils import allure_name
 
 import ci_workflow
 import conftest
+import tk_guard
 from archive_management.services.platforms import PLATFORM_LABELS
 
 pytestmark = [
@@ -99,35 +99,29 @@ def test_mypy_path_covers_the_shared_test_modules(pytestconfig: pytest.Config) -
     assert has_tests, hint
 
 
-def test_the_cli_runs_without_installing_the_project(
+def test_the_project_is_installed_as_an_editable_package(
     pytestconfig: pytest.Config,
 ) -> None:
-    """ "不作为包安装"与仓库根的 ``.env`` 是配套的: 少任何一个, CLI 都导入不了自身.
+    """ "装成可编辑包"与 CI 里的 `--no-install-project` 是配套的: 少任何一个口径就不一致.
 
-    只有 ``[tool.uv] package = false`` 时, README/docs 里的 CLI 命令会以
-    ``No module named archive_management`` 结束, 所以 ``.env`` 必须提供
-    ``PYTHONPATH=src``。**uv 不会读这个 .env**: 实测 uv 0.12.10/0.12.19 都不自动加载
-    它(``[tool.uv]`` 也没有可用的 ``env-file``), 它只在 VS Code 集成终端里由 Python
-    扩展注入; 纯终端要显式传 ``--env-file .env`` 或 ``PYTHONPATH=src``(文档已写明)。
-    改安装方式就必须同步改 ``.env`` 与文档里的说明。
+    `[tool.uv] package = true` 让 `uv sync` 往 venv 里放一个指向 `src` 的 `.pth`(源码不进
+    site-packages), 于是 CLI 在任意目录都能跑, 不再需要 `PYTHONPATH`/仓库根的 `.env`;
+    CI 反过来: 用例靠 pytest 的 `pythonpath` 导入源码, 每处 `uv sync` 都带
+    `--no-install-project`, 只有质量作业装一次并跑 CLI 冒烟(见 .github/workflows/ci.yml)。
     """
     root = Path(str(pytestconfig.rootpath))
     with (root / "pyproject.toml").open("rb") as handle:
         config = tomllib.load(handle)
     package = config["tool"]["uv"]["package"]
-    assert package is False, "安装方式变了: 请同步调整 .env 与文档里的 CLI 说明"
+    hint = "安装方式变了: 请同步调整 CI 的 --no-install-project 与文档里的 CLI 说明"
+    assert package is True, hint
 
-    lines = (root / ".env").read_text(encoding="utf-8").splitlines()
-    entries = {
-        key.strip(): value.strip()
-        for key, _, value in (line.partition("=") for line in lines if "=" in line)
-        if not key.strip().startswith("#")
-    }
-    paths = [item for item in entries.get("PYTHONPATH", "").split(os.pathsep) if item]
-    hint = (
-        ".env 必须提供 PYTHONPATH=src, 否则 uv run python -m archive_management 会失败"
-    )
-    assert "src" in paths, hint
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
+    hint = "锁文件里根项目不是可编辑安装: 改完 [tool.uv] 要重新 uv lock"
+    assert 'source = { editable = "." }' in lock, hint
+
+    hint = "仓库根的 .env 是旧方案(PYTHONPATH=src)的残留: 可编辑安装后不再需要"
+    assert not (root / ".env").exists(), hint
 
 
 def test_ci_only_suites_exist_and_are_marked(pytestconfig: pytest.Config) -> None:
@@ -296,6 +290,32 @@ def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
                 f"{name} 缺依赖组: {sorted(needed - listed)} (它跑了需要这些组的命令)"
             )
             assert needed <= listed, hint
+
+
+def test_ci_only_installs_the_project_where_the_cli_smoke_needs_it() -> None:
+    """CI 不重复安装项目: 每处 `uv sync` 都带 `--no-install-project`, 只有跑 CLI 的例外.
+
+    项目装成可编辑包(见 pyproject 的 [tool.uv])是给本地/任意目录跑 CLI 用的; CI 的用例靠
+    pytest 的 `pythonpath` 导入源码、静态检查靠 `mypy_path`, 都不需要装它 —— 不带
+    `--no-install-project` 时每个作业都要多下一次构建后端(hatchling)并构建一遍, 十几个实例
+    的重复开销。反过来也不能全都不装: 至少要有一个作业真的装上并跑一次 CLI, 否则“可编辑
+    安装可用”就没人验证了。
+    """
+    installed_somewhere = False
+    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+        text = workflow.read_text(encoding="utf-8")
+        for name, body in ci_workflow.jobs(text).items():
+            commands = _without_comments(body)
+            synced = re.findall(r"uv sync[^\n]*", commands)
+            if "python -m archive_management" in commands:
+                installed_somewhere = True
+                hint = f"{name} 要跑 CLI, 就不能跳过安装项目: {synced}"
+                assert all("--no-install-project" not in line for line in synced), hint
+            else:
+                hint = f"{name} 不跑 CLI, 每处 uv sync 都该带 --no-install-project: {synced}"
+                assert all("--no-install-project" in line for line in synced), hint
+    hint = "没有作业真的装上项目并跑一次 CLI: 可编辑安装就没人验证了"
+    assert installed_somewhere, hint
 
 
 def test_uv_run_does_not_silently_sync_the_default_groups() -> None:
@@ -610,3 +630,66 @@ def test_report_config_keeps_the_history_settings() -> None:
 
     assert 'historyPath: "./.allure/history.jsonl"' in config
     assert "appendHistory: true" in config
+
+
+def _allowed_environment_ids() -> list[str]:
+    """读出配置里的环境 id 白名单(启动期校验用)."""
+    matched = re.search(r"allowedEnvironments:\s*\[([^\]]*)\]", _allure_config_text())
+    assert matched is not None, "allurerc.mjs 要有 allowedEnvironments"
+    return re.findall(r'"([^"]+)"', matched.group(1))
+
+
+def _category_rules() -> str:
+    """截出配置里的 ``categories`` 块(三条分类规则都在这段里).
+
+    要在 categories 这一层自己的收尾花括号处收住: 后面的 ``qualityGate`` 里也有 ``id:``
+    (``tests-on-every-platform``), 不收住就会把它当成分类型规则。
+    """
+    block = _allure_config_text().split("categories: {", 1)[1]
+    return block.split("\n  },\n", 1)[0]
+
+
+def test_report_config_declares_every_environment_id_as_allowed() -> None:
+    """``allowedEnvironments`` 必须恰好等于 ``environments`` 声明的键集合。
+
+    实测(Allure 3.18.0): 少列一个 id 时 ``allure generate`` 以 Internal Error 退出, 原文是
+    ``config.environments: environment id "common" is not listed in allowedEnvironments``。
+    于是"加平台漏改一处"从**静默少一个环境**变成**报告生成不出来、且点名是哪个 id**。
+    这条清单也要跟着 CI 的矩阵与汇总作业的 ``--expect-platforms`` 一起改。
+    """
+    ids = re.findall(r"^\s{4}([A-Za-z0-9_-]+): \{", _environment_block(), re.MULTILINE)
+    allowed = _allowed_environment_ids()
+
+    assert allowed == ids, f"允许清单 {allowed} 与环境 id {ids} 不一致"
+    assert allowed == ["windows", "macos", "linux", "common"], (
+        "环境清单变了要同步 CI 的三个矩阵与汇总作业的 --expect-platforms"
+    )
+
+
+def test_report_config_categorises_the_known_environment_problems() -> None:
+    """失败归类要盖住仓库记录过的环境问题, 且只登记这三条。
+
+    为什么需要这条守卫: 分类规则靠**错误文本**匹配, 而 Tk 症状的权威清单在
+    ``tests/tk_guard.KNOWN_TK_SKIP_MARKERS``。新增一种症状(或改了拼写)却忘了同步分类规则时,\n    那条失败会掉进默认分类 —— 读报告的人会以为是用例本身坏了。这里把两处钉在一起。
+    """
+    rules = _category_rules()
+    ids = re.findall(r'^\s{8}id: "([^"]+)"', rules, re.MULTILINE)
+
+    assert set(ids) == {
+        "env-tk-library",
+        "env-transient-database",
+        "gate-quality-check",
+    }, f"分类规则变了要同步 docs/testing.md 与本用例: {ids}"
+    assert len(ids) == len(set(ids)), "每条规则要有唯一 id(同名会被合并)"
+    # Tk 那条用数组匹配器(message / trace 任一命中), 两条正则都要盖住全部已知症状。
+    # 顺手把 JS 的 flags 也读出来: 规则必须大小写不敏感, 否则 `tcl_findLibrary`
+    # 这种驼峰拼法会漏(而 tests/tk_guard 的白名单正是按不敏感比对的)。
+    found = re.findall(
+        r":\s*/([^/\n]+)/([a-z]*),", rules.split("env-transient-database", 1)[0]
+    )
+    assert len(found) == 2, f"Tk 规则要有 message 与 trace 两条正则: {found}"
+    for pattern, flags in found:
+        assert "i" in flags, f"Tk 规则的正则要带 i(大小写不敏感): /{pattern}/{flags}"
+        compiled = re.compile(pattern, re.IGNORECASE)
+        missing = [m for m in tk_guard.KNOWN_TK_SKIP_MARKERS if not compiled.search(m)]
+        assert not missing, f"这些已知症状没进分类规则 /{pattern}/: {missing}"

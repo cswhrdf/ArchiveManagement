@@ -24,8 +24,14 @@ from archive_management.services.snapshot import (
     create_snapshot,
     verify_snapshot,
 )
-from archive_management.ui.models import BackupItem, branch_order, timeline_order
+from archive_management.ui.models import (
+    BackupItem,
+    branch_order,
+    branch_tree,
+    timeline_order,
+)
 from archive_management.ui.sql_backend import SqlArchiveService
+from archive_management.ui.tree_layout import tree_layout
 from helpers import (
     BASE_MOMENT,
     add_game,
@@ -128,6 +134,50 @@ def test_tree_and_view_sorting_within_budget(
     assert len(timeline) == NODE_COUNT
     assert branches
     assert max(item.depth for item in branches) > 1
+
+
+def test_branch_graph_layout_within_budget(
+    chain_database: tuple[Database, int], perf_recorder: PerformanceRecorder
+) -> None:
+    """分支图的布局与 item 账目(渲染基线的确定那一半).
+
+    **item 数是确定性数字**, 比计时稳, 所以它当主判据"画不出来"这类事故 —— 一条
+    400 节点的链应该正好是 400 个框、399 条连线、800 条文字。计时量的是**全部 400 个
+    节点**(不经剪枝): 退化成 O(n x n) 的布局在这里会被拦下。
+
+    剪枝后的形状由 :func:`~archive_management.ui.models.branch_tree` 决定(自动备份只
+    留最新一份), 那是另一条判据, 见下面的 ``test_pruned_branch_tree_drops_old_autos``。
+    """
+    database, game_id = chain_database
+    nodes = BackupRepository(database).list_for_game(game_id)
+
+    with perf_recorder.duration("ui.tree_layout", scale=NODE_SCALE, budget_seconds=1.0):
+        tree = build_tree(tree_inputs(nodes))
+        layout = tree_layout(tree)
+
+    assert len(layout.boxes) == NODE_COUNT
+    assert len(layout.edges) == NODE_COUNT - 1
+    # 画布上的 item 数 = 框 + 线 + 文字(每框两条), 与 ui/tree_view 的账目同源。
+    assert len(layout.boxes) + len(layout.edges) + len(layout.boxes) * 2 == 1599
+
+
+def test_pruned_branch_tree_drops_old_autos(
+    chain_database: tuple[Database, int], perf_recorder: PerformanceRecorder
+) -> None:
+    """分支图喂的是**剪枝后**的树: 自动备份只留最新一份, 布局也不会因此裂开."""
+    database, game_id = chain_database
+    nodes = BackupRepository(database).list_for_game(game_id)
+    items = _items(nodes)
+
+    with perf_recorder.duration("ui.branch_tree", scale=NODE_SCALE, budget_seconds=1.0):
+        tree = branch_tree(list(items))
+        layout = tree_layout(tree)
+
+    assert len(tree) < NODE_COUNT, "这条链里大部分是自动备份, 剪枝后应该少很多"
+    # 每个被剪枝的父节点都换掉了子节点的父指针, 所以图仍然是一棵连续的树。
+    assert len(layout.boxes) == len(tree)
+    assert len(layout.edges) == len(tree) - 1
+    assert {box.node_id for box in layout.boxes} == {node.node_id for node in tree}
 
 
 def test_backend_backup_listing_response(

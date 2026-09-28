@@ -70,6 +70,11 @@ QUALITY_SEVERITY = "trivial"
 # 里的 `common` matcher) —— 既不是某个平台的环境, 也不是隐式的 default。改这里要同步
 # 改配置, tests/unit/test_report_verification.py 有守卫把两处钉在一起。
 QUALITY_ENVIRONMENT = "common"
+# 结论项的类别标签: allurerc.mjs 的"工程门禁:质量检查未通过"分类规则按**这一对取值**
+# 挑选质量检查结果, 运行总账(create_allure_summary.py)也按它收集这些项 —— 三处必须一致。
+# 守卫在 tests/unit/test_report_verification.py (改配置里的取值要同步改这里)。
+CATEGORY_LABEL = "testCategory"
+CATEGORY_VALUE = "quality"
 # 平台专属检查: ``sys.platform`` 取值 → 报告的"环境"名。取值必须与平台展示名
 # (`platform_name()` / 用例的 env 标签)以及 allurerc.mjs 的 matcher 一致 ——
 # 守卫会把三处钉在一起。
@@ -330,7 +335,7 @@ def write_result(
             {"name": "feature", "value": "代码质量门禁"},
             {"name": "story", "value": outcome.check.title},
             {"name": "env", "value": outcome.check.environment},
-            {"name": "testCategory", "value": "quality"},
+            {"name": CATEGORY_LABEL, "value": CATEGORY_VALUE},
             {"name": "severity", "value": QUALITY_SEVERITY},
         ],
         "description": (

@@ -29,7 +29,7 @@ class Palette:
     raised: str  # 工具栏等较高层级背景
     card: str  # 列表项/备份卡片背景(需与 well/panel 明确区分)
     card_border: str  # 列表项/备份卡片描边
-    card_hover: str  # 列表项/备份卡片悬停背景
+    card_hover: str  # 列表项/备份卡片悬停背景(卡上还有正文, 所以它要跟着正文对比度走)
     well: str  # 列表滚动区背景(卡片在其中以“凹槽”方式呈现)
     input_bg: str  # 输入/下拉控件背景
     border: str  # 面板描边
@@ -86,7 +86,11 @@ DARK = Palette(
     raised="#111e31",
     card="#1a2942",
     card_border="#2f4767",
-    card_hover="#223657",
+    # 悬停底色比常规底色**暗**一档(与浅色主题、与列表行的 item_hover 同方向), 而不是
+    # 提亮: 卡片上还摆着 text_muted 的元数据, 提亮会把它的对比度压到 4.5:1 以下
+    # (实测提亮值 #223657: text_muted 3.80:1 / text_disabled 2.20:1, 都低于本仓库
+    # 自己的下限; 现在 4.99:1 / 2.89:1)。
+    card_hover="#152238",
     well="#0c1524",
     input_bg="#0c1627",
     border="#253a55",

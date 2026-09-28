@@ -272,3 +272,35 @@ def test_paint_options_reports_nothing_when_the_control_has_no_border() -> None:
     keyboard._ring_on(widget, saved)  # 应该什么也不做
     assert saved == {}
     assert widget.cget("fg_color") == DARK.input_bg
+
+
+def test_a_focused_button_is_still_recognised_as_the_primary_action() -> None:
+    """聚焦换色之后, 这颗按钮还得认得出是"主按钮"(否则回车确认会失效).
+
+    实底按钮聚焦时会被换成软底配色 —— 那是**焦点态**, 不是"这颗按钮是什么按钮"。
+    按实测底色认主按钮的机制(``primary_button``/配色守卫)如果不看原样, 焦点一落上去
+    就认不出来了: CI 上实测"回车不确认"(找不到主按钮)与"危险色按钮少了一颗"都是这个。
+
+    ``_focus_saved`` 由 :func:`make_reachable` 挂在控件上, 所以这里也照它的样子先挂一个。
+    """
+    widget = _widget(DARK, fg_color=DARK.accent, border_color="#253a55", border_width=0)
+    saved: dict[str, object] = {}
+    widget._focus_saved = saved  # type: ignore[attr-defined]
+
+    keyboard._ring_on(widget, saved)
+    assert widget.cget("fg_color") == DARK.accent_soft, "夹具要先造出已被换色的样子"
+    assert keyboard.resting_fill(widget) == DARK.accent
+    assert keyboard._focus_style(widget) == "accent"
+
+    keyboard._ring_off(widget, saved)
+    assert keyboard.resting_fill(widget) == DARK.accent
+    assert keyboard._focus_style(widget) == "accent"
+
+
+def test_resting_fill_falls_back_to_the_live_colour() -> None:
+    """没接过键盘线(或已经失焦还原)的控件读活值; 记过原样但没记底色时也读活值."""
+    widget = _widget(DARK, fg_color=DARK.raised)
+    assert keyboard.resting_fill(widget) == DARK.raised
+
+    widget._focus_saved = {"border_color": "#253a55"}  # type: ignore[attr-defined]
+    assert keyboard.resting_fill(widget) == DARK.raised

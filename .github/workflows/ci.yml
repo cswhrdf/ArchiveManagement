@@ -71,7 +71,16 @@ jobs:
         # 与性能基准(要 pytest + allure-pytest, 即测试组)。
         # `--no-default-groups` 是必需的: 默认组是给本地开发用的, 在 CI 里它会静悄悄把
         # 全套依赖装回来(守卫会核对每次 uv sync 都显式列组)。
+        # 这个作业是**唯一**不跳过安装项目的: 下面的 CLI 冒烟要真的用上可编辑包。
         run: uv sync --locked --no-default-groups --group test --group quality --group analysis
+
+      - name: Verify the CLI runs from the editable install
+        # 项目装成可编辑包(见 pyproject 的 [tool.uv]), 其余作业都带 --no-install-project,
+        # 所以用一次冒烟把"任意目录都能跑 python -m archive_management"钉住: cwd 故意换到
+        # 工作区外面 —— 只有指向 src 的 .pth 能让它导入成功。
+        run: |
+          cd "$RUNNER_TEMP"
+          uv run --project "$GITHUB_WORKSPACE" python -m archive_management init --root "$RUNNER_TEMP/am-cli-smoke"
 
       - name: Run quality gates (ruff / format / mypy)
         # 三项检查在脚本里依次执行: 未通过时脚本以非 0 退出(作业照常红), 但结论与完整输出
@@ -197,7 +206,9 @@ jobs:
         # 质量组** —— 后者是给片 0 的平台专属检查用的(它跑 mypy --platform win32, 由
         # scripts/create_allure_quality.py 的 platform 组调用)。矩阵是共享的, 所以各片
         # 都装同样的组: 按片加条件会让这两句话各自带一份 ${{ }} 表达式, 得不偿失。
-        run: uv sync --locked --no-default-groups --group test --group quality
+        # `--no-install-project`: 用例靠 pytest 的 pythonpath 导入源码, 不必把项目装进 .venv
+        # (见 pyproject 的 [tool.uv])—— 带上它连构建后端都不用下。
+        run: uv sync --locked --no-default-groups --group test --group quality --no-install-project
 
       - name: Verify Tkinter works (Windows/macOS)
         # GUI 用例把"Tk 起不来"当作环境问题 skip(见 tests/integration/test_gui_*.py 的
@@ -220,7 +231,7 @@ jobs:
         if: steps.tkinter.outcome == 'failure'
         run: |
           uv python install --reinstall 3.12
-          uv sync --locked --no-default-groups --group test --group quality
+          uv sync --locked --no-default-groups --group test --group quality --no-install-project
           uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK after repair')"
 
       - name: Install Xvfb and a CJK font (Linux)
@@ -341,8 +352,8 @@ jobs:
 
       - name: Install dependencies
         # 这个作业不跑用例: 它只用覆盖率 CLI 把各片数据合起来、判门槛、出报告(报告与
-        # 自检脚本只用标准库), 所以只装覆盖率那一组。
-        run: uv sync --locked --no-default-groups --group coverage
+        # 自检脚本只用标准库), 所以只装覆盖率那一组; --no-install-project 与其它作业同理。
+        run: uv sync --locked --no-default-groups --group coverage --no-install-project
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -550,8 +561,8 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        # 安全用例也是 pytest 跑的, 同样只需要测试组。
-        run: uv sync --locked --no-default-groups --group test
+        # 安全用例也是 pytest 跑的, 同样只需要测试组; 项目本身不装(--no-install-project)。
+        run: uv sync --locked --no-default-groups --group test --no-install-project
 
       - name: Run security tests
         run: uv run pytest tests/security -m security --alluredir=allure-results-security
@@ -601,7 +612,8 @@ jobs:
       - name: Install dependencies
         # 这个作业一行 Python 依赖都不需要: 脚本只用标准库(读 JSON/XML、写 Allure 结果),
         # Allure CLI 由 npm 提供。所以一个开发组都不装 —— 这一档里最划算的一个作业。
-        run: uv sync --locked --no-default-groups
+        # `--no-install-project` 保住这一点: 不带它的话, 装可编辑包要先下构建后端(hatchling)。
+        run: uv sync --locked --no-default-groups --no-install-project
 
       - name: Set up Node.js
         uses: actions/setup-node@v6

@@ -883,7 +883,6 @@ def test_backup_dialog_does_not_count_its_placeholder(harness: _FakeParent) -> N
         title=tr("dialog.rename_title"),
         name_label=tr("dialog.rename_label"),
         desc_label=tr("dialog.describe_label"),
-        desc_prompt=tr("dialog.describe_prompt"),
         limit=200,
     )
 
@@ -982,7 +981,6 @@ class _EditArgs(TypedDict):
     title: str
     name_label: str
     desc_label: str
-    desc_prompt: str
 
 
 def _edit_args() -> _EditArgs:
@@ -990,7 +988,6 @@ def _edit_args() -> _EditArgs:
         "title": tr("dialog.rename_title"),
         "name_label": tr("dialog.rename_label"),
         "desc_label": tr("dialog.describe_label"),
-        "desc_prompt": tr("dialog.describe_prompt", limit=200),
     }
 
 

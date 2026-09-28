@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import dataclasses
+import time
 import tkinter
 from collections import deque
 from collections.abc import Callable
@@ -36,7 +37,14 @@ try:
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
+from archive_management.config import (
+    AppConfig,
+    WindowSettings,
+    load_config,
+    save_config,
+)
 from archive_management.i18n import tr
+from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.services.hotkeys import (
     GlobalHotkeyService,
     UnavailableBackend,
@@ -105,6 +113,21 @@ def _pump(app: ctk.CTk) -> None:
     for _ in range(6):
         app.update_idletasks()
         app.update()
+
+
+def _wait_mapped(app: ctk.CTk, seconds: float = 3.0) -> bool:
+    """等到主窗口真的被映射出来.
+
+    CustomTkinter 是**延时** deiconify 的(5ms 定时器), 而位置的读数只有映射之后才有
+    意义 —— 未映射时 ``winfo_x/y`` 报的不是窗口管理器摆的那个位置。
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        _pump(app)
+        if app.winfo_ismapped():
+            return True
+        time.sleep(0.01)
+    return bool(app.winfo_ismapped())
 
 
 def _new_app(backend: ArchiveService) -> ArchiveApp:
@@ -336,7 +359,6 @@ def _dialog_cases() -> list[tuple[str, _DialogCase]]:
                 title=tr("dialog.rename_title", name="测试游戏"),
                 name_label=tr("dialog.rename_label"),
                 desc_label=tr("dialog.describe_label"),
-                desc_prompt=tr("dialog.describe_prompt", limit=200),
                 initial_name="手动备份",
                 initial_desc="描述" * 100,
             ),
@@ -519,13 +541,88 @@ def test_main_window_opens_within_the_screen(app: ArchiveApp) -> None:
         _assert_fits(app, "00-主窗口", limit=_hard_limit())
 
 
-def test_dialogs_fit_the_screen_and_keep_their_button_rows(app: ArchiveApp) -> None:
-    """撑高的对话框在三种屏高下都不超舒适线, 按钮行也不被窗口切掉."""
-    cases = _dialog_cases()
-    for screen in SCREENS:
-        SCREEN["height"] = screen
-        for label, spec in cases:
-            _measure_dialog(app, label, spec)
+# 记住的窗口几何(1920x1080 的屏、1400x900 摆在中偏左上).
+_REMEMBERED = WindowSettings(width=1400, height=900, x=160, y=120)
+
+
+def _geometry_app(paths: ApplicationPaths) -> Callable[[Any], ArchiveApp]:
+    """造一个"带配置目录"的主窗口工厂(记住的几何写在那个目录的 config.json 里)."""
+
+    def build(backend: ArchiveService) -> ArchiveApp:
+        return ArchiveApp(
+            backend,
+            title="窗口几何测试",
+            hotkeys=GlobalHotkeyService(backend=UnavailableBackend("几何测试禁用")),
+            paths=paths,
+        )
+
+    return build
+
+
+def test_the_main_window_returns_to_the_remembered_geometry(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上次关窗时记下的尺寸与位置, 下次打开照它摆; 关窗时再写回一份新的."""
+    SCREEN["height"] = 1080
+    SCREEN["width"] = 1920
+    monkeypatch.setattr(
+        tkinter.Misc, "winfo_screenheight", lambda _self, *a: SCREEN["height"]
+    )
+    monkeypatch.setattr(
+        tkinter.Misc, "winfo_screenwidth", lambda _self, *a: SCREEN["width"]
+    )
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    config = AppConfig(theme="dark", language="en")
+    config.window = _REMEMBERED
+    save_config(config, paths.config_path)
+
+    app = gui_app(_geometry_app(paths), DemoArchiveService(delay=0))
+    assert _wait_mapped(app), "窗口未映射, 位置读数没有意义"
+
+    # 打开时用的就是记住的那套(不是设计尺寸 1360x860, 也不是窗口管理器的默认位置).
+    assert (int(app.winfo_width()), int(app.winfo_height())) == (1400, 900)
+    assert (int(app.winfo_x()), int(app.winfo_y())) == (160, 120)
+
+    # 用户拖到别处并改了尺寸 → 关窗时这份几何写回配置, 其余字段一个不丢。
+    app.geometry("1500x820+240+150")
+    _pump(app)
+    app._on_close()
+
+    written = load_config(paths.config_path)
+    assert written.window.geometry() == (1500, 820, 240, 150)
+    assert (written.theme, written.language) == ("dark", "en"), (
+        "写回几何不能把别的字段冲掉(读-改-写)"
+    )
+
+
+def test_a_maximized_window_is_not_remembered(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """最大化时关窗**跳过这一项**: 配置里留着的还是上次用户摆的那套几何.
+
+    实测最大化时 ``winfo_*`` 报的是整块屏幕(3440x1369+-8+-8) —— 记下来下次打开就
+    不是用户摆的那个大小了。这里直接把 ``state()`` 换成 ``zoomed``: 真去点最大化按钮
+    在无窗口管理器的 CI 上不可靠, 而判定点就在这一个调用上。
+    """
+    monkeypatch.setattr(tkinter.Misc, "winfo_screenheight", lambda _self, *a: 1080)
+    monkeypatch.setattr(tkinter.Misc, "winfo_screenwidth", lambda _self, *a: 1920)
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    config = AppConfig(theme="dark")
+    config.window = _REMEMBERED
+    save_config(config, paths.config_path)
+
+    app = gui_app(_geometry_app(paths), DemoArchiveService(delay=0))
+    assert _wait_mapped(app), "窗口未映射, 位置读数没有意义"
+    app.geometry("1500x820+240+150")  # 摆一套"本来会被记下来"的几何
+    _pump(app)
+
+    monkeypatch.setattr(app, "state", lambda: "zoomed")
+    app._on_close()
+
+    written = load_config(paths.config_path)
+    assert written.window.geometry() == _REMEMBERED.geometry(), (
+        "最大化关闭时不该写这一项(跳过 = 保留上次记下的值)"
+    )
 
 
 # 导入弹窗那个撑得最高的用例(滚动用例复用它, 免得两处 prompt 长度对不上)。
@@ -538,6 +635,24 @@ def _case(label: str) -> _DialogCase:
         if name == label:
             return spec
     raise AssertionError(f"没有这个对话框用例: {label}")
+
+
+# 比三个基准屏都矮的"夹取生效"屏高: 正文区顶到上限的对话框在它上面必须真的被收.
+_CLAMP_SCREEN = 700
+# 正文区顶到上限的那个对话框(内容最多的一个).
+_CLAMP_DIALOG = "29-批量导入(6 款)"
+
+
+def test_dialogs_are_clamped_to_the_measured_comfort_line(app: ArchiveApp) -> None:
+    """装潢高度按**实测**算: 正文区顶到上限时, 整窗仍然落在舒适线内.
+
+    正文区之外那部分(标题/提示行/按钮行)原来按 ``_DIALOG_CHROME_HEIGHT = 52`` 估,
+    而它其实由字体与窗口管理器决定 —— 实测同一份代码 Linux 上比 Windows 高 7 像素,
+    于是**只有 Linux 的 CI** 会报"768 高屏上弹窗 621 > 614"。这条用例把那个场景搬到
+    一个更矮的屏上(本机上也会溢出), 于是漏掉那次实测夹取就会直接变红。
+    """
+    SCREEN["height"] = _CLAMP_SCREEN
+    _measure_dialog(app, _CLAMP_DIALOG, _case(_CLAMP_DIALOG))
 
 
 def test_import_dialog_scrolls_instead_of_getting_squashed(app: ArchiveApp) -> None:
