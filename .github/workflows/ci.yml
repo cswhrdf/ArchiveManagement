@@ -340,16 +340,28 @@ jobs:
         # 产物名(哪个平台的产物), platform 是报告里的环境名。
         # expect_shards 必须与那个平台在 pytest 矩阵里的片号一致
         # (tests/unit/test_sharding.py 会核对): 声明一个根本没人跑的片号等于白声明。
+        #
+        # download_path 是产物**下载落地的目录**, 按平台分开写 —— 因为
+        # `download-artifact` 只在匹配到**多个**产物时才逐个建"以产物名命名的子目录",
+        # 只匹配到一个时它把内容直接解到 ``path`` 里, 不建那层目录。macOS 只有 1 片, 正好
+        # 撞上这条: path 写 "." 时那 12689 个结果文件摊在工作区根, 合并脚本按"分片目录"
+        # 找就一个都匹配不到 —— 于是 macOS 的结论与覆盖率全程没进报告, 合并作业报
+        # "以下模式没匹配到目录"、覆盖率报"缺片"(2026-10-01 run 36754229023 实测: 下载成功、
+        # digest 校验通过、macOS 分片作业自己 2206 passed)。所以单片平台的 path 直接写成
+        # 那个分片目录名, 多片平台仍写 "."(各片各自成目录)。
         include:
           - os: ubuntu-latest
             platform: Linux
             expect_shards: "0,1,2"
+            download_path: .
           - os: windows-latest
             platform: Windows
             expect_shards: "0,1"
+            download_path: .
           - os: macos-latest
             platform: macOS
             expect_shards: "0"
+            download_path: allure-results-macos-latest-0
 
     steps:
       - name: Check out repository
@@ -403,17 +415,23 @@ jobs:
         run: allure --version
 
       - name: Download shard Allure results
-        # merge-multiple: false —— 各片落在自己的目录里, 合并交给脚本(它会逐片打印文件数,
-        # 少了一片能一眼看出来, 而不是悄悄生成一份不完整的报告)。
+        # 落地目录按平台给(见矩阵里 download_path 的说明): 单片平台的 path 必须**正好是那个
+        # 分片目录名** —— download-artifact 只在匹配到多个产物时才逐个建子目录, 只匹配到
+        # 一个时把内容直接解到 path 里。merge-multiple 显式写 false: 各片落在自己的目录里,
+        # 合并交给脚本它逐片打印文件数, 少了一片能一眼看出来。
         # continue-on-error: 某片在跑测试前就挂了(没来得及上传产物)时不要连累整个作业 ——
         # 这时候更需要一份报告来看“到底哪一片没结果”。
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
           pattern: allure-results-${{ matrix.os }}-*
-          path: .
+          path: ${{ matrix.download_path }}
+          merge-multiple: false
 
       - name: Download shard coverage data
+        # 这里故意仍写 ".": 单片平台的产物会被摊到工作区根, 而 ``collect_coverage_data.py``
+        # 两个布局都认(以产物名命名的子目录, 或直接在工作目录里的 ``.coverage.shard-<片>``)
+        # —— 换成 download_path 反而两边都对不上。
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:

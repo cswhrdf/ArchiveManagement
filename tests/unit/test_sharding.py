@@ -360,6 +360,44 @@ def test_ci_records_shard_counts_in_a_manifest() -> None:
     assert '--manifest "allure-manifests/*.json"' in text
 
 
+def test_single_shard_platform_downloads_into_its_own_shard_directory() -> None:
+    """单片平台的产物必须**直接落进那个分片目录名**里.
+
+    ``download-artifact`` 只在匹配到**多个**产物时才逐个建"以产物名命名的子目录"; 只匹配到
+    一个时它把内容直接解到 ``path`` 里, 不建那层目录。macOS 只有 1 片, 正好撞上这条:
+    ``path: .`` 时那 12689 个结果文件摊在工作区根, 合并脚本按"分片目录"找就一个都匹配不到
+    —— macOS 的结论与覆盖率**全程没进报告** (2026-10-01 run 36754229023 实测: 分片作业自己
+    2206 passed、下载也成功且 digest 校验通过, 而合并报"以下模式没匹配到目录")。
+
+    所以单片平台的 ``download_path`` 必须正好是 ``allure-results-<os>-<片号>``; 多片平台仍用
+    ``.``(各片各自成目录)。这条守卫读的是工作流文本 —— 它拦的正是"把某个平台减到 1 片"这种
+    改动: 片数一减, 下载布局就变了。
+    """
+    text = _workflow_text()
+    entries = ci_workflow.matrix_entries(text, "pytest-report")
+    assert entries, "报告作业的矩阵读不到"
+
+    for entry in entries:
+        shards = [part.strip() for part in entry["expect_shards"].split(",")]
+        path = entry.get("download_path")
+        assert path, f"{entry['platform']} 没写 download_path(产物下载落地的目录)"
+        if len(shards) == 1:
+            assert path == f"allure-results-{entry['os']}-{shards[0]}", (
+                f"{entry['platform']} 只有 1 片: 产物会被直接解到 path 里, 而合并脚本按"
+                f"分片目录找 —— path 必须正好是 allure-results-{entry['os']}-{shards[0]}, "
+                f"现在是 {path!r}"
+            )
+        else:
+            assert path == ".", (
+                f"{entry['platform']} 有 {len(shards)} 片, 各片要各自成目录, path 该是 '.'"
+            )
+
+    # 只声明字段而不用等于没改: 下载步骤必须真的照它落地。
+    assert "path: ${{ matrix.download_path }}" in text, (
+        "产物下载的落地目录要来自矩阵(单片平台与多片平台的落地方式不同)"
+    )
+
+
 def test_merge_warns_about_colliding_files(tmp_path: Path) -> None:
     """重名覆盖要计数: 分片结果被复用/编号撞车时不能静默盖掉一条结果."""
     first = tmp_path / "allure-results-shard-0"

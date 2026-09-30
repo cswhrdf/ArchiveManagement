@@ -36,6 +36,7 @@ cache key 由「架构 + runner 镜像 + 运行时版本 + 锁文件哈希」算
 
 - **产物名必须带矩阵维度**（`allure-results-${{ matrix.os }}-${{ matrix.shard }}`）：`upload-artifact` 允许同名，行为是**互相覆盖**而不是报错。
 - **明确下载语义**：`merge-multiple: true` 把各产物摊平进一个目录；`false` 让每份产物落进以产物名命名的子目录（要先逐份对数时用它）。用 `pattern:` 匹配多个产物时必须显式写这两者之一。
+- **但只匹配到 `一个` 产物时上述规则不成立**：`download-artifact` 会把内容**直接解到 `path` 里**，不建那层"以产物名命名的子目录"（与 `merge-multiple` 取什么值无关）。所以"按目录名认分片"的下游（本仓库的 `merge_allure_results.py`）遇到**只有一个分片的平台**就会一个目录都匹配不到。**单片平台的 `path` 要直接写成那个分片目录名**（本仓库用矩阵字段 `download_path`），多片平台才写 `.`。踩过一次（2026-10-01，run 36754229023）：macOS 单片，分片作业全绿、产物也传了（汇总作业的运行总账写着"缺失 0 个"），但合并报"以下模式没匹配到目录"，该平台的结论与覆盖率全程没进报告。守卫：`tests/unit/test_sharding.py::test_single_shard_platform_downloads_into_its_own_shard_directory`。
 - **下载要容错**：某个分片在跑测试前就挂了 → 它没有产物 → 下载步骤会失败并连累后面的合并与报告。加 `continue-on-error: true`，并在合并日志里**逐份报文件数**（少一份要能一眼看出来）。- **上传不要静默**: 分片那一步自己写 `if-no-files-found: error`。写 `ignore` 的后果是产物根本不被创建, 而下游只能报一句“某平台缺片” —— 得再翻回去翻那个分片作业才知道是哪儿断的（2026-09-30 实测: macOS 分片的 `allure-results-*` / `coverage-data-*` 全程没出现过, pytest-report 里只看到“以下模式没匹配到目录”, 覆盖率汇总则把它说成“未通过”）。这一片本来就是红的, 把“为什么没有产物”提到源头说, 不丢任何结论。- **隐藏文件默认不上传**：`.coverage.shard-0`、`.allure/history.jsonl` 这类以 `.` 开头的路径要显式放行，否则上传报 `no files found` 或内容为空。
 
 ```yaml
