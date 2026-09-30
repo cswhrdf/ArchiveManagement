@@ -33,9 +33,23 @@ class _FakeCtkWidget:
     def __init__(self, master: Any = None, **kwargs: Any) -> None:
         self.master = master
         self.kwargs = dict(kwargs)
+        self.handlers: dict[str, Any] = {}
+        # 每次 configure 的参数: 用例靠它数"到底写了几次"(写回路就是写得太频).
+        self.configure_calls: list[dict[str, Any]] = []
+        # 假宽度: 默认 0(= 还没布局), 用例可以自己设.
+        self.width = 0
 
     def configure(self, **kwargs: Any) -> None:
+        self.configure_calls.append(dict(kwargs))
         self.kwargs.update(kwargs)
+
+    def bind(self, sequence: str, func: Any, add: str | None = None) -> None:
+        """记录回调(忽略 add, 测试只关心函数本身)."""
+        self.handlers[sequence] = func
+
+    def winfo_width(self) -> int:
+        """假宽度(见 ``width``)."""
+        return self.width
 
     def cget(self, option: str) -> Any:
         """按真实控件的契约读回选项(``state`` 默认 ``normal``: 重绘要按它取色)."""
@@ -537,18 +551,16 @@ class _FakeContainer(_FakeCtkWidget):
 
     def __init__(self, scrollbar: _FakeScrollbar | None = None) -> None:
         super().__init__()
-        self.handlers: dict[str, Any] = {}
         self.idle_calls = 0
+        # 排上的首帧回调: wraplength 的判定就挂在它上面(用例要自己跑一次).
+        self.idle_callbacks: list[Any] = []
         if scrollbar is not None:
             self._scrollbar = scrollbar
-
-    def bind(self, sequence: str, func: Any, add: str | None = None) -> None:
-        """记录回调(忽略 add, 测试只关心函数本身)."""
-        self.handlers[sequence] = func
 
     def after_idle(self, func: Any) -> None:
         """记录首帧回调(测试不跑事件循环, 只确认它被排上了)."""
         self.idle_calls += 1
+        self.idle_callbacks.append(func)
 
 
 @pytest.mark.blocker
@@ -582,24 +594,148 @@ def test_auto_scrollbar_binds_only_the_container_without_a_canvas() -> None:
 def test_track_wraplength_follows_the_width_and_ignores_a_dead_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """成段说明按容器宽度换行; 容器销毁时的回调不能往已销毁标签上写字.
+    """成段说明按实际宽度换行; 控件销毁时的回调不能往外抛.
 
-    容器的销毁过程也会发 ``<Configure>``, 那时标签已经没了 —— 不兜住 ``TclError``
-    就会在 stderr 留下一串 ``invalid command name ...``, 报告里会挂到别的用例上。
+    判定是**延后到 idle** 的: ``<Configure>`` 只负责排一次, 量宽度发生在布局停下之后
+    (事件回调里读到的是旧值)。容器或标签销毁时也会发 ``<Configure>``, 那时控件已经
+    没了 —— 不兜住 ``TclError`` 就会在 stderr 留下一串 ``invalid command name ...``。
     """
     container = _FakeContainer()
+    container.width = 800
     label = _FakeCtkWidget()
     widgets.track_wraplength(container, label, inset=20)
 
     assert label.kwargs["wraplength"] == 240
-    container.handlers["<Configure>"](SimpleNamespace(width=800))
-    assert label.kwargs["wraplength"] == 780, "说明文字要跟着容器宽度换行"
+    # 标签还没布局(宽度 0) → 退回按容器宽度减 inset 估。
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 780, "说明文字要跟着可用宽度换行"
 
     def boom(**_kwargs: Any) -> None:
         raise tk.TclError("bad window path name")
 
     monkeypatch.setattr(label, "configure", boom)
-    container.handlers["<Configure>"](SimpleNamespace(width=800))
+    container.width = 900  # 换一个值: 否则"宽度没变就不动"会直接返回, 跑不到 configure
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+
+
+def test_track_wraplength_never_exceeds_the_width_the_label_got() -> None:
+    """换行上限是**标签自己分到的宽度**, 而且同一轮只排一次判定.
+
+    实测(监控目录页): 容器 1312 / 标签实得 928(同一行摆着四个按钮, 占掉约 350),
+    按容器算出来的 wraplength 是 1122 —— 文字按 1122 排成**一行**, 标签只有 928,
+    于是尾部约 8 个字被 Tk 硬裁掉(既不换行也没省略号)。
+    """
+    container = _FakeContainer()
+    container.width = 1312
+    label = _FakeCtkWidget()
+    label.width = 928
+    widgets.track_wraplength(container, label, inset=190)
+
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    scheduled = container.idle_calls
+    # 连续事件只排一次(合并): 同时量容器与标签, 不能混着新旧两个读数写。
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    assert container.idle_calls == scheduled, "同一轮只排一次判定"
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 928, "不能超过标签自己分到的宽度"
+
+    # 窗口拉宽: 容器与标签一起变大。
+    container.width = 1600
+    label.width = 1240
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 1240
+
+    # 容器比标签还窄时取容器那个(两者取小), 但不低于 minimum。
+    container.width = 500
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 310, "取小值: 500 - 190 = 310"
+
+    container.width = 300
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 240, "300 - 190 = 110 也要抬到 minimum 240"
+
+
+def test_track_wraplength_starts_where_it_is_told_and_reports_real_changes() -> None:
+    """落位宽度由调用点给; 换行**真的**变了才回调一次(高度按内容算的窗口靠它重收).
+
+    设置窗口那类"高度按内容算"的窗口在建起来那一瞬间就要定高, 而可用宽度要等映射之后
+    才量得准 —— 所以调用点给一个接近面板宽度的落位(这里 240), 量准之后才换成真值;
+    落位与下限(120)差得远时, 少了这一步窗口就会先长一下再弹回去。
+    """
+    container = _FakeContainer()
+    container.width = 428
+    label = _FakeCtkWidget()
+    changes: list[int] = []
+    widgets.track_wraplength(
+        container,
+        label,
+        inset=32,
+        minimum=120,
+        initial=240,
+        on_change=lambda: changes.append(len(changes)),
+    )
+
+    assert label.kwargs["wraplength"] == 240, "还没量之前按调用点给的落位排"
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 396, "量准之后按 428 - 32 排"
+    assert len(changes) == 1, "换行变了要回调一次"
+
+    # 同一宽度再量一次不许再响: 否则"改文本 → 新 Configure → 再改"会互相追。
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert len(changes) == 1, "宽度没变就不许回调"
+
+    # 比下限还窄的一格: 夹到 minimum(仍然算一次真变化)。
+    container.width = 130
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 120
+    assert len(changes) == 2
+
+    # 落位不许低于下限(下限是"再窄也不能比它更窄"的兜底)。
+    squeezed = _FakeCtkWidget()
+    widgets.track_wraplength(container, squeezed, minimum=120, initial=40)
+    assert squeezed.kwargs["wraplength"] == 120
+
+
+def test_track_wraplength_follows_a_narrowed_cell_without_writing_in_a_loop() -> None:
+    """同一格里别的控件变宽把说明挤窄时容器一个事件都不来 —— 标签自己要能补上.
+
+    实测(设置窗口): 把右列的下拉框撑宽 40px, 面板宽度仍是 448(容器静默), 而说明那一格
+    从 244 掉到 204 —— 那时候只有标签自己会发 ``<Configure>``。判定读的是**实得宽度**,
+    所以这里能量到 204; 而换行改了高度之后再发一次事件时宽度没变, 不许再写(否则就是
+    来回写的回路, 见过两千多次写把界面抽住)。
+    """
+    container = _FakeContainer()
+    container.width = 448
+    label = _FakeCtkWidget()
+    label.width = 244
+    # 下限必须显式给 120: 默认的 240 会把被挤窄的那一格抬回 240, 正是这一处要挡的坑。
+    widgets.track_wraplength(container, label, inset=32, minimum=120, initial=240)
+
+    assert set(label.handlers) == {"<Configure>"}, "标签那一侧也要能触发判定"
+    container.handlers["<Configure>"](SimpleNamespace(width=1))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 244
+
+    # 右列控件变宽 → 这一格被挤窄; 容器尺寸没变, 一个事件都没有。
+    label.width = 204
+    label.handlers["<Configure>"](SimpleNamespace(width=204))
+    container.idle_callbacks[-1]()
+    assert label.kwargs["wraplength"] == 204, "说明要跟着被挤窄的那一格重排"
+
+    # 换行改了高度 → 标签会再发事件(事件里的宽度还不是这里要看的那个): 不许再写。
+    writes = len(label.configure_calls)
+    for _ in range(3):
+        label.handlers["<Configure>"](SimpleNamespace(width=204))
+        container.idle_callbacks[-1]()
+    assert len(label.configure_calls) == writes, "宽度没变就不许再写"
 
 
 def test_paint_button_disabled_dims_background_text_and_border() -> None:

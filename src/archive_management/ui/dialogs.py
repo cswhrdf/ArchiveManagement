@@ -45,11 +45,14 @@ from archive_management.ui.widgets import (
     paint_button_enabled,
     paint_button_state,
     paint_button_style,
+    track_wraplength,
 )
 
 # 文本类对话框的正文宽度: 提示、输入框与按钮行都按这个宽度左对齐, 三块不再各宽各的
 # (19 号评审: 三块内容都居中但宽度各不相同, 看着像三个独立组件堆在一起)。
 _TEXT_WIDTH = 360
+# 对话框里成段说明的左右内边距(单侧): 算可用宽度时要按它的**两倍**减(见 _dialog_hint)。
+_DIALOG_HINT_PAD = 24
 # 定时对话框里两个输入框的宽度: 两者同宽, 左右边界才对得上(25 号评审)。
 _SCHEDULE_FIELD_WIDTH = 210
 
@@ -2176,17 +2179,22 @@ def _dialog_section(
 def _dialog_hint(
     window: ctk.CTkBaseClass, palette: Palette, text: str
 ) -> ctk.CTkBaseClass:
-    """对话框里的补充说明(成段文字, 用更好读的 text_hint)."""
+    """对话框里的补充说明(成段文字, 用更好读的 text_hint).
+
+    宽度**不写死**: 说明按对话框实际分给它的宽度换行(``fill="x"`` 之后这个宽度就是真实
+    可用宽度, 见 :func:`widgets.track_wraplength`)。写死 460 时, 一句话只要比它宽几个
+    像素, 末尾的句号就会被挤到第二行独自站着(27 号评审的筛选说明实测如此)。
+    """
     label = ctk.CTkLabel(
         window,
         text=text,
         anchor="w",
         justify="left",
-        wraplength=460,
         font=ctk.CTkFont(size=11),
         text_color=palette.text_hint,
     )
-    label.pack(padx=24, pady=(0, 2), anchor="w")
+    label.pack(fill="x", padx=_DIALOG_HINT_PAD, pady=(0, 2), anchor="w")
+    track_wraplength(window, label, inset=_DIALOG_HINT_PAD * 2)
     return label
 
 

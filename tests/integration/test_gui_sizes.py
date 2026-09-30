@@ -235,13 +235,67 @@ def _body_visible_fraction(body: Any) -> float:
     return float(last) - float(first)
 
 
+def _label_problems(window: Any) -> list[str]:
+    """对话框里的"成段说明"两类毛病(空列表 = 没问题).
+
+    ① **文字放不下**: 会自己换行的标签(``wraplength`` > 0)该比的是它自己算出来的请求
+    宽度, 而不是整段文字的宽度 —— 断过行的标签拿整段去比就是假红(与
+    ``test_gui_text_fit`` 同一套判据)。超出控件宽度时 Tk 直接裁掉且**不补省略号**。
+    **只看真的显示出来的标签**: 弹窗里没被切过去的那些页(hidden ``grid_remove``)还
+    留着布局中途的旧宽度(实测 152, 需要 296), 拿它们量就是假红。
+    """
+    problems: list[str] = []
+    queue = deque([window])
+    while queue:
+        widget = queue.popleft()
+        queue.extend(widget.winfo_children())
+        if not isinstance(widget, ctk.CTkLabel):
+            continue
+        text = str(widget.cget("text"))
+        width = int(widget.winfo_width())
+        wrap = int(widget.cget("wraplength") or 0)
+        if not text.strip() or width <= 1 or wrap <= 0:
+            continue
+        if not widget.winfo_ismapped():
+            continue
+        needed = int(widget.winfo_reqwidth())
+        if needed > width:
+            problems.append(f"被硬裁: {width} < {needed} | {text[:50]!r}")
+            continue
+        font = widget.cget("font")
+        tail = text.rstrip()
+        lone = tail[-1:] in _LONE_PUNCTUATION
+        if lone and font.measure(tail) > wrap >= font.measure(tail[:-1]):
+            problems.append(f"末行只剩标点「{tail[-1:]}」: {text[:50]!r}")
+    return problems
+
+
+# 语气标点里"孤立在末行会读成话没说完"的那几个(与 test_gui_copy_quality 同一份口径)。
+# 全角标点用转义写: 源码里直接出现全角标点会被 RUF001 拦(仓库约定)。
+_LONE_PUNCTUATION = set(",.!?;:").union("\u3002\uff01\uff1f\uff1b\uff1a\u3001\uff0c")
+
+
+def _settle(window: Any, *, seconds: float = 0.5) -> None:
+    """等窗口真的映射出来并布局完再量.
+
+    CTk 的 ``deiconify`` 是**延后 5ms** 的, 只 ``update()`` 一次量到的是布局中途的数字:
+    实测弹窗里的标签还停在 152 宽(需要 296)、整个窗口甚至还没 mapped —— 拿它量就是
+    一堆假红。这里跑一小段事件循环(有空转上限), 让那次延后映射与随之而来的重排落地。
+    """
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        window.update()
+        time.sleep(0.02)
+
+
 def _assert_fits(window: Any, label: str, *, limit: int) -> None:
-    """断言窗口高度不超上限、且没有直接子控件被窗口自己切掉.
+    """断言窗口高度不超上限、且没有直接子控件被窗口自己切掉、说明文字都排好了.
 
     先 ``update()`` 把窗口真正布局出来再量: 模态钩子刚触发时窗口只是"请求尺寸"已经算好,
     内部的子控件还停在初始值(实测正文容器仍是 canvas 默认的 200、按钮行 h=1), 那时量
     越界会变成空断言。
     """
+    _settle(window)
     window.update()
     height = int(window.winfo_height())
     cut = _cut_children(window)
@@ -251,6 +305,8 @@ def _assert_fits(window: Any, label: str, *, limit: int) -> None:
     )
     assert height <= limit, hint
     assert not cut, hint
+    problems = _label_problems(window)
+    assert not problems, f"{label}: 说明文字没排好\n" + "\n".join(problems)
 
 
 @pytest.fixture
@@ -581,6 +637,11 @@ def test_the_main_window_returns_to_the_remembered_geometry(tmp_path: Any) -> No
     期望值按规格(屏幕 - :data:`SCREEN_MARGIN`、不低于最小尺寸)直接算出来, 在本机与 CI
     上都成立 —— 原来把屏幕替身成 1920x1080 再断言"窗口就是 1400x900", 在 CI 上测的其实
     是窗口管理器能不能摆下那个尺寸。
+
+    桌面比期望尺寸还小时同理: CI 的 macOS runner 只有 1024 宽, 而窗口最小尺寸是 1200,
+    窗口管理器一定会把它压回屏幕内 —— 那是 WM 的行为, 不是这里的期望值(实测 CI 报的是
+    ``(1024, 720) == (1200, 720)``)。因此尺寸按"装得下就按规格、装不下接受屏幕尺寸"判,
+    与位置那条 :func:`_desktop_holds` 同一条理由。
     """
     paths = ApplicationPaths.default(override_root=tmp_path).ensure()
     config = AppConfig(theme="dark", language="en")
@@ -612,7 +673,10 @@ def test_the_main_window_returns_to_the_remembered_geometry(tmp_path: Any) -> No
         f"桌面 {screen[0]}x{screen[1]} 下, 记住的几何 {saved} 应当被夹成 "
         f"{size}@{position}, 实测 {actual[:2]}@{actual[2:]}"
     )
-    assert actual[:2] == size, hint
+    expected_widths = {size[0], screen[0]} if screen[0] < size[0] else {size[0]}
+    expected_heights = {size[1], screen[1]} if screen[1] < size[1] else {size[1]}
+    assert actual[0] in expected_widths, hint
+    assert actual[1] in expected_heights, hint
     if _desktop_holds(app, (*size, *position)):
         assert actual[2:] == position, hint
 
@@ -694,6 +758,20 @@ def test_dialogs_are_clamped_to_the_measured_comfort_line(app: ArchiveApp) -> No
     """
     SCREEN["height"] = _CLAMP_SCREEN
     _measure_dialog(app, _CLAMP_DIALOG, _case(_CLAMP_DIALOG))
+
+
+# 说明文字最多、最容易"末行只剩标点"的那个对话框(27 号评审就是它)。
+_HINT_DIALOG = "27-批量导出(40 款)"
+
+
+def test_dialog_hints_follow_the_width_they_get(app: ArchiveApp) -> None:
+    """对话框里的成段说明按**实际分到的宽度**换行(写死宽度会把末尾的句号挤成孤行).
+
+    27 号评审的筛选说明实测需要 470px: 写死 460 时末尾的"。"会被挤到第二行独自站着
+    (``_label_problems`` 的第二条判据); 跟着对话框给的宽度走之后一行放得下。
+    """
+    SCREEN["height"] = 768
+    _measure_dialog(app, _HINT_DIALOG, _case(_HINT_DIALOG))
 
 
 def test_import_dialog_scrolls_instead_of_getting_squashed(app: ArchiveApp) -> None:

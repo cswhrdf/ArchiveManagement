@@ -39,7 +39,7 @@ from archive_management.services.hotkeys import (
 from archive_management.ui.dialogs import _present
 from archive_management.ui.palette import Palette
 from archive_management.ui.typography import FONT_CHOICES
-from archive_management.ui.widgets import auto_scrollbar
+from archive_management.ui.widgets import auto_scrollbar, track_wraplength
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,19 @@ _FOOTER_GAP = 12
 # 窗口高度最多占到"屏幕高 - 这个留白": 给系统标题栏与任务栏留位, 免得窗口
 # 在 1366x768 上比屏幕还高(底部的关闭按钮被推到屏幕外)。
 _SCREEN_MARGIN = 120
+# 成段说明的左右内裐(单侧): 面板里的说明都按 padx=16 排版, 算可用宽度时要减掉两侧。
+_HINT_PAD = 16
+# 说明 wraplength 的下限: 这里**不能用**默认的 widgets.WRAPLENGTH_MINIMUM(240) ——
+# 窗口宽度写死不可缩放, 而右列控件会变宽(语言下拉框在 macOS 上更宽), 那时左列说明只剩
+# 228; 掉 240 当地板会把 228 抬回 240, 右边照样被裁(2026-10-01 的 macOS CI 就是这么
+# 红的: “界面语言”说明被切掉 12px)。
+_HINT_MIN_WRAPLENGTH = 120
+# 说明的"落位"宽度(还没量出可用宽度之前就按它排): 左列说明右侧被下拉框占掉约 172px,
+# 跨两列的说明几乎占满面板, 页脚那一格右侧还有一个"关闭"按钮。这三个值**只影响窗口刚
+# 建起来那一瞬间** —— 窗口高度按内容算, 落位与实际差得多就会先长/短一下再弹回去。
+_HINT_INITIAL_WRAPLENGTH = 240
+_WIDE_INITIAL_WRAPLENGTH = 400
+_NOTE_INITIAL_WRAPLENGTH = 320
 # 应用一个新组合键; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyShortcut = Callable[[str, str], "str | None"]
 # 切换界面语言; 返回 None 表示成功, 否则返回可直接展示的失败说明.
@@ -212,11 +225,15 @@ class SettingsWindow:
             text=tr("settings.appearance_hint"),
             anchor="w",
             justify="left",
-            wraplength=240,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._appearance_hint.grid(row=1, column=0, padx=16, sticky="w")
+        self._appearance_hint.grid(row=1, column=0, padx=16, sticky="ew")
+        self._track_hint(
+            self._appearance_panel,
+            self._appearance_hint,
+            initial=_HINT_INITIAL_WRAPLENGTH,
+        )
         self._toggle_btn = ctk.CTkButton(
             self._appearance_panel,
             text=self._toggle_text(),
@@ -292,11 +309,15 @@ class SettingsWindow:
             text=tr("settings.language_hint"),
             anchor="w",
             justify="left",
-            wraplength=240,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._language_hint.grid(row=1, column=0, padx=16, sticky="w")
+        self._language_hint.grid(row=1, column=0, padx=16, sticky="ew")
+        self._track_hint(
+            self._language_panel,
+            self._language_hint,
+            initial=_HINT_INITIAL_WRAPLENGTH,
+        )
         self._language_box = ctk.CTkComboBox(
             self._language_panel,
             values=list(self._locales),
@@ -324,12 +345,16 @@ class SettingsWindow:
             ),
             anchor="w",
             justify="left",
-            wraplength=400,
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
         self._language_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+        )
+        self._track_hint(
+            self._language_panel,
+            self._language_label,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
         self._logging_panel = ctk.CTkFrame(
@@ -354,11 +379,15 @@ class SettingsWindow:
             text=tr("settings.logging_hint"),
             anchor="w",
             justify="left",
-            wraplength=240,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._logging_hint.grid(row=1, column=0, padx=16, sticky="w")
+        self._logging_hint.grid(row=1, column=0, padx=16, sticky="ew")
+        self._track_hint(
+            self._logging_panel,
+            self._logging_hint,
+            initial=_HINT_INITIAL_WRAPLENGTH,
+        )
         self._debug_switch = ctk.CTkSwitch(
             self._logging_panel,
             text=tr("settings.debug_logging"),
@@ -378,12 +407,16 @@ class SettingsWindow:
             text=self._debug_state_text(),
             anchor="w",
             justify="left",
-            wraplength=400,
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
         self._debug_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+        )
+        self._track_hint(
+            self._logging_panel,
+            self._debug_label,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
         self._activation_panel = ctk.CTkFrame(
@@ -408,11 +441,15 @@ class SettingsWindow:
             text=tr("settings.activation_hint"),
             anchor="w",
             justify="left",
-            wraplength=240,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._activation_hint.grid(row=1, column=0, padx=16, sticky="w")
+        self._activation_hint.grid(row=1, column=0, padx=16, sticky="ew")
+        self._track_hint(
+            self._activation_panel,
+            self._activation_hint,
+            initial=_HINT_INITIAL_WRAPLENGTH,
+        )
         self._activation_switch = ctk.CTkSwitch(
             self._activation_panel,
             text=tr("settings.activation_auto"),
@@ -432,12 +469,16 @@ class SettingsWindow:
             text=self._activation_state_text(),
             anchor="w",
             justify="left",
-            wraplength=400,
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
         self._activation_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+        )
+        self._track_hint(
+            self._activation_panel,
+            self._activation_label,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
         self._shortcut_panel = ctk.CTkFrame(
@@ -500,7 +541,6 @@ class SettingsWindow:
             text="",
             anchor="w",
             justify="left",
-            wraplength=400,
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=palette.accent,
         )
@@ -510,7 +550,12 @@ class SettingsWindow:
             columnspan=2,
             padx=16,
             pady=(0, 6),
-            sticky="w",
+            sticky="ew",
+        )
+        self._track_hint(
+            self._shortcut_panel,
+            self._capture_status,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
         # 这条说明是"为什么我按的键不被接受"的唯一出处, 因此用正文色(而不是最弱的
@@ -520,12 +565,16 @@ class SettingsWindow:
             text=tr("settings.shortcut_hint"),
             anchor="w",
             justify="left",
-            wraplength=400,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
         )
         self._shortcut_hint.grid(
-            row=2 + len(_SHORTCUT_ROWS), column=0, columnspan=2, padx=16, sticky="w"
+            row=2 + len(_SHORTCUT_ROWS), column=0, columnspan=2, padx=16, sticky="ew"
+        )
+        self._track_hint(
+            self._shortcut_panel,
+            self._shortcut_hint,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
         )
         # 面板最后一行的底部留白不能省: 贴边的文字会盖住面板自己的下边框。
         self._shortcut_error = ctk.CTkLabel(
@@ -533,7 +582,6 @@ class SettingsWindow:
             text="",
             anchor="w",
             justify="left",
-            wraplength=400,
             font=ctk.CTkFont(size=11),
             text_color=palette.danger,
         )
@@ -543,7 +591,12 @@ class SettingsWindow:
             columnspan=2,
             padx=16,
             pady=(4, 16),
-            sticky="w",
+            sticky="ew",
+        )
+        self._track_hint(
+            self._shortcut_panel,
+            self._shortcut_error,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
         )
         self._paint_shortcuts()
 
@@ -557,11 +610,17 @@ class SettingsWindow:
             text=tr("settings.note"),
             anchor="w",
             justify="left",
-            wraplength=320,
             font=ctk.CTkFont(size=12),
             text_color=palette.text_hint,
         )
-        self._note_label.grid(row=0, column=0, sticky="w")
+        self._note_label.grid(row=0, column=0, sticky="ew")
+        # 页脚这一格没有 padx, 因此左右内衬是 0。
+        self._track_hint(
+            self._footer,
+            self._note_label,
+            initial=_NOTE_INITIAL_WRAPLENGTH,
+            pad=0,
+        )
 
         self._close_btn = ctk.CTkButton(
             self._footer,
@@ -579,23 +638,59 @@ class SettingsWindow:
         )
         self._close_btn.grid(row=0, column=1, sticky="e")
 
-        # 高度按**实际内容**算(说明文字会随语言换行), 再夹到屏幕可用高度以内:
-        # 装不下时滚动区自己滚,"关闭"与说明留在固定页脚里(16 号评审: 1366x768
-        # 上底部按钮被屏幕下沿切掉)。先定宽再量 —— 换行后的高度才是准的。
+        # 先定宽再量 —— 换行后的高度才是准的。之后说明一换行就再收一次(见 _refit_height)。
         window.geometry(f"{_WINDOW_WIDTH}x{_WINDOW_MIN_HEIGHT}")
         window.update_idletasks()
-        content_height = (
-            int(self._body.winfo_reqheight())
-            + int(self._footer.winfo_reqheight())
-            + _FOOTER_GAP
-            + _WINDOW_PAD_Y * 2
-        )
-        available = int(self._parent.winfo_screenheight()) - _SCREEN_MARGIN
-        window.geometry(
-            f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, min(content_height, available))}"
-        )
+        self._refit_height()
         # 常驻窗口不接窗口级的 Esc/回车/定焦: 那三件事是对话框的约定(见 _present)。
         _present(self._parent, window, modal=False)
+
+    def _track_hint(
+        self,
+        parent: ctk.CTkBaseClass,
+        label: ctk.CTkLabel,
+        *,
+        initial: int,
+        pad: int = _HINT_PAD,
+    ) -> None:
+        """让一条成段说明跟着**它自己分到的宽度**换行, 并在换行变化时重算窗口高度.
+
+        写死的 ``wraplength`` 两头都不对: 窄列里(右列控件变宽, 说明这一格只剩 228)会被 Tk
+        硬裁 —— 没有省略号, 后半句直接看不到(macOS CI 上的“界面语言”说明); 宽面板里又会
+        提前折行, 读起来像被截断(第 12 号评审)。规则见 :func:`widgets.track_wraplength`。
+
+        ``initial`` 是还没量出可用宽度之前的落位宽度: 量准之后就不再生效。
+        """
+        track_wraplength(
+            parent,
+            label,
+            inset=2 * pad,
+            minimum=_HINT_MIN_WRAPLENGTH,
+            initial=initial,
+            on_change=self._refit_height,
+        )
+
+    def _refit_height(self) -> None:
+        """按当前内容重算窗口高度(说明换行变了行数就变了).
+
+        宽度写死, 高度只能按**实际内容**算: 说明文字会随语言与可用宽度换行, 写死高度会把
+        底部的说明与“关闭”按钮裁到窗口外面(16 号评审)。装不下时夹到屏幕可用高度以内,
+        滚动区自己滚, 那两样留在固定页脚里(1366x768 上底部按钮被屏幕下沿切掉过)。
+        """
+        try:
+            self._window.update_idletasks()
+            content_height = (
+                int(self._body.winfo_reqheight())
+                + int(self._footer.winfo_reqheight())
+                + _FOOTER_GAP
+                + _WINDOW_PAD_Y * 2
+            )
+            available = int(self._parent.winfo_screenheight()) - _SCREEN_MARGIN
+            self._window.geometry(
+                f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, min(content_height, available))}"
+            )
+        except tk.TclError:  # 窗口已销毁: 延后的量宽可能晚于关闭
+            return
 
     def _toggle_text(self) -> str:
         """按钮文案: 点击后会切到的主题."""

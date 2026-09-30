@@ -36,7 +36,12 @@ from archive_management.ui.backend import ArchiveService
 from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import ArchiveApp
 from archive_management.ui.manage_window import ManageGameWindow
-from archive_management.ui.models import HomeBoard, HomeSection, ViewKind
+from archive_management.ui.models import (
+    DiscoveryPage,
+    HomeBoard,
+    HomeSection,
+    ViewKind,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -317,6 +322,34 @@ def test_list_and_table_text_is_never_clipped_without_an_ellipsis(
             if isinstance(child, ctk.CTkToplevel):
                 child.destroy()
         _pump(app)
+
+
+def test_hint_text_is_never_clipped_without_an_ellipsis(app: ArchiveApp) -> None:
+    """成段说明同样不许被硬裁 —— 它们不在列表/表格里, 从前没人量.
+
+    监控目录页那条说明因此长期被裁掉尾部: 容器 1312 时标签只分到 928(同一行还有四个
+    按钮), 而按容器算出来的 ``wraplength`` 是 1122 → 文字按 1122 排成**一行**, 再在标签
+    边界处被 Tk 硬裁(不换行、无省略号), 结尾的"也可以加进监控目录。"永远看不到。
+    """
+    page = app._home_page
+    page._show_section(HomeSection.DISCOVERY)
+    _pump(app)
+    for width, height in WIDTHS:
+        app.geometry(f"{width}x{height}")
+        _pump(app)
+        hints = (
+            ("发现页说明", DiscoveryPage.CANDIDATES, page._discovery._hint_label),
+            ("监控目录说明", DiscoveryPage.MONITORED, page._discovery._dirs_hint),
+        )
+        for name, holder, label in hints:
+            # 两块说明在不同的子页上: 隐藏的那一页量不出宽度, 必须切过去再量。
+            page._discovery._show_page(holder)
+            _pump(app)
+            _assert_areas(app, [(f"{width}-{name}", label, False)])
+
+    page._show_section(HomeSection.ACTIVATION)
+    _pump(app)
+    _assert_areas(app, [("启停页空状态说明", page._activation._empty, False)])
 
 
 def test_poster_cards_keep_their_names_inside_the_card(app: ArchiveApp) -> None:

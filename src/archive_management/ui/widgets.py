@@ -732,30 +732,140 @@ def track_fit(
     container.bind("<Configure>", resize, add="+")
 
 
+# 成段说明的 wraplength 下限: 真实宽度要等布局完成才知道, 这个值只负责"还没量出来时"的落位
+# (也能挡住"长文本一开始就要个上千像素"把容器顶宽)。公开导出名是为了让守卫能引用它,
+# 不要在调用点再写一遍 240。
+WRAPLENGTH_MINIMUM = 240
+
+
+def _measured_width(widget: ctk.CTkBaseClass) -> int:
+    """控件的实得宽度; 已经销毁时返回 0.
+
+    销毁过程也会发 ``<Configure>``, 那时 ``winfo_width()`` 会抛 ``TclError`` —— 让它
+    漏出去, stderr 里就是一堆 ``bad window path name``(报告里会挂到别的用例上)。
+    """
+    try:
+        return int(widget.winfo_width())
+    except tk.TclError:
+        return 0
+
+
+def _write_wraplength(
+    label: ctk.CTkLabel,
+    budget: int,
+    on_change: Callable[[], None] | None,
+) -> None:
+    """把宽度写进标签, 写成功后再响一次 ``on_change``.
+
+    控件已经销毁时(销毁过程也会发 ``<Configure>``)什么也不做 —— 让 ``TclError`` 漏出去
+    会在 stderr 留下一串 ``bad window path name`` (报告里会挂到别的用例上)。
+    """
+    try:
+        label.configure(wraplength=budget)
+    except tk.TclError:
+        return
+    if on_change is not None:
+        on_change()
+
+
 def track_wraplength(
     container: ctk.CTkBaseClass,
     label: ctk.CTkLabel,
     *,
     inset: int = 0,
-    minimum: int = 240,
+    minimum: int = WRAPLENGTH_MINIMUM,
+    initial: int | None = None,
+    on_change: Callable[[], None] | None = None,
 ) -> None:
-    """让成段说明文字跟着容器的实际宽度换行.
+    """让成段说明文字跟着**标签自己分到的宽度**换行.
 
     写死的 ``wraplength`` 在宽窗口里会提前折行: 一句话被劈成"半行 + 半行", 读起来
     像被截断("…候选名一律忽略," 后面直接接下一句), 第 12 号评审就是这个问题。
 
-    容器的销毁过程也会发 ``<Configure>``, 那时标签已经没了 —— 不兜住 ``TclError``
-    就会在 stderr 留下一串 ``invalid command name ...`` (报告里会挂到别的用例上)。
-    """
-    label.configure(wraplength=minimum)
+    上限必须取**标签自己的宽度**而不能只看容器: 同一条里还有别的控件时(监控目录页那
+    一行摆着四个按钮, 占掉约 350px), 按容器宽度算出来的 ``wraplength`` 会比标签实际分到
+    的宽度还大 —— 文字按那个过宽的预算排成**一行**, 再在标签边界处被 Tk 硬裁: 既不换行
+    也没有省略号, 后半句直接看不到(实测: 容器 1312 / 标签 928 / wraplength 1122 → 尾部
+    约 8 个字永远读不到)。取小值还顺带保证"标签的请求宽度 ≤ 它分到的宽度", 于是重排不会
+    把容器顶宽, 也就不会来回震荡。
 
-    def resize(event: tk.Event) -> None:
+    触发源挂在**容器与标签自己**上。两边都要: 同一条里别的控件变宽时(实测: 把设置窗口右列
+    的下拉框撑宽 40px)面板宽度一动不动, 说明那一格却从 244 掉到 204 —— 那时候一个事件都不
+    来, 只有标签自己会发。
+
+    判定里读的**必须是实得宽度**, 不能读事件带的值, 踩过两次:
+
+    * 标签的 ``bind`` 会同时挂到内层 ``tkinter.Label`` 上, 而那个控件的宽度**就是文字
+      宽度**(由 wraplength 反推), 拿事件里的宽度当上限会让说明越排越窄(实测 27 号对话框
+      里从 468 一路掉到下限 240);
+    * 绑在顶层窗口上时, Tk 会把**所有子控件**的 ``<Configure>`` 也送进这个绑定(子控件的
+      bindtags 里带着顶层窗口的路径), 宽度是那个子控件的(实测 24/33/100), 同样把说明压
+      到下限。
+
+    真正的判定**延后到 idle 再算**, 而且同一轮只算一次: 事件回调里读到的宽度是**旧值**
+    (事件先到、几何后落)。混着新旧两个读数去写 wraplength, 会写下一个此刻并不成立的值;
+    对"内容撑高的容器 + 按需滚动条"这种回路来说(差 12px 就能让正文多一行 → 滚动条出现
+    → 宽度又变回去), 那就是死循环 —— 实测这样会在 240/252 之间来回写**两千多次**, 界面
+    直接抽住。等布局停下来再量, 两个读数来自同一瞬间, 写下去的值自洽: 宽度没变就不再写
+    (见 ``apply`` 里那句), 而变窄只会让文字更高、不会反过来把上限顶大, 因此收敛。
+    标签那一侧的事件也是这么被压住的: 换行改了高度 → 标签再发 ``<Configure>`` → 再量一次
+    得到同一个宽度 → 不写(否则就是来回写)。
+
+    容器或标签的销毁过程也会发 ``<Configure>``, 那时控件已经没了 —— 不兜住 ``TclError``
+    就会在 stderr 留下一串 ``invalid command name ...`` (报告里会挂到别的用例上)。
+
+    ``initial`` 是"还没量出可用宽度之前"的落位宽度(不给就取 ``minimum``): 布局从它开始,
+    量准之后才被真实宽度取代。它只影响**窗口刚建起来那一瞬间** —— 高度按内容算的窗口
+    会先按它排一次; 落位与真值差得多, 窗口就会先长/短一下再弹回去(给个与面板宽度接近的
+    值就看不出来)。
+
+    ``on_change`` 只在 wraplength **真的变了**之后响一次(宽度不变不会响): 给"高度按内容
+    算"的窗口用 —— 换行变了行数就变了, 高度得跟着重算, 否则底部会空出一块(设置窗口
+    就是这么用的)。
+    """
+    start = minimum if initial is None else max(minimum, initial)
+    state = {"width": start, "pending": False}
+
+    def apply(budget: int) -> None:
+        """把 wraplength 落到 [minimum, budget] 上(宽度没变就不动)."""
+        budget = max(minimum, budget)
+        if budget == state["width"]:
+            return  # 宽度没变就不动: 否则"改文本 → 新 Configure → 再改"会互相追
+        state["width"] = budget
+        _write_wraplength(label, budget, on_change)
+
+    def measure() -> None:
+        """按**同一瞬间**量到的容器宽度与标签宽度定 wraplength."""
+        own = _measured_width(label)
+        room = _measured_width(container) - inset
+        if own > 1 and room > 1:
+            room = min(room, own)
+        apply(room if room > 1 else minimum)
+
+    def run() -> None:
+        state["pending"] = False
+        measure()
+
+    def request(_event: tk.Event | None = None) -> None:
+        """收到 <Configure>: 排一次 idle 判定(已经排了就合并, 不再排)."""
+        if state["pending"]:
+            return
+        state["pending"] = True
         try:
-            label.configure(wraplength=max(minimum, int(event.width) - inset))
-        except tk.TclError:  # 控件已销毁: 回调作废
+            container.after_idle(run)
+        except tk.TclError:  # 容器已销毁
+            state["pending"] = False
             return
 
-    container.bind("<Configure>", resize, add="+")
+    label.configure(wraplength=start)
+    container.bind("<Configure>", request, add="+")
+    # 标签自己也绑: 同一格里**别的控件**变宽时容器可以一动不动, 而这一格已经窄了 —— 那时
+    # 只有标签会发 ``<Configure>``(实测: 把设置窗口右列的下拉框撑宽 40px, 面板宽度仍是
+    # 448, 说明那一格从 244 掉到 204, 容器一个事件都没有)。这么绑之所以安全, 是因为
+    # 判定读的是**实得宽度**而不是事件里的值, 而且宽度没变就不写: 标签因换行改了高度而
+    # 再发的事件只会白跑一次 idle, 写不出新值(来回写的回路要"每次量都得到不同的宽度"
+    # 才成立, 而 ``sticky="ew"`` 之后标签宽度等于格子宽度, 与文字无关)。
+    label.bind("<Configure>", request, add="+")
 
 
 # 悬停多久才弹出提示: 短到"停一下就有", 长到鼠标划过不会到处闪。

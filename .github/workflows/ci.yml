@@ -384,7 +384,7 @@ jobs:
         # `~/.npm` 是 npm 的内容寻址缓存(按 integrity 存), 缓存被改过会校验失败并重下; 且
         # 低信任触发(PR)默认只读(见 GitHub 的 cache-mode 说明), 所以不必担心缓存被投毒。
         # 版本取自 GitHub 官方文档的示例(仓库里没有这个 action 的先例)。
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: npm-allure-3.18.0-${{ matrix.os }}
@@ -717,7 +717,7 @@ jobs:
         # 与 pytest-report 那一处同一个规则(见那里的说明): 版本号定钥匙。
         # 这里没有矩阵, 而且这个作业固定跑在 ubuntu-latest 上(见上面的 runs-on), 所以
         # 平台直接写成字面量 —— 也不用 runner.os(理由同 pytest-report 那处)。
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: npm-allure-3.18.0-linux

@@ -632,7 +632,7 @@ timeline/
 
 #### I-0 视觉评审基准（已完成，供后续每轮复用）
 
-- **评审包**：`ui-review/`（**已 gitignore，仅本地**，不进仓库）。含 `screens/` **29 张截图**（空库 4 张 + 有数据 25 张，覆盖主页的三个分区与海报/列表两种排版、详情页两种视图、游戏管理窗口、设置窗口、定时任务窗口与 11 个对话框）、`pages.md`（逐页清单 + 每页观察到的具体问题）、`optimizations.csv`（评审时 **44 条**、I-9 复核补了 2 条共 **46 条**，字段固定为 `序号,页面/区域,现状问题,预期优化样式,依据/参考,优先级,验收方式`）、`capture.py`（可重跑的抓图脚本：按窗口句柄抓图，不用屏幕区域抓，避免被遮挡与缩放错位）。
+- **评审包**：`ui-review/`（**已 gitignore，仅本地**，不进仓库）。含 `screens/` **29 张截图**（空库 4 张 + 有数据 25 张，覆盖主页的三个分区与海报/列表两种排版、详情页两种视图、游戏管理窗口、设置窗口、定时任务窗口与 11 个对话框）**+ `screens/focus-ring/` 8 张焦点环放大图**、`screens-i3-before/`（**I-3 改前基线**：2026-09-30 17:19 拍的同一套 29 张，用于"文案/版式改动前后"的逐张比对；再往前的 `screens-before/` 是 09-26 版式基线）、`pages.md`（逐页清单 + 每页观察到的具体问题）、`optimizations.csv`（评审时 **44 条**、I-9 复核补了 2 条共 **46 条**，字段固定为 `序号,页面/区域,现状问题,预期优化样式,依据/参考,优先级,验收方式`）、`capture.py`（可重跑的抓图脚本：按窗口句柄抓图，不用屏幕区域抓，避免被遮挡与缩放错位）。
 - **基准视口**：**1366×768** 与 **1920×900** —— 本机实测就出现过"设置窗口高 1026、底部按钮落到屏幕下沿之外"这类问题，这两个尺寸是最容易暴露自适应缺陷的档位；主窗口最小宽度 1200。
 - **工作方式**：CSV 是工作清单（不是交付物）。每完成一批就重跑 `capture.py` 更新截图、在 CSV 上标记处置结果；阶段结束时 CSV 里不许有"未处置"的空白行。
 
@@ -1889,8 +1889,7 @@ v3.0.1 / v4.0.0 / v5.0.0，`actions/deploy-pages` 有 v3.0.2 / v4.0.5 / v5.0.1�
 - `ruff format --check .` → **229 files already formatted**；`ruff check .` → **All checks passed**；
   `mypy` → **195 source files, no issues**。
 - 全量 `pytest --cov` = **2192 passed / 7 skipped**（上一轮是 2186，本轮加了 5 条守卫：
-  i18n 三条 + Pages 配对一条 + macOS 降频一条）、`Total coverage **97.63%**`（门槛 95 达标）、分支 partial 72。
-- **两次自我咬合**：
+  i18n 三条 + Pages 配对一条 + macOS 降频一条）、`Total coverage **97.63%**`（门槛 95 达标）、分支 partial 72。- **两次自我咬合**：
   1. 第一次全量咬出一处**上一版扫描漏掉的"写死文案"** —— `tests/unit/test_sql_backend.py::test_update_game_renames`
      断言 `"原始名称: 旧名"`（半角冒号）。它是"拼起来的文案"：`hero.original_name` 的占位符把字面值切成了短片段，
      上一次扫描的门槛（片段 ≥ 8 字符）刚好把它漏掉。已改成用 `tr()` 拼期望值。
@@ -1911,6 +1910,82 @@ v3.0.1 / v4.0.0 / v5.0.0，`actions/deploy-pages` 有 v3.0.2 / v4.0.5 / v5.0.1�
      `DatabaseError: file is not a database`，而那次真实失败报的是 `OperationalError: unsupported file format`；
      类名与消息都不可靠，只有 `sqlite_errorname` / `sqlite_errorcode` 稳定。守卫：
      `test_sqlite_error_details_name_the_failure_class` 与 `test_failure_evidence_records_the_sqlite_error_class`（咬合验证过）。
+
+### 15.8 界面文案的两处排版缺陷（2026-10-01 追加，**已修**）
+
+这两条不是清点表里的项，是**I-3 重拍截图时逐张复核量出来的**（验收标准第 8 条的产出）：
+
+- **② 监控目录页说明条被硬裁（既有，两个版本都在）**：1360 宽下容器 1312 / 标签实得 **928**
+  （同一行摆着四个按钮，占掉 ≈350）/ 按容器算出来的 `wraplength` **1122** —— 文字按 1122 排成
+  **一行**，再在标签边界处被 Tk 硬裁（不换行、无省略号），结尾"也可以加进监控目录。"永远看不到。
+  **修法**：`widgets.track_wraplength` 的上限改成 `min(容器宽 − inset, 标签现在的宽)` → 收到 928，
+  整句改成两行、尾句回来了。
+- **① `27` 对话框的筛选说明末行只剩 `。`（I-3 去掉标点后空格引出的）**：那句话需要 470px 而
+  `_dialog_hint` 写死 460 → 最后一个句号被挤到第二行。**修法**：`_dialog_hint` 改成 `fill="x"` +
+  `track_wraplength(window, label, inset=2×24)`（跟着对话框实际给的宽度走）→ 470 一行放得下；
+  `29` 的逐款说明同时从 460 收到 485（也是一行）。
+
+**踩到并记下的两个坑（都写进了 `widgets.py` 的注释）**：
+
+1. **`CTkLabel.bind` 不是"绑在标签上"**：它会把回调同时挂到内层 `tkinter.Label` 与内层画布上，而内层
+   Label 的宽度**就是文字宽度**（由 wraplength 反推）；绑在**顶层窗口**上时，Tk 还会把所有子控件的
+   `<Configure>` 送进这个绑定（子控件 bindtags 里带着顶层窗口路径，实测宽度 24/33/100）。所以
+   **事件里的宽度一律不能用**，只能"叫醒"。
+2. **不要跟着标签自己的宽度变化去改 wraplength**：对"内容撑高的容器 + 按需滚动条"（空库主页空状态、
+   发现页空卡片）会成死循环 —— 差 12px 就多一行 → 滚动条出现 → 宽度变回去 → 再写……实测 3 秒里写了
+   **2358 次**（`test_empty_database_polling_does_not_crash` 差点被拖超时），而旧实现只写 21 次。
+   最终靠**延后到 idle 再算、两个读数取同一瞬间**解开（同场景回落到 2~7 次）。
+
+**守卫（三条，都咬合验证过"改回旧实现就红"）**：`test_ui_widgets.py::test_track_wraplength_never_exceeds_the_width_the_label_got`
+（上限/取小/下限/同一轮只排一次）、`test_gui_text_fit.py::test_hint_text_is_never_clipped_without_an_ellipsis`
+（两档宽度下量两张说明：**这条把说明条加进了"文字不许被硬裁"的量测范围**）、
+`test_gui_sizes.py::test_dialog_hints_follow_the_width_they_get`（对话框说明：不许硬裁，也不许只剩一个
+标点收尾；为此 `_assert_fits` 里加了一条 `_label_problems` 与一次 `_settle` —— 弹窗的 `deiconify` 是
+**延后 5ms** 的，只 `update()` 一次量到的是布局中途的数字）。
+
+### 15.9 macOS CI 的两条红（2026-10-01 追加，**已修**）＋ Windows 分片挂起（**本地没能复现**）
+
+这一轮的 Windows 分片在 `test_pipeline_backup_restore.py` 里挂了 60s，被 `--timeout=60` 杀掉（栈停在
+`database.py:61 connection.commit()`，即 `Database.session` 退出时提交），那一片因此**没有产物** →
+覆盖率缺片、汇总作业红（**缺片报错是设计如此**）。macOS 那一片另报了两条真红，本次修掉：
+
+- **① `test_settings_window_fits_its_content`：界面语言说明被裁 12px**。根因：`settings_window.py` 里
+  **11 处写死的 `wraplength`**（左列说明 240 ×4、跨两列 400 ×6、页脚 320），一处都没接 `track_wraplength`；
+  macOS 上那一格只有 228px，按 240 排就被 Tk 硬裁（不换行、无省略号）。
+  **修法**：11 处全部 `sticky="ew"` + `_track_hint()` → `track_wraplength(inset=32, minimum=120, initial=落位,
+  on_change=self._refit_height)`。三个细节都不能少：`minimum` 必须**显式写 120**（默认的 240 会把 228 抬回去，
+  照样裁）、`initial` 要把原来的 240/400/320 当"落位"传回去（窗口高度是建起来那一瞬间按内容算的）、
+  `on_change` 用来在换行变化后重算高度（实测改完窗口 480×898，内容正好放下、无滚动条）。
+- **顺带查出的既有缺陷：`track_wraplength` 只绑容器不够**。实测把设置窗口右列的下拉框从 140 撑到 180，
+  面板宽度一动不动（448）而说明那一格从 244 掉到 204 —— 容器一个事件都不来，只有标签自己会发。现在
+  **容器 + 标签都绑**，安全性靠"判定读实得宽度（不看事件里的宽度）、宽度没变就不写、`sticky="ew"` 让标签
+  宽度与文字无关"。于是 §15.8 第 2 条要修正一半：**标签那一侧可以绑，但事件里的宽度绝不能用、且必须保留
+  "没变就不写"**（那才是挡住来回写的闸门）。
+- **② `test_the_main_window_returns_to_the_remembered_geometry`：`(1024, 720) == (1200, 720)`**。
+  那条断言在测窗口管理器：runner 桌面只有 1024 宽，而窗口最小尺寸是 1200（`SCREEN_MARGIN = 96` 夹完仍是
+  1200）。**修法**：期望值改成"装得下按规格、装不下接受屏幕宽"，与位置那条 `_desktop_holds` 同一条理由。
+
+**验证**：本机桌面宽，原样量不出 macOS 那一格 → 用"把右列两个下拉框各撑宽 16px"复现同一个窄列：说明那一格 =
+**228px**（与 CI 一致），老行为裁 **12px**（与 CI 报的数字一致），新行为零裁。守卫两条，都咬合验证过：
+`test_gui_buttons::test_settings_window_hints_follow_a_narrow_column`（临时把 `_track_hint` 换回写死的
+`wraplength` 就复现 `这一格 228px, 说明要 240px(裁掉 12px)`）、
+`test_ui_widgets::test_track_wraplength_follows_a_narrowed_cell_without_writing_in_a_loop`（标签侧触发、
+且不许重复写）。
+
+**Windows 挂起：本地用 CI 原样命令复现失败**（`--shard-count 2 --shard-index 1 --cov --cov-report=
+--cov-fail-under=0 --alluredir=…` + `COVERAGE_FILE`：**1099 passed / 4 skipped / 342.59s**）。所以它不是
+"这个用例在 Windows 上必挂"，而是负载/时序相关。现有证据与可选加固（**都还没做**）：
+
+1. 栈卡在 `commit()`，而 `connect()` 里 `PRAGMA busy_timeout = 5000` —— 锁冲突本该 5s 后抛
+   `database is locked`；挂满 60s 说明卡在 SQLite 忙等待**管不到**的地方（OS 层写事务/fsync 被拖住），
+   而那一片进程里还跟着 20+ 个 `APScheduler` 线程（一个 scheduler 会带 1 个调度线程 + 若干同名前缀的
+   线程池 worker，所以 20+ 不等于 20+ 个泄漏的 scheduler）。
+2. `--timeout` 60 → 120：便宜，但真死锁要多等一分钟才暴露。
+3. 找出并堵住遗留的 scheduler（实测：demo backend 的 GUI 用例 destroy 后**一个线程都不漏**；
+   `test_scheduler*` + `test_pipeline_*` 一起跑只漏 1 个 —— 要定位得在整片会话末尾数线程），并加一条
+   "会话末尾不许有遗留线程"的守卫。
+4. `PRAGMA journal_mode=WAL`：能显著降低读写争用，但**有坑** —— 库连同 `-wal` 才算完整，而备份/快照是按
+   文件复制的，漏拷 `-wal` 会得到旧数据；要连带改备份逻辑与用例，不能顺手开。
 
 ---
 

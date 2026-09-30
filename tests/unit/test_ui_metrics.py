@@ -54,7 +54,11 @@ _EXPECTED_FONT_SITES = 168
 # (分支图里没有卡片, 这句在默认视图里就是错的), 它自己那``padx=24``/``pady=(0, 12)``
 # 也随之消失; 描述框下面那条计数标签的 ``pady`` 从 ``(0, 10)`` 改成 ``(0, 20)``
 # 补上被删掉的那段留白, 整数个数不变。
-_EXPECTED_SPACE_SITES = 775
+# 间距站点 775 → 774: ``_dialog_hint`` 的 ``padx=24`` 换成了具名常量 ``_DIALOG_HINT_PAD``
+# —— 对话框说明条的宽度改成跟着对话框实际给的宽度走, 左右内衬只留一个出处(见
+# ``widgets.track_wraplength``)。那个整数挪进了模块级常量, 不再算一个"站点", 正是本文件
+# 开头说的那个出口。
+_EXPECTED_SPACE_SITES = 774
 
 
 def _integers(node: ast.expr) -> list[int]:
