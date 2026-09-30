@@ -14,6 +14,21 @@ uv run pre-commit install
 
 上面的命令可以在**任意目录**执行。项目以**可编辑包**装进 `.venv`（`pyproject.toml` 的 `[tool.uv] package = true`）：`uv sync` 往 site-packages 里放的只是一个指向 `src` 的 `.pth`（几十字节）与一份 dist-info，**源码不进 site-packages**、改代码不需要重装，因此 `python -m archive_management` 与绕过 `uv run` 直接调用 `.venv` 里的解释器（Windows 是 `.venv\Scripts\python.exe`，Linux 是 `.venv/bin/python`）都能导入自身源码，不再需要 `PYTHONPATH`。CI 里则相反：用例靠 pytest 的 `pythonpath` 导入源码、静态检查靠 `mypy_path`，所以每处 `uv sync` 都带 `--no-install-project`（不构建、也不必下载构建后端），只有质量作业装一次并跑一次 CLI 冒烟 —— 见 [testing.md](testing.md) 第 6 节与 `.github/workflows/ci.yml`。
 
+**首次 `uv sync` 需要联网取一次构建后端**：可编辑安装必须真的构建一次，uv 会去解析 `pyproject.toml` 的 `build-system.requires`（`hatchling`）。构建依赖不参与 `uv.lock`，所以锁文件齐备也可能卡在这一步，报 `Failed to resolve requirements from build-system.requires` / `Failed to fetch: https://pypi.org/simple/hatchling/`。访问 PyPI 不畅时先给 uv 配镜像：
+
+```shell
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync --locked   # 一次性
+```
+
+```toml
+# 一次配置长期有效：用户级 ~/.config/uv/uv.toml（Windows 是 %APPDATA%\uv\uv.toml）
+[[index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true        # 标为默认索引，同时停用 PyPI 官方索引
+```
+
+装过一次之后构建后端就进了 uv 缓存，之后的 `uv sync --locked` 不再需要网络（`--no-install-project` 的那几处更是从不构建）。
+
 项目采用 `src` 布局（包名 `archive_management`），业务层不直接调用 Tkinter、HTTP 或文件系统：领域模型与用例通过接口注入基础设施，便于替换实现与测试。
 
 ```text
@@ -53,7 +68,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 ## 质量门禁
 
-本地提交钩子 + CI 里跑的检查（`pytest --cov` 与平台相关，Windows/Ubuntu 两个平台都跑 —— **macOS 暂时屏蔽**，见 [testing.md](testing.md) 第 4 节的说明；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
+本地提交钩子 + CI 里跑的检查（`pytest --cov` 与平台相关，Windows / Ubuntu / macOS 三个平台都跑；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
 
 ```shell
 uv run ruff check .
@@ -100,7 +115,7 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 
 输出应为 **0 个文件需要改动**，且与 `ruff format --check .` 同时成立。
 
-本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`），并把 `src/archive_management/resources/` 顶层的**固定数据清单**（如平台工具排除清单）自动压回单行紧凑 JSON（`scripts/compact_json.py`）。这个钩子跑完会把文件 **`git add` 进暂存区**（这次没改写也会加一次，顺手把索引里可能残留的多行版本同步成单行）：工作区与索引一起变成单行后 pre-commit 就不算它“弄脏了文件”，本次提交直接带上转换好的内容，不需要重新 `git add`；万一把结果加不进索引（没有 git 等），才会退回“就地改写并拦下提交”。`resources/i18n/*.json` 是给人审校的文案资源，不受影响。CI 会在 Windows、Ubuntu 上运行全量测试（macOS 暂时屏蔽，见 [testing.md](testing.md) 第 4 节），并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`），并把 `src/archive_management/resources/` 顶层的**固定数据清单**（如平台工具排除清单）自动压回单行紧凑 JSON（`scripts/compact_json.py`）。这个钩子跑完会把文件 **`git add` 进暂存区**（这次没改写也会加一次，顺手把索引里可能残留的多行版本同步成单行）：工作区与索引一起变成单行后 pre-commit 就不算它“弄脏了文件”，本次提交直接带上转换好的内容，不需要重新 `git add`；万一把结果加不进索引（没有 git 等），才会退回“就地改写并拦下提交”。`resources/i18n/*.json` 是给人审校的文案资源，不受影响。CI 会在 Windows、Ubuntu、macOS 上运行全量测试（三个平台的矩阵与分片数见 [testing.md](testing.md) 第 4 节），并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
 
 ### 想在本地看 Allure 报告：
 

@@ -45,6 +45,13 @@ pytestmark = [
     pytest.mark.layer("e2e"),
 ]
 
+# 框里那个"必须被裁"的长标题: **留一段长拉丁串**。缺中文字体的机器会把汉字量成近乎零宽,
+# 纯汉字的"超长标题"在那里根本放得下 —— "被裁过"这个前提恒不成立, 判据就变成了空断言
+# (CI 实测 Linux 上两条用例都是这么失守的)。拉丁字形任何字体都量得出宽度。
+_LONG_BOX_TITLE = "恢复之前自动创建的安全点(超长的备份标题示例)" * 3 + (
+    "-VeryLongBackupTitleSample0123456789" * 3
+)
+
 
 def _pump(app: ctk.CTk, rounds: int = 6) -> None:
     """把待处理事件跑完(布局与重绘都是事件驱动的)."""
@@ -431,7 +438,7 @@ def test_a_clipped_box_can_be_read_in_full_on_hover(graph: Any) -> None:
     被裁过的框悬停要挂上全文 (且文案里真的有完整标题), 没裁过的框与没悬停时都不许挂。
     """
     app, view, _hooks = graph
-    long_title = "恢复之前自动创建的安全点(超长的备份标题示例)" * 3
+    long_title = _LONG_BOX_TITLE
     view.set_items([_item("root", title=long_title), _item("kid", "root")])
     view.redraw(DARK)
     _pump(app)
@@ -563,7 +570,7 @@ def test_the_box_text_is_fitted_into_the_box(graph: Any) -> None:
     所以这是它自己的那一条判据: 每条文字的实测像素宽必须落在框宽之内。
     """
     app, view, _hooks = graph
-    long_title = "恢复之前自动创建的安全点(超长的备份标题示例)" * 3
+    long_title = _LONG_BOX_TITLE
     view.set_items([_item("root", title=long_title), _item("kid", "root")])
     view.redraw(DARK)
     _pump(app)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import customtkinter as ctk
@@ -44,6 +45,9 @@ class _Scheduler:
         """初始化空的排队记录."""
         self.jobs: list[tuple[int, Any]] = []
         self.cancelled: list[str] = []
+        # ``CTkFrame.bind`` 把绑定转发到内层画布, 销毁事件里的 widget 是它(见
+        # ``HomePage._on_frame_destroyed``): 替身也备一个, 好把那条接线也测到.
+        self.canvas = object()
 
     def after(self, delay_ms: int, callback: Any) -> str:
         """排一个任务, 返回形如 ``after#N`` 的 id(与 Tk 一致)."""
@@ -236,17 +240,39 @@ def test_detail_refit_is_ignored_on_other_pages() -> None:
 
 
 def test_home_page_clears_pending_sync_when_host_is_destroyed() -> None:
-    """宿主帧销毁时要撤掉挂起的任务: after 回调打到已销毁控件上会往 stderr 丢噪声."""
+    """宿主帧销毁时要撤掉挂起的任务: after 回调打到已销毁控件上会往 stderr 丢噪声.
+
+    这里走**真实接线**(销毁事件 → :meth:`HomePage._on_frame_destroyed`, 判据是内层画布):
+    收尾只测 ``cancel_list_sync()`` 的话, "接线接没接上"没人管 —— 实测那样写时清理根本
+    没被调用(销毁事件里的 widget 是 CTkFrame 的内层画布, 不是 ``self.frame``)。
+    """
     page = object.__new__(HomePage)
     page.frame = _Scheduler()
+    page._frame_host = page.frame.canvas
     page._sync_job = None
     HomePage._schedule_list_sync(page)
     assert page._sync_job is not None
 
-    page.cancel_list_sync()
+    HomePage._on_frame_destroyed(
+        page, cast(Any, SimpleNamespace(widget=page.frame.canvas))
+    )
 
     assert page._sync_job is None
     assert page.frame.cancelled == ["after#1"]
+
+
+def test_a_child_destroy_does_not_cancel_the_pending_sync() -> None:
+    """子控件的 Destroy 会冒泡上来: 那不叫"宿主没了", 不该撤掉挂起的任务."""
+    page = object.__new__(HomePage)
+    page.frame = _Scheduler()
+    page._frame_host = page.frame.canvas
+    page._sync_job = None
+    HomePage._schedule_list_sync(page)
+
+    HomePage._on_frame_destroyed(page, cast(Any, SimpleNamespace(widget=object())))
+
+    assert page._sync_job is not None, "子控件销毁不该撤掉挂起的同步任务"
+    assert page.frame.cancelled == []
 
 
 def test_destroy_cancels_the_timers_the_window_owns() -> None:

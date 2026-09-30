@@ -1,6 +1,6 @@
 ---
 applyTo: "src/archive_management/ui/**.py, tests/unit/test_ui_widgets.py, tests/integration/test_gui_buttons.py, tests/integration/test_gui_scrollbars.py"
-description: "CustomTkinter 按需滚动条(以及所有"改几何 → 事件 → 再改几何"的循环)引起的界面抽搐与递归崩溃: 定位手法、根因、修法与守卫。"
+description: 'CustomTkinter 按需滚动条(以及所有"改几何 → 事件 → 再改几何"的循环)引起的界面抽搐与递归崩溃: 定位手法、根因、修法与守卫。'
 ---
 
 # 按需滚动条的抽搐 / 递归崩溃 / 常驻灰条: 定位与修法

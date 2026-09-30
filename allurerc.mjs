@@ -210,17 +210,16 @@ export default {
       // scripts/merge_allure_results.py 写、各平台作业上传、由
       // scripts/verify_allure_report.py --manifest 与最终条数对齐(见 docs/testing.md 第 6 节)。
       //
-      // **macOS 暂时屏蔽**(2026-09-21, 开发阶段省额度: macOS runner 是 Linux 的 10 倍), 
-      // 所以这里只要求两个平台。**恢复清单**: 把 "macOS" 加回这个数组, 并同步
-      // CI 的三个矩阵(pytest / pytest-report / security)与汇总作业的 --expect-platforms
-      // —— 三处必须一致, tests/unit/test_report_verification.py 会核对。见 PLAN.md 第 11.9 节。
+      // macOS 已于 2026-09-30 恢复(见 PLAN.md 第 11.9 节): 这里要求三个平台, 与 CI 的三个
+      // 矩阵(pytest / pytest-report / security)及汇总作业的 --expect-platforms 必须一致
+      // —— tests/unit/test_report_verification.py 会核对这四处的集合。
       {
         id: "tests-on-every-platform",
         filter: (tr) =>
           tr.labels.some(
             ({ name, value }) => name === "framework" && value === "pytest",
           ),
-        environmentsTested: ["Windows", "Linux"],
+        environmentsTested: ["Windows", "macOS", "Linux"],
       },
     ],
   },
@@ -233,10 +232,8 @@ export default {
         labels.some(({ name, value }) => name === "env" && value === "Windows"),
     },
     macos: {
-      // macOS 暂时屏蔽(2026-09-21): CI 里没有这个平台的作业, 所以正常情况下报告里不会出现
-      // 这个环境。matcher 保留着 —— 本地在 macOS 上跑一次就能看到它, 恢复 CI 矩阵时也不用改。
       name: "macOS",
-      variables: { "CI 镜像": "macos-latest(当前 CI 未启用)" },
+      variables: { "CI 镜像": "macos-latest" },
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "macOS"),
     },

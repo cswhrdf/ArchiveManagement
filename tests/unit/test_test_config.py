@@ -59,6 +59,10 @@ _SEVERITY_MARKERS = ("blocker", "critical", "normal", "minor", "trivial")
 _DEFAULT_SUITES = ("tests/unit", "tests/integration")
 # 只在 CI 执行的测试类别: 目录名与 -m 标记名一致.
 _CI_ONLY_SUITES = ("performance", "security")
+# 不碰 uv 的作业(它们只用 runner 自带的工具): 发布 Pages 的那个作业就是如此 —— 它要做的
+# 只是下载产物、`unzip`、上传, 为它装一个虚拟环境纯属白花固定开销。列表不会自己变长:
+# 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
+_UV_FREE_JOBS = {"deploy-pages"}
 # 跨模块共享的测试辅助模块.
 _SHARED_MODULES = ("helpers.py", "reporting.py")
 
@@ -263,12 +267,21 @@ def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
     两条判据: ① 作业里出现的命令所需的那几组必须都被某次 `uv sync` 装上(缺了会以
     "Failed to spawn: xxx" 响亮地失败, 但仍值得在本地拦住); ② 同一作业里的每次 `uv sync`
     必须是同一套参数(否则修复步骤那一次会把刚装好的组又删掉)。
+
+    **不碰 uv 的作业**在 :data:`_UV_FREE_JOBS` 里登记(发布 Pages 的作业只用 runner 自带的
+    `unzip`, 装一个 venv 纯属白花固定开销); 登记项会被反向自查"真的一条 uv 命令都没有",
+    免得它变成绕过分组检查的后门。
     """
     for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
         text = workflow.read_text(encoding="utf-8")
         for name, body in ci_workflow.jobs(text).items():
             commands = _without_comments(body)
             synced = re.findall(r"uv sync[^\n]*", commands)
+
+            if name in _UV_FREE_JOBS:
+                hint = f"{name} 登记为不用 uv, 却出现了 uv 命令: 要么让它 sync, 要么别用 uv"
+                assert "uv " not in commands, hint
+                continue
 
             assert synced, f"{workflow.name} 的 {name} 没有 uv sync"
             assert len(set(synced)) == 1, f"{name} 里每次 uv sync 必须一致: {synced}"

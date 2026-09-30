@@ -327,13 +327,13 @@ def test_required_platforms_match_the_ci_matrix() -> None:
 
     这三处一旦不一致就会变成两种错法: 矩阵里跑了而没要求 -> 那个平台的产物丢了没人发现;
     要求了而矩阵里没跑 -> 报告必然不完整, 门禁无意义地红。
-    macOS 在开发阶段被屏蔽(省额度), 恢复时按同样的规矩把三处一起加回去。
+    macOS 曾在开发阶段屏蔽(省额度), 2026-09-30 恢复后三处一起加回来(见 PLAN.md 第 11.9 节)。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
     required = set(required_platforms())
-    assert required == {"Windows", "Linux"}, (
-        "macOS 屏蔽期间只要求两个平台; 恢复时这一条也要跟着改"
+    assert required == {"Windows", "macOS", "Linux"}, (
+        "要求哪几个平台要有用例: 恢复/屏蔽某个平台时这一条要跟着改(见 PLAN.md 第 11.9 节)"
     )
 
     summary = workflow.split("name: Check every platform contributed tests", 1)[1]
@@ -527,13 +527,17 @@ def test_zip_packages_every_file(
 def test_ci_publishes_only_verified_report() -> None:
     """CI 必须先自检报告再发布, 并且发布单个 zip(整目录被静默丢掉的情况不会再出现)."""
     workflow = _WORKFLOW.read_text(encoding="utf-8")
-    verifications = workflow.count("scripts/verify_allure_report.py")
+    # 只看命令行: 注释里也会指路到这个脚本(例如说明 zip 里的目录结构), 那是文档而不是门禁。
+    code = "\n".join(
+        line for line in workflow.splitlines() if not line.strip().startswith("#")
+    )
+    verifications = code.count("scripts/verify_allure_report.py")
 
     assert verifications >= 3, "两个作业的结构自检 + 汇总作业的平台用例检查"
     # 发布 zip 的前提是**出 zip 的那次自检**通过: 两个作业各一份。
     commands = [
         line.strip()
-        for line in workflow.splitlines()
+        for line in code.splitlines()
         if line.strip().startswith("run:") and "verify_allure_report.py" in line
     ]
     assert len(commands) == verifications, "自检点数量与命令数量对不上"
@@ -549,11 +553,11 @@ def test_ci_publishes_only_verified_report() -> None:
         command for command in commands if "--expect-platforms" in command
     ]
     assert len(platform_checks) == 2, "pytest 作业与汇总作业各要检查一次平台用例"
-    assert (
-        sum('--expect-platforms "${{ matrix.platform }}"' in c for c in platform_checks)
-        == 1
-    )
-    assert sum("--expect-platforms Windows,Linux" in c for c in platform_checks) == 1
+    per_platform_flag = '--expect-platforms "${{ matrix.platform }}"'
+    assert sum(per_platform_flag in c for c in platform_checks) == 1
+    # 汇总作业要在这份合并报告里要求三个平台都有**用例**结果(不是只要"环境存在")。
+    summary_flag = "--expect-platforms Windows,macOS,Linux"
+    assert sum(summary_flag in c for c in platform_checks) == 1
     # 汇总作业里那条不拦发布(报告正是用来看"哪个平台没数据"的地方), 所以它的结论必须有
     # 地方接手: 末尾的门禁结论步骤要带上它, 否则失败了也没人管。
     step = workflow.split("name: Check every platform contributed tests", 1)[1]
@@ -562,6 +566,95 @@ def test_ci_publishes_only_verified_report() -> None:
     assert "steps.verify-platforms.outcome == 'failure'" in verdict, (
         "平台用例检查的结论必须由末尾的门禁结论步骤接手"
     )
+
+
+def test_ci_judges_the_coverage_only_on_complete_shard_data() -> None:
+    """覆盖率链条: 缺片要点名、不合并、不判门槛、不出残缺报告, 并且作业照样红.
+
+    2026-09-30 的 CI 实测: 少一个分片的覆盖率产物时, ``cp coverage-data-*/.coverage.shard-*``
+    只报一句 ``cannot stat``, 后面 ``coverage xml`` 会自己合并剩下那份并照 ``fail_under``
+    报"覆盖率不达标" —— 报告里写着"Windows 89.99% 未达标", 而真相是数据不全。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    job = ci_workflow.job_block(workflow, "pytest-report")
+    code = "\n".join(
+        line for line in job.splitlines() if not line.strip().startswith("#")
+    )
+
+    assert "cp coverage-data-*" not in code, "通配符抄数据看不出缺的是哪一片"
+    collect = code.split("name: Collect coverage data", 1)[1].split("- name:", 1)[0]
+    assert "scripts/collect_coverage_data.py" in collect, "要按片号收集"
+    assert '--expect-shards "${{ matrix.expect_shards }}"' in collect, (
+        "收集要按矩阵声明核对片号(声明了却没到的那些才是缺片)"
+    )
+    assert "continue-on-error: true" in collect, (
+        "缺片时要让后面的步骤按 outcome 各自决定"
+    )
+    assert re.search(r"^\s+id: collect-coverage$", collect, re.M), (
+        "后面的步骤要靠这个 id 判断数据全不全"
+    )
+
+    # 合并 / 判门槛 / 出报告 / 挂结论四件都只在"片到齐"时做。
+    for step in (
+        "Combine coverage data",
+        "Enforce the coverage threshold",
+        "Write coverage reports",
+        "Attach coverage report to Allure",
+    ):
+        body = code.split(f"name: {step}", 1)[1].split("- name:", 1)[0]
+        assert "steps.collect-coverage.outcome == 'success'" in body, (
+            f"{step} 没有按'片到齐'放行: 残缺数据会变成一个看起来'覆盖率掉了'的结论"
+        )
+    # 门槛只在一处判: `coverage xml` 自己也会执行 fail_under, 那会让同一个失败被报两次,
+    # 而且文案把"缺片"说成"覆盖率不够"。
+    assert "coverage xml -o coverage.xml --fail-under=0" in code, (
+        "写报告的那一步不该再判一次门槛"
+    )
+    # 缺片的结论必须落在作业状态上: 收集那步是 continue-on-error, 所以要有接手的一步。
+    gap = code.split("name: Report the shard gap", 1)
+    assert len(gap) == 2, "缺片要有一道专门让作业变红的门禁"
+    assert "steps.collect-coverage.outcome != 'success'" in gap[1]
+    assert "exit 1" in gap[1]
+
+
+def test_collect_coverage_data_names_the_missing_shard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """缺片要点名(哪一片)并以非 0 退出, 而且**不摊平**(下游据此跳过硬门槛)."""
+    module = _load_script("collect_coverage_data")
+    monkeypatch.chdir(tmp_path)
+    shard0 = tmp_path / "coverage-data-windows-latest-0" / ".coverage.shard-0"
+    shard0.parent.mkdir()
+    shard0.write_bytes(b"a")
+
+    exit_code = module.main(["--expect-shards", "0,1"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "缺 1" in captured.err, "失败信息要点名缺的是哪一片"
+    assert "0,1" in captured.err, "也要说明声明了哪几片"
+    assert not (tmp_path / ".coverage.shard-0").exists(), "缺片时不该摊平"
+    assert "片 0" in captured.out, "找到了哪几片也要打出来(便于与日志里的产物清单对数)"
+
+
+def test_collect_coverage_data_accepts_the_flat_download_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只匹配到一个产物时下载动作会把它直接解到当前目录(没有 coverage-data-* 这层).
+
+    这正是那次 CI 失败的另一半: 通配符 `coverage-data-*/...` 一个都匹配不到, 于是那一片
+    静默地没进合并。
+    """
+    module = _load_script("collect_coverage_data")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".coverage.shard-0").write_bytes(b"a")
+    nested = tmp_path / "coverage-data-windows-latest-1" / ".coverage.shard-1"
+    nested.parent.mkdir()
+    nested.write_bytes(b"b")
+
+    assert module.main(["--expect-shards", "0,1"]) == 0
+    assert (tmp_path / ".coverage.shard-1").exists(), "子目录里的那片要摊平到工作目录"
+    assert (tmp_path / ".coverage.shard-0").read_bytes() == b"a"
 
 
 def test_report_summary_items_declare_a_severity() -> None:
@@ -1030,7 +1123,7 @@ def test_quality_gate_asks_every_platform_for_real_tests() -> None:
     assert verifier.REAL_TEST_VALUE == "pytest"
     assert f'name === "{verifier.REAL_TEST_LABEL}"' in gate
     assert f'value === "{verifier.REAL_TEST_VALUE}"' in gate
-    assert 'environmentsTested: ["Windows", "Linux"]' in gate
+    assert 'environmentsTested: ["Windows", "macOS", "Linux"]' in gate
     # 规则集要有 id: 门禁失败时输出的是 `<规则集 id>/<规则名>`, 一眼看出是哪条不过。
     assert re.search(r'id:\s*"[\w-]+"', gate) is not None
 
@@ -1908,6 +2001,70 @@ def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
         condition = ci_workflow.job_condition(text, job)
         assert "always()" in condition, f"{job} 少了 always(): 依赖作业失败时也要出报告"
         assert "!cancelled()" in condition, f"{job} 在整轮被取消后仍会启动"
+
+
+def test_the_report_is_published_to_pages_from_the_default_branch_only() -> None:
+    """汇总报告发布到 GitHub Pages, 但只从**默认分支的 push**发布, 且发布的是解开的目录。
+
+    发布本身很便宜, 但三个前置条件漏了就会出问题:
+    ① 只在 push 上发布 —— PR 上发布等于把未评审的内容放上站点, 而来自 fork 的 PR 也
+       拿不到 `pages: write`(那会变成一条恒红的检查);
+    ② 只在默认分支上发布 —— `dev` 的推送会把站点来回覆盖;
+    ③ Pages 要的是**目录**: 直接传 zip 的话站点根就变成一个压缩包, 打开网址只会下载文件 ——
+       所以必须真的出现解压, 且上传路径指向解出来的报告目录。
+    另外发布没有额外凭据: 顶层只给了 `contents: read` / `actions: read`, 所以这个作业要自己
+    声明 `pages: write` + `id-token: write`(OIDC, 不必发长期凭据)。
+    """
+    workflow = ci_workflow.workflow_text()
+    job = ci_workflow.job_block(workflow, "deploy-pages")
+
+    assert ci_workflow.needs_of(workflow, "deploy-pages") == {"allure-summary"}, (
+        "发布的是汇总报告: 不等它就可能在报告还没生成时去下载(或发布半份结果)"
+    )
+    condition = ci_workflow.job_condition(workflow, "deploy-pages")
+    assert "always()" in condition, condition
+    assert "!cancelled()" in condition, "整轮被取消后不该再启动发布"
+    assert "github.event_name == 'push'" in condition, "PR 上不该发布站点"
+    assert "default_branch" in condition, "只从默认分支发布, dev 的推送不该覆盖站点"
+    assert "pages: write" in job, "发布 Pages 需要它(顶层只给了只读的 contents/actions)"
+    assert "id-token: write" in job, "deploy-pages 用 OIDC 换一次性的部署权限"
+    assert "environment:" in job, "站点要挂在 github-pages 环境上(作业 URL 也来自它)"
+    assert "github-pages" in job, "environment 的名字必须是 github-pages"
+    assert "allure-report.zip" in job, "发布的是自检通过后打好的那个 zip"
+    assert "unzip" in job, "Pages 要目录: 必须先把 zip 解开"
+    assert "path: site/allure-report" in job, "上传的必须是解出来的报告目录"
+
+
+def test_history_trends_survive_the_pages_deploy() -> None:
+    """历史趋势靠 artifact 往返 —— 发布到 Pages 既不能提供它, 也不该把它弄丢。
+
+    机制(这条守卫要钉住的不变式): 两个报告作业各自"找上一次**成功**运行的同名产物 → 取回
+    `.allure/history.jsonl` → 生成报告(读它并追加本次一行) → 把新的 history.jsonl 重新
+    传进产物"。于是趋势的寿命 = artifact 的寿命(与站点无关), 而链条的每一环都要求那一轮的
+    `conclusion` 是 success —— 这也解释了为什么"发布 Pages"这个非门禁动作必须
+    `continue-on-error`: 它失败会让整轮离开成功集合, 于是这一轮刚写好的历史行再也不会
+    被下一轮读走(表现是趋势曲线缺一走)。
+    """
+    workflow = ci_workflow.workflow_text()
+
+    for job in ("pytest-report", "allure-summary"):
+        block = ci_workflow.job_block(workflow, job)
+        assert "Resolve previous successful run" in block, f"{job} 要先找上一轮成功运行"
+        assert 'conclusion === "success"' in block, f"{job} 只把成功运行当基线"
+        hint = f"{job} 要取回上一次的历史文件"
+        assert "cp .previous-allure-resources/.allure/history.jsonl" in block, hint
+        assert "include-hidden-files: true" in block, (
+            f"{job} 要把新的历史文件传回产物(它是隐藏文件, 必须显式放行)"
+        )
+
+    deploy = ci_workflow.job_block(workflow, "deploy-pages")
+    # 只看**作业级**的键(步骤级也允许写 continue-on-error —— "下载产物"那一步就用了它来容忍
+    # 产物缺失, 所以不能拿整段文本去数, 否则这条断言会被步骤级的那一处满足)。
+    deploy_keys = deploy.split("steps:", 1)[0]
+    assert "continue-on-error: true" in deploy_keys, (
+        "发布失败不该让整轮离开'成功'集合: 历史基线只认成功的运行"
+    )
+    assert "history.jsonl" not in deploy, "站点只是副本: 发布作业不该碰历史文件"
 
 
 def test_tkinter_check_still_fails_the_job_when_tcl_is_broken() -> None:

@@ -54,6 +54,7 @@ from archive_management.ui import schedule_window as sched_mod
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import (
+    SCREEN_MARGIN,
     WINDOW_DEFAULT_SIZE,
     WINDOW_MIN_SIZE,
     ArchiveApp,
@@ -559,18 +560,28 @@ def _geometry_app(paths: ApplicationPaths) -> Callable[[Any], ArchiveApp]:
     return build
 
 
-def test_the_main_window_returns_to_the_remembered_geometry(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """上次关窗时记下的尺寸与位置, 下次打开照它摆; 关窗时再写回一份新的."""
-    SCREEN["height"] = 1080
-    SCREEN["width"] = 1920
-    monkeypatch.setattr(
-        tkinter.Misc, "winfo_screenheight", lambda _self, *a: SCREEN["height"]
-    )
-    monkeypatch.setattr(
-        tkinter.Misc, "winfo_screenwidth", lambda _self, *a: SCREEN["width"]
-    )
+def _desktop_holds(app: ctk.CTk, geometry: tuple[int, int, int, int]) -> bool:
+    """真桌面(留出任务栏余量)装得下这套几何吗.
+
+    GitHub 的 Windows/macOS runner 桌面只有约 1024x768(减去任务栏更矮), 而主窗口有
+    1200x720 的**最小尺寸** —— 那种桌面上"记住的 1400x900"一定会被窗口管理器压回屏幕
+    内。所以断言位置之前先问这一句: 装不下时位置由窗口管理器决定, 拿它当断言等于在测
+    窗口管理器(2026-09-30 的 CI 就是这么红的: `(1200, 749) == (1400, 900)`)。
+    """
+    width, height, x, y = geometry
+    screen_w = int(app.winfo_screenwidth())
+    screen_h = int(app.winfo_screenheight())
+    return x + width <= screen_w and y + height <= screen_h - TITLE_MARGIN
+
+
+def test_the_main_window_returns_to_the_remembered_geometry(tmp_path: Any) -> None:
+    """上次关窗时记下的尺寸与位置, 下次打开照它摆; 关窗时再写回一份新的.
+
+    **不替换屏幕尺寸**: 记住的几何会先被 ``open_window_geometry`` 夹进当前屏幕, 所以
+    期望值按规格(屏幕 - :data:`SCREEN_MARGIN`、不低于最小尺寸)直接算出来, 在本机与 CI
+    上都成立 —— 原来把屏幕替身成 1920x1080 再断言"窗口就是 1400x900", 在 CI 上测的其实
+    是窗口管理器能不能摆下那个尺寸。
+    """
     paths = ApplicationPaths.default(override_root=tmp_path).ensure()
     config = AppConfig(theme="dark", language="en")
     config.window = _REMEMBERED
@@ -579,17 +590,47 @@ def test_the_main_window_returns_to_the_remembered_geometry(
     app = gui_app(_geometry_app(paths), DemoArchiveService(delay=0))
     assert _wait_mapped(app), "窗口未映射, 位置读数没有意义"
 
-    # 打开时用的就是记住的那套(不是设计尺寸 1360x860, 也不是窗口管理器的默认位置).
-    assert (int(app.winfo_width()), int(app.winfo_height())) == (1400, 900)
-    assert (int(app.winfo_x()), int(app.winfo_y())) == (160, 120)
+    saved = _REMEMBERED.geometry()
+    assert saved is not None, "夹具必须给整套几何(少一项就测不到位置)"
+    saved_width, saved_height, saved_x, saved_y = saved
+    screen = (int(app.winfo_screenwidth()), int(app.winfo_screenheight()))
+    size = (
+        max(WINDOW_MIN_SIZE[0], min(saved_width, screen[0] - SCREEN_MARGIN)),
+        max(WINDOW_MIN_SIZE[1], min(saved_height, screen[1] - SCREEN_MARGIN)),
+    )
+    position = (
+        min(saved_x, max(0, screen[0] - size[0])),
+        min(saved_y, max(0, screen[1] - size[1])),
+    )
+    actual = (
+        int(app.winfo_width()),
+        int(app.winfo_height()),
+        int(app.winfo_x()),
+        int(app.winfo_y()),
+    )
+    hint = (
+        f"桌面 {screen[0]}x{screen[1]} 下, 记住的几何 {saved} 应当被夹成 "
+        f"{size}@{position}, 实测 {actual[:2]}@{actual[2:]}"
+    )
+    assert actual[:2] == size, hint
+    if _desktop_holds(app, (*size, *position)):
+        assert actual[2:] == position, hint
 
-    # 用户拖到别处并改了尺寸 → 关窗时这份几何写回配置, 其余字段一个不丢。
+    # 用户拖到别处并改了尺寸 → 关窗时把**实际**几何写回配置, 其余字段一个不丢。
     app.geometry("1500x820+240+150")
     _pump(app)
+    moved = (
+        int(app.winfo_width()),
+        int(app.winfo_height()),
+        int(app.winfo_x()),
+        int(app.winfo_y()),
+    )
     app._on_close()
 
     written = load_config(paths.config_path)
-    assert written.window.geometry() == (1500, 820, 240, 150)
+    assert written.window.geometry() == moved, (
+        "关窗要写回窗口**当时**的几何(桌面装不下 1500x820 时写回的应当是被夹过的那套)"
+    )
     assert (written.theme, written.language) == ("dark", "en"), (
         "写回几何不能把别的字段冲掉(读-改-写)"
     )

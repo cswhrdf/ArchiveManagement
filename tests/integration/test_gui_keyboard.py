@@ -796,31 +796,60 @@ def test_every_screen_is_reachable_by_keyboard(app: Any) -> None:
     assert not problems, hint
 
 
-def _press_in_dialog(app: Any, key: str, call: Callable[[], Any]) -> Any:
-    """在替身 ``wait_window`` 里按下一个键, 返回对话框的返回值."""
+def _key_target(app: Any, window: Any) -> Any:
+    """按键该送给哪个控件: 这个对话框的**焦点窗口**(焦点不在它里面就退回它自己).
+
+    Tk 会把"送给子控件的合成键盘事件"转到**焦点窗口**上: 焦点不在这个对话框里时事件就白丢
+    了(2026-09-30 实测: 送给主按钮的内层画布"什么都没发生"; 送给焦点窗口才真的走到产品接线)。
+    这里量当下的焦点而不是自己 ``focus_set`` 一个 —— 用例要走的正是"用户打开对话框后直接
+    按键"那条路。
+    """
+    target = app.focus_get()
+    if target is None or not str(target).startswith(str(window)):
+        return window
+    return target
+
+
+def _press_in_dialog(app: Any, key: str, call: Callable[[], Any]) -> tuple[Any, Any]:
+    """在替身 ``wait_window`` 里按下一个键, 返回(对话框返回值, 那个对话框窗口).
+
+    按键前先把窗口真的映射出来(未映射的窗口收不到合成的键盘事件, 见 :func:`_settle`),
+    并按 :func:`_key_target` 送到焦点窗口上。
+    """
+    opened: list[Any] = []
 
     def hook(window: Any, *_args: Any, **_kwargs: Any) -> None:
+        # 顺序要紧: 先把窗口映射出来(未映射时不仅收不到按键, 焦点也还没定下来), 再量焦点.
         _settle(window)
-        window.event_generate(key, when="now")
+        target = _key_target(app, window)
+        opened.append(window)
+        target.event_generate(key, when="now")
 
     app.wait_window = hook
-    return call()
+    result = call()
+    return result, (opened[0] if opened else None)
 
 
 def test_escape_cancels_and_return_confirms(app: Any) -> None:
-    """Esc = 取消、回车 = 确认: 两个键都要真的把对话框关掉并给出对应结果."""
-    cancel = _press_in_dialog(
+    """Esc = 取消、回车 = 确认: 两个键都要真的把对话框关掉并给出对应结果.
+
+    Esc 那半边额外断言窗口**真的被销毁** —— 只看返回值的话,"键没接上"与"接上了并取消"
+    都是 False(这条判据最容易退化成空断言, CI 上那次 Linux 红就是只有返回值能看)。
+    """
+    cancel, cancel_window = _press_in_dialog(
         app,
         "<Escape>",
         lambda: dialogs.confirm_dialog(app, DARK, title="t", message="m"),
     )
-    confirm = _press_in_dialog(
+    confirm, _confirm_window = _press_in_dialog(
         app,
         "<Return>",
         lambda: dialogs.confirm_dialog(app, DARK, title="t", message="m"),
     )
     _pump(app)
     assert (cancel, confirm) == (False, True)
+    assert cancel_window is not None, "对话框没开出来(夹具失效)"
+    assert not cancel_window.winfo_exists(), "Esc 必须真的把对话框关掉"
 
 
 def test_return_inside_an_input_submits_the_dialog(app: Any) -> None:

@@ -31,7 +31,7 @@ uv run pre-commit install                                     # 安装 Git 提�
 
 不带子命令运行时默认执行 `init`；`--root` 可以把全部数据收敛到指定目录，便于便携使用与调试。首次启动是空库：用顶栏的"+ 添加游戏"录入游戏或游戏发现中导入已发现的游戏，再在游戏设置里添加"原始存档位置"，之后即可备份、创建分支与恢复。命令行参数与配置文件（含内容非法时自动还原为默认值的行为）见 [docs/development.md](docs/development.md)。
 
-上面的命令可以在**任意目录**执行：项目以**可编辑包**装进 `.venv`（`uv sync` 只往 site-packages 放一个指向 `src` 的 `.pth` 与一份 dist-info，源码仍留在工作区），所以 `python -m archive_management` 与直接调用 `.venv` 里的解释器都能导入自身源码，不需要设置 `PYTHONPATH`。细节（CI 为什么不装它、又在哪里验证）见 [docs/development.md](docs/development.md)。
+上面的命令可以在**任意目录**执行：项目以**可编辑包**装进 `.venv`（`uv sync` 只往 site-packages 放一个指向 `src` 的 `.pth` 与一份 dist-info，源码仍留在工作区），所以 `python -m archive_management` 与直接调用 `.venv` 里的解释器都能导入自身源码，不需要设置 `PYTHONPATH`。首次 `uv sync` 会联网取一次构建后端（`hatchling`），访问 PyPI 不畅时先配镜像；细节（CI 为什么不装它、又在哪里验证）见 [docs/development.md](docs/development.md)。
 
 ## 平台支持
 
@@ -59,11 +59,11 @@ uv run pytest --cov
 uv run deptry .       # 依赖卫生(未声明 / 多余 / 传递依赖)
 ```
 
-上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中 `pytest --cov` 在 Windows、Ubuntu 两个平台各跑一遍（**macOS 在开发阶段暂时屏蔽**，见 [testing.md](./docs/testing.md) 第 4 节），`ruff` / `mypy`（宿主平台各一次）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（与平台无关的结论项带 `env=common`，归入报告的 `Common` 环境）；覆盖平台专属分支的 mypy 检查（`--platform win32`）在 Windows 上跑，结论归入那个平台的 `Windows` 环境，与那个平台的测试结果一起看。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
+上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中 `pytest --cov` 在 Windows、Ubuntu、macOS 三个平台各跑一遍（见 [testing.md](./docs/testing.md) 第 4 节），`ruff` / `mypy`（宿主平台各一次）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（与平台无关的结论项带 `env=common`，归入报告的 `Common` 环境）；覆盖平台专属分支的 mypy 检查（`--platform win32` / `darwin`）分别在那个平台上跑，结论归入各自的 `Windows` / `macOS` 环境，与那个平台的测试结果一起看。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
 
 提交钩子只运行本次变动的静态检查与最高严重等级的单元测试（快速反馈）；CI 在 Windows、
-Ubuntu 上运行全量测试（macOS 暂时屏蔽，见 [testing.md](./docs/testing.md) 第 4 节），并单独执行
-性能基准与安全测试，最后合并成一份 Allure 报告。测试分类、基准阈值与报告内容见
+Ubuntu、macOS 上运行全量测试（见 [testing.md](./docs/testing.md) 第 4 节），并单独执行
+性能基准与安全测试（安全测试在三个平台各跑一遍），最后合并成一份 Allure 报告。测试分类、基准阈值与报告内容见
 [testing.md](./docs/testing.md)。
 
 ## 打包

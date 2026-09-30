@@ -28,7 +28,7 @@
 用法:
 
 - CI(pytest-report 作业): ``uv run python scripts/verify_allure_report.py allure-report
-  --results allure-results --zip --expect-platforms "${{ runner.os }}"``
+  --results allure-results --zip --expect-platforms "${{ matrix.platform }}"``
 - CI(allure-summary 作业): 同上, 但 ``--expect-platforms Windows,macOS,Linux``
 - 本地核对下载的 artifact: ``uv run python scripts/verify_allure_report.py allure-report``
 """

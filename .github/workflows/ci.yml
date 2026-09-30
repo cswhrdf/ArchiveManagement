@@ -10,7 +10,6 @@ on:
       - "**/*.md"
       - "docs/**"
       - ".github/instructions/**"
-      - ".github/skills/**"
       - ".github/prompts/**"
   pull_request:
 
@@ -155,10 +154,12 @@ jobs:
         # 改片数要同时改这里的 shards 与报告作业的 expect_shards:
         # tests/unit/test_sharding.py 会核对两边, 产物清单也照它声明"必须有哪几片"。
         #
-        # macOS 暂时屏蔽(2026-09-21): 开发阶段先不跑 macOS runner —— 按倍率计费时它是
-        # Linux 的 10 倍。**恢复清单**: 在这里加一条 macos-latest 的条目(以及 pytest-report
-        # 与 security 的矩阵)、allurerc.mjs 的 environmentsTested、汇总作业的
-        # --expect-platforms —— 三处必须一致, 守卫会核对。见 PLAN.md 第 11.9 节。
+        # macOS 已于 2026-09-30 恢复(见 PLAN.md 第 11.9 节), 并且只给它 **1 片**:
+        # macOS runner 按 Linux 的 10 倍计价, 片数直接决定多付几整套 setup —— 1 片 = 3 个
+        # macOS 实例(pytest / pytest-report / security), 本平台的 T≈260s 那么单片约 5~6 分钟。
+        # 想缩短墙钟就再加一条 `{ os: macos-latest, platform: macOS, shard: 1, shards: 2 }`,
+        # 并把两条条目的 shards 改成 2、报告作业的 expect_shards 改成 "0,1"(三处由
+        # tests/unit/test_sharding.py 核对着一致)。
         include:
           - os: ubuntu-latest
             platform: Linux
@@ -180,6 +181,10 @@ jobs:
             platform: Windows
             shard: 1
             shards: 2
+          - os: macos-latest
+            platform: macOS
+            shard: 0
+            shards: 1
 
     steps:
       - name: Check out repository
@@ -335,6 +340,9 @@ jobs:
           - os: windows-latest
             platform: Windows
             expect_shards: "0,1"
+          - os: macos-latest
+            platform: macOS
+            expect_shards: "0"
 
     steps:
       - name: Check out repository
@@ -398,23 +406,40 @@ jobs:
       - name: Collect coverage data
         # 各片的 COVERAGE_FILE 是隐藏文件, 合并要求它们就在当前目录(coverage combine
         # 只扫工作目录); 下载来的产物各自落在以产物名命名的子目录里, 所以先摊平。
+        # **刻意不用 `cp coverage-data-*/.coverage.shard-* ./`**: 少一片时 bash 只报一句
+        # `cannot stat`, 从日志里看不出缺的是哪一片; 更糟的是只匹配到一个产物时下载动作
+        # 会把它直接解到 `.`(没有 coverage-data-* 这层目录), 那条通配符什么都匹配不到 ——
+        # 一个分片的数据就这么静默地没进合并, 而后面 `coverage xml` 会自己合并剩下那份
+        # 并照 fail_under 报"覆盖率不达标"(2026-09-30 实测: Windows 被判 89.99% 未达标,
+        # 真相是少了一片的数据)。脚本按**片号**收, 两个布局都认, 缺片点名并非 0 退出。
+        # continue-on-error: 缺片时后面的步骤要能按 outcome 跳过(而不是照旧给一个残缺
+        # 结论); 作业成败由末尾的 `Report the shard gap` 统一判定。
+        id: collect-coverage
+        continue-on-error: true
         shell: bash
-        run: cp coverage-data-*/.coverage.shard-* ./
+        run: |
+          uv run python scripts/collect_coverage_data.py --expect-shards "${{ matrix.expect_shards }}"
 
       - name: Combine coverage data
         # 只含**这一个平台**各片的数据(这一步的下载范围就是本平台的产物): 混在一起的话
         # 某个平台掉了一半数据也看不出来。
+        # 该到的片没到齐就不合并: 残缺数据的百分比没有意义。
+        if: steps.collect-coverage.outcome == 'success'
         run: uv run coverage combine
 
       - name: Enforce the coverage threshold
         # 门槛值在 pyproject 的 [tool.coverage.report] fail_under 里(与本地一致)。
         # 单独一步: 原生命令的非零退出码只有作为该步最后一条命令时才会让作业失败。
+        if: steps.collect-coverage.outcome == 'success'
         run: uv run coverage report --show-missing
 
       - name: Write coverage reports
-        if: always()
+        # 数据不全时**什么报告都不产出**: 残缺数据的百分比会把"少了一片"说成"覆盖率掉了"。
+        # `--fail-under=0`: 门槛判定只留给上面那一步 —— 否则同一个失败被报两次, 而且这里的
+        # 文案会把缺片说成覆盖率不够。
+        if: always() && steps.collect-coverage.outcome == 'success'
         run: |
-          uv run coverage xml -o coverage.xml
+          uv run coverage xml -o coverage.xml --fail-under=0
           uv run coverage html
 
       - name: Attach coverage report to Allure
@@ -424,8 +449,18 @@ jobs:
         # fail_under 时这一项本身直接是 failed, 不再另写一条汇总结论项。
         # --platform 是这个平台的展示名: 这台机器是 Ubuntu, 但它合并的是那个平台的数据,
         # 宿主平台自己认(platform.system()) 会把结论标成 Linux。
-        if: always()
+        # 数据不全时不写这条结论: 报告里那一格会显示为"缺覆盖率结论"(汇总脚本按平台核对),
+        # 比给一个看起来"掉了几个点"的百分比诚实。
+        if: always() && steps.collect-coverage.outcome == 'success'
         run: uv run python scripts/create_allure_coverage.py --platform "${{ matrix.platform }}"
+
+      - name: Report the shard gap
+        # 缺片的结论必须落在作业状态上: 上面那步是 continue-on-error(不让它把后面的步骤
+        # 一起掐掉), 所以这里补一次判定, 并把"该去哪找原因"写进错误信息。
+        if: always() && steps.collect-coverage.outcome != 'success'
+        run: |
+          echo "::error::覆盖率数据不全(缺片): 本轮不判覆盖率门槛。请到本平台的分片作业里看哪一片没上传产物。"
+          exit 1
 
       - name: Resolve previous successful run
         id: prev-run
@@ -543,8 +578,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 与 pytest 作业同一个平台列表(见那里的"macOS 暂时屏蔽"说明)。
-        os: [ubuntu-latest, windows-latest]
+        # 与 pytest 作业同一个平台列表(见那里的 macOS 分片说明)。
+        os: [ubuntu-latest, windows-latest, macos-latest]
     # 安全防护是跨平台正确性属性: 路径越界、符号链接与权限差异都要在每个平台验证.
     steps:
       - name: Check out repository
@@ -829,8 +864,8 @@ jobs:
         # 用例全没合并进来"就没人发现(实测: 删掉 Linux 的 1166 条用例后环境依然齐全)。
         # --manifest 再补一道"分片都到齐了吗": 少一片时环境、通过率、格式自检全都正常,
         # 只有把分片自报的条数与最终条数对齐才能看出来。
-        # --expect-platforms 要与实际跑的矩阵一致(macOS 暂时屏蔽时就不能要求它,
-        # 否则每个平台都没数据会必然失败); 守卫会把三处拷在一起。
+        # --expect-platforms 要与实际跑的矩阵一致(要求了却没跑, 报告必然不完整、门禁
+        # 无意义地红); 守卫会把三处拷在一起。
         # 这一条不拦发布(`continue-on-error`): 这属于**内容**问题, 而报告正是用来看
         # "哪个平台没数据"的东西, 拦下来反而拿不到证据; 判定交给末尾的门禁结论步骤。
         # 另外它也是仓库自己表达同一道不变式的地方(不只靠 Allure 配置里的 filter)。
@@ -838,7 +873,7 @@ jobs:
         if: always()
         continue-on-error: true
         shell: bash
-        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --expect-platforms Windows,Linux --manifest "allure-manifests/*.json"
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --expect-platforms Windows,macOS,Linux --manifest "allure-manifests/*.json"
 
       - name: Upload final Allure resources
         if: always()
@@ -869,3 +904,85 @@ jobs:
         run: |
           echo "::error::质量门未通过 或 有平台没有合并进用例结果 —— 见上面的逐平台条数与报告首页「全局附件」的运行总账"
           exit 1
+
+  deploy-pages:
+    # 把**汇总报告**放到 GitHub Pages 上: 报告 zip 只能下载后手动打开, 而 Pages 给的是一个
+    # 稳定网址(给不装工具的人看)。各平台的报告仍旧只是 artifact —— 汇总那份才是"一份看全部"。
+    # 本作业不碰 Python/uv: 下载 + `unzip` + 发布都是 runner 自带的工具, 所以它是唯一
+    # 不需要 `uv sync` 的作业(登记在 tests/unit/test_test_config.py 的 _UV_FREE_JOBS 里)。
+    name: 发布报告到 GitHub Pages
+    needs: [allure-summary]
+    # 四个条件缺一不可:
+    # `always() && !cancelled()` —— 上游失败/跳过也要试一次(报告可能已经生成好了), 但整轮
+    #   被取消就别再启动(与两个报告作业同一条纪律);
+    # `pull_request` 上不发布 —— 未评审的内容不该上站点, 而且来自 fork 的 PR 拿不到 pages: write;
+    # 只在**默认分支**上发布 —— `dev` 的推送不该把站点来回覆盖(要连 dev 一起发布, 就把后面的
+    #   比较换成 `github.ref_name == 'dev' || ...`, 但两边会互相覆盖, 得自己想清楚);
+    # 因此本作业在 PR 上会显示为 skipped —— **不要**把它加进分支保护的必需检查(被跳过的
+    #   必需检查会一直停在 pending, PR 反而合不了, 见 .github/instructions 里那条)。
+    if: always() && !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    # 发布失败**不让整轮变红**: 一轮运行只有 `conclusion == success` 才会被下一轮当作历史
+    # 基线(见上面两个报告作业的 “Resolve previous successful run”), 而 Pages 只是"给人看的
+    # 副本" —— 它出问题不该让这一轮**已经写好的历史趋势**再也接不上。作业在 UI 上仍显示失败。
+    continue-on-error: true
+    # 发布需要写权限, 与顶层的只读声明不同; 作业级 permissions 是**覆盖**而不是叠加。
+    permissions:
+      # 取本轮的产物(allure-report-final)要读 actions。
+      actions: read
+      # 发布站点。
+      pages: write
+      # `deploy-pages` 用 OIDC 令牌换一次性的部署权限, 不必给长期凭据。
+      id-token: write
+    # 站点地址会显示在这条 environment 上(作业 URL)。
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # 站点只能有一个"当前版本": 把并发的两次发布排成队, 不要互相打断(被取代的运行本来
+    # 就由顶层 concurrency 取消了, 这一条是防"取消不彻底时两次发布撞车")。
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    steps:
+      - name: Download the final Allure report
+        # 产物名与上面 `Upload final Allure report` 一致。那份上传挂在自检成功上, 所以
+        # "产物在不在"就是"报告能不能发布"的判据 —— 没通过自检时不发布, 也不让作业红
+        # (报告本身的问题已经由 allure-summary 报过了)。
+        id: fetch
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-report-final
+          path: report
+
+      - name: Unpack the report
+        # Pages 要的是一个**目录**(站点根就是它)。直接把 zip 传上去的话, 打开网址只会下载
+        # 一个压缩包 —— 所以先解开再传; `allure-report.zip` 里的条目带一层报告目录名
+        # (见 scripts/verify_allure_report.py 的打包逻辑), 解开后就是 site/allure-report/。
+        id: unpack
+        shell: bash
+        run: |
+          archive="report/allure-report.zip"
+          if [ ! -f "$archive" ]; then
+            echo "::warning::没有找到 allure-report-final/allure-report.zip, 跳过发布(报告可能没通过自检)"
+            exit 0
+          fi
+          unzip -q "$archive" -d site
+          test -f site/allure-report/index.html
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the report as a Pages artifact
+        if: steps.unpack.outputs.ready == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/allure-report
+
+      - name: Deploy to GitHub Pages
+        # 这里用的是官方 Pages 两个 action 的**当前主版本**(仓库里没有它们的版本先例 ——
+        # 其它 action 的 `@v7` 是各自的主版本)。首次 push 后如果报"找不到该版本/未知 action",
+        # 按提示把它改成对应的主版本即可; 备选方案是推 gh-pages 分支(但那样要多给
+        # `contents: write`, 还得在仓库设置里把 Pages 的来源改成那个分支)。
+        # 无论哪种方式, 仓库设置里的 Pages → Source 都必须选 “GitHub Actions”, 否则这里会失败。
+        if: steps.unpack.outputs.ready == 'true'
+        id: deploy
+        uses: actions/deploy-pages@v4

@@ -648,18 +648,72 @@ def _assert_name_fills(label: Any, full: str, font: Any) -> None:
     assert slack <= budget, hint
 
 
-def _fixed_cells(block: Any) -> list[Any]:
+def _fixed_cell_block(block: Any) -> list[Any] | None:
     """取"固定列块"里的单元格(表头与数据行结构相同, 只有它带 len(_COLUMNS) 个格子)."""
     for child in block.winfo_children():
         cells = child.winfo_children()
         if len(cells) == len(_COLUMNS):
             return sorted(cells, key=lambda cell: int(cell.grid_info()["column"]))
-    raise AssertionError("没有找到固定列块")
+    return None
+
+
+def _fixed_cells(block: Any) -> list[Any]:
+    """同 :func:`_fixed_cell_block`, 但找不到时直接失败(让诊断信息指到这一层)."""
+    cells = _fixed_cell_block(block)
+    if cells is None:
+        raise AssertionError("没有找到固定列块")
+    return cells
 
 
 def _place(cell: Any) -> tuple[int, int]:
     """单元格在屏幕上的水平位置与宽度: 跨越不同父控件比较列对齐时用它."""
     return (cell.winfo_rootx(), cell.winfo_width())
+
+
+def _alignment_places(
+    page: Any,
+) -> tuple[list[list[tuple[int, int]]], list[tuple[int, int]], bool]:
+    """量出(各行固定列位置, 表头固定列位置, 名称列是否也对齐); 结构没建好时给空表."""
+    places: list[list[tuple[int, int]]] = []
+    for row in page._rows.values():
+        cells = _fixed_cell_block(row)
+        if cells is None:
+            return [], [], False
+        places.append([_place(cell) for cell in cells])
+    head = _fixed_cell_block(page._head)
+    if head is None:
+        return [], [], False
+    parts = next(iter(page._row_parts.values()), None)
+    name_aligned = parts is not None and (
+        page._head_name.winfo_rootx() == parts.name_block.winfo_rootx()
+    )
+    return places, [_place(cell) for cell in head], name_aligned
+
+
+def _wait_for_the_columns_to_line_up(
+    app: ArchiveApp, page: Any, *, timeout: float = 3.0
+) -> tuple[list[list[tuple[int, int]]], list[tuple[int, int]], bool]:
+    """等到"各行 + 表头 + 名称列"都落在同一条竖线上, 返回最后一轮的读数.
+
+    表头对齐是 ``after(60ms)`` 的任务, 而且**要跑两轮才收敛**(第一轮按实测差值改内边距,
+    第二轮复核后归零): 用例里流逝的墙钟时间很短, CI 上可能还没轮到 —— 实测 Windows runner
+    上就是"六列整体差同一个 16px"(正好一个滚动条宽度)。等不变量成立比"先睡一会儿再断言"
+    可靠: 它既容忍慢机器, 又真的能在不收敛时报错(与 ``_wait_until_the_name_fits`` 同一套做法)。
+    """
+    deadline = time.monotonic() + timeout
+    places, header, name_aligned = _alignment_places(page)
+    while time.monotonic() < deadline:
+        _pump(app)
+        places, header, name_aligned = _alignment_places(page)
+        lined_up = (
+            bool(places)
+            and header == places[0]
+            and all(place == places[0] for place in places)
+        )
+        if lined_up and name_aligned:
+            return places, header, name_aligned
+        time.sleep(0.02)
+    return places, header, name_aligned
 
 
 def test_long_game_name_does_not_widen_the_list_rows() -> None:
@@ -686,16 +740,14 @@ def test_long_game_name_does_not_widen_the_list_rows() -> None:
     assert shown.endswith("…"), f"名称应当截断显示: {shown!r}"
     assert len(shown) < len(parts.full_name), "截断后的名称必须比原名短"
 
-    # 各行的固定列必须落在同一个 (屏幕) x 上: 名称长的行不能把后面的列右推.
-    places = [[_place(cell) for cell in _fixed_cells(row)] for row in rows]
+    # 各行的固定列必须落在同一个 (屏幕) x 上: 名称长的行不能把后面的列右推;
+    # 表头与数据行也要在同一条竖线上(表头在卡片里, 宽度原本不同)。
+    places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
     misaligned = f"各行列位置不一致: {places}"
     assert all(place == places[0] for place in places), misaligned
-
-    # 表头与数据行的固定列也在同一条竖线上(表头在卡片里, 宽度原本不同).
-    header = [_place(cell) for cell in _fixed_cells(page._head)]
     assert header == places[0], f"表头与数据行没有对齐: {header} != {places[0]}"
     # 名称列头与名称文本也落在同一个 x 上.
-    assert page._head_name.winfo_rootx() == parts.name_block.winfo_rootx()
+    assert name_aligned, "名称列头与名称文本不在同一个 x 上"
 
     # 固定列块**贴靠右侧**: 最后一列的右边界离行的右边界只差一个内边距.
     row = rows[0]

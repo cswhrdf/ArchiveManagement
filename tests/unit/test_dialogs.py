@@ -1413,6 +1413,79 @@ def test_dialog_body_height_is_clamped_to_the_screen() -> None:
     assert dialogs._dialog_body_height(_Screen(400)) == dialogs._DIALOG_BODY_MIN
 
 
+class _ComfortBody:
+    """舒适线用例的假正文滚动区: 只记高度, 供 cget/configure 读写."""
+
+    def __init__(self, height: int) -> None:
+        """记下初始高度."""
+        self.height = height
+
+    def cget(self, _option: str) -> int:
+        """读高度(coverage 之外还会被问别的选项, 这里只关心 height)."""
+        return self.height
+
+    def configure(self, **kwargs: Any) -> None:
+        """写高度."""
+        self.height = int(kwargs["height"])
+
+    def winfo_children(self) -> list[Any]:
+        """滚动区内部没有子控件(判据只看高度)."""
+        return []
+
+
+class _ComfortWindow:
+    """舒适线用例的假对话框: 屏幕 700(舒适线 560), 请求高度与实测高度分开给."""
+
+    def __init__(self, body: _ComfortBody, *, requested: int, measured: int) -> None:
+        """记下正文区与两个高度."""
+        self._body = body
+        self._requested = requested
+        self._measured = measured
+
+    def update_idletasks(self) -> None:
+        """假窗口没有待处理事件."""
+
+    def winfo_screenheight(self) -> int:
+        """屏幕高度(舒适线 = 它的 80%)."""
+        return 700
+
+    def winfo_reqheight(self) -> int:
+        """建窗那一刻的请求高度."""
+        return self._requested
+
+    def winfo_height(self) -> int:
+        """映射之后的实测高度."""
+        return self._measured
+
+    def winfo_children(self) -> list[Any]:
+        """正文区是唯一的子控件."""
+        return [self._body]
+
+
+def test_the_comfort_line_is_clamped_again_after_the_window_is_mapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """映射之后要按**实测**高度再收一次(请求高度压线 + 实测多几个像素的形态).
+
+    ``winfo_reqheight()`` 是建窗那一刻的请求高度, 而窗口管理器与 CustomTkinter 会在映射时
+    改尺寸 —— 只按它收一次的话最终窗口仍会越线几个像素(CI 实测: 700 高的屏上 Linux
+    561 > 560, 而 Windows 恰好 560, 所以这条只在 Linux 红)。
+    """
+    monkeypatch.setattr(ctk, "CTkScrollableFrame", _ComfortBody)
+    body = _ComfortBody(508)
+    window: Any = _ComfortWindow(body, requested=560, measured=561)
+
+    dialogs._clamp_to_comfort_line(window)
+    assert body.height == 508, "请求高度没越线时不该动正文区"
+
+    dialogs._clamp_to_comfort_line(window, current=561)
+    assert body.height == 507, "映射后多出来的 1px 要从正文区里收掉"
+
+    # 收到下限就停手: 矮屏上宁可让正文区滚, 也不能把内容切掉.
+    dialogs._clamp_to_comfort_line(window, current=900)
+    assert body.height == dialogs._DIALOG_BODY_MIN
+
+
 def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
     harness: _FakeParent,
 ) -> None:

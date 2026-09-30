@@ -184,13 +184,22 @@ def _dialog_comfort_limit(window: ctk.CTkToplevel) -> int:
     return int(int(window.winfo_screenheight()) * _DIALOG_COMFORT)
 
 
-def _clamp_to_comfort_line(window: ctk.CTkToplevel) -> None:
+def _clamp_to_comfort_line(
+    window: ctk.CTkToplevel, *, current: int | None = None
+) -> None:
     """把建好的窗口收进舒适线: 超出多少就把正文区收掉多少(内容由它自己滚).
 
     ``_DIALOG_CHROME_HEIGHT`` 是估算值, 而"正文区之外"的高度由字体与窗口管理器决定
     —— 实测同一份代码 Linux 上比 Windows 高 7 像素, 于是正文区顶到上限的对话框会
     整窗超出舒适线(CI 实测: 768 高的屏幕上 621 > 614)。这里用**实测**的整窗高补齐
     那几像素, 而不是把估算值再调大一点(调大就会在 Windows 上白留一块空白)。
+
+    ``current`` 是"现在量到的整窗高度", 两个时刻必须分开喂:
+
+    * 建窗时(还没映射)只能给请求高度 ``winfo_reqheight()``;
+    * 映射之后要给实测的 ``winfo_height()`` —— 窗口管理器与 CustomTkinter 都会在这中间
+      改尺寸, 只按请求高度收一次的话最终窗口仍会越线(CI 实测 Linux 上 561 > 560,
+      而 Windows 上恰好 560, 所以这条只在 Linux 红)。
 
     只收正文区(不缩内容): 收到下限为止, 矮屏上宁可让正文区滚也不能把内容切掉。
     没有滚动正文区的对话框(短提示框)本来就不会超线, 直接返回。
@@ -200,17 +209,18 @@ def _clamp_to_comfort_line(window: ctk.CTkToplevel) -> None:
     """
     limit = _dialog_comfort_limit(window)
     window.update_idletasks()
+    height = int(window.winfo_reqheight()) if current is None else current
     body = next(
         (child for child in walk(window) if isinstance(child, ctk.CTkScrollableFrame)),
         None,
     )
     if body is None:
         return
-    overflow = int(window.winfo_reqheight()) - limit
+    overflow = height - limit
     if overflow <= 0:
         return
-    current = int(body.cget("height"))
-    body.configure(height=max(_DIALOG_BODY_MIN, current - overflow))
+    current_height = int(body.cget("height"))
+    body.configure(height=max(_DIALOG_BODY_MIN, current_height - overflow))
 
 
 def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) -> None:
@@ -261,6 +271,12 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     transparent = _set_alpha(window, 0.0)
     window.deiconify()
     window.update_idletasks()
+    if modal:
+        # 映射之后尺寸才定下来(窗口管理器与 CTk 都会在这中间改尺寸): 按**实测**高度再收
+        # 一次, 否则"请求高度刚好在舒适线内、实际多出几个像素"的对话框仍会越线。这一步
+        # 在窗口透明时做, 所以用户看不到任何跳动。
+        _clamp_to_comfort_line(window, current=int(window.winfo_height()))
+        window.update_idletasks()
     # 映射之后才知道窗口管理器给的真实尺寸: 透明时用户看不到这一步, 不透明时也只是微调.
     window.geometry(
         _centered_position(

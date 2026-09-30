@@ -257,6 +257,9 @@ class HomePage:
         self.frame = ctk.CTkFrame(parent, fg_color=palette.background, corner_radius=0)
         # 帧销毁时撤掉挂起的同步任务: after 回调打到已销毁的控件上会在 stderr 里留下
         # `invalid command name ...` 噪声(报告里会挂到下一个用例的 stderr 附件上)。
+        # ``CTkFrame.bind`` 把绑定**转发到内层画布**, 所以销毁事件里的 widget 是那块画布而
+        # 不是 self.frame —— 把它记下来当判据(见 :meth:`_on_frame_destroyed`)。
+        self._frame_host = getattr(self.frame, "_canvas", None)
         self.frame.bind("<Destroy>", self._on_frame_destroyed, add="+")
         self._build()
         self.reload()
@@ -986,8 +989,15 @@ class HomePage:
         self._sync_scrollbar()
 
     def _sync_scrollbar(self) -> None:
-        """重绘之后再判一次滚动条要不要出现(内容条数刚变过)."""
+        """重绘之后再判一次滚动条要不要出现(内容条数刚变过).
+
+        滚动条占的是**滚动区内部**的宽度: 它一出现/收起, 每一行的可用宽度就变了, 而滚动区
+        外层的尺寸没变 —— 于是 `<Configure>` 可能一次都不来, 表头就会与数据行整体错开一个
+        滚动条宽度(实测格式: 六列全部偏差同一个常量 16px)。这里主动补一次同步。
+        """
         sync_scrollbar(self._list_box)
+        if self._row_parts:
+            self._schedule_list_sync()
 
     def _reserve_head_row(self, *, reserve: bool) -> None:
         """海报模式收起表头后, 游戏区的四边边距要一致.
@@ -1079,8 +1089,17 @@ class HomePage:
         self._sync_job = self.frame.after(_SYNC_DELAY_MS, self._sync_list_layout)
 
     def _on_frame_destroyed(self, event: tk.Event) -> None:
-        """宿主帧被销毁时撤掉挂起的同步任务(子控件的 Destroy 事件会冒泡上来, 要过滤)."""
-        if event.widget is not self.frame:
+        """宿主帧被销毁时撤掉挂起的同步任务.
+
+        **判据要连内层画布一起认**: ``CTkFrame.bind`` 把绑定转发到画布上, 销毁事件里的
+        ``event.widget`` 是那块画布而不是 ``self.frame``(那个对象不是 Tk 控件) —— 只认
+        ``self.frame`` 时这条清理是死代码(2026-09-30 实测: 销毁后 ``_sync_job`` 还挂着,
+        ``cancel_list_sync`` 被调用 0 次, 任务随后以
+        `invalid command name "..._sync_list_layout"` 报出来)。
+
+        子控件的 Destroy 也会冒泡上来, 所以不能无条件取消: 那些事件与"宿主没了"是两回事。
+        """
+        if event.widget is not self._frame_host and event.widget is not self.frame:
             return
         self.cancel_list_sync()
 
@@ -1173,8 +1192,15 @@ class HomePage:
         延后的那一轮(与容器事件互补)。只裁这一行, 拖窗口时的开销是一行一次。
         """
         parts = self._row_parts.get(game_id)
-        if parts is not None:
-            self._fit_row_name(parts, int(event.width))
+        if parts is None:
+            return
+        width = int(event.width)
+        if parts.fitted_width == width:
+            return  # 宽度没变: 不动文本, 也不重排(否则会与延后的那一轮互相追)
+        self._fit_row_name(parts, width)
+        # 名称块的宽度变了 = 这一行的可用宽度变了(滚动条出现/消失、内边距被重算):
+        # 表头也要跟着重新对齐。滚动区的 `<Configure>` 只在自己尺寸变化时来, 这条是补充。
+        self._schedule_list_sync()
 
     def _retry_refit(self) -> None:
         """为"宽度还没量出来"排下一轮名称重裁(有上限, 免得一直排下去)."""
