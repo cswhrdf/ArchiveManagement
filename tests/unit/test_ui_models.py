@@ -153,17 +153,21 @@ def test_detail_origin_label_lists_original_name_and_a_plain_folder_note() -> No
     """
     detail = _detail(name="新名字", original_name="旧名字", folder="旧名字-1a2b3c4d")
 
-    assert detail.origin_label == "原始名称: 旧名字 · 备份目录: 应用自动命名"
+    # 期望值从文案资源拼出来, 不写死原文: 这里要验的是"两段怎么组合", 而文案本身的标点
+    # 由 tests/unit/test_i18n.py 的守卫统一管(写死原文的用例会在标点改动时无谓变红)。
+    assert detail.origin_label == (
+        tr("hero.original_name", name="旧名字") + " · " + tr("hero.storage_folder")
+    )
     assert detail.storage_folder not in detail.origin_label
-    assert (
-        detail.storage_hint == "应用自动管理的备份目录(位于备份目标下): 旧名字-1a2b3c4d"
+    assert detail.storage_hint == tr(
+        "hero.storage_folder_tip", folder="旧名字-1a2b3c4d"
     )
 
 
 def test_detail_origin_label_skips_unchanged_name() -> None:
     detail = _detail(name="Demo", original_name="Demo", folder="Demo-1a2b3c4d")
 
-    assert detail.origin_label == "备份目录: 应用自动命名"
+    assert detail.origin_label == tr("hero.storage_folder")
 
 
 def test_detail_origin_label_empty_before_first_backup() -> None:

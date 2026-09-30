@@ -132,7 +132,10 @@ def test_update_game_renames(tmp_path: Path) -> None:
     assert detail.name == "新名"
     # 重命名不改写"首次录入的名称", 界面据此展示额外的原始名称.
     assert detail.original_name == "旧名"
-    assert detail.origin_label == "原始名称: 旧名"
+    # 期望值从文案资源拼, 不写死原文: 这里要验的是"重命名之后还能查到原始名称",
+    # 文案本身的标点由 tests/unit/test_i18n.py 的守卫统一管(写死原文的断言会在
+    # 标点改动时无谓变红 —— I-3 把中文句内的半角冒号改全角时就碰上了一次).
+    assert detail.origin_label == tr("hero.original_name", name="旧名")
 
 
 def test_backup_uses_named_folder_and_hides_the_key(tmp_path: Path) -> None:

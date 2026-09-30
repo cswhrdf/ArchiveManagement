@@ -59,10 +59,11 @@ _SEVERITY_MARKERS = ("blocker", "critical", "normal", "minor", "trivial")
 _DEFAULT_SUITES = ("tests/unit", "tests/integration")
 # 只在 CI 执行的测试类别: 目录名与 -m 标记名一致.
 _CI_ONLY_SUITES = ("performance", "security")
-# 不碰 uv 的作业(它们只用 runner 自带的工具): 发布 Pages 的那个作业就是如此 —— 它要做的
-# 只是下载产物、`unzip`、上传, 为它装一个虚拟环境纯属白花固定开销。列表不会自己变长:
-# 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
-_UV_FREE_JOBS = {"deploy-pages"}
+# 不碰 uv 的作业(它们只用 runner 自带的工具: 下载产物、`unzip`、上传)。
+# 2026-09-30: 发布 Pages 的那个作业已与汇总**合成一个**, 而汇总必须 sync(它要跑仓库的
+# 脚本与 Allure CLI), 所以这份清单**现在是空的** —— 机制留着: 以后再加"只用 runner 自带
+# 工具"的作业时按这条登记。列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
+_UV_FREE_JOBS: set[str] = set()
 # 跨模块共享的测试辅助模块.
 _SHARED_MODULES = ("helpers.py", "reporting.py")
 
@@ -268,9 +269,8 @@ def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
     "Failed to spawn: xxx" 响亮地失败, 但仍值得在本地拦住); ② 同一作业里的每次 `uv sync`
     必须是同一套参数(否则修复步骤那一次会把刚装好的组又删掉)。
 
-    **不碰 uv 的作业**在 :data:`_UV_FREE_JOBS` 里登记(发布 Pages 的作业只用 runner 自带的
-    `unzip`, 装一个 venv 纯属白花固定开销); 登记项会被反向自查"真的一条 uv 命令都没有",
-    免得它变成绕过分组检查的后门。
+    **不碰 uv 的作业**在 :data:`_UV_FREE_JOBS` 里登记(清单现在是空的: 原来那个只做下载/解压/发布的
+    Pages 作业已与汇总合并); 登记项会被反向自查"真的一条 uv 命令都没有", 免得它变成绕过分组检查的后门。
     """
     for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
         text = workflow.read_text(encoding="utf-8")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from importlib.resources import files
 
 import pytest
@@ -20,10 +21,16 @@ pytestmark = [
 ]
 
 
-def _keys(locale: str) -> set[str]:
+def _catalog(locale: str) -> dict[str, str]:
     base = files("archive_management").joinpath("resources", "i18n")
-    raw = json.loads(base.joinpath(f"{locale}.json").read_text(encoding="utf-8"))
-    return set(raw)
+    raw: dict[str, str] = json.loads(
+        base.joinpath(f"{locale}.json").read_text(encoding="utf-8")
+    )
+    return raw
+
+
+def _keys(locale: str) -> set[str]:
+    return set(_catalog(locale))
 
 
 def test_locales_available() -> None:
@@ -84,3 +91,50 @@ def test_read_raises_on_non_string_value(
     )
     with pytest.raises(ValueError):
         i18n_module._read("zh-CN")
+
+
+# ---- I-3(CSV 43): 中文文案的标点统一用全角 -----------------------------------------
+#
+# 判据(与那轮转换用的规则一致): **紧跟中文的半角 ``,;:`` 一律改全角**, 且全角标点后面不再
+# 留空格(全角自带间距)。照旧用半角的是 ``1,000`` / ``12:30`` / ``C:\Users`` 这类 —— 它们的
+# 左边是 ASCII, 属于英文/路径/数字里的标点, 不算"中文句内"。
+#
+# 正则里写码位(``\uff0c``)而不是直接写那几个全角字符: 仓库的 ruff 规则 RUF001 禁止在 .py
+# 里出现全角标点 —— 它的本意正是防住"看着像逗号, 其实不是"的字符混进代码, 所以这里
+# 不给自己开例外, 改文案时只动 JSON。
+_CHINESE_THEN_HALF_WIDTH = re.compile(r"[\u4e00-\u9fff\u300d\u201d][,;:]")
+_FULL_WIDTH_THEN_SPACE = re.compile(r"[\uff0c\uff1b\uff1a] ")
+_ANY_FULL_WIDTH = re.compile(r"[\uff0c\uff1b\uff1a]")
+
+
+def test_chinese_copy_uses_full_width_punctuation() -> None:
+    """中文句内的 ``,;:`` 必须是全角: 半角跟在汉字后面是"断句错位"(I-3)."""
+    offenders = {
+        key: value
+        for key, value in _catalog("zh-CN").items()
+        if _CHINESE_THEN_HALF_WIDTH.search(value)
+    }
+
+    assert offenders == {}
+
+
+def test_no_space_follows_full_width_punctuation() -> None:
+    """全角标点后面不留空格: 再空格就是"只换了一半"(界面上会豁开一道口子)."""
+    offenders = {
+        key: value
+        for key, value in _catalog("zh-CN").items()
+        if _FULL_WIDTH_THEN_SPACE.search(value)
+    }
+
+    assert offenders == {}
+
+
+def test_english_copy_does_not_use_full_width_punctuation() -> None:
+    """英文文案里出现全角标点通常是复制中文时串了语言(两套标点不混用)."""
+    offenders = {
+        key: value
+        for key, value in _catalog("en").items()
+        if _ANY_FULL_WIDTH.search(value)
+    }
+
+    assert offenders == {}

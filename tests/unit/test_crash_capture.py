@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import gzip
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -195,6 +197,29 @@ def test_exception_text_is_one_readable_line() -> None:
     assert crash_capture.exception_text(object()) == ""
 
 
+def test_sqlite_error_details_name_the_failure_class(tmp_path: Path) -> None:
+    """SQLite 的失败要连**错误分类**一起留下: 光有 OperationalError 分不清是锁、缺表还是文件不对.
+
+    同一条消息文本会随平台/版本变(``file is not a database`` 与 ``unsupported file format``
+    其实是同一类 NOTADB), 只有 errorname/errorcode 稳定 —— 2026-09-30 那次偶发就是靠它定类的。
+    """
+    junk = tmp_path / "junk.db"
+    junk.write_text("这不是数据库", encoding="utf-8")
+    connection = sqlite3.connect(junk)
+    try:
+        with pytest.raises(sqlite3.Error) as not_a_db:
+            connection.execute("SELECT 1").fetchone()
+    finally:
+        connection.close()
+
+    assert crash_capture.sqlite_error_details(_excinfo_for(not_a_db.value)) == (
+        "SQLITE_NOTADB (26)"
+    )
+    # 不是 SQLite 异常时不留这一行(摘要里不该多出一个空字段)。
+    assert crash_capture.sqlite_error_details(_excinfo_for(ValueError("boom"))) == ""
+    assert crash_capture.sqlite_error_details(object()) == ""
+
+
 def test_write_dump_is_off_when_the_depth_is_zero(tmp_path: Path) -> None:
     """--crash-dump-depth=0 等于关掉 dump: 不写文件, 只留一句说明."""
     path, note = crash_capture.write_dump(
@@ -365,6 +390,35 @@ def test_failure_evidence_attaches_dump_and_screenshot(
     summary = _summary_text(evidence)
     assert "tests/unit/test_x.py::test_y" in summary
     assert "ValueError: boom" in summary
+
+
+def test_failure_evidence_records_the_sqlite_error_class(tmp_path: Path) -> None:
+    """分类信息同时进**摘要附件**与**dump 描述** —— 本地不带 ``--alluredir`` 时后者是唯一的现场."""
+    junk = tmp_path / "junk.db"
+    junk.write_text("这不是数据库", encoding="utf-8")
+    connection = sqlite3.connect(junk)
+    try:
+        with pytest.raises(sqlite3.Error) as not_a_db:
+            connection.execute("SELECT 1").fetchone()
+    finally:
+        connection.close()
+
+    evidence = crash_capture.failure_evidence(
+        node_id="tests/unit/test_x.py::test_y",
+        phase="call",
+        excinfo=_excinfo_for(not_a_db.value),
+        directory=tmp_path,
+        depth=3,
+        apps=[],
+    )
+
+    assert "SQLITE_NOTADB (26)" in _summary_text(evidence)
+    dump = next(item for item in evidence if item.path is not None)
+    assert dump.path is not None
+    # dump 是压缩流: 解开后是 JSON, 描述字段里有这一行(用 gzip 而不是 coredumpy.load ——
+    # 后者会直接进 pdb)。
+    with gzip.open(dump.path, "rt", encoding="utf-8") as stream:
+        assert "SQLITE_NOTADB (26)" in stream.read()
 
 
 def test_failure_evidence_says_when_there_is_no_window(

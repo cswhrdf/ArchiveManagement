@@ -247,7 +247,7 @@ def _assert_fits(window: Any, label: str, *, limit: int) -> None:
     cut = _cut_children(window)
     hint = (
         f"{label}: 屏高 {SCREEN['height']} 下窗口高 {height}, 上限 {limit}; "
-        f"被切掉的子控件: {cut or '无'}"
+        f"请求高度 {window.winfo_reqheight()}; 被切掉的子控件: {cut or '无'}"
     )
     assert height <= limit, hint
     assert not cut, hint

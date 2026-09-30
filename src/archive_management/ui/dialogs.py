@@ -72,6 +72,9 @@ _DIALOG_COMFORT = 0.8
 # (CI 实测 621 > 614)。所以建完窗口之后还要按**实测**收一次(见
 # :func:`_clamp_to_comfort_line`), 这个常量只负责"还没法量的时候"的初值。
 _DIALOG_CHROME_HEIGHT = 52
+# 舒适线夹取的收敛轮数: 每轮按"现在量到的高度"收一次, 收完再量(布局不保证 1:1 跟着正文区走)。
+# 上限只是保险 —— 正常情况下第一轮或第二轮就落到线内了。
+_CLAMP_PASSES = 4
 # 勾选行下面那行提示的左缩进: 24(正文距边) + 22(方框宽与它到文字的间距), 量出来是为了
 # 与复选框的**文字**左对齐 -- 这条对齐没法落在间距刻度上, 所以留个具名常量。
 _CHECK_HINT_PAD = (24 + 22, 24)
@@ -196,31 +199,41 @@ def _clamp_to_comfort_line(
 
     ``current`` 是"现在量到的整窗高度", 两个时刻必须分开喂:
 
-    * 建窗时(还没映射)只能给请求高度 ``winfo_reqheight()``;
-    * 映射之后要给实测的 ``winfo_height()`` —— 窗口管理器与 CustomTkinter 都会在这中间
-      改尺寸, 只按请求高度收一次的话最终窗口仍会越线(CI 实测 Linux 上 561 > 560,
-      而 Windows 上恰好 560, 所以这条只在 Linux 红)。
+    * 建窗时(还没映射)只能看请求高度 ``winfo_reqheight()``;
+    * 映射之后要把**实测高度与请求高度一起看**(取大者): 只看实测值会漏掉一种现场 ——
+      无窗口管理器的 X11 上 ``winfo_height()`` 会晚一拍(它等 ConfigureNotify), 于是夹取那一刻
+      量到 560、布局定下来却是 561(2026-09-30 的 Linux CI: 700 高的屏上 561 > 560, 而 Windows
+      恰好 560, 所以只有 Linux 红)。请求高度是本地立刻算出来的, 没有这个滞后。
 
-    只收正文区(不缩内容): 收到下限为止, 矮屏上宁可让正文区滚也不能把内容切掉。
+    收一轮不够就继续收(布局不保证 1:1 跟着正文高度走): 最多 :data:`_CLAMP_PASSES` 轮, 每轮
+    都重新量, 收到下限为止。只收正文区(不缩内容): 矮屏上宁可让正文区滚也不能把内容切掉。
     没有滚动正文区的对话框(短提示框)本来就不会超线, 直接返回。
 
     正文区是**递归找**的: 实测批量导入把它套在一层卡片容器里(不是窗口的直接子控件,
     只找一层就会漏掉它, 那时这条夹取看起来"跑了但什么都没做")。
     """
     limit = _dialog_comfort_limit(window)
-    window.update_idletasks()
-    height = int(window.winfo_reqheight()) if current is None else current
     body = next(
         (child for child in walk(window) if isinstance(child, ctk.CTkScrollableFrame)),
         None,
     )
     if body is None:
         return
-    overflow = height - limit
-    if overflow <= 0:
-        return
-    current_height = int(body.cget("height"))
-    body.configure(height=max(_DIALOG_BODY_MIN, current_height - overflow))
+    for _ in range(_CLAMP_PASSES):
+        window.update_idletasks()
+        height = int(window.winfo_reqheight())
+        if current is not None:
+            # 映射之后那一轮: 实测高度也要算进去(上面解释的那个滞后), 但**只有这一轮** ——
+            # 后面几轮是"收完再量", 量的该是新布局的请求高度。
+            height = max(height, int(window.winfo_height()), int(current))
+            current = None
+        overflow = height - limit
+        if overflow <= 0:
+            return
+        current_height = int(body.cget("height"))
+        if current_height <= _DIALOG_BODY_MIN:
+            return
+        body.configure(height=max(_DIALOG_BODY_MIN, current_height - overflow))
 
 
 def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) -> None:
@@ -272,9 +285,10 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     window.deiconify()
     window.update_idletasks()
     if modal:
-        # 映射之后尺寸才定下来(窗口管理器与 CTk 都会在这中间改尺寸): 按**实测**高度再收
-        # 一次, 否则"请求高度刚好在舒适线内、实际多出几个像素"的对话框仍会越线。这一步
-        # 在窗口透明时做, 所以用户看不到任何跳动。
+        # 映射之后尺寸才定下来(窗口管理器与 CTk 都会在这中间改尺寸): 再收一次 —— 夹取同时看
+        # **实测高度与请求高度**(取大者, 见 _clamp_to_comfort_line: 无窗口管理器的 X11 上
+        # 实测值会晚一拍), 否则"请求高度刚好在舒适线内、实际多出几个像素"的对话框仍会越线。
+        # 这一步在窗口透明时做, 所以用户看不到任何跳动。
         _clamp_to_comfort_line(window, current=int(window.winfo_height()))
         window.update_idletasks()
     # 映射之后才知道窗口管理器给的真实尺寸: 透明时用户看不到这一步, 不透明时也只是微调.

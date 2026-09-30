@@ -29,6 +29,12 @@ default = true        # 标为默认索引，同时停用 PyPI 官方索引
 
 装过一次之后构建后端就进了 uv 缓存，之后的 `uv sync --locked` 不再需要网络（`--no-install-project` 的那几处更是从不构建）。
 
+镜像与锁文件有一个连带的坑：`uv.lock` 里记的是**每个包来自哪个索引**（官方 `https://pypi.org/simple`），配了镜像之后 uv 就认为锁过期 —— `--locked` 直接报 `The lockfile needs to be updated`（不会写文件），而普通的 `uv sync` / `uv run` 会**把锁里的地址全改写成镜像地址**（这种锁千万不要提交）。在只能走镜像的机器上应该用 `--frozen`（等价于 `UV_FROZEN=1`）：按锁安装、不校验、不改写。真在那种机器上改了依赖（`uv lock` / `uv add`）之后，把地址换回来再提交：
+
+```shell
+sed -i 's#https://mirrors.aliyun.com/pypi/simple#https://pypi.org/simple#g; s#https://mirrors.aliyun.com/pypi/packages/#https://files.pythonhosted.org/packages/#g' uv.lock
+```
+
 项目采用 `src` 布局（包名 `archive_management`），业务层不直接调用 Tkinter、HTTP 或文件系统：领域模型与用例通过接口注入基础设施，便于替换实现与测试。
 
 ```text

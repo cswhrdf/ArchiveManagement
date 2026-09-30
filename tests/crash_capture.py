@@ -126,6 +126,29 @@ def exception_text(excinfo: Any) -> str:
     return f"{type(value).__name__}: {value}"
 
 
+def sqlite_error_details(excinfo: Any) -> str:
+    """SQLite 异常的**错误分类**(``SQLITE_NOTADB (26)``); 不是 SQLite 异常时返回空串.
+
+    为什么要单独把分类掳出来: ``OperationalError`` 这个类名对"文件不是数据库"(NOTADB)、
+    "打不开"(CANTOPEN)、"库被锁住"(BUSY)、"没有这张表"(ERROR) 是**一模一样**的, 而四者的
+    处理方向完全不同。更坑的是消息文本会随平台/版本变 —— ``file is not a database`` 与
+    ``unsupported file format`` 其实是同一类(NOTADB), 光看文本会以为是两件事。
+    只有 ``sqlite_errorname`` / ``sqlite_errorcode``(Python 3.11+ 提供)是稳定的。
+
+    2026-09-30 那次偶发就是靠它定类的: 一条 GUI 用例在整轮全量里红了一次(本地单跑不复现),
+    dump 里写着 ``OperationalError: unsupported file format`` + 临时库路径, 于是能立刻把它归成
+    "临时文件在那一刻被读成非 SQLite 内容"而不是"时序/等得不够"。
+    """
+    import sqlite3
+
+    value = getattr(excinfo, "value", None)
+    if not isinstance(value, sqlite3.Error):
+        return ""
+    name = str(getattr(value, "sqlite_errorname", "") or type(value).__name__)
+    code = getattr(value, "sqlite_errorcode", None)
+    return f"{name} ({code})" if code is not None else name
+
+
 def write_dump(
     *,
     node_id: str,
@@ -306,6 +329,10 @@ def failure_evidence(
     dump 文件本身会落在 ``directory`` 下 —— 摘要与附件都要引用它的路径。
     """
     description = f"{node_id} [{phase}]\n{exception_text(excinfo)}"
+    sqlite_details = sqlite_error_details(excinfo)
+    if sqlite_details:
+        # 也写进 dump 的描述: 本地跑不带 ``--alluredir`` 时, dump 是**唯一**留下来的现场。
+        description = f"{description}\nSQLite: {sqlite_details}"
     dump_path, dump_note = write_dump(
         node_id=node_id,
         frame=deepest_frame(getattr(excinfo, "tb", None)),
@@ -425,6 +452,11 @@ def _summary(
         f"- 用例: `{node_id}`",
         f"- 阶段: {phase}",
         f"- 异常: {exception_text(excinfo) or '(无)'}",
+    ]
+    sqlite_details = sqlite_error_details(excinfo)
+    if sqlite_details:
+        lines.append(f"- SQLite 错误分类: {sqlite_details}")
+    lines += [
         f"- 环境: {environment['os']} · Python {environment['python']} · 提交 {environment['commit']}",
         f'- 复现: `uv run pytest "{node_id}" -q`',
         "",

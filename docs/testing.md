@@ -168,12 +168,11 @@ pytest-report (每平台一份报告: 合并各片的 Allure 结果与覆盖率,
                **三个平台都在 ubuntu 上生成** → 生成并自检报告)
       ↓
 allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全/覆盖率汇总
-               结论 + 有意不统计的覆盖豁免清单 → 生成最终报告)
-deploy-pages   (仅默认分支的 push: 解开 allure-report-final 的 zip → 发布到 GitHub Pages;
-                唯一不碰 uv 的作业 —— 只用 runner 自带的 unzip, 所以不需要 uv sync)
+               结论 + 有意不统计的覆盖豁免清单 → 生成最终报告与质量门结论；
+               同一作业里再做发布：仅默认分支的 push 时解开 allure-report.zip → GitHub Pages)
 ```
 
-**作业数量也是额度**：一轮 CI 是 14 个作业实例（`quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1 + `deploy-pages` 1），每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”，见 `PLAN.md` 第 11.10 节）；`paths-ignore` 只加在 **push** 上 —— PR 被路径过滤跳过会让分支保护里的必需检查永远停在 pending，反而合不了 PR。完整的优化清单与取舍记在 `PLAN.md` 第 11 节。
+**作业数量也是额度**：一轮 CI 是 **14 个作业实例**（`quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1；原来独立的 `deploy-pages` 已于 2026-09-30 并进 `allure-summary`，代价是 `pages: write` / `id-token: write` 与 `github-pages` 环境只能声明在**作业级**，所以那个作业在 PR 上跑时也带着它们，而发布的那三步各自带 `continue-on-error`）。**这 14 个是"默认分支上跑一轮"的数**：自 2026-09-30 起，`security` 的 macOS 那一条只在 push 到默认分支时跑（PR 与 `dev` 推送上是 **13 个**，省下一个按 10 倍计价的 macOS 实例）—— 平台列表里仍然写着三个平台（所以"报告要求哪些平台"的口径不变），降频条件写在矩阵的 `exclude` 里，理由见 `PLAN.md` 第 11.4 节第 10 条。每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”，见 `PLAN.md` 第 11.10 节）；`paths-ignore` 只加在 **push** 上 —— PR 被路径过滤跳过会让分支保护里的必需检查永远停在 pending，反而合不了 PR。完整的优化清单与取舍记在 `PLAN.md` 第 11 节。
 
 每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
 
@@ -536,11 +535,20 @@ uv run python scripts/verify_allure_report.py allure-report --results allure-res
 只在 CI 出现、本地怎么跑都不复现的失败，事后能拿到的往往只有一行 traceback。所以用例失败时会自动把现场挂到**该用例的 Allure 结果**上（`tests/crash_capture.py`）：
 
 - **崩溃现场 dump**：`coredumpy` 把最深一层栈帧的局部变量与对象属性写成 `crash-dumps/<用例>.dump`（在 `.gitignore` 里），附件与摘要都会写明落点。本地打开：`coredumpy load <文件>`（进 pdb），或在 VSCode 里用 coredumpy 扩展右键「Load with coredumpy」；只想知道哪个 dump 是哪条用例，用 `coredumpy peek crash-dumps`。  **报告里只给下载链接**：dump 的附件媒体类型挂的是 `application/octet-stream`（见 `tests/crash_capture.py` 的 `DUMP_MEDIA_TYPE`）—— Allure 对不认识的类型不渲染预览区。以前按 `text/plain` 挂时，它会尝试把整份（实测上兆字节的）JSON 读进预览区渲染，**一打开报告页面就卡死**；换成不认识的类型后附件只提供下载（文件名带 `.dump` 后缀，下载下来可直接 `coredumpy load`）。- **界面截图**：本用例创建的窗口（`tests/gui_support.py` 的登记表）在失败时的画面。Windows 走 `ImageGrab.grab(window=hwnd)` 按**窗口句柄**抓：窗口被别的窗口盖住（全屏游戏、多个用例窗口叠放）也拍得到，也不受显示缩放影响（Tk 报逻辑坐标、按屏幕区域抓拿的是物理像素，缩放不是 100% 时会错位；本次就是用这条修掉的）；Linux 按屏幕区域抓（需要 `DISPLAY`，CI 由 xvfb 提供），macOS 同（需要屏幕录制权限）——抓不到时只在摘要里写一句原因，绝不影响用例结果。
-- **失败现场摘要**：平台 / Python / 提交号 + dump 与截图落点 + 复现命令，让报告里不只有一堆附件。
+- **失败现场摘要**：平台 / Python / 提交号 + dump 与截图落点 + 复现命令，让报告里不只有一堆附件。**SQLite 类失败额外给一行错误分类**（如 `SQLITE_NOTADB (26)`）：类名与消息会随平台/版本变 —— 同一次 NOTADB，本机报 `DatabaseError: file is not a database`，而 Windows 上那次真实失败报的是 `OperationalError: unsupported file format` —— 只有 `sqlite_errorname` / `sqlite_errorcode`（Python 3.11+）是稳定的。这一行**同时写进摘要附件与 dump 的描述字段**：本地不带 `--alluredir` 时 dump 是唯一留下来的现场（见下面那段 2026-09-30 的实例）。
 
 三条纪律写在模块注释里：留证**绝不改变用例结果**（每一步各自兜底，整段编排外面还有一层，出错只打一行日志）、**失败才留证**（通过的用例不产生任何文件）、**有上限**（递归深度默认 5、单次 dump 时限 20s、超过 25 MiB 的 dump 只记落点不挂附件、最多 3 张截图，同一用例只留一次——失败后 teardown 常跟着再报一次错）。参数：`--crash-dump-dir`（默认 `crash-dumps`）与 `--crash-dump-depth`（`0` = 关掉 dump，仍留摘要）。
 
 报告侧不需要额外配置：附件由 allure-pytest 写进 `allure-results`，随 `allure-resources-<平台>` artifact 上传，`scripts/verify_allure_report.py` 会把它们一并核对（缺附件即报告不完整）。**dump 里是真实的局部变量**（coredumpy 默认会遮掉像密钥的字符串与 `os.environ` 的值）—— 把报告或 artifact 发给仓库以外的人之前先看一眼附件。
+
+**一次真实的偶发就是靠它断的（2026-09-30）**：一条 GUI 用例在整轮全量里红过一次（单跑、整模块连跑两遍都不复现），当时手里只剩一个测试名。事后从 `crash-dumps/` 里那次失败留下的 dump 直接读出根因 —— dump 自带的现场摘要是
+
+```text
+tests/integration/test_gui_buttons.py::test_discovery_default_filter_is_pending_with_filter_aware_empty_state [call]
+OperationalError: unsupported file format
+```
+
+`coredumpy load <文件>` 的 `w` 给出栈：最深一帧是 `MonitoredDirectoryRepository.list_all()` 的 `connection.execute(`，异常穿过 `_on_scan` 的 `except ArchiveManagementError`（没被接住）冒到用例。所以这是**环境级偶发**（临时 SQLite 文件在那一刻被读成非 SQLite 内容），**不是**“等得不够”那类时序问题 —— 原本打算“把 `_pump` 换成有界等待”的修法是猜错了方向，因此没做。两条可复用的做法：① **先读现场再动手** —— dump 是**失败当刻**写的，且**写盘**（与有没有 `--alluredir` 无关），`coredumpy peek crash-dumps` 就能找到是哪条用例的；② 本地跑全量最好照 CI 的写法带上 `--alluredir=allure-results`，否则截图与其余附件不落盘（这次只有 dump 留下来）。
 
 ### 分片执行与结果合并
 

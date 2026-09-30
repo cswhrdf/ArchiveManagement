@@ -366,6 +366,70 @@ def test_required_platforms_match_the_ci_matrix() -> None:
     )
 
 
+def test_the_pages_actions_are_a_compatible_pair() -> None:
+    """发布站点的两个 action 必须成对(上传 ≥ v3 且 部署 ≥ v4): 单边降级会让部署拿不到产物.
+
+    版本事实(2026-09-30 从两个 action 的 release 页核对, 这是 12.4 要的"版本先例"):
+    ``actions/upload-pages-artifact`` 有 v3.0.1 / v4.0.0 / v5.0.0,
+    ``actions/deploy-pages`` 有 v3.0.2 / v4.0.5 / v5.0.1;
+    官方在 release note 里写死了兼容关系 —— deploy-pages **v3 及以上**只吃
+    upload-pages-artifact **v3 及以上**(或 upload-artifact v4+)上传的产物。
+    所以升级要两边都在"新的那一侧", 不能只动一个。
+    """
+    block = ci_workflow.job_block(
+        _WORKFLOW.read_text(encoding="utf-8"),
+        "allure-summary",
+    )
+
+    uploaded = re.search(r"actions/upload-pages-artifact@v(\d+)", block)
+    deployed = re.search(r"actions/deploy-pages@v(\d+)", block)
+    assert uploaded is not None, "汇总作业要上传 Pages 产物"
+    assert deployed is not None, "汇总作业要部署到 Pages"
+
+    assert int(uploaded.group(1)) >= 3, (
+        "上传侧要 ≥ v3: deploy-pages 只吃 v3 及以上上传的产物"
+    )
+    assert int(deployed.group(1)) >= 4, "部署侧要 ≥ v4(v3 那版已被 v4 取代)"
+
+
+def test_the_macos_security_job_is_downgraded_to_the_default_branch() -> None:
+    """macOS 的安全用例只在 push 到默认分支时跑(PLAN.md 11.4 第 10 条).
+
+    这是**降频**不是砍平台: 安全用例确实验平台语义(大小写不敏感的文件系统、符号链接权限),
+    但 macOS runner 按 Linux 的 10 倍计价, 每个 PR 都跑一遍的边际收益很低。三条要一起成立,
+    缺任何一条都会往两个坏方向之一跑:
+
+    1. 平台列表里必须**仍有** macOS —— 删掉它就成了"砍平台", 上一条守卫也会跟着红;
+    2. 排除它的条件必须是"push 到默认分支"的取反, 不能是别的分支/别的事件口径;
+    3. 只能写在矩阵的 ``exclude`` 里: 作业级 ``if`` 拿不到 ``matrix``(GitHub 的「上下文
+       可用性」表里它只认 github/needs/vars/inputs, 且官方写明它在矩阵展开**之前**求值),
+       而把条件挂到每个步骤上会留下"作业是绿的、其实一条用例都没跑"的空壳。
+    """
+    block = ci_workflow.job_block(
+        _WORKFLOW.read_text(encoding="utf-8"),
+        "security",
+    )
+
+    listed = re.search(r"os: \[([^\]]+)\]", block)
+    assert listed is not None, "security 的矩阵里要有平台列表"
+    assert "macos-latest" in listed.group(1), (
+        "macOS 必须留在平台列表里: 这一条是降频, 不是砍掉一个平台"
+    )
+
+    excluded = re.search(r"^\s*exclude:\s*(\S.*)$", block, re.MULTILINE)
+    assert excluded is not None, (
+        "降频条件要写在矩阵的 exclude 里(作业级 if 拿不到 matrix)"
+    )
+    condition = excluded.group(1)
+    assert "macos-latest" in condition, "排除的必须是 macOS 那一条"
+    assert "github.event_name == 'push'" in condition, (
+        "降频口径是'push 到默认分支', 事件名要对上"
+    )
+    assert "github.event.repository.default_branch" in condition, (
+        "分支要按默认分支判断(写死 main 会在改名后静默失效)"
+    )
+
+
 def test_expect_platforms_flag_decides_the_run(
     layout: _Layout, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -543,7 +607,11 @@ def test_ci_publishes_only_verified_report() -> None:
     assert len(commands) == verifications, "自检点数量与命令数量对不上"
     zip_checks = [command for command in commands if "--zip" in command]
     assert len(zip_checks) == 2, "pytest 与汇总作业各出一份 zip 报告"
-    assert workflow.count("steps.verify-report.outcome == 'success'") == len(zip_checks)
+    # 挂在"出 zip 的那次自检通过"上的地方有三处: 两个作业各一次 `Upload ... Allure report`,
+    # 再加汇总作业里"把 zip 解开发布到 Pages"的第一步(2026-09-30 合并发布作业时新增)。
+    # 只数命令行(注释里也会引这句话当说明), 所以先把注释剥掉再数。
+    gated = code.count("steps.verify-report.outcome == 'success'")
+    assert gated == len(zip_checks) + 1, f"自检与发布挂钩的地方对不上: {gated}"
     assert workflow.count("path: allure-report.zip") == len(zip_checks)
     assert "path: allure-report/" not in workflow, "报告目录不再直接发布"
     # 平台用例检查: pytest 作业的报告传矩阵里的平台(报告作业固定跑在 Ubuntu 上,
@@ -2004,35 +2072,53 @@ def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
 
 
 def test_the_report_is_published_to_pages_from_the_default_branch_only() -> None:
-    """汇总报告发布到 GitHub Pages, 但只从**默认分支的 push**发布, 且发布的是解开的目录。
+    """汇总报告发布到 GitHub Pages: 与汇总**合成一个作业**, 只从默认分支的 push 发布, 发解开的目录。
 
-    发布本身很便宜, 但三个前置条件漏了就会出问题:
+    发布本身很便宜, 但几个前置条件漏了就会出问题:
     ① 只在 push 上发布 —— PR 上发布等于把未评审的内容放上站点, 而来自 fork 的 PR 也
        拿不到 `pages: write`(那会变成一条恒红的检查);
     ② 只在默认分支上发布 —— `dev` 的推送会把站点来回覆盖;
     ③ Pages 要的是**目录**: 直接传 zip 的话站点根就变成一个压缩包, 打开网址只会下载文件 ——
-       所以必须真的出现解压, 且上传路径指向解出来的报告目录。
+       所以必须真的出现解压, 且上传路径指向解出来的报告目录;
+    ④ 没通过报告自检就不发布(`steps.verify-report.outcome == 'success'`)。
     另外发布没有额外凭据: 顶层只给了 `contents: read` / `actions: read`, 所以这个作业要自己
-    声明 `pages: write` + `id-token: write`(OIDC, 不必发长期凭据)。
+    声明 `pages: write` + `id-token: write`(OIDC, 不必发长期凭据), 并保留 `contents: read`
+    —— 作业级 permissions 是**覆盖**而不是叠加, 漏了它 checkout 会直接失败。
+
+    **这条同时守卫“合并”这件事**(2026-09-30): 汇总与发布必须留在同一个作业里, 所以下面除了
+    正向断言, 还反向断言"没有第二个发布作业" —— 重新拆开会让这条红, 而不是静默多付一整套固定开销。
     """
     workflow = ci_workflow.workflow_text()
-    job = ci_workflow.job_block(workflow, "deploy-pages")
-
-    assert ci_workflow.needs_of(workflow, "deploy-pages") == {"allure-summary"}, (
-        "发布的是汇总报告: 不等它就可能在报告还没生成时去下载(或发布半份结果)"
+    assert "\n  deploy-pages:\n" not in workflow, (
+        "发布不再是独立作业: 它与汇总合成一个(否则要多付一整套 checkout / uv / npm)"
     )
-    condition = ci_workflow.job_condition(workflow, "deploy-pages")
-    assert "always()" in condition, condition
-    assert "!cancelled()" in condition, "整轮被取消后不该再启动发布"
-    assert "github.event_name == 'push'" in condition, "PR 上不该发布站点"
-    assert "default_branch" in condition, "只从默认分支发布, dev 的推送不该覆盖站点"
+    job = ci_workflow.job_block(workflow, "allure-summary")
+
+    assert ci_workflow.needs_of(workflow, "allure-summary") == {
+        "quality",
+        "pytest-report",
+        "security",
+    }, "汇总要等齐三批产物(报告还没传完就开始合并会静默少一部分)"
+    assert "Generate final Allure report" in job, "汇总本身还在这里"
+    assert "Deploy to GitHub Pages" in job, "发布也在这里(两者一个作业)"
+
+    # 触发条件写在发布的第一步上(后面两步跟随它的 ready 输出)。
+    step = job.split("name: Unpack the report for Pages", 1)[1].split("run:", 1)[0]
+    assert "always()" in step, step
+    assert "!cancelled()" in step, "整轮被取消后不该再启动发布"
+    assert "github.event_name == 'push'" in step, "PR 上不该发布站点"
+    assert "default_branch" in step, "只从默认分支发布, dev 的推送不该覆盖站点"
+    assert "steps.verify-report.outcome == 'success'" in step, "没通过自检的报告不发布"
+
+    publish = job.split("name: Unpack the report for Pages", 1)[1]
     assert "pages: write" in job, "发布 Pages 需要它(顶层只给了只读的 contents/actions)"
     assert "id-token: write" in job, "deploy-pages 用 OIDC 换一次性的部署权限"
+    assert "contents: read" in job, "作业级 permissions 是覆盖: 漏了它 checkout 会失败"
     assert "environment:" in job, "站点要挂在 github-pages 环境上(作业 URL 也来自它)"
     assert "github-pages" in job, "environment 的名字必须是 github-pages"
-    assert "allure-report.zip" in job, "发布的是自检通过后打好的那个 zip"
-    assert "unzip" in job, "Pages 要目录: 必须先把 zip 解开"
-    assert "path: site/allure-report" in job, "上传的必须是解出来的报告目录"
+    assert "allure-report.zip" in publish, "发布的是自检通过后打好的那个 zip"
+    assert "unzip" in publish, "Pages 要目录: 必须先把 zip 解开"
+    assert "path: site/allure-report" in publish, "上传的必须是解出来的报告目录"
 
 
 def test_history_trends_survive_the_pages_deploy() -> None:
@@ -2044,6 +2130,9 @@ def test_history_trends_survive_the_pages_deploy() -> None:
     `conclusion` 是 success —— 这也解释了为什么"发布 Pages"这个非门禁动作必须
     `continue-on-error`: 它失败会让整轮离开成功集合, 于是这一轮刚写好的历史行再也不会
     被下一轮读走(表现是趋势曲线缺一走)。
+
+    合并成一个作业之后这条要多守一件事: `continue-on-error` **只能落在发布那几步上**,
+    不能挂到作业上 —— 挂上去会把质量门的结论一起吞掉(那样门禁失败也只是条绿记录)。
     """
     workflow = ci_workflow.workflow_text()
 
@@ -2057,14 +2146,20 @@ def test_history_trends_survive_the_pages_deploy() -> None:
             f"{job} 要把新的历史文件传回产物(它是隐藏文件, 必须显式放行)"
         )
 
-    deploy = ci_workflow.job_block(workflow, "deploy-pages")
-    # 只看**作业级**的键(步骤级也允许写 continue-on-error —— "下载产物"那一步就用了它来容忍
-    # 产物缺失, 所以不能拿整段文本去数, 否则这条断言会被步骤级的那一处满足)。
-    deploy_keys = deploy.split("steps:", 1)[0]
-    assert "continue-on-error: true" in deploy_keys, (
-        "发布失败不该让整轮离开'成功'集合: 历史基线只认成功的运行"
+    summary = ci_workflow.job_block(workflow, "allure-summary")
+    deploy_keys = summary.split("steps:", 1)[0]
+    assert "continue-on-error" not in deploy_keys, (
+        "合并后它不能挂在作业上: 那会把质量门的结论一起吞掉(只该落在发布那几步上)"
     )
-    assert "history.jsonl" not in deploy, "站点只是副本: 发布作业不该碰历史文件"
+    publish = summary.split("name: Unpack the report for Pages", 1)[1].split(
+        "name: Report quality gate verdict", 1
+    )[0]
+    for block in publish.split("\n      - name: "):
+        assert "continue-on-error: true" in block, (
+            "发布这几步都要带 continue-on-error: 发布失败不该让整轮离开'成功'集合"
+            f"(历史基线只认成功的运行): {block[:200]}"
+        )
+    assert "history.jsonl" not in publish, "站点只是副本: 发布那几步不该碰历史文件"
 
 
 def test_tkinter_check_still_fails_the_job_when_tcl_is_broken() -> None:

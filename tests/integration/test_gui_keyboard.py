@@ -796,31 +796,68 @@ def test_every_screen_is_reachable_by_keyboard(app: Any) -> None:
     assert not problems, hint
 
 
-def _key_target(app: Any, window: Any) -> Any:
-    """按键该送给哪个控件: 这个对话框的**焦点窗口**(焦点不在它里面就退回它自己).
-
-    Tk 会把"送给子控件的合成键盘事件"转到**焦点窗口**上: 焦点不在这个对话框里时事件就白丢
-    了(2026-09-30 实测: 送给主按钮的内层画布"什么都没发生"; 送给焦点窗口才真的走到产品接线)。
-    这里量当下的焦点而不是自己 ``focus_set`` 一个 —— 用例要走的正是"用户打开对话框后直接
-    按键"那条路。
-    """
+def _focus_inside(app: Any, window: Any) -> bool:
+    """当前焦点是不是落在 ``window`` 这个对话框里(焦点窗口本身也算)."""
     target = app.focus_get()
-    if target is None or not str(target).startswith(str(window)):
-        return window
-    return target
+    return target is not None and str(target).startswith(str(window))
 
 
-def _press_in_dialog(app: Any, key: str, call: Callable[[], Any]) -> tuple[Any, Any]:
+def _key_target(app: Any, window: Any) -> Any:
+    """按键该送给哪个控件: 这个对话框的**焦点控件**.
+
+    Tk 会把"送给子控件的合成键盘事件"转到**焦点窗口**上。焦点不在这个对话框里时, 连"送给
+    对话框本身的 `<Return>`"也会被转给那个真正的焦点窗口 —— 对话框的接线一个都不响
+    (2026-09-30 实测: 焦点被主窗口拿着时对话框返回 False, 正是 Linux CI 上那条
+    `(False, False)`: `按 Esc/回车都没反应`)。
+
+    所以分两步走:
+
+    * 焦点已经在这个对话框里 —— 就量**当下**的那一个(用例要走的正是"用户打开对话框后直接
+      按键"那条路, 不是先 ``focus_set`` 一个再看结果);
+    * **焦点压根没落进对话框** —— 先按用户面对的事实把焦点交给它(无窗口管理器的 Xvfb 上
+      没人会把输入焦点交给新窗口, 而用户眼里这个对话框就在最前面), 再重新量一次。
+
+    两次都没落进去时把事件送给窗口本身: 它这时已经是焦点窗口, 而 `<Escape>` / `<Return>`
+    正是接在窗口自己身上的。
+    """
+    if _focus_inside(app, window):
+        return app.focus_get()
+    with suppress(Exception):
+        # 先 `focus_force`(无窗口管理器的 Xvfb 上只有它能真的把输入焦点交给这个窗口), 再跑一次
+        # `update()`(本机上 CTk 那次重新定焦的 `after_idle` 要靠它才会跑, 实测光 force 不回
+        # 焦点); 两步都要 —— 只留 update 在 CI 上不管用, 只留 force 在本机不管用。
+        window.focus_force()
+    app.update()
+    if _focus_inside(app, window):
+        return app.focus_get()
+    return window
+
+
+def _press_in_dialog(
+    app: Any, key: str, call: Callable[[], Any], *, steal_focus: bool = False
+) -> tuple[Any, Any]:
     """在替身 ``wait_window`` 里按下一个键, 返回(对话框返回值, 那个对话框窗口).
 
     按键前先把窗口真的映射出来(未映射的窗口收不到合成的键盘事件, 见 :func:`_settle`),
-    并按 :func:`_key_target` 送到焦点窗口上。
+    并按 :func:`_key_target` 送到焦点控件上。
+
+    ``steal_focus``: 先把焦点抢回主窗口 —— 那就是无窗口管理器的 Xvfb 上新对话框的处境
+    (没人会把输入焦点交给它), 见那条反例用例。
     """
     opened: list[Any] = []
 
     def hook(window: Any, *_args: Any, **_kwargs: Any) -> None:
         # 顺序要紧: 先把窗口映射出来(未映射时不仅收不到按键, 焦点也还没定下来), 再量焦点.
         _settle(window)
+        if steal_focus:
+            # 把"焦点在别的窗口上"这个条件搬进用例(无窗口管理器的 Xvfb 上新对话框就是这样:
+            # 没有任何东西会把输入焦点交给它)。只跑 idle 任务: 完整 `update()` 会把 CTk 排好的
+            # 那次重新定焦回调一起跑掉, 这个状态就不存在了。
+            app.focus_force()
+            app.update_idletasks()
+            assert not _focus_inside(app, window), (
+                "前提: 把焦点交给主窗口后它不该还在对话框里(否则这条反例是空转)"
+            )
         target = _key_target(app, window)
         opened.append(window)
         target.event_generate(key, when="now")
@@ -850,6 +887,36 @@ def test_escape_cancels_and_return_confirms(app: Any) -> None:
     assert (cancel, confirm) == (False, True)
     assert cancel_window is not None, "对话框没开出来(夹具失效)"
     assert not cancel_window.winfo_exists(), "Esc 必须真的把对话框关掉"
+
+
+def test_escape_and_return_reach_the_dialog_even_when_the_focus_is_elsewhere(
+    app: Any,
+) -> None:
+    """反例: 焦点被别的窗口拿着时, Esc/回车**仍**要真的走到这个对话框的接线.
+
+    2026-09-30 的 Linux CI 红的就是这一条: Xvfb 上没有窗口管理器, 没有任何东西会把输入焦点
+    交给新开的对话框 —— `event_generate` 送出去的按键被 Tk 转给**真正的**焦点窗口, 对话框的
+    Esc/回车一个都不响(用例看到的是 `(False, False)`)。本机(带窗口管理器)不会自然出现这个
+    状态, 所以这里先把焦点抢到主窗口上, 把那个条件搬进用例: `_key_target` 会按"对话框此刻
+    就在最前面"这个事实把焦点交回来, 然后把按键送到对话框上。
+    """
+    confirm, _confirm_window = _press_in_dialog(
+        app,
+        "<Return>",
+        lambda: dialogs.confirm_dialog(app, DARK, title="t", message="m"),
+        steal_focus=True,
+    )
+    cancel, cancel_window = _press_in_dialog(
+        app,
+        "<Escape>",
+        lambda: dialogs.confirm_dialog(app, DARK, title="t", message="m"),
+        steal_focus=True,
+    )
+    _pump(app)
+    assert confirm is True, "焦点不在对话框里时回车丢了(合成事件被转给了别的焦点窗口)"
+    assert cancel is False, "Esc 不该被当成确认"
+    assert cancel_window is not None, "对话框没开出来(夹具失效)"
+    assert not cancel_window.winfo_exists(), "焦点不在对话框里时 Esc 没把它关掉"
 
 
 def test_return_inside_an_input_submits_the_dialog(app: Any) -> None:

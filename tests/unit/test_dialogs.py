@@ -34,6 +34,13 @@ pytestmark = [
 ]
 
 
+# 提示文字用一个"没有任何标点"的标记: 这些用例断言的是对齐/宽度/能否提交, 与文案本身
+# 无关。原来写的是文案原文("请输入游戏名称:") —— 那会让用例跟着文案标点一起变红(I-3
+# 把中文句内的半角逗号/冒号统一成全角时就撞过一次), 而文案的标点由
+# tests/unit/test_i18n.py 的三条守卫统一管着。
+_PROMPT = "提示语"
+
+
 class _FakeWidget:
     """可 configure / pack / get 的最小假控件."""
 
@@ -829,12 +836,12 @@ def test_ask_text_hints_enter_and_left_aligns_the_blocks(
     """19 号评审: 回车能提交要写在界面上, 提示/输入框/按钮统一左对齐同宽."""
     harness.click_text = tr("dialog.cancel")
 
-    dialogs.ask_text(harness, DARK, title="新增游戏", text="请输入游戏名称:")
+    dialogs.ask_text(harness, DARK, title="新增游戏", text=_PROMPT)
 
     assert [
         label.text for label in harness.labels if label.text == tr("dialog.enter_hint")
     ] == [tr("dialog.enter_hint")]
-    prompt = next(label for label in harness.labels if label.text == "请输入游戏名称:")
+    prompt = next(label for label in harness.labels if label.text == _PROMPT)
     assert prompt.kwargs["anchor"] == "w"
     assert int(prompt.kwargs["wraplength"]) == dialogs._TEXT_WIDTH
 
@@ -847,7 +854,7 @@ def test_ask_text_context_says_what_is_being_edited(harness: _FakeParent) -> Non
         harness,
         DARK,
         title="重命名",
-        text="输入新的游戏名称:",
+        text=_PROMPT,
         initial="测试游戏",
         context=tr("dialog.rename_context", name="测试游戏"),
     )
@@ -1434,12 +1441,26 @@ class _ComfortBody:
 
 
 class _ComfortWindow:
-    """舒适线用例的假对话框: 屏幕 700(舒适线 560), 请求高度与实测高度分开给."""
+    """舒适线用例的假对话框: 屏幕 700(舒适线 560), 请求高度与实测高度分开给.
 
-    def __init__(self, body: _ComfortBody, *, requested: int, measured: int) -> None:
-        """记下正文区与两个高度."""
+    ``requested`` 给一个固定的请求高度; ``chrome`` 则按“正文之外 + 正文区”算(真窗口就是
+    这样随正文区伸缩的, 夹取之后请求高度会跟着变)。``measured`` 是映射那一刻量到的实测高度,
+    可以与请求高度不一致 —— 无窗口管理器的 X11 上它常常晚一拍。
+    """
+
+    def __init__(
+        self,
+        body: _ComfortBody,
+        *,
+        measured: int,
+        requested: int | None = None,
+        chrome: int | None = None,
+    ) -> None:
+        """记下正文区与两个高度(请求高度二选一: 固定值, 或者按正文区算)."""
+        assert (requested is None) != (chrome is None), "请求高度只能给一种"
         self._body = body
         self._requested = requested
+        self._chrome = chrome
         self._measured = measured
 
     def update_idletasks(self) -> None:
@@ -1450,8 +1471,11 @@ class _ComfortWindow:
         return 700
 
     def winfo_reqheight(self) -> int:
-        """建窗那一刻的请求高度."""
-        return self._requested
+        """请求高度: 固定值, 或者"正文之外 + 正文区"."""
+        if self._requested is not None:
+            return self._requested
+        assert self._chrome is not None
+        return self._chrome + self._body.height
 
     def winfo_height(self) -> int:
         """映射之后的实测高度."""
@@ -1484,6 +1508,60 @@ def test_the_comfort_line_is_clamped_again_after_the_window_is_mapped(
     # 收到下限就停手: 矮屏上宁可让正文区滚, 也不能把内容切掉.
     dialogs._clamp_to_comfort_line(window, current=900)
     assert body.height == dialogs._DIALOG_BODY_MIN
+
+
+def test_the_comfort_line_also_reads_the_requested_height_after_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """映射之后要把**请求高度**也一起看: 实测高度会晚一拍, 比真正的布局小 1px.
+
+    CI 现场(2026-09-30, 只有 Linux 红): 700 高的屏上最终窗口 561 > 560, 而夹取那一刻量到的
+    实测高度是 560 —— 只认实测值的话这次夹取什么都不做, 那 1px 就一直留着。请求高度是本地
+    立刻算出来的(不等窗口管理器的 ConfigureNotify), 所以两个取大者。
+    """
+    monkeypatch.setattr(ctk, "CTkScrollableFrame", _ComfortBody)
+    body = _ComfortBody(509)
+    window: Any = _ComfortWindow(body, measured=560, chrome=52)  # 请求高度 = 52 + 509
+
+    dialogs._clamp_to_comfort_line(window, current=560)
+
+    assert body.height == 508, "请求高度越线时也要收"
+    assert window.winfo_reqheight() == 560, "收一轮就该落到线上(收敛)"
+
+
+def test_the_comfort_line_keeps_shrinking_until_the_request_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """布局不保证 1:1 跟着正文高度走: 收一轮不够时继续收, 收到不越线为止.
+
+    假窗口把"正文之外"的那部分也算成 52 —— 真窗口里它可能是别的控件在撑, 于是收掉 1px
+    正文只换来 0.x 个像素的整窗高度; 这类情况下只收一轮就停会让窗口一直差着那一两像素。
+    """
+    monkeypatch.setattr(ctk, "CTkScrollableFrame", _ComfortBody)
+    body = _ComfortBody(509)
+    window: Any = _ComfortWindow(body, measured=561, chrome=52)
+
+    dialogs._clamp_to_comfort_line(window, current=561)
+
+    assert window.winfo_reqheight() <= 560, "最终要落在舒适线内"
+    assert body.height == 508, "只该收掉真正多出来的那 1px"
+
+
+def test_the_comfort_line_stops_after_the_pass_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """布局一直不合规时**不能无限收**: 收够 :data:`_CLAMP_PASSES` 轮就停手.
+
+    这里让请求高度**固定不动**(现实中是"撑住整窗高度的是别的控件, 收正文区没用"), 于是每轮都
+    能收掉 1px、永远差那 1px —— 上限就是为这种情况留的保险。
+    """
+    monkeypatch.setattr(ctk, "CTkScrollableFrame", _ComfortBody)
+    body = _ComfortBody(509)
+    window: Any = _ComfortWindow(body, requested=561, measured=561)
+
+    dialogs._clamp_to_comfort_line(window, current=561)
+
+    assert body.height == 509 - dialogs._CLAMP_PASSES, "收够上限就该停手"
 
 
 def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
@@ -1691,7 +1769,9 @@ def test_export_batch_dialog_rows_put_the_metadata_on_its_own_line(
         label.kwargs.get("text"): label.kwargs.get("text_color")
         for label in harness.labels
     }
-    assert meta.get("· 原始名称: Kaiju Princess 2") == DARK.text_hint
+    assert meta.get("· " + tr("hero.original_name", name="Kaiju Princess 2")) == (
+        DARK.text_hint
+    )
     assert meta.get(tr("game.disabled_short")) == DARK.text_muted
     # 全选的作用域单独成行, 不再挂在"全选"后面同字号同色。
     assert meta.get(tr("dialog.export_batch_select_all_scope")) == DARK.text_hint

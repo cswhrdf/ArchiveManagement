@@ -16,14 +16,18 @@
 from __future__ import annotations
 
 import builtins
+import ctypes
+import importlib
 import io
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -214,7 +218,53 @@ def _dir_fd_is_available() -> bool:
 
 
 # “fd → 目录”的两条常见路径(Linux 用 /proc, macOS 用 /dev); 读到就接回绝对路径。
+# 注意 macOS 的 `/dev/fd/<fd>` **不是符号链接**, realpath 会原样返回 —— 所以它不够用,
+# 还要问内核, 见 :func:`_fd_directory`。
 _FD_PATH_TEMPLATES = ("/proc/self/fd/{fd}", "/dev/fd/{fd}")
+# macOS 上“问出 fd 指向哪个目录”只能走 `fcntl.F_GETPATH`; Windows 没有 fcntl 这个模块
+# (那一支也走不到 —— `dir_fd` 只有 POSIX 支持)。用 importlib 拿它: 写成 try/except import
+# 反而要多一个 type: ignore, 而这里只需要“有就拿来用”。
+_fcntl = importlib.import_module("fcntl") if sys.platform != "win32" else None
+# F_GETPATH 要一个至少 MAXPATHLEN 的缓冲区(macOS 上是 1024 字节)。
+_FD_PATH_BUFFER = 1024
+
+
+def _fd_directory(fd: int) -> str | None:
+    """问出 ``fd`` 指向的那个目录; 问不到返回 None(调用方退回裸文件名, 于是响亮地判越界).
+
+    两条路都要试, 且**先问内核**:
+
+    * `fcntl.F_GETPATH`(macOS 的正路)把真实路径写进缓冲区;
+    * 两条路径模板 —— Linux 走 `/proc/self/fd/<fd>`(它是指向目标的符号链接, `realpath` 就能
+      解开)。
+
+    macOS **不能**只靠模板: `/dev/fd/<fd>` 是 fdesc 节点而不是符号链接, `realpath` 原样返回,
+    而那个路径的 `isdir()` 又是真的 —— 记账器会以为自己拿到了绝对路径, 于是一次**合法**删除
+    被记成 `/dev/fd/13/slot.dat`、再被判成越界变更(2026-09-30 的 macOS CI 现场: 两条安全
+    用例都在这里红)。
+    """
+    module = _fcntl
+    if module is not None:
+        getpath = getattr(module, "F_GETPATH", None)
+        if getpath is not None:
+            buffer = ctypes.create_string_buffer(_FD_PATH_BUFFER)
+            try:
+                module.fcntl(fd, getpath, buffer)
+            except OSError:  # fd 已经关掉时内核会报 EBADF
+                pass
+            else:
+                base = os.fsdecode(buffer.value)
+                if base and Path(base).is_dir():
+                    return base
+    for template in _FD_PATH_TEMPLATES:
+        marker = template.format(fd=fd)
+        try:
+            base = os.path.realpath(marker)
+        except OSError:  # 读不到就试下一条
+            continue
+        if base and Path(base).is_dir():
+            return base
+    return None
 
 
 def _resolve_dir_fd(dir_fd: object, path: str) -> str:
@@ -225,8 +275,8 @@ def _resolve_dir_fd(dir_fd: object, path: str) -> str:
     只是相对基准没被一起记下来(Windows 不支持 `dir_fd`, 所以这一支只在 Linux/macOS 上
     出现: 2026-09-25 的 CI 就是在这里红的)。
 
-    :data:`_FD_PATH_TEMPLATES` 能读回那个目录的真实路径; 全都读不到时**原样返回**
-    裸文件名 —— 于是它会被判成越界并响亮地失败, 而不是被悄悄当成“合法”.
+    :func:`_fd_directory` 能问回那个目录的真实路径; 全都问不到时**原样返回**裸文件名
+    —— 于是它会被判成越界并响亮地失败, 而不是被悄悄当成“合法”.
     """
     if dir_fd is None:
         return path
@@ -234,14 +284,8 @@ def _resolve_dir_fd(dir_fd: object, path: str) -> str:
         fd = int(str(dir_fd))
     except ValueError:
         return path
-    for template in _FD_PATH_TEMPLATES:
-        try:
-            base = os.path.realpath(template.format(fd=fd))
-        except OSError:  # pragma: no cover - 读不到就退回裸文件名
-            continue
-        if base and Path(base).is_dir():
-            return str(Path(base) / path)
-    return path
+    base = _fd_directory(fd)
+    return path if base is None else str(Path(base) / path)
 
 
 def _inside(root: Path, path: str) -> bool:
@@ -325,6 +369,35 @@ def test_the_recorder_resolves_paths_relative_to_a_directory_fd(
     assert recorded, "删了文件却没记账"
     assert expected in recorded, f"没还原成绝对路径: {recorded}"
     assert all(_inside(tmp_path, path) for path in recorded), f"记成了越界: {recorded}"
+
+
+def test_the_directory_fd_falls_back_to_the_kernel_when_the_templates_do_not_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """自检: 路径模板解不开时要问 `fcntl.F_GETPATH`(macOS 只有这条路).
+
+    2026-09-30 的 macOS CI 正是在这里红的: 记下来的路径是 `/dev/fd/13/slot.dat` ——
+    `realpath` 对 `/dev/fd/13` **原样返回**(它不是符号链接), 而那个路径在 macOS 上
+    `isdir()` 是真的, 于是记账器以为自己拿到了绝对路径, 一次合法删除被判成越界变更。
+    真机行为没法在 Windows 上复现, 所以这里把两件事换成替身: realpath 原样返回(模拟 macOS
+    那种“解不开但不报错”的路径)与一个只认 `F_GETPATH` 的假 fcntl。
+    """
+    folder = tmp_path / "root"
+    folder.mkdir()
+    victim = folder / "child.dat"
+    victim.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(os.path, "realpath", lambda value, *a, **kw: value)
+
+    def fake_fcntl(fd: int, command: int, buffer: Any) -> int:
+        assert command == fake.F_GETPATH, "不是 F_GETPATH 就问不出真实路径"
+        buffer.value = os.fsencode(folder)
+        return 0
+
+    fake = SimpleNamespace(F_GETPATH=50, fcntl=fake_fcntl)
+    monkeypatch.setattr(sys.modules[__name__], "_fcntl", fake)
+
+    assert _fd_directory(3) == str(folder), "没有问内核要真实路径"
+    assert _resolve_dir_fd(3, victim.name) == str(victim), "还是没接回绝对路径"
 
 
 def test_installing_the_recorder_does_not_change_the_platform_capability(

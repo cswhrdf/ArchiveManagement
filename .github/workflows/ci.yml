@@ -274,22 +274,29 @@ jobs:
         run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Upload shard Allure results
+        # `if-no-files-found: error`: 这一片**没产出结果**时必须在这里响亮地失败。
+        # 原来写的是 `ignore` —— 结果是产物根本没被创建, 而下游(pytest-report)只能报一句
+        # “某平台缺片”, 得再翻回去看这个作业才知道是哪儿断的(2026-09-30 的 macOS 分片就是
+        # 这样: `allure-results-macos-latest-*` 一个目录都没匹配到, 而报告里只有它的安全结果)。
+        # 这一片本来就是红的, 所以把“为什么没有产物”提到这里说, 不丢任何结论。
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: allure-results-${{ matrix.os }}-${{ matrix.shard }}
           path: allure-results/
-          if-no-files-found: ignore
+          if-no-files-found: error
 
       - name: Upload shard coverage data
         # .coverage.shard-* 是隐藏文件, 要显式允许上传。
+        # `if-no-files-found: error` 的理由同上一处: 缺一片覆盖率数据会让合并后的百分比
+        # 说成“覆盖率下路”, 而真相是这一片没跑起来。
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
           path: .coverage.shard-${{ matrix.shard }}
           include-hidden-files: true
-          if-no-files-found: ignore
+          if-no-files-found: error
 
       - name: Run the platform-specific check (Windows/macOS, shard 0)
         # 平台专属类型检查(mypy --platform win32 / darwin)只在该平台上跑: `--platform` 只是
@@ -362,6 +369,25 @@ jobs:
         # 这个作业不跑用例: 它只用覆盖率 CLI 把各片数据合起来、判门槛、出报告(报告与
         # 自检脚本只用标准库), 所以只装覆盖率那一组; --no-install-project 与其它作业同理。
         run: uv sync --locked --no-default-groups --group coverage --no-install-project
+
+      - name: Cache the npm download of the Allure CLI
+        # 11.3 第 6 条(2026-09-30 落地): 每轮 CI 要现装 4 次 allure CLI(pytest-report × 3 +
+        # allure-summary), 每次 10~20s。这里缓存 npm 自己的下载缓存目录(~/.npm), 命中后
+        # 那 10~20s 就省下来了。
+        # key 里带**钉住的版本号**: 升级 CLI 时自动换一把新钥匙, 不会拿旧版本的缓存去凑。
+        # key 里再带 matrix.os: 不然三个报告作业会抢着保存同一个 key, 后两个会打印
+        # "Failed to save: Unable to reserve cache"(分片上线时在 uv 缓存上碰到过同一个坑,
+        # 所以 setup-uv 那时改成了只让片 0 写)。
+        # **不写 runner.os**: 这个作业有一条守卫要求"平台只能来自矩阵"(两台机器都是 Linux,
+        # 看一眼 runner.os 就会把两个平台的结论标成 Linux), 缓存 key 也不该开这个头。
+        # 不写 restore-keys: 旧钥匙里的包对不上新版本, 回退命中只会把语义弄混乱。
+        # `~/.npm` 是 npm 的内容寻址缓存(按 integrity 存), 缓存被改过会校验失败并重下; 且
+        # 低信任触发(PR)默认只读(见 GitHub 的 cache-mode 说明), 所以不必担心缓存被投毒。
+        # 版本取自 GitHub 官方文档的示例(仓库里没有这个 action 的先例)。
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-allure-3.18.0-${{ matrix.os }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -578,8 +604,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 与 pytest 作业同一个平台列表(见那里的 macOS 分片说明)。
+        # 三个平台一个不少地声明(与 pytest 的矩阵、报告要求的平台三处一致): macOS 是**降频**
+        # 不是砍平台 —— 安全用例确实要验平台语义(大小写不敏感的文件系统、符号链接权限)。
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS 那一条只在 push 到默认分支时跑(PLAN.md 11.4 第 10 条): macOS runner 按 Linux
+        # 的 10 倍计价, 而"每个 PR 都验一遍 macOS 的路径/权限语义"与"每个平台上都验过"比起来
+        # 边际收益很低。PR 与 dev 上的推送各少一个 macOS 实例, 默认分支上照旧三个平台全跑。
+        #
+        # 为什么写在 exclude 里: 作业级 `if` **拿不到** matrix(GitHub 的「上下文可用性」表里
+        # jobs.<job_id>.if 只认 github/needs/vars/inputs, 而且官方明确写了它在矩阵展开**之前**
+        # 求值), 而把同一条条件挂到作业里每个步骤上会留下"作业是绿的、其实一条安全用例都没跑"
+        # 的空壳 —— 那种失败是静默的, 与本仓库的纪律相反。
+        # 两个 JSON 里都**不写空格**(``{"os":"macos-latest"}``): 冒号后跟空格在 YAML 的普通
+        # 标量里非法, 会让整份工作流解析失败。
+        # 万一这行表达式不被接受, 工作流校验会**当场报错**(不是静默跳过), 退回静态的三平台列表即可。
+        exclude: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) && fromJSON('[]') || fromJSON('[{"os":"macos-latest"}]') }}
     # 安全防护是跨平台正确性属性: 路径越界、符号链接与权限差异都要在每个平台验证.
     steps:
       - name: Check out repository
@@ -619,7 +658,10 @@ jobs:
           if-no-files-found: ignore
 
   allure-summary:
-    name: Allure 汇总报告
+    # 汇总与发布**合并成一个作业**（2026-09-30）：这两件事本来就是“先生成报告、再发站点”的固定
+    # 顺序，拆成两个作业只是多付一整套 checkout / uv / npm 的固定开销（作业实例 15 → 14）。
+    # 合并的两处代价（写权限与环境只能提到作业级）见下面 permissions / environment 的注释。
+    name: Allure 汇总报告与发布
     runs-on: ubuntu-latest
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
     # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure
@@ -630,6 +672,27 @@ jobs:
     needs: [quality, pytest-report, security]
     # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
     if: always() && !cancelled()
+    # 发布站点要写权限, 与顶层的只读声明不同; 作业级 permissions 是**覆盖**而不是叠加 ——
+    # 所以 `contents: read`(checkout 要它)与 `actions: read`(取本轮的产物)必须一起写上。
+    # 工作流语法里**没有**步骤级 permissions, 所以这两个写权限在 PR 上那一次运行里也存在——
+    # 这个作业只跑仓库自己的脚本(不跑 PR 里的代码), 风险可接受。
+    permissions:
+      contents: read
+      actions: read
+      # 发布 Pages 要它(顶层只给了只读)。
+      pages: write
+      # `deploy-pages` 用 OIDC 令牌换一次性的部署权限, 不必给长期凭据。
+      id-token: write
+    # 站点要挂在 github-pages 环境上(作业 URL 也来自它)。environment 同样只能挂作业级, 于是
+    # **不要**给这个环境配“必需审批”: 那样每次 PR 都会停在这里等批准。
+    # url 用 `||` 兜底: 不发布的那几次运行没有 `steps.deploy`, 空的 url 会挂一个空链接。
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+    # 这里**刻意不写**原来那个 `concurrency: group: github-pages`: 汇总是每个 PR 都要跑的作业,
+    # 共用一个组会让并发的几个 PR 互相排队(同组只允许一个 pending, 后来者会把前一个 pending
+    # 取消掉)。而“两次发布撞车”本来就被顶层 concurrency(按 ref、cancel-in-progress)挡住了:
+    # 只有默认分支的 push 会发布, 被取代的那一轮整轮被取消、根本走不到发布步骤。
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -649,6 +712,15 @@ jobs:
         # Allure CLI 由 npm 提供。所以一个开发组都不装 —— 这一档里最划算的一个作业。
         # `--no-install-project` 保住这一点: 不带它的话, 装可编辑包要先下构建后端(hatchling)。
         run: uv sync --locked --no-default-groups --no-install-project
+
+      - name: Cache the npm download of the Allure CLI
+        # 与 pytest-report 那一处同一个规则(见那里的说明): 版本号定钥匙。
+        # 这里没有矩阵, 而且这个作业固定跑在 ubuntu-latest 上(见上面的 runs-on), 所以
+        # 平台直接写成字面量 —— 也不用 runner.os(理由同 pytest-report 那处)。
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-allure-3.18.0-linux
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -894,6 +966,59 @@ jobs:
           path: allure-report.zip
           if-no-files-found: ignore
 
+      # -- 发布到 GitHub Pages(只有默认分支的 push 会真的走到) ------------------------------
+
+      - name: Unpack the report for Pages
+        # 触发条件只写在这一步(后面两步跟随它的 `ready` 输出)。四个条件缺一不可:
+        # `always()` —— 步骤的 `if` 默认隐含 `success()`, 而这一步要“不论前面成不成, 都按结论
+        #   决定发不发”; `!cancelled()` —— 整轮被取消就别再启动;
+        # `github.event_name == 'push'` —— 未评审的内容不上站点, 而且来自 fork 的 PR 也拿不到
+        #   `pages: write`(那会变成一条恒红的检查);
+        # `default_branch` —— `dev` 的推送不该把站点来回覆盖(要连 dev 一起发布就把这里换成
+        #   `github.ref_name == 'dev' || ...`, 但两边会互相覆盖, 得自己想清楚);
+        # `steps.verify-report.outcome == 'success'` —— 就是上面 `Upload final Allure report`
+        #   的挂载条件: 没通过自检的报告不发布(宁可这一轮没有站点, 也不把“打不开详情”的报告发出去)。
+        # 直接解工作区里的 `allure-report.zip`: 合并成一个作业之后它就是本作业上一步的产物,
+        # 不必再让 artifact 绕一圈(原来那个“下载 allure-report-final”的唯一用途就是跨作业取文件)。
+        id: unpack
+        if: always() && !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.verify-report.outcome == 'success'
+        # 发布是“给人看的副本”, 不让它决定这一轮的成败: 历史趋势的基线只认
+        # `conclusion == success` 的运行, 发布挂掉不该把本轮刚写好的历史行作废。
+        # 原来这条 `continue-on-error` 挂在 deploy-pages **整个作业**上, 合并后只能落在发布这三步
+        # 上 —— **不能**挂到作业上, 那会把质量门的结论一起吞掉。
+        continue-on-error: true
+        shell: bash
+        run: |
+          rm -rf site
+          mkdir -p site
+          archive="allure-report.zip"
+          if [ ! -f "$archive" ]; then
+            echo "::warning::没有找到 $archive, 跳过发布(报告可能没通过自检)"
+            exit 0
+          fi
+          # Pages 要的是一个**目录**(站点根就是它): 直接传 zip 的话, 打开网址只会下载一个压缩包。
+          # zip 里的条目带一层报告目录名(见 scripts/verify_allure_report.py 的打包逻辑),
+          # 所以解开之后就是 site/allure-report/。
+          unzip -q "$archive" -d site
+          test -f site/allure-report/index.html
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the report as a Pages artifact
+        if: always() && steps.unpack.outputs.ready == 'true'
+        continue-on-error: true
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/allure-report
+
+      - name: Deploy to GitHub Pages
+        # 这两个官方 action 用的是各自的**当前主版本**(仓库里没有它们的版本先例 —— 其它 action
+        # 的 `@v7` 是各自的主版本)。首次 push 后若报“找不到该版本/未知 action”, 就按提示改。
+        # 另: 仓库设置里的 Pages → Source 必须选 “GitHub Actions”, 否则这里必然失败。
+        if: always() && steps.unpack.outputs.ready == 'true'
+        continue-on-error: true
+        id: deploy
+        uses: actions/deploy-pages@v4
+
       - name: Report quality gate verdict
         # 质量门是"结论"而不是"步骤": 报告已生成、两份 artifact 都上传完了, 现在再用它的
         # 退出码决定作业成败 —— 否则门禁不通过时连报告都拿不到(结论与输出都在首页
@@ -904,85 +1029,3 @@ jobs:
         run: |
           echo "::error::质量门未通过 或 有平台没有合并进用例结果 —— 见上面的逐平台条数与报告首页「全局附件」的运行总账"
           exit 1
-
-  deploy-pages:
-    # 把**汇总报告**放到 GitHub Pages 上: 报告 zip 只能下载后手动打开, 而 Pages 给的是一个
-    # 稳定网址(给不装工具的人看)。各平台的报告仍旧只是 artifact —— 汇总那份才是"一份看全部"。
-    # 本作业不碰 Python/uv: 下载 + `unzip` + 发布都是 runner 自带的工具, 所以它是唯一
-    # 不需要 `uv sync` 的作业(登记在 tests/unit/test_test_config.py 的 _UV_FREE_JOBS 里)。
-    name: 发布报告到 GitHub Pages
-    needs: [allure-summary]
-    # 四个条件缺一不可:
-    # `always() && !cancelled()` —— 上游失败/跳过也要试一次(报告可能已经生成好了), 但整轮
-    #   被取消就别再启动(与两个报告作业同一条纪律);
-    # `pull_request` 上不发布 —— 未评审的内容不该上站点, 而且来自 fork 的 PR 拿不到 pages: write;
-    # 只在**默认分支**上发布 —— `dev` 的推送不该把站点来回覆盖(要连 dev 一起发布, 就把后面的
-    #   比较换成 `github.ref_name == 'dev' || ...`, 但两边会互相覆盖, 得自己想清楚);
-    # 因此本作业在 PR 上会显示为 skipped —— **不要**把它加进分支保护的必需检查(被跳过的
-    #   必需检查会一直停在 pending, PR 反而合不了, 见 .github/instructions 里那条)。
-    if: always() && !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
-    # 发布失败**不让整轮变红**: 一轮运行只有 `conclusion == success` 才会被下一轮当作历史
-    # 基线(见上面两个报告作业的 “Resolve previous successful run”), 而 Pages 只是"给人看的
-    # 副本" —— 它出问题不该让这一轮**已经写好的历史趋势**再也接不上。作业在 UI 上仍显示失败。
-    continue-on-error: true
-    # 发布需要写权限, 与顶层的只读声明不同; 作业级 permissions 是**覆盖**而不是叠加。
-    permissions:
-      # 取本轮的产物(allure-report-final)要读 actions。
-      actions: read
-      # 发布站点。
-      pages: write
-      # `deploy-pages` 用 OIDC 令牌换一次性的部署权限, 不必给长期凭据。
-      id-token: write
-    # 站点地址会显示在这条 environment 上(作业 URL)。
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    # 站点只能有一个"当前版本": 把并发的两次发布排成队, 不要互相打断(被取代的运行本来
-    # 就由顶层 concurrency 取消了, 这一条是防"取消不彻底时两次发布撞车")。
-    concurrency:
-      group: github-pages
-      cancel-in-progress: false
-    steps:
-      - name: Download the final Allure report
-        # 产物名与上面 `Upload final Allure report` 一致。那份上传挂在自检成功上, 所以
-        # "产物在不在"就是"报告能不能发布"的判据 —— 没通过自检时不发布, 也不让作业红
-        # (报告本身的问题已经由 allure-summary 报过了)。
-        id: fetch
-        continue-on-error: true
-        uses: actions/download-artifact@v7
-        with:
-          name: allure-report-final
-          path: report
-
-      - name: Unpack the report
-        # Pages 要的是一个**目录**(站点根就是它)。直接把 zip 传上去的话, 打开网址只会下载
-        # 一个压缩包 —— 所以先解开再传; `allure-report.zip` 里的条目带一层报告目录名
-        # (见 scripts/verify_allure_report.py 的打包逻辑), 解开后就是 site/allure-report/。
-        id: unpack
-        shell: bash
-        run: |
-          archive="report/allure-report.zip"
-          if [ ! -f "$archive" ]; then
-            echo "::warning::没有找到 allure-report-final/allure-report.zip, 跳过发布(报告可能没通过自检)"
-            exit 0
-          fi
-          unzip -q "$archive" -d site
-          test -f site/allure-report/index.html
-          echo "ready=true" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the report as a Pages artifact
-        if: steps.unpack.outputs.ready == 'true'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site/allure-report
-
-      - name: Deploy to GitHub Pages
-        # 这里用的是官方 Pages 两个 action 的**当前主版本**(仓库里没有它们的版本先例 ——
-        # 其它 action 的 `@v7` 是各自的主版本)。首次 push 后如果报"找不到该版本/未知 action",
-        # 按提示把它改成对应的主版本即可; 备选方案是推 gh-pages 分支(但那样要多给
-        # `contents: write`, 还得在仓库设置里把 Pages 的来源改成那个分支)。
-        # 无论哪种方式, 仓库设置里的 Pages → Source 都必须选 “GitHub Actions”, 否则这里会失败。
-        if: steps.unpack.outputs.ready == 'true'
-        id: deploy
-        uses: actions/deploy-pages@v4
