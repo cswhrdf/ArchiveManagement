@@ -112,6 +112,7 @@ from archive_management.ui.settings_window import SettingsWindow
 from archive_management.ui.tree_view import TreeView
 from archive_management.ui.typography import (
     FONT_STRONG,
+    drain_deferred_fonts,
     install_font_scaling,
     set_base_font_px,
 )
@@ -2994,6 +2995,11 @@ class ArchiveApp(ctk.CTk):
 
     def _poll_messages(self) -> None:
         """主线程轮询队列并分发完成消息与快捷键请求."""
+        # 顺便把后台线程"寄存"的字体删掉: `tkinter.font.Font.__del__` 会调 Tcl, 而 Tcl
+        # 只有主线程能安全调用 —— 后台 worker 触发 GC 时终结字体对象会直接段错误(见
+        # archive_management.ui.typography._ScaledFont.__del__)。这里本来就在主线程上按
+        # 100ms 周期跑, 是天然的排空点, 不需要额外的事件源。
+        drain_deferred_fonts()
         while True:
             try:
                 kind, payload = self._messages.get_nowait()

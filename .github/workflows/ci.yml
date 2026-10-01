@@ -146,6 +146,10 @@ jobs:
         # 与 pytest 作业里那一步同一个配方(连 Chrome 源失效的绕行也一样): 界面是中文的,
         # 而 Tk 的量宽全靠字形度量 —— 没有 CJK 字体时汉字会被量成近乎零宽, 截出来的画面
         # 与基线对不上, 而且会以"文字没换行/没省略"的形态出现(2026-09-27 在分片里踩过)。
+        #
+        # ``python3-tk`` (发行版的 Tk 8.6) 是给**视觉回归那一步**装的, 详见它下面的说明:
+        # uv 管的那份 Python 里带的 Tk 在 X11 上只会用核心位图字体, 而核心字体看不到任何
+        # TTF —— 装再多字体也画不出汉字。
         shell: bash
         run: |
           while IFS= read -r -d '' source; do
@@ -154,12 +158,12 @@ jobs:
             fi
           done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
           sudo apt-get update
-          sudo apt-get install -y xvfb fonts-noto-cjk
+          sudo apt-get install -y xvfb fonts-noto-cjk python3-tk
 
       - name: Run the visual regression
-        # 起一个真实窗口、拍空库那一组画面、与入库的基线图比(感知哈希距离 + SSIM)。
+        # 起一个真实窗口、拍两套画面(演示数据 + 空库)、与入库的基线图比(感知哈希距离 + SSIM)。
         # 这是一道**门禁**: 界面变了就要有人看一眼再合, 所以不一致时这一步直接红。
-        # 基线图在 ui-review/baselines/(入库); 还没有基线时本脚本只产出候选基线并写明
+        # 基线图在 tests/visual-baselines/(入库); 还没有基线时本脚本只产出候选基线并写明
         # "基线尚未入库", 不判失败 —— 否则第一轮永远卡住(见脚本的模块说明)。
         # 结论写进 allure-results-visual, 由汇总作业收进报告(标签 env=common +
         # testCategory=quality, 于是它落进 Common 环境与"工程门禁:质量检查未通过"分类)。
@@ -169,7 +173,28 @@ jobs:
         # 屏幕宽, 于是"默认屏幕是多少"就变成了画面尺寸的隐藏输入(xvfb-run 换默认值时
         # 假红)。显式写死屏幕后, 截出来就是应用自己的 1360x860。深度 24 同理: 默认深度
         # 偏低时颜色会被量化, 与基线对不上。
-        run: xvfb-run -a -s "-screen 0 1600x1000x24" uv run python scripts/create_allure_visual.py --results-dir allure-results-visual --baselines ui-review/baselines --candidates visual-baselines-candidates
+        #
+        # 脚本**不依赖 ui-review/**: 那个目录被它自己的 .gitignore 挡在仓库外(CI 上根本
+        # 不存在), 而且只是开发阶段的临时物 —— 曾经因为复用它的 capture.py, 这一步在 CI
+        # 上直接以"找不到复用脚本"退出 2。现在建窗口/切状态都在脚本里, 只复用 tests/ 下
+        # 已被 Linux 分片验证的抓图原语。
+        #
+        # **这一步用发行版的 Tk, 不是 uv 管的那份 Python**(实测 2026-10-02): uv 装的
+        # CPython 里带的 ``libtcl9tk9.0.so`` 在 X11 上只走**核心位图字体** —— 符号表里只有
+        # ``XLoadQueryFont`` / ``XCreateFontSet`` 那一套, 没有 fontconfig/FreeType, 于是它
+        # 看不到任何 TTF: 截出来的画面里汉字一个都没画出来(整排按钮是空的), 拉丁字形也是
+        # 位图字体(锯齿), 而这与装了多少字体无关。发行版 ``python3-tk`` 的 Tk 8.6 走
+        # Xft/fontconfig, 才是与 ``fonts-noto-cjk`` 配套的那一个; ``UV_PROJECT_ENVIRONMENT``
+        # 让它装进独立环境, 不动本作业其余步骤共用的 .venv。
+        #
+        # 脚本自己也会拦: 汉字量不出宽度时它标红**且不产出候选基线**(见 tests/unit/
+        # test_report_verification.py 的守卫) —— 宁可这一轮没有基线, 也不拿一张看不清的
+        # 图当"正确"。
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv-visual
+        run: |
+          uv sync --locked --no-default-groups --group visual --python /usr/bin/python3.12 --python-preference only-system
+          xvfb-run -a -s "-screen 0 1600x1000x24" uv run --no-sync python scripts/create_allure_visual.py --results-dir allure-results-visual --baselines tests/visual-baselines --candidates visual-baselines-candidates
 
       - name: Upload visual Allure results
         # 与质量/分析两份同理: 结论要进汇总报告。`if-no-files-found: error` —— 这一份缺了
@@ -183,7 +208,7 @@ jobs:
 
       - name: Upload candidate baselines
         # 这一份是**给人看的输入**而不是结论: 基线缺失或界面有意改动时, 把本轮真实画面传上来
-        # 供下载后提交到 ui-review/baselines/。所以 `ignore` 而不是 `error` —— 它没有产出
+        # 供下载后提交到 tests/visual-baselines/。所以 `ignore` 而不是 `error` —— 它没有产出
         # 时, 上面那一步已经红了, 再红一次只是噪音。
         if: always()
         uses: actions/upload-artifact@v7

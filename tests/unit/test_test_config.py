@@ -263,6 +263,27 @@ def _dev_groups() -> dict[str, list[str]]:
     return cast("dict[str, list[str]]", groups)
 
 
+def _sync_by_environment(job_body: str) -> dict[str, list[str]]:
+    """把作业里的 ``uv sync`` 按"这一步装到哪个环境"归类.返回 ``环境名 -> 命令行列表``.
+
+    同一个作业可以故意装有**两份环境**: 视觉回归那一步要用发行版的 Tk(uv 管的那份 Python
+    在 X11 上只走核心位图字体, 汉字一个都画不出来, 见 PLAN §22), 于是它用
+    ``UV_PROJECT_ENVIRONMENT`` 指到另一个目录、只装 ``--group visual``。
+
+    "每次 uv sync 必须一致"这条规矩守的是"别在**同一个**环境里来回换组"(后一次会把前一次
+    刚装好的组删掉), 所以先按环境分组再比。
+    """
+    by_environment: dict[str, list[str]] = {}
+    for step in re.split(r"\n\s*- (?:name|uses|run):", job_body):
+        lines = re.findall(r"uv sync[^\n]*", _without_comments(step))
+        if not lines:
+            continue
+        target = re.search(r"UV_PROJECT_ENVIRONMENT:\s*(\S+)", step)
+        key = target.group(1) if target else "(作业共用)"
+        by_environment.setdefault(key, []).extend(lines)
+    return by_environment
+
+
 def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
     """CI 每个作业只装自己需要的那一组依赖, 而且每组都在 `uv sync` 里显式列出来.
 
@@ -279,21 +300,31 @@ def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
         text = workflow.read_text(encoding="utf-8")
         for name, body in ci_workflow.jobs(text).items():
             commands = _without_comments(body)
-            synced = re.findall(r"uv sync[^\n]*", commands)
+            by_environment = _sync_by_environment(body)
 
             if name in _UV_FREE_JOBS:
                 hint = f"{name} 登记为不用 uv, 却出现了 uv 命令: 要么让它 sync, 要么别用 uv"
                 assert "uv " not in commands, hint
                 continue
 
+            synced = [line for lines in by_environment.values() for line in lines]
             assert synced, f"{workflow.name} 的 {name} 没有 uv sync"
-            assert len(set(synced)) == 1, f"{name} 里每次 uv sync 必须一致: {synced}"
-            command = synced[0]
-            assert "--locked" in command, f"{name} 的 uv sync 没用 --locked"
-            # 默认组是给本地开发用的: CI 里它会把整套依赖静默装回来(实测一次装回 51 个包)。
-            assert "--no-default-groups" in command, f"{name} 的 uv sync 没关掉默认组"
+            # 同一个环境里的多次 sync 必须一模一样; 另一个环境可以有自己的那一套。
+            for target, lines in by_environment.items():
+                hint = (
+                    f"{name} 在同一个环境({target})里的每次 uv sync 必须一致"
+                    f"(后一次会把前一次装好的组删掉): {lines}"
+                )
+                assert len(set(lines)) == 1, hint
+            for line in synced:
+                assert "--locked" in line, f"{name} 的 uv sync 没用 --locked: {line}"
+                # 默认组是给本地开发用的: CI 里它会把整套依赖静默装回来(实测一次装回 51 个包)。
+                hint = f"{name} 的 uv sync 没关掉默认组: {line}"
+                assert "--no-default-groups" in line, hint
 
-            listed = set(re.findall(r"--group ([\w-]+)", command))
+            listed = set().union(
+                *(set(re.findall(r"--group ([\w-]+)", line)) for line in synced)
+            )
             hint = f"{name} 引用了不存在的依赖组: {sorted(listed)}"
             assert listed <= set(_dev_groups()), hint
 

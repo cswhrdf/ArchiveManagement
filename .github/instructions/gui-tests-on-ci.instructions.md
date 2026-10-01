@@ -1,9 +1,9 @@
 ---
 applyTo: "tests/integration/test_gui_*.py,tests/gui_support.py,tests/unit/test_ui_*.py,tests/unit/test_dialogs.py,src/archive_management/ui/home_page.py,src/archive_management/ui/dialogs.py,src/archive_management/ui/keyboard.py"
-description: "写或改 GUI 端到端用例(以及它们量到的那几处界面代码)时的实测坑: CI 上的窗口尺寸不由用例决定、字体度量会变、合成键盘事件走焦点窗口(焦点可能压根不在对话框里)、尺寸夹取要看请求高度并收敛、延后的布局任务要与控件一起撤。遇到\"本机绿、CI 红(尤其只有 Windows 或只有 Linux 红)\"的布局/尺寸/文字截断/按键失败时先读这篇。"
+description: "写或改 GUI 端到端用例(以及它们量到的那几处界面代码)时的实测坑: CI 上的窗口尺寸不由用例决定、字体度量会变、合成键盘事件走焦点窗口(焦点可能压根不在对话框里)、尺寸夹取要看请求高度并收敛、延后的布局任务要与控件一起撤、行/卡片会被重渲染销毁(等待之后必须重新取引用)。遇到"本机绿、CI 红(尤其只有 Windows 或只有 Linux 红)"的布局/尺寸/文字截断/按键失败时先读这篇。"
 ---
 
-# GUI 端到端用例在 CI 上: 七条实测出来的坑与写法
+# GUI 端到端用例在 CI 上: 八条实测出来的坑与写法
 
 本仓库的 GUI 用例跑在真 Tk 上(本地 Windows、CI 的 ubuntu(xvfb) + windows runner), 下面每条都是
 **实测踩过**的: 失败形态都是"本机全绿、CI 上某几台红", 而且红的那几条看起来像产品 bug, 其实是用例
@@ -147,6 +147,33 @@ CI 上可能还没轮到 —— 实测 2026-09-30: Windows runner 上"表头与�
   接线 —— 上面那条死代码就是这么躲过守卫的。
 * 同类噪声 `invalid command name "...check_dpi_scaling"` 来自 CustomTkinter 自己, 不是我们的。
 
+## 6. 行/卡片会被重渲染销毁: "等一会儿再量"的引用必须当场重新取
+
+主页有两条整页重建路径: `HomePage.refresh_artwork` → `_render_games`(由**异步数据落地**触发: 封面/译名
+补好)与延后 60ms 的 `_schedule_list_sync`。两者都先 `destroy` 旧行再重建 `_rows`/`_row_parts`), 于是
+**等待之前抓到的控件引用已经失效** —— 拿它调 `winfo_*` 报的是:
+
+```text
+_tkinter.TclError: bad window path name ".!ctkframe2.!...!ctkscrollableframe.!ctkframe4"
+```
+
+实测 2026-10-01(Windows 分片 0, `test_long_game_name_does_not_widen_the_list_rows`): 用例先
+`rows = list(page._rows.values())` 抓一份快照, 再去"等各列对齐"(最多 3s, 一直在泵事件), 期间那次
+重渲染落地 → 后面 `row.winfo_rootx()` 直接抛上面那句。**那句报错与"布局对不对"毫无关系**, 看上去
+像控件树坏了, 只会把排查带偏。
+
+* 凡是"等一会儿再量"的地方, 都在**量的那一刻**从 `page._rows` / `page._row_parts` 重新取
+  (见 `_live_row`; `_wait_until_the_name_fits` 本来就在循环里每轮重取)。
+* 量之前先 `winfo_exists()` 判一次, 把"拿到失效引用"变成一句能照着做的断言("请在等待之后重新取行"),
+  别让它以 TclError 的形式冒出来。
+* **延后任务算出来的**不变量(如"最后一列贴住右边界")同样要"等到成立", 不能量一次 —— 重建会把它
+  重置回兜底值(`_wait_for_the_fixed_block_to_hug_the_right`)。
+* 反过来也对: **要量"稳定态/刚设的状态"就别在中间泵事件**。悬停判定就是靠这一点(`_set_hover(None)`
+  之后立刻读, 中间多一次 `_pump` 就可能被延后重排复位)。
+* 这一条**在本机可以确定性复现**(不必等 CI): 取一行 → 调 `page._render_games()` → 拿旧引用调
+  `winfo_rootx()`, 报的就是那句 TclError。守卫:
+  `tests/integration/test_gui_layout.py::test_a_row_reference_goes_stale_after_a_rerender`。
+
 ## 7. 尺寸/夹取类改动: 一次夹取不够, 还要一起看请求高度
 
 "这个窗口/对话框比屏幕高"这类断言在**尺寸恰好压线**的时候最容易只红一个平台。实测 2026-09-30:
@@ -180,3 +207,4 @@ CI 上可能还没轮到 —— 实测 2026-09-30: Windows runner 上"表头与�
 6. 新加的 `after`/`bind` 在控件销毁时撤得掉吗? 守卫驱动的是真接线吗?
 7. 尺寸/夹取: 量的是 `winfo_height()` 还是"请求与实测取大者"? 收一轮不够时还会继续收敛吗?
 8. 这条断言在**焦点/尺寸**这两种"环境给的"条件下, 有没有一条能在本机复现的反例用例?
+9. 每处测量用的控件引用都是**当下**取的吗? 中间泵过事件的话, 它可能已经被重渲染销毁了。

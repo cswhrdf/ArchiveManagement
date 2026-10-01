@@ -67,6 +67,7 @@ import pytest
 
 import crash_capture
 import sharding
+import timeout_guard
 import tk_guard
 from archive_management.i18n import DEFAULT_LOCALE, set_locale
 from archive_management.services.audit import AUDIT_LOGGER_NAME
@@ -356,6 +357,23 @@ def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
     items[:] = [item for item in items if item.nodeid in mine]
     if deselected:
         config.hook.pytest_deselected(items=deselected)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_timeout_set_timer(item: pytest.Item, settings: Any) -> bool | None:
+    """超时也要留下现场(见 ``tests/timeout_guard.py``).
+
+    ``tryfirst`` + 返回 ``None`` 表示"这次不接管": pytest-timeout 这个钩子是
+    ``firstresult``, 我们只在 ``thread`` 模式下接管(它超时后直接 ``os._exit(1)``,
+    覆盖率与失败现场都会丢), ``signal`` 模式照旧交给它自己实现。
+    """
+    return timeout_guard.set_timer(item, settings)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_timeout_cancel_timer(item: pytest.Item) -> bool:
+    """用例正常结束时撤掉上面那个计时器."""
+    return timeout_guard.cancel_timer(item)
 
 
 @pytest.hookimpl(wrapper=True, trylast=True)

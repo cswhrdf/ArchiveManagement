@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -68,3 +70,102 @@ def test_base_font_is_clamped_to_the_allowed_range(given: int, expected: int) ->
     """越界的基准字号夹到配置允许的区间(最后一道保护)."""
     assert typography.set_base_font_px(given).base_px == expected
     assert typography.current_scale().base_px == expected
+
+
+def _fake_font() -> tuple[typography._ScaledFont, list[str]]:
+    """造一个不碰 Tk 的字体对象, 并把"真正调 Tcl 的那一步"换成计数器.
+
+    ``tkinter.font.Font`` 没有 ``__slots__``, 所以可以跳过 ``__init__`` 直接构造 —— 要验证的
+    正是"这一步发生在哪个线程上", 而"这一步做了什么"无关紧要。
+    """
+    calls: list[str] = []
+    font = object.__new__(typography._ScaledFont)
+    font._delete_tcl_font = lambda: calls.append(  # type: ignore[method-assign]
+        "delete"
+    )
+    return font, calls
+
+
+def test_a_font_is_released_immediately_on_the_main_thread() -> None:
+    """主线程上终结字体: 立刻释放(这条路径与改造前完全一致)."""
+    font, calls = _fake_font()
+    typography.drain_deferred_fonts()
+
+    font.__del__()
+
+    assert calls == ["delete"]
+    assert typography.deferred_font_count() == 0
+
+
+def test_a_font_is_only_deferred_on_a_worker_thread() -> None:
+    """后台线程上终结字体: **一次 Tcl 都不碰**, 只寄存等主线程来删.
+
+    这正是 2026-10-01 CI 段错误的那条路径(``tkinter/font.py`` 的 ``__del__`` 在 worker
+    线程的 GC 里调 Tcl, 主线程同时正在 ``canvas.coords``)。修法不是"让它在那儿删得对",
+    而是"根本别在那儿删"。
+    """
+    font, calls = _fake_font()
+    typography.drain_deferred_fonts()
+
+    worker = threading.Thread(target=font.__del__, name="font-reaper")
+    worker.start()
+    worker.join()
+
+    assert calls == []
+    assert typography.deferred_font_count() == 1
+
+    assert typography.drain_deferred_fonts() == 1
+    assert calls == ["delete"]
+    assert typography.deferred_font_count() == 0
+
+
+def test_the_message_pump_drains_deferred_fonts() -> None:
+    """主窗口的消息泵负责排空: 它本来就在主线程上按 100ms 周期跑, 不需要新的事件源."""
+    from archive_management.ui import main_window
+
+    source = Path(main_window.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def _poll_messages") :][:600]
+
+    assert "drain_deferred_fonts()" in body
+
+
+def test_each_platform_prefers_a_family_that_really_exists_there() -> None:
+    """候选表的第一位必须是"那个平台真的装了的"字体 —— 顺序错了画面就变.
+
+    - Windows 上必须还是 **Roboto**: customtkinter 自带并私有注册它, 现有界面的字形与
+      入库的基线都是照它采的;
+    - Linux 上必须是**中日韩字体**: uv 管的那份 Tk 一个 TTF 都用不了(只走 X11 核心位图字体,
+      见 PLAN §22), 发行版的 Tk 则靠 fontconfig 找字体 —— 而 CI 装的是 fonts-noto-cjk。
+    """
+    assert typography.preferred_candidates("win32")[0] == "Roboto"
+    assert typography.preferred_candidates("linux")[0].startswith("Noto Sans CJK")
+    assert "PingFang SC" in typography.preferred_candidates("darwin")
+
+
+def test_the_family_is_chosen_by_really_resolving_it() -> None:
+    """挑族名靠"真的解析得到", 而不是"在 ``families()`` 列表里".
+
+    实测 2026-10-01~02: Windows 上 ``font.families()`` **看不到** Roboto(customtkinter 用
+    ``FR_PRIVATE | FR_NOT_ENUM`` 注册, 它不进枚举), 但 ``actual("family")`` 就是 Roboto。
+    只查列表会得出"Roboto 不存在", 顺手把 Windows 的画面也改掉。
+    """
+    assert typography.pick_family(["A", "B", "C"], lambda name: name == "B") == "B"
+    assert typography.pick_family(["A"], lambda name: False) is None
+    assert typography.pick_family([], lambda name: True) is None
+
+
+def test_a_requested_family_wins_over_the_platform_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """调用方写了 family 就用它的(那是"这一处有意用别的字体"), 只有没写才补平台默认."""
+    monkeypatch.setattr(typography, "current_family", lambda: "平台默认")
+
+    assert typography._family_for_request("指定字体") == "指定字体"
+    assert typography._family_for_request(None) == "平台默认"
+
+
+def test_creating_a_font_goes_through_the_platform_family() -> None:
+    """接线守卫: ``_ScaledFont.__init__`` 必须真的把解析结果用上(否则整段解析白做)."""
+    source = Path(typography.__file__).read_text(encoding="utf-8")
+
+    assert "family=_family_for_request(family)" in source

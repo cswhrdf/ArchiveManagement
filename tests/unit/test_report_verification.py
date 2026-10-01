@@ -1918,6 +1918,62 @@ def test_quality_job_runs_on_one_platform() -> None:
     assert "\n  performance:\n" not in workflow, "不要再把性能基准拆成独立作业"
 
 
+def test_the_visual_gate_refuses_a_frame_that_cannot_draw_cjk(tmp_path: Path) -> None:
+    """字体画不出汉字的画面**不许当基线**: 结论照写(带探针), 候选基线一个都不产出.
+
+    出处(2026-10-02): CI 的候选基线里整排按钮是空的(汉字一个都没画出来), 而那一轮在报告里
+    是**通过** —— 判据只比"这轮与基线像不像", 基线本身是坏的时候它看不出来。所以脚本先跑
+    字体探针, 拿它当门禁。
+    """
+    module = _load_script("create_allure_visual")
+    broken = {"cjk_width": 0, "actual": "fixed"}
+    assert module.font_problem(broken), "汉字量不出宽度时必须判不可用"
+    assert module.font_problem({"cjk_width": 40, "actual": "fixed"}), (
+        "落到核心位图字体也一样不可用(没有抗锯齿)"
+    )
+    assert not module.font_problem({"cjk_width": 40, "actual": "Noto Sans CJK SC"})
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "01-画面.png").write_bytes(b"\x89PNG\r\n\x1a\nfake bytes, good enough")
+    candidates = tmp_path / "candidates"
+    candidates.mkdir()
+    results = tmp_path / "results"
+    results.mkdir()
+
+    comparison = module.process_screen(
+        "01-画面.png",
+        work_dir=work,
+        baselines=tmp_path / "baselines",
+        candidates=candidates,
+        results_dir=results,
+        host="Linux",
+        skipped=(),
+        probe={
+            **broken,
+            "cjk_candidates": [],
+            "families": 3,
+            "platform": "Linux",
+            "python": "3.12.0",
+            "tk": "9.0",
+            "requested": "Noto Sans CJK SC",
+            "ascii_width": 20,
+        },
+        blocked=module.font_problem(broken),
+    )
+
+    assert not comparison.passed
+    assert list(candidates.iterdir()) == [], "画不出汉字的图不该被当成候选基线"
+    payload = json.loads(
+        next(results.glob("*-result.json")).read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "failed", "必须标红: 这一轮的画面不可信"
+    assert "汉字量出来是 0 宽" in payload["statusDetails"]["message"]
+    names = [attachment["name"] for attachment in payload["attachments"]]
+    assert "fonts.txt" in names, "探针要作为附件进报告(不然下一次还得猜)"
+    assert "actual.png" in names, "坏图也要留着: 人要看它坏成什么样"
+
+
 def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> None:
     """视觉回归(感知哈希 + SSIM)是公共质量作业的一道门禁, 结论要进 Common 环境并进总账.
 
@@ -1941,9 +1997,32 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
     assert "xvfb-run -a" in job, "无头 runner 上必须经 xvfb 起显示"
     assert "xvfb" in job, "对应的系统包也要装"
     assert "allure-results-visual" in job, "结论要作为产物上传"
-    assert "ui-review/baselines" in job, "基线图入库, 从仓库里读"
+    assert "tests/visual-baselines" in job, "基线图入库, 从仓库里读"
+    # 基线**不能**放 ui-review/: 那个目录被它自己的 .gitignore 挡在仓库外, CI 上根本不存在
+    # (曾经因为复用 ui-review/capture.py, 这一步在 CI 上以"找不到复用脚本"退出 2)。
+    # 只看命令: 注释里正拿这件事当反面说明(与本仓库其它几条守卫同一个口径)。
+    code = "\n".join(
+        line for line in job.splitlines() if not line.strip().startswith("#")
+    )
+    assert "ui-review" not in code, (
+        "门禁不许依赖 ui-review/(它不进仓库, 且只是开发阶段的临时物)"
+    )
     assert "matrix" not in job, "视觉回归不按平台展开: 基线只按一种渲染采"
     assert "font" in job, "要装 CJK 字体: 否则汉字被量成零宽, 画面与基线对不上"
+    # 但"装了字体"还不够: 用的那个 Tk 必须看得到 fontconfig/FreeType。uv 管的那份 Linux
+    # CPython 里带的 Tk 在 X11 上只走**核心位图字体**(实测它的 libtcl9tk9.0.so 只有
+    # XLoadQueryFont/XCreateFontSet 那套符号), 汉字一个都画不出来 —— 2026-10-02 的候选基线
+    # 就是这么空的。所以这一步要用发行版的 python3-tk, 并且装进独立环境(别动作业共用的 .venv)。
+    assert "python3-tk" in job, "要装发行版的 Tk: uv 管的那份在 X11 上画不出汉字"
+    visual_step = job.split("name: Run the visual regression", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    assert "--python-preference only-system" in visual_step, (
+        "视觉回归要用系统的解释器(发行版 Tk), 不是 uv 管的那份"
+    )
+    assert "UV_PROJECT_ENVIRONMENT" in visual_step, (
+        "那一份装进独立环境, 别动本作业其余步骤共用的 .venv"
+    )
 
     summary = ci_workflow.job_block(workflow, "allure-summary")
     assert "name: allure-results-visual" in summary, "汇总作业要把这份结论收进报告"

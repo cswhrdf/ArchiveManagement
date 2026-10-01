@@ -2287,9 +2287,10 @@ Tk 无 AT-SPI 桥"；量出来非 0，再按 §17.3 的原案（不可见即记�
   （主页海报/列表两个视图 + 游戏发现 + 游戏启停，2 张 + 2 张）→ 与基线比。两条判据：
   `imagehash.phash`(64 位)距离 ≤ 6 **且** `skimage.metrics.structural_similarity` ≥ 0.98
   （初始值从"两次相同渲染应当完全相同"留余量取；命令行可覆盖）。
-- **复用而不是另写一套**：建窗口与截图直接加载 `ui-review/capture.py` 的
-  `build_app` / `prepare_root` / `Recorder` / `capture_empty`（它自己又复用
-  `tests/crash_capture.py` 的 `window_box` / `grab_png`）—— 评审脚本与 CI 门禁看的是同一套代码。
+- **自包含，不依赖 `ui-review/`**（2026-10-01 修正）：建窗口与切状态（空库那一组画面）都在脚本自己里，
+  只复用 `tests/crash_capture.py` 的 `window_box` / `grab_png` —— 那两个函数里有两处踩过坑的平台细节
+  （Windows 按窗口句柄抓、Linux 走 `xdisplay`），而且它们已被 Linux 分片的 GUI 用例每天验证着。
+  最初是加载 `ui-review/capture.py` 复用的，结果 CI 上直接以"找不到复用脚本"退出 2（原因见 18.3）。
 - **CI（`.github/workflows/ci.yml`）**：四步加进**质量作业**（与 ruff / 静态分析 / 性能基准同一个作业，
   它同样与平台无关）：装 `xvfb` + `fonts-noto-cjk` → `xvfb-run` 跑脚本 → 上传
   `allure-results-visual` → 上传 `visual-baselines-candidates`（给人下载后提交基线）。
@@ -2302,16 +2303,32 @@ Tk 无 AT-SPI 桥"；量出来非 0，再按 §17.3 的原案（不可见即记�
 
 ### 18.2 两个刻意的设计决定（容易被"优化"掉的）
 
-1. **基线图入库**（`ui-review/baselines/`），不存 artifact。视觉回归要回答的是"这一版把界面改了吗"，
+1. **基线图入库**（`tests/visual-baselines/`），不存 artifact。视觉回归要回答的是"这一版把界面改了吗"，
    基线跟着代码走,改动才会出现在 PR 的 diff 里。反过来若把基线做成"上一轮成功运行的产物"，
    会**死锁**：界面有意改动 → 比对失败 → 这一轮不是成功运行 → 新画面永远不会成为基线 → 一直红。
 2. **缺基线不算失败**：某张画面没有对应文件时，脚本把本轮画面写成候选基线并在报告里写明
    "基线尚未入库"，状态仍是通过。既不让第一轮永远卡住，也不把"没判据"混进"通过"
    （描述里那句话就是区别所在）。**待办：第一轮 CI 跑完后把候选图确认并提交进
-   `ui-review/baselines/`，这道门禁才真正开始判。**
+   `tests/visual-baselines/`，这道门禁才真正开始判。**
 
 ### 18.3 踩到的坑与实测
 
+- **门禁依赖了一个不在仓库里的目录**（2026-10-01 首次真跑 CI 就撞上）：脚本最初复用
+  `ui-review/capture.py`，而 `ui-review/` **整体被它自己的 `ui-review/.gitignore` 的 `*` 挡在仓库外**
+  （§I 的"评审包"早就写着"已 gitignore，仅本地"，见第 635 行）—— 于是 CI 上那一步直接
+  `Error: 找不到复用脚本: /home/runner/work/.../ui-review/capture.py`、退出码 2。
+  **教训**：本地跑绿说明不了什么 —— 判据要问"CI 检出后这个文件在不在"，而不是"我这台机器上在不在"。
+  改法：建窗口/切状态搬进脚本自己，只复用 `tests/` 下**已被跟踪**的抓图原语；守卫里加了一条
+  `assert "ui-review" not in job`（门禁不许依赖它）。顺带把基线目录也从 `ui-review/baselines/`
+  搬到 `tests/visual-baselines/`（否则基线同样进不了仓库，第一轮采完也就丢了）。
+- **`scripts/` 的类型错误只在 pre-commit 里暴露**：`pyproject` 的 `files = ["src", "tests"]` 不含
+  `scripts/`，而 pre-commit 的 mypy 钩子是把**改动文件当参数**交给 mypy（显式文件名绕过 `files=`）。
+  所以"`uv run mypy` 全绿"不等于脚本也绿。这次撞上的是 `no-untyped-call`：scikit-image 带
+  `py.typed`，但 `structural_similarity` 自己没标注 —— 带了 `py.typed` 的库反而更容易触发这条
+  （缺 marker 的库整体被当 `Any`，调用反而不报）。按仓库既有风格给了指定错误码的行内忽略。
+- **pre-commit 检查的是索引里的内容**：它有未暂存改动时会先 `Stashing unstaged files` 再跑，
+  所以"改完文件直接重跑钩子"仍是红（跑的还是暂存的旧版本，连报错行号都停在旧位置）。
+  手动改过文件后要先 `git add` 再跑。这条通用，不只这次。
 - **`xvfb-run` 的默认屏幕装不下窗口**：应用请求 1360×860，而 `xvfb-run -a` 的默认屏幕是
   1280×1024 —— 窗口会被夹到屏幕宽，于是"默认屏幕是多少"成了画面尺寸的隐藏输入（xvfb-run
   换默认值就假红）。所以命令里显式写 `-s "-screen 0 1600x1000x24"`：尺寸与色深都钉死
@@ -2333,7 +2350,7 @@ Tk 无 AT-SPI 桥"；量出来非 0，再按 §17.3 的原案（不可见即记�
 
 ### 18.4 还没做的
 
-- **基线尚未入库**：`ui-review/baselines/` 目前只有一份 `README.md`（说明怎么采）。第一轮 CI 的
+- **基线尚未入库**：`tests/visual-baselines/` 目前只有一份 `README.md`（说明怎么采）。第一轮 CI 的
   `visual-baselines-candidates` 产物确认后提交进来，门禁才从"记录"变成"比较"。
 - **只覆盖空库**：有数据的那些画面依赖 `dev-data` 与后台补译名/补封面，不适合当跨运行比较的输入
   （§17.4 已记）。要扩到有数据的画面，先得让那套数据在 CI 里可复现。
@@ -2397,6 +2414,257 @@ Tk 无 AT-SPI 桥"；量出来非 0，再按 §17.3 的原案（不可见即记�
 `ui-review/capture.py`（切状态）、`winfo_children()` 递归 + `winfo_reqwidth()`/`winfo_width()`
 （判"文字要的宽度 vs 分到的宽度"）。判据要盯的是**不变量**（文字完整、控件 `is_mapped`、同容器内
 bbox 不重叠），不是像素 —— 像素那一层已经由 §18 的 `imagehash + scikit-image` 覆盖了。
+
+---
+
+## 20. 让崩溃与超时留下现场（2026-10-01，已落地）
+
+§15.9 那两条红（Linux 段错误、Windows 挂起）都是"**本地不复现、事后没证据**"。这一轮先解决证据问题：
+把"这两种死法什么都不留"改成"死之前把栈、覆盖率、现场 dump 与一条结论全落盘"。两件事分开记。
+
+### 20.1 段错误：Tcl 字体只能在主线程释放（**已修**）
+
+**证据**（Linux 分片 2，退出码 139，`.coverage.shard-2` 从未写出）：
+
+```text
+Fatal Python error: Segmentation fault
+Current thread ...: Garbage-collecting          ← worker 线程在回收对象
+  File ".../tkinter/font.py", line 121 in __del__   ← 在 worker 线程上调 Tcl
+主线程同时: _poll_messages → ... → CTkProgressBar.set → ctk_canvas.coords
+```
+
+`tkinter.font.Font.__del__` 会调 Tcl（`font delete`），而 **Tcl/Tk 只有创建解释器的那个线程能安全调用**。
+界面里有上百个字体对象，它们随控件树成环 → 由**循环 GC** 回收，而 GC 跑在"当时正在分配的任意线程"上。
+所以这不是"某处写错了"，而是"迟早会有一次"的竞态。
+
+**修法**（`src/archive_management/ui/typography.py`）：`_ScaledFont.__del__` 分线程处置 ——
+
+- 主线程：照旧立刻释放（与改造前完全一致）；
+- 其它线程：把对象挂进 `_DEFERRED_FONTS`（**复活**，于是这次 GC 不会终结它），等主线程来删。
+
+排空点在 `ArchiveApp._poll_messages` 开头（它本来就在主线程上按 100 ms 跑，**不需要新的事件源**）。
+代价只是"释放晚一点"，收益是**不可能**再从 worker 线程调 Tcl。
+
+**守卫**（`tests/unit/test_typography.py`，三条都咬合验证过）：主线程调用 `__del__` 立刻删、worker 线程调用
+`__del__` **一次 Tcl 都不碰**只寄存、`_poll_messages` 真的调了排空函数（文本级守卫，防"删掉那行调用"）。
+
+### 20.2 超时：`os._exit` 之前把数据存下来（**已落地**）
+
+**证据**（Windows 分片 0）：`--timeout=60` 在 `database.py:61 connection.commit()` 处杀掉了
+`test_pipeline_backup_restore.py:66`，那一片进程里还跟着 19 个 `APScheduler` 线程。pytest-timeout 的行为是
+打印各线程栈然后 `os._exit(1)`。
+
+**问题不在"被杀死"，而在 `os._exit` 跳过了整条 `atexit`**：
+
+1. **覆盖率数据整个消失**：它是进程收尾时统一落盘的 → 那一片"完全没有数据"，下游只能报"缺片"，
+   而**缺片的原因（超时）在报告里根本看不到**；
+2. **失败现场消失**：`tests/crash_capture.py` 的留证挂在 `pytest_runtest_makereport` 上，而 `os._exit`
+   让 pytest 没机会产出那份 report —— **最需要现场的那类失败（卡死）恰恰一点现场都没有**，
+   `coredumpy load` 无从下手。
+
+**修法**（`tests/timeout_guard.py` + `tests/conftest.py` 的两个钩子）：接管 pytest-timeout 自己留的扩展点
+（`pytest_timeout_set_timer` 是 `firstresult` 钩子，上游标了 `trylast`，官方 docstring 明说
+"Can be overridden by plugins for alternative timeout implementation strategies"），**只在 `thread` 模式**接管
+（`signal` 模式抛异常、走正常收尾，覆盖率与留证都不缺，原样交给上游）。顺序：
+
+```text
+倒出用例至今的输出/日志(上游的 timeout_timer 也是先做这件事)
+  → 打印各线程栈(沿用 pytest-timeout 自己的格式)
+  → 存覆盖率(与 pytest-cov 自己在会话结束时做的是同一件事: CovController.finish)
+  → 抓"卡住的那一帧"的 coredumpy dump(主线程的栈, 超时现场就在那里)
+  → 写一条 Allure 结论(栈与 dump 都是它的附件)
+  → 冲干净三条输出通道, 最后才 os._exit(1)
+```
+
+**三个只有在真跑一次之后才会暴露的坑**（都已修，且都写进了注释）：
+
+| 坑 | 后果 | 修法 |
+| --- | --- | --- |
+| 用 `print()` 写结论 | pytest 捕获 stdout，而 `os._exit` 跳过收尾 → **结论连缓冲区一起丢**（第一次冒烟里日志只剩 pytest-timeout 自己写的栈） | 走终端写入器（`write_raw`，不做 markup 解析）：与那些栈同一条路，绕过捕获 |
+| 忘了"先倒出捕获的内容" | 上游的 `timeout_timer` 会 `suspend_global_capture()` + `read_global_capture()` 把用例至今的 stdout/stderr/日志打到终端；接管之后这步就没人做了 → **"卡死之前程序自己打了什么"一并消失**（往往比栈更说明问题） | 照它抄一遍（`dump_captured_output`），三条通道都倒 |
+| `getplugin("cov")` | pytest-cov 把持有 `cov_controller` 的插件注册在**私有名 `_cov`** 上 → 拿到 `None`，"未启用"，覆盖率照旧消失 | 按 `_cov` 取，再兜底遍历所有插件找带 `cov_controller` 的那个 |
+| `getoption("alluredir")` | allure-pytest 把这个选项的 **`dest` 定成了 `allure_report_dir`** → `getoption` **静静地**返回默认值 → 结论被丢掉 | 两个名字都试 |
+
+另外对齐了上游两个容易漏的细节：① `--timeout-method=signal` 在**非主线程**上收不到 SIGALRM，上游会
+回退成线程计时器（也就是又变成 `os._exit`）—— 那种情况同样要接管；② 退出前要 `flush` 终端/stdout/stderr，
+`os._exit` 不会帮我们冲缓冲区。
+
+**结论项长什么样**：`status=broken`（不是 `failed` —— 它不是"断言没过"，是"这条用例没能跑完"），
+标签 `suite/epic/feature/story(=nodeid)/env(=平台)/severity=critical`，**故意不写 `framework` /
+`testCategory`** —— 原生质量门那条"每个平台的 pytest 用例必须全绿"只该判真的 pytest 结果，不该被这条结论
+改变口径。dump 只在 ≤ 25 MiB 时挂进报告（媒体类型用 `application/octet-stream`，理由同
+`tests/crash_capture.py`：Allure 不认识的类型不会去渲染预览把页面卡死）。
+
+**纪律**：留证**不许改变结局** —— 每一步各自兜底，`on_timeout` 里最坏情况仍然 `os._exit(1)`
+（守卫咬合验证过：让 `preserve_scene` 抛 `MemoryError`，退出码照样是 1）。
+
+### 20.3 验证（真的跑了一次超时）
+
+临时造一条 `time.sleep(30)` 的用例，按 CI 的口径跑
+（`--timeout=5 --timeout-method=thread --alluredir=… --cov=archive_management --cov-report=`，**不加 `-s`**）：
+
+- 日志里**看得见**结论（证明终端写入器这条路真的绕过了输出捕获）—— 其中第一段就是"卡死之前程序自己打的"：
+
+  ```text
+  ~~~~~ 捕获的 stdout ~~~~~
+  冒烟: 卡住之前程序自己打的一行 print
+  用例 tests/unit/test_zz_timeout_smoke.py::test_this_one_hangs 超过 5.0s 仍未结束 —— 先把现场落盘, 再退出。
+  [超时留证] 覆盖率: 已保存(E:\...\.smoke.coverage)
+  [超时留证] 崩溃现场 dump: 已生成(600 KiB)
+  [超时留证] Allure 结论: d19a7288-…-result.json(3 个附件)
+  ```
+
+- 退出码 **1**；`.smoke.coverage` 能被 `coverage report --data-file` 正常读出（证明它是**可合并的真数据**，
+  不是空文件）；结果目录里有 `-result.json` + `threads.txt` + `notes.txt` + `-coredumpy-dump.dump`；
+- `coredumpy load <那个附件>` **直接落在卡住的那一行**（`test_this_one_hangs()` → `time.sleep(30)`）——
+  这正是"即使失败了也要保留数据"想要的效果。
+
+**守卫**：`tests/unit/test_timeout_guard.py` 20 条（含两条钉接线的：钩子必须真挂在 conftest 上、
+`pyproject` 里必须还是 `--timeout-method=thread` —— 方式一改成 `signal`，这里的 `set_timer` 就会一直返回
+`None`，而"超时后什么都没有"的老问题会**静默**回来）。冒烟用的临时用例与产物已删（`.smoke-*`、
+`.smoke-log.txt`、`crash-dumps/*_timeout.dump`、`COVERAGE_FILE` 环境变量）。
+
+### 20.4 还没做的
+
+- **Windows 挂起的根因**（§15.9 的四条建议）仍然一项没做。顺序是先让这一轮上 CI：下一次挂起就能直接
+  `coredumpy load` 那个 attachment 看现场，而不是再靠"19 个 APScheduler 线程"这种旁证猜。
+- 分片被 `os._exit` 杀掉之后，那一片里**剩下的用例不会跑**（与上游行为一致，不打算改）。
+- `crash-dumps/` 目录本身不上传；dump 靠"挂进 Allure 结果"才到得了报告，所以 `--alluredir` 必须带
+  （CI 一直带着；本地裸跑 `pytest` 时只有 `crash-dumps/` 里的文件）。
+
+### 20.5 顺带发现：本机 `test_gui_buttons.py` 有 5 条布局红（**与本次改动无关，未处理**）
+
+跑这一轮验证时顺手全量跑了 `tests/integration/test_gui_buttons.py`：5 条布局/文案宽度用例在本机红
+（`test_discovery_rows_clip_long_paths_and_ignore_stale_refits`、`test_home_page_supports_poster_mode_and_paging`、
+`test_poster_card_keeps_its_meta_below_the_title`、`test_settings_window_fits_its_content`、
+`test_settings_window_hints_follow_a_narrow_column`），单跑也红。**归因做了对照实验**：把本次全部改动
+`git stash` 掉、在 HEAD 上跑同样 5 条 → **一模一样地红**；再把字体排空那行临时去掉 → 也照样红。所以这是
+**这台机器的字体度量与 CI runner 不同**（那几条本来就按 runner 的字形宽度标定），不是回归。
+
+之所以一直没被发现：该模块的严重等级是 `normal`，不在本机 pre-commit 子集（blocker+critical）里，只有 CI
+跑全量；而 `dev-data/config/config.json` 里的 `base_font_px` 是默认的 16（已排除"持久化字号被改过"这条）。
+留在这里是为了下次再看到它们时不必重做一遍对照实验。
+
+---
+
+## 21. 第四次修 CI 的红（2026-10-01，run 36883345666，Windows 片 0）
+
+**现象**：Windows 分片 0 只红一条（`1127 passed / 1 skipped / 1 failed`），而且报的是一句看起来与布局
+无关的错：
+
+```text
+FAILED tests/integration/test_gui_layout.py::test_long_game_name_does_not_widen_the_list_rows
+E      _tkinter.TclError: bad window path name
+       ".!ctkframe2.!ctkframe2.!ctkframe2.!ctkframe3.!ctkframe2.!canvas.!ctkscrollableframe.!ctkframe4"
+```
+
+**根因（本机当场复现，不是猜）**：用例先抓了一份"行"的快照，再去等"各列对齐"，最后用快照量尺寸：
+
+```python
+rows = list(page._rows.values())  # ← 快照
+places, header, name_aligned = _wait_for_the_columns_to_line_up(
+    app, page
+)  # 最多 3s, 一直在泵事件
+...
+row = rows[0]  # ← 已经失效
+row_right = row.winfo_rootx() + row.winfo_width()  # TclError
+```
+
+那 3s 里 **异步数据落地会整页重渲染**：主窗口的消息泵 → `HomePage.refresh_artwork` → `_render_games()`
+（先把每一行 `destroy`，再重建 `_rows`/`_row_parts`）。把这段时序手工演一遍（取一行 →
+`page._render_games()` → 拿旧引用量 `winfo_rootx()`），本机报出的正是 CI 里那句 `bad window path name`，
+连控件路径的形状都一样。
+
+**为什么只有 Windows 红**：那次重渲染什么时候落地不由用例决定（异步封面/译名的时序），而"等各列对齐"
+最多等 3s —— 落在这 3s 里就红。这不是产品缺陷（重渲染是设计：封面补好后要让用户看到），而是用例把
+**等着等着就会被换掉的东西**当成了常量。
+
+**修法**（`tests/integration/test_gui_layout.py`）：
+
+- `_live_row(page, game_id=None)`：从 `page._rows` **当场**取行，并先 `winfo_exists()` 判一次 —— 拿到
+  失效引用时报的是"行控件已被重渲染销毁: 请在等待之后重新取行"，不再是 TclError；
+- `_wait_for_the_fixed_block_to_hug_the_right(app, page)`：把"最后一列贴住行右边界"写成**等不变量成立**
+  （与 `_wait_for_the_columns_to_line_up` / `_wait_until_the_name_fits` 同一套做法），且**每一轮重新取行**
+  —— 贴右本身也是延后任务算出来的，量早了读到的是兜底值；
+- 那条用例末尾不再用快照。
+
+**守卫（本机能确定性复现，不必等 CI）**：
+`test_a_row_reference_goes_stale_after_a_rerender` —— 取一行 → `page._render_games()` → 断言旧行
+`winfo_exists()` 为假（失效引用的来源）、`_live_row` 取到的是**新**行、把失效控件再交给助手时抛的是
+"已被重渲染销毁"。这条把"TclError 为什么会出现在这里"钉住了。
+
+**写进 instructions**：`.github/instructions/gui-tests-on-ci.instructions.md` 新增第 6 条（原编号跳过了 6）
+与自检清单第 9 项；`docs/testing.md` 的"列表文字截断"那节补一条同名坑。
+
+**验证方式的诚实话**：本机跑 `tests/integration/test_gui_layout.py` 有 6 条红（字体度量与 CI runner 不同，
+与 §20.5 那 5 条同源；失败点全在本次没碰过的断言上），所以**没能靠"本机跑这条用例变绿"来验证**。换成两步：
+① 临时用例直接驱动两个助手（`_live_row` 在重渲染后取到新行；贴右等待 0.17s 返回 `gap=12px`）；
+② 手工演一遍旧时序复现 CI 那句 TclError。两条都是确定性的、可重跑的。
+
+---
+
+## 22. 视觉回归的两处"看着像界面坏了"（2026-10-02，run 36883345666 的报告）
+
+看完那一轮的报告，报上来两件事：**候选基线的截图"内容都没正常加载完"**、**Linux 上"缺字体导致的
+UI 锯齿"没解决**。把用户下载的 `allure-report-final.zip` 解开、看那 4 张候选图：**汉字一个都没画
+出来**（整排按钮是空的），能画出字的只有 `ARCHIVE /`、`Steam / Epic / GOG / Ubisoft` 这类纯拉丁串，
+放大后是**硬边位图**（无抗锯齿）。两件事是同一个根因。
+
+### 22.1 根因：那一步用的 Tk 在 X11 上只认核心位图字体
+
+- **画面证据**（`allure-report-final.zip` → 报告的附件 → 4 张候选基线）：按钮、页签、页脚全是空的，
+  只有拉丁字形；且没有抗锯齿。
+- **二进制证据**（本机把 uv 用的那份 Linux CPython 下下来查）：`python/lib/libtcl9tk9.0.so` 的符号里
+  **只有核心字体那一套** —— `XLoadQueryFont` / `XCreateFontSet` / `XListFonts` / `XQueryFont` /
+  `XFreeFont`；**没有** fontconfig / FreeType / Xft 的任何字符串，整棵树里也没有自带 TTF。也就是说
+  这份 Tk **看不到任何 TTF**：装 `fonts-noto-cjk` 也没用，汉字永远画不出来，拉丁字形也只能用位图字体。
+- 顺带解释了另一个旧现象：Linux 分片的界面用例一直是在"汉字量宽 ≈ 0"的位图字体下跑的 —— 那些
+  "夹具要用拉丁串""比文本不比像素""前提写成强制断言"的纪律，正是被这种环境逼出来的。换句话说
+  **Linux 分片的绿与"界面在 Linux 上是什么样"没有关系**，而视觉回归正好把它照了下来。
+
+### 22.2 修法（三件，缺一件画面就不可信）
+
+1. **视觉回归那一步改用发行版的 Tk**：`apt-get install python3-tk`，并在那一步
+   `uv sync --locked --no-default-groups --group visual --python /usr/bin/python3.12
+   --python-preference only-system`，配 `UV_PROJECT_ENVIRONMENT=.venv-visual`（装进独立环境，不动本
+   作业其余步骤共用的 `.venv`）。Ubuntu 的 Tk 8.6 走 Xft/fontconfig，才用得上 `fonts-noto-cjk`。
+2. **产品侧不再依赖 customtkinter 的 "Roboto"**（`ui/typography.py`）：那个字体**只有 Windows 上
+   真的装上了**（customtkinter 用 GDI 的 `AddFontResourceEx` 私有注册它，其余平台它的 `FontManager`
+   直接返回 False），Linux/macOS 上我们一直在请求一个不存在的族名、画面听凭系统代换。现在按平台给
+   一串候选、**按"真的解析得到"挑**（不能查 `families()`：Windows 上 Roboto 能画但不进枚举 —— 查列表
+   会得出"它不存在"，顺手把 Windows 的画面也改掉）。Windows 仍是 Roboto（画面与基线不变），Linux
+   首选 `Noto Sans CJK SC`。
+3. **脚本自己拦住坏画面**（`scripts/create_allure_visual.py`）：每张结论都挂一份**字体探针**
+   （平台 / Python / Tk 版本、选中的族、实际解析到的族、汉字与拉丁量宽、判定）。汉字量不出宽度、
+   或落到位图字体时：**标红 + 不产出候选基线 + 退出码 2** —— 宁可这一轮没有基线，也不拿一张看不清
+   的图当"正确"（原来的行为是"没基线就算通过"，于是坏画面进了候选池还显示绿）。
+
+### 22.3 顺带：候选基线从"只拍空库"改成"有数据的 + 空库"
+
+同一轮那 4 张画面全是空库（第一版的设计理由：空库最稳、不需要种子数据），于是**真正的布局一张都没
+被覆盖**：列表列宽与名称裁剪、状态列、海报网格、详情页表头、发现与启停两个分区 —— 视觉回归要拦的
+恰恰是这些。现在换成**演示后端**（`ui/demo_backend.py`：模块级常量、不联网、不读 `dev-data`、不写盘，
+与空库一样是确定性的），拍 6 张：列表 / 海报 / 详情 / 发现 / 启停 / 空库（删光演示数据后拍，演示后端
+不碰文件系统）。一个进程仍然只建一个 Tk 根。
+
+### 22.4 守卫
+
+- `test_the_visual_gate_refuses_a_frame_that_cannot_draw_cjk`（新）：探针判定 + "不产出候选基线"
+  两条都咬住（拿假图直接驱动 `process_screen`，检查结果状态、`statusDetails`、附件里有 `fonts.txt`）。
+- `test_visual_regression_runs_in_the_quality_job_and_reaches_the_report`（加强）：质量作业必须装
+  `python3-tk`，且视觉那一步必须带 `--python-preference only-system` 与 `UV_PROJECT_ENVIRONMENT`。
+- `tests/unit/test_typography.py`：候选表首位（Windows = Roboto、Linux = 中日韩字体）、"按真的解析
+  得到挑"、请求优先于默认、`_ScaledFont` 真的用上解析结果。
+- 依赖分组守卫（`tests/unit/test_test_config.py`）改成**按环境**比：同一个环境里的多次 `uv sync`
+  必须一致；另一个环境可以有自己的那一套（视觉那一步就是另一份环境）。
+
+### 22.5 还没做的（本轮刻意不做）
+
+- **pytest 分片要不要也换成发行版 Tk**：那会把 Linux 上的字体度量整体换掉（汉字从"≈ 0 宽"变成真实
+  宽度），一批按位图度量标定、或刻意写成度量无关的用例会跟着动 —— 换不换、换完哪些用例要重标，
+  是独立的一件事。至少现在不再是"看不见"的：报告里的视觉回归会把这种差异照出来。
+- **基线图仍未入库**（`tests/visual-baselines/` 只有 README）：需要下一轮 CI 产出 6 张候选、逐张看过后
+  再提交 —— 顺便也是对新字体环境（发行版 Tk）的第一次验收。
 
 ---
 

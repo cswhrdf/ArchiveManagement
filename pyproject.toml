@@ -222,6 +222,7 @@ known_first_party = [
   "crash_capture",
   "ci_workflow",
   "tk_guard",
+  "timeout_guard",
 ]
 exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
 
@@ -235,6 +236,8 @@ exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-result
 # 否则 deptry 会把"开发依赖出现在用例里"当成越界。
 # imagehash / skimage: 同理, 它们是视觉回归的算尺(声明在 visual 组), 只被
 # scripts/create_allure_visual.py 使用, 不在 src 里出现。
+# pytest_timeout: 超时留证的接管点(见 tests/timeout_guard.py)—— 我们调它的钩子
+# (`is_debugging` / `dump_stacks`), 而不是只把它当插件用。
 DEP004 = [
   "pytest",
   "allure",
@@ -244,6 +247,7 @@ DEP004 = [
   "color_contrast",
   "imagehash",
   "skimage",
+  "pytest_timeout",
 ]
 # `allure` 与 `allure_commons` 这两个模块由 allure-pytest 带进来, 测试里直接用它记
 # 附件(含 AttachmentType 类型标注)属正常用法。

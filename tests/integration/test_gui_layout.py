@@ -79,6 +79,9 @@ pytestmark = [
 
 _WINDOW_SIZE = "1360x820"
 
+#: "固定列块贴右"允许的缝隙上限: 最后一个单元格右边界与行右边界之差(内边距/省略号的量级)。
+_ROW_RIGHT_SLACK = 20
+
 
 def _pump(app: ctk.CTk) -> None:
     """把待处理事件跑完, 保证布局与绘制都已生效."""
@@ -670,6 +673,27 @@ def _place(cell: Any) -> tuple[int, int]:
     return (cell.winfo_rootx(), cell.winfo_width())
 
 
+def _live_row(page: Any, game_id: str | None = None) -> Any:
+    """取一行**此刻还活着**的行控件(不给 ``game_id`` 就是第一行).
+
+    行会在异步数据(封面/译名)落地时被整页重渲染: ``HomePage.refresh_artwork`` →
+    ``_render_games`` 先 ``destroy`` 旧行再重建 ``_rows``/``_row_parts``。所以"等一会儿再量"的
+    用例必须**在量的那一刻重新取**; 拿着等待之前抓到的引用去调 ``winfo_*`` 只会得到
+    ``_tkinter.TclError: bad window path name``(2026-10-01 Windows 分片 0 实测) —— 那句报错
+    与"布局对不对"毫无关系, 只会把排查带偏。
+    """
+    row = (
+        page._rows.get(game_id)
+        if game_id is not None
+        else next(iter(page._rows.values()), None)
+    )
+    assert row is not None, "演示数据应当有游戏"
+    assert row.winfo_exists(), (
+        "行控件已被重渲染销毁: 请在等待之后重新取行, 而不是用旧引用"
+    )
+    return row
+
+
 def _alignment_places(
     page: Any,
 ) -> tuple[list[list[tuple[int, int]]], list[tuple[int, int]], bool]:
@@ -716,6 +740,29 @@ def _wait_for_the_columns_to_line_up(
     return places, header, name_aligned
 
 
+def _wait_for_the_fixed_block_to_hug_the_right(
+    app: Any, page: Any, *, timeout: float = 3.0
+) -> int:
+    """等到"最后一列贴住行右边界"成立, 返回实测缝隙(超时给最后一轮的读数).
+
+    贴右是 ``_sync_list_layout``(延后 60ms)算出来的, 而**行本身可能刚被重渲染重建过** ——
+    重建会把它重置回兜底值。与 :func:`_wait_for_the_columns_to_line_up` 同一条理由: 等不变量
+    成立, 别赌时长; 并且每一轮都 :func:`_live_row` 重新取行, 不拿等待之前抓到的引用。
+    """
+    deadline = time.monotonic() + timeout
+    gap: int = -1
+    while time.monotonic() < deadline:
+        _pump(app)
+        row = _live_row(page)
+        row_right = row.winfo_rootx() + row.winfo_width()
+        last = _fixed_cells(row)[-1]
+        gap = row_right - (last.winfo_rootx() + last.winfo_width())
+        if 0 <= gap <= _ROW_RIGHT_SLACK:
+            return gap
+        time.sleep(0.02)
+    return gap
+
+
 def test_long_game_name_does_not_widen_the_list_rows() -> None:
     """名称是唯一可变长的一列: 长名称不能推走固定列, 也不能把行撑宽 or 推挤对齐.
 
@@ -728,8 +775,7 @@ def test_long_game_name_does_not_widen_the_list_rows() -> None:
     _settle_layout(app)
 
     budget = _supported_content_width(app, page._list_box.winfo_width())
-    rows = list(page._rows.values())
-    assert rows, "演示数据应当有游戏"
+    assert page._rows, "演示数据应当有游戏"
     # 固定列块本身必须放得进"最小窗口"的内容区, 否则名称在最小窗口下没有位置.
     block = next(iter(page._row_parts.values())).columns.winfo_width()
     too_wide = f"固定列块 {block}px 放不进最小窗口的内容区({budget}px)"
@@ -750,11 +796,35 @@ def test_long_game_name_does_not_widen_the_list_rows() -> None:
     assert name_aligned, "名称列头与名称文本不在同一个 x 上"
 
     # 固定列块**贴靠右侧**: 最后一列的右边界离行的右边界只差一个内边距.
-    row = rows[0]
-    row_right = row.winfo_rootx() + row.winfo_width()
-    last = _fixed_cells(row)[-1]
-    gap = row_right - (last.winfo_rootx() + last.winfo_width())
-    assert 0 <= gap <= 20, f"固定列块没有贴右: 右侧还空着 {gap}px"
+    # 这里**不能**用上面那份"行"的快照: 等待期间行可能已经被重渲染销毁(见 :func:`_live_row`),
+    # 而且贴右是延后任务算出来的 —— 所以等不变量成立, 并且每一轮都重新取行。
+    gap = _wait_for_the_fixed_block_to_hug_the_right(app, page)
+    assert 0 <= gap <= _ROW_RIGHT_SLACK, f"固定列块没有贴右: 右侧还空着 {gap}px"
+
+
+def test_a_row_reference_goes_stale_after_a_rerender() -> None:
+    """行在重渲染后失效 —— 用例必须重新取(这条钉住"TclError 为什么会出现在这里").
+
+    2026-10-01 Windows 分片 0 的真实失败: 用例在"等各列对齐"期间赶上一次重渲染(异步封面/
+    译名落地 → ``refresh_artwork`` → ``_render_games``), 而它是拿**等待之前**抓到的行去量
+    ``winfo_rootx()`` 的, 于是报出与布局无关的 ``bad window path name``。这条用例把那个
+    时序手工演一遍, 保证 :func:`_live_row` 取到的是新行, 而且报错能照着做。
+    """
+    app = gui_app(_long_name_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    stale = _live_row(page)
+
+    page._render_games()  # 异步数据落地时走的就是这条重建路径
+
+    assert not stale.winfo_exists(), "重渲染本来就该销毁旧行(失效引用的来源)"
+    assert _live_row(page) is not stale, (
+        "助手必须在重渲染之后重新取行, 而不是复用旧引用"
+    )
+    # 万一有人又把失效控件交给助手, 报的必须是"请重新取行", 而不是 TclError.
+    with pytest.raises(AssertionError, match="已被重渲染销毁"):
+        _live_row(SimpleNamespace(_rows={"g": stale}))
 
 
 def test_name_fits_again_after_a_full_rerender() -> None:
