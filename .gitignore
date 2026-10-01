@@ -68,6 +68,14 @@ performance-results.json
 performance-results.csv
 security-results.json
 
+# 视觉回归的中间产物与候选基线(见 scripts/create_allure_visual.py):
+#   visual-work/                    本轮截图的临时落点
+#   visual-baselines-candidates/    本轮真实画面, 供下载后提交到 ui-review/baselines/
+#   ui-review/.tmp-empty-root/      复用 ui-review/capture.py 时它自己准备的空库目录
+visual-work/
+visual-baselines-candidates/
+ui-review/.tmp-empty-root/
+
 # Translations
 *.mo
 *.pot

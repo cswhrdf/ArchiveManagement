@@ -64,6 +64,11 @@ TEXT_OPTIONS = ("text_color",)
 # "它们与两套调色板都不撞色", 否则这条豁免会掩盖真的陈旧色。
 THEME_INDEPENDENT = frozenset(main_window._TONE_COLORS.values())
 
+# 输入控件(边界要单独量的一类): 实测 CTkEntry / CTkComboBox 的默认 ``border_width``
+# 是 **2**, 也就是"确实画着一条线"; CTkTextbox 我们自己写 1。``CTkOptionMenu`` 不支持
+# 这两个选项(``cget`` 直接报 ``ValueError``), 本仓库不用它。
+INPUT_TYPES = (ctk.CTkEntry, ctk.CTkComboBox, ctk.CTkTextbox)
+
 
 def palette_values(palette: Palette) -> set[str]:
     """当前调色板里全部 ``#rrggbb`` 值(小写)."""
@@ -133,6 +138,22 @@ def stale_color_problems(
                 found.append(
                     f"{_label_of(widget)} 的 {option}={value} 不属于当前调色板"
                 )
+    return found
+
+
+def input_boundary_problems(root: Any, palette: Palette) -> list[str]:
+    """返回"输入控件的边界不是 ``input_border``"的控件清单.
+
+    :func:`stale_color_problems` 只问"这个颜色属不属于当前调色板"—— ``border`` 与
+    ``input_border`` 都是合法值, 所以它分不出"输入框用了面板那份浅灰边界"。
+    """
+    found: list[str] = []
+    for widget in _ctk_widgets(root):
+        if not isinstance(widget, INPUT_TYPES):
+            continue
+        value = _option(widget, "border_color")
+        if value is None or value.lower() != palette.input_border.lower():
+            found.append(f"{_label_of(widget)} 的 border_color={value}")
     return found
 
 
@@ -229,5 +250,34 @@ def test_toggling_the_theme_repaints_the_whole_application() -> None:
             )
         # 兜底: 主窗口里真的要量到控件, 否则上面几条在空树上空转。
         assert len(_ctk_widgets(application)) >= 200
+    finally:
+        application.destroy()
+
+
+def test_toggling_the_theme_keeps_the_input_boundary() -> None:
+    """切主题后输入框的边界仍必须是 ``input_border``.
+
+    上一条只问"颜色属不属于当前调色板" —— 它分不出"输入框用了面板那份浅灰边界"(浅色
+    主题实测 1.20:1, 边界等于看不见, 而界面照样能跑)。这条把输入控件单独挑出来量: 主页
+    的搜索框与筛选下拉是按当前调色板造的, 主题切换后重建/重绘都得把边界带对。
+    """
+    application = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        for _ in range(3):
+            application.update_idletasks()
+            application.update()
+        # 夹具必须造出"必须触发"的条件: 来回切两次主题, 每次都量一遍。
+        for _ in range(2):
+            application._on_toggle_theme()
+            for _ in range(3):
+                application.update_idletasks()
+                application.update()
+            problems = input_boundary_problems(application, application.p)
+            assert not problems, (
+                "切主题后这些输入框的边界不是 input_border:\n" + "\n".join(problems)
+            )
+        # 兜底: 真的要量到输入控件, 否则上面在空树上空转(主页有搜索框 + 两个筛选下拉)。
+        inputs = [w for w in _ctk_widgets(application) if isinstance(w, INPUT_TYPES)]
+        assert len(inputs) >= 3, [type(w).__name__ for w in inputs]
     finally:
         application.destroy()

@@ -125,6 +125,12 @@ from archive_management.ui.widgets import (
 
 logger = logging.getLogger(__name__)
 
+# 首字占位块的文字色: 它坐在**固定色调**的色块上(见下面的 _TONE_COLORS, 这批颜色故意不跟
+# 主题走), 所以文字固定用白 —— 写成具名常量而不是调用里的字面量, 让"这个白是故意的"一眼可见。
+# (原先拦这类字面量的静态检查 C9101 已撤, 理由见 PLAN §17.3 —— 现在由 test_gui_theme_repaint
+# 在运行期整屏核对配色。)
+_HERO_TILE_TEXT = "#ffffff"
+
 _TONE_COLORS: dict[str, str] = {
     "orange": "#d15b3e",
     "blue": "#405685",
@@ -917,7 +923,7 @@ class ArchiveApp(ctk.CTk):
             height=84,
             corner_radius=RADIUS_LG,
             fg_color=self._tone_color(None),
-            text_color="#ffffff",
+            text_color=_HERO_TILE_TEXT,
             font=ctk.CTkFont(size=28, weight="bold"),
         )
         self._hero_tile.pack(side="left")
@@ -1067,6 +1073,9 @@ class ArchiveApp(ctk.CTk):
             height=36,
             corner_radius=RADIUS_MD,
             command=self._on_filter_change,
+            # 构造时就给输入边界: 下面的 _paint_combo 也会写一次(主题重绘), 但控件
+            # **建成那一瞬**就得是它 —— 否则注册表生效前会闪一下无描边的样子。
+            border_color=self.p.input_border,
             font=ctk.CTkFont(size=12),
         )
         combo.set(initial)
@@ -1093,7 +1102,7 @@ class ArchiveApp(ctk.CTk):
     def _paint_combo(self, combo: ctk.CTkComboBox, palette: Palette) -> None:
         combo.configure(
             fg_color=palette.input_bg,
-            border_color=palette.border,
+            border_color=palette.input_border,
             button_color=palette.raised,
             button_hover_color=palette.item_hover,
             text_color=palette.text_body,

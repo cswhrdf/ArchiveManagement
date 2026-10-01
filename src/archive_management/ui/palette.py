@@ -32,6 +32,7 @@ class Palette:
     card_hover: str  # 列表项/备份卡片悬停背景(卡上还有正文, 所以它要跟着正文对比度走)
     well: str  # 列表滚动区背景(卡片在其中以“凹槽”方式呈现)
     input_bg: str  # 输入/下拉控件背景
+    input_border: str  # 输入控件的边界(见下方取值说明; 面板描边另有 border)
     border: str  # 面板描边
     text_primary: str  # 标题等强文本
     text_body: str  # 正文
@@ -93,6 +94,12 @@ DARK = Palette(
     card_hover="#152238",
     well="#0c1524",
     input_bg="#0c1627",
+    # 输入控件的边界不能与面板共用 ``border``: 面板/卡片的外框是**装饰性**的(内容自身
+    # 的文字对比度独立达标, WCAG 不要求 3:1), 而输入框的边界是 1.4.11 要求 3:1 的那一类。
+    # 共用时实测最差只有 **1.20:1**(浅色 ``border`` 对 ``card_hover``), 等于没有边界。
+    # 取值对**全部表面色**(含 ``disabled_bg``)都在 3:1 以上 —— 实测最差 3.140:1
+    # (对 ``card``); 登记在 ``tests/unit/test_ui_contrast.py`` 的输入边界那一档。
+    input_border="#6a7681",
     border="#253a55",
     text_primary="#f4f7fb",
     text_body="#d2dbea",
@@ -136,6 +143,11 @@ LIGHT = Palette(
     card_hover="#eef4f8",
     well="#f1f4f8",
     input_bg="#f6f8f9",
+    # 同深色主题的理由(见 DARK 那段)。取值对全部表面色都在 3:1 以上 —— 实测最差
+    # 3.158:1(对 ``disabled_bg``); 对输入框自己的底色 ``input_bg`` 是 3.56:1。
+    # **原来的候选 ``#7f8892`` 被淘汰**: 它对 ``disabled_bg`` 只有 2.996:1, 看着像达标
+    # 其实是压线不达标(只量前 5 个表面色时会漏掉这条)。
+    input_border="#7b848f",
     border="#d6dee6",
     text_primary="#1b2735",
     text_body="#405168",

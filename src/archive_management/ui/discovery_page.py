@@ -336,7 +336,7 @@ class DiscoveryPanel:
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
             dropdown_fg_color=palette.panel,
             dropdown_text_color=palette.text_body,

@@ -218,7 +218,15 @@ class UiKit:
             parent,
             fg_color="transparent",
             corner_radius=corner_radius,
-            scrollbar_button_color="#314765",
+            # 构造时就取调色板当前值: 原来硬写的是**深色主题**那一档("#314765"), 浅色主题下
+            # 新建的滚动区会带着错色的滚动条直到下一次重绘(原先那条静态检查 C9101 拓的就是
+            # 这处, 已撤, 见 PLAN §17.3)。
+            # `_palette` 为 None 只出现在 `apply()` 之前的极短窗口里, 那时用兜底色。
+            scrollbar_button_color=(
+                getattr(self._palette, scrollbar_key)
+                if self._palette is not None
+                else _SCROLLBAR_FALLBACK
+            ),
         )
         self.register(lambda p: self._recolor_scroll(frame, p, bg_key, scrollbar_key))
         return frame
@@ -867,6 +875,10 @@ def track_wraplength(
     # 才成立, 而 ``sticky="ew"`` 之后标签宽度等于格子宽度, 与文字无关)。
     label.bind("<Configure>", request, add="+")
 
+
+# 兜底: `UiKit.apply()` 之前建出来的滚动区拿不到调色板, 那时先用深色主题那一档
+# (窗口还没画出来, 下一次 apply 就换掉了)。写成具名常量: 静态检查只拦"调用里随手写的颜色"。
+_SCROLLBAR_FALLBACK = "#314765"
 
 # 悬停多久才弹出提示: 短到"停一下就有", 长到鼠标划过不会到处闪。
 # 提示文案记在控件上的属性名: 让"省了尾巴的地方到底挂没挂提示"能量出来(I-3)。

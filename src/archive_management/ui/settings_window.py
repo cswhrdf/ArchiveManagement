@@ -100,7 +100,7 @@ def _paint_combo(box: ctk.CTkComboBox, palette: Palette) -> None:
     """
     box.configure(
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         button_color=palette.raised,
         button_hover_color=palette.item_hover,
         text_color=palette.text_body,
@@ -273,7 +273,7 @@ class SettingsWindow:
             height=30,
             corner_radius=8,
             fg_color=palette.input_bg,
-            border_color=palette.border,
+            border_color=palette.input_border,
             button_color=palette.raised,
             button_hover_color=palette.item_hover,
             text_color=palette.text_body,
@@ -327,7 +327,7 @@ class SettingsWindow:
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.item_hover,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
             dropdown_fg_color=palette.panel,
             dropdown_hover_color=palette.item_hover,
@@ -529,7 +529,9 @@ class SettingsWindow:
                 hover_color=palette.item_hover,
                 text_color=palette.text_body,
                 border_width=1,
-                border_color=palette.border,
+                # 描边色与真输入框共用 ``input_border``: 两者形状相同、又在同一个窗口里
+                # 并排, 用两个深浅就不像一套控件了(这条评审要的就是"像输入框")。
+                border_color=palette.input_border,
                 font=ctk.CTkFont(size=12, weight="bold"),
             )
             button.grid(row=row, column=1, padx=16, pady=(0, 8), sticky="e")
@@ -1008,7 +1010,7 @@ class SettingsWindow:
                 hover_color=palette.accent if recording else palette.item_hover,
                 text_color=palette.accent_text if recording else palette.text_body,
                 border_width=2 if recording else 1,
-                border_color=palette.accent if recording else palette.border,
+                border_color=palette.accent if recording else palette.input_border,
             )
         self._capture_status.configure(text=self._recording_status())
         self._shortcut_error.configure(text=self._error)

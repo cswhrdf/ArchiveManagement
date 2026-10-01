@@ -380,7 +380,7 @@ class HomePage:
             height=32,
             placeholder_text=tr("home.search_placeholder"),
             fg_color=palette.input_bg,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
         )
         self._search_entry.pack(side="left")
@@ -568,7 +568,7 @@ class HomePage:
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
             dropdown_fg_color=palette.panel,
             dropdown_text_color=palette.text_body,
@@ -715,7 +715,7 @@ class HomePage:
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
             dropdown_fg_color=palette.panel,
             dropdown_text_color=palette.text_body,

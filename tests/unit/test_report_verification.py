@@ -1201,6 +1201,7 @@ def test_quality_gate_asks_every_platform_for_real_tests() -> None:
         "create_allure_quality",
         "create_allure_coverage",
         "create_allure_summary",
+        "create_allure_visual",
     )
     for script in writers:
         text = (_REPO_ROOT / "scripts" / f"{script}.py").read_text(encoding="utf-8")
@@ -1915,6 +1916,44 @@ def test_quality_job_runs_on_one_platform() -> None:
     assert "allure-results-performance" in job, "性能结果照旧要上传(汇总作业要读)"
     assert "\n  analysis:\n" not in workflow, "不要再把静态分析拆成独立作业"
     assert "\n  performance:\n" not in workflow, "不要再把性能基准拆成独立作业"
+
+
+def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> None:
+    """视觉回归(感知哈希 + SSIM)是公共质量作业的一道门禁, 结论要进 Common 环境并进总账.
+
+    四件事必须同时成立, 缺一件这套机制就退化成"跑了但没人看得见":
+
+    ① 脚本在**质量作业**里跑(与 ruff / 静态分析 / 性能基准同一个作业: 它同样与平台无关,
+       单独开作业只是多付一整套 checkout / uv / 依赖同步的固定开销);
+    ② 它要**真实显示**: runner 上先装 xvfb, 命令走 ``xvfb-run`` —— Tk 在无头环境里起不来,
+       而"起不来"绝不能被记成"画面没问题";
+    ③ 它**不按平台展开**: 基线图入库、只在 Linux 采, 三个平台各采一套会把"字体度量不同"
+       变成一堆假红(见 PLAN.md 17.4 的落地结论);
+    ④ 结论项带 ``env=common`` + ``testCategory=quality``: 前者让它落进报告里显式声明的
+       Common 环境(而不是某个平台), 后者让运行总账的质量检查表与"工程门禁:质量检查未通过"
+       分类都能看见它 —— 这就是"视觉回归也要体现到报告里"的落点。
+    """
+    module = _load_script("create_allure_visual")
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    job = ci_workflow.job_block(workflow, "quality")
+
+    assert "scripts/create_allure_visual.py" in job, "脚本要在质量作业里跑"
+    assert "xvfb-run -a" in job, "无头 runner 上必须经 xvfb 起显示"
+    assert "xvfb" in job, "对应的系统包也要装"
+    assert "allure-results-visual" in job, "结论要作为产物上传"
+    assert "ui-review/baselines" in job, "基线图入库, 从仓库里读"
+    assert "matrix" not in job, "视觉回归不按平台展开: 基线只按一种渲染采"
+    assert "font" in job, "要装 CJK 字体: 否则汉字被量成零宽, 画面与基线对不上"
+
+    summary = ci_workflow.job_block(workflow, "allure-summary")
+    assert "name: allure-results-visual" in summary, "汇总作业要把这份结论收进报告"
+
+    # 标签决定归属: 改动这两处会让结论落错环境或从总账里消失。
+    assert module.ENVIRONMENT == "common"
+    assert (module.CATEGORY_LABEL, module.CATEGORY_VALUE) == ("testCategory", "quality")
+    # 判据必须**两条都在**(哈希管"整体变了没有", SSIM 管细粒度), 且门槛是有界的数字。
+    assert 0 <= module.MAX_HASH_DISTANCE <= 64, "哈希距离上限要在 64 位以内"
+    assert 0.0 < module.MIN_SSIM <= 1.0, "SSIM 下限要在 0~1 之间"
 
 
 def test_report_job_does_not_depend_on_the_host_platform() -> None:

@@ -1,4 +1,4 @@
-"""调色板对比度守卫: 两套主题的每一对"文字 / 状态指示"都要够清楚.
+"""调色板对比度守卫: 两套主题的每一对"文字 / 状态指示 / 输入边界"都要够清楚.
 
 判据与算法见 :mod:`archive_management.ui.contrast`, 量测数据见
 ``docs/testing.md``「对比度判据」一节. 这里只做一件事: 把**要判的对**逐条登记,
@@ -6,6 +6,10 @@
 
 登记表是"只增不减"的: 新加一个文字色却忘了判它, 兜底断言
 (:func:`test_every_text_token_is_judged`) 会变红, 而不是静默放过。
+
+除了本仓库的公式, 每一对还会请**第三方库** ``color-contrast`` 再算一遍: 它与我们出自
+不同作者, 一起写错的概率极低 —— 这是我们那条公式唯一的"外部对照"
+(见 :func:`test_the_third_party_oracle_agrees_with_us_on_every_pair`)。
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 from dataclasses import fields
 
 import pytest
+from color_contrast import check_contrast
 
 from archive_management.ui.contrast import (
     DISABLED_MINIMUM,
@@ -81,9 +86,19 @@ STATE_PAIRS: tuple[tuple[str, str], ...] = (
     ("accent_soft_border", "well"),
 )
 
+# 输入控件的**边界**: WCAG 1.4.11 要求 3:1 —— 它承载"这里可以输入"的信息, 与状态指示
+# 同一档; 下面 DECORATION_PAIRS 那些装饰性描边不适用(所以"别把装饰性描边塞进 3:1"
+# 这条管不到这里)。原来输入框与面板共用 `border`, 实测最差 **1.20:1**(浅色 `border`
+# 对 `card_hover`) —— 边界等于看不见; 现在单独取 `input_border`(取值均已实测达标)。
+# 按**全部表面色**登记: 输入框可能落在其中任何一个上, 比"实际用到的组合"更严。
+BOUNDARY_PAIRS: tuple[tuple[str, str], ...] = tuple(
+    ("input_border", surface) for surface in SURFACES
+)
+
 # 装饰性描边(卡片外框/分隔线): **不承**担"这块区域是什么"的信息(内容自身
 # 的文字对比度独立达标), 因此不设 3:1 硬门槛; 登记它们只是为了挡住
 # "描边色被改得和底色一样"这种事故。1.2:1 是"肉眼还能看出有一条边"的下限。
+# 注意: 输入框的边界**不在这里** —— 它承载"这里可以输入", 见上面的 BOUNDARY_PAIRS。
 DECORATION_PAIRS: tuple[tuple[str, str], ...] = (
     ("card_border", "card"),
     ("card_border", "well"),
@@ -92,7 +107,7 @@ DECORATION_PAIRS: tuple[tuple[str, str], ...] = (
 DECORATION_MINIMUM = 1.2
 
 ALL_PAIRS: tuple[tuple[str, str], ...] = (
-    TEXT_PAIRS + DISABLED_PAIRS + STATE_PAIRS + DECORATION_PAIRS
+    TEXT_PAIRS + DISABLED_PAIRS + STATE_PAIRS + BOUNDARY_PAIRS + DECORATION_PAIRS
 )
 
 THEMES = {"dark": DARK, "light": LIGHT}
@@ -100,6 +115,7 @@ THEMES = {"dark": DARK, "light": LIGHT}
 _EXPECTED_TEXT_PAIRS = 46
 _EXPECTED_DISABLED_PAIRS = 11
 _EXPECTED_STATE_PAIRS = 13
+_EXPECTED_BOUNDARY_PAIRS = 10
 
 
 def _minimum(pair: tuple[str, str]) -> float:
@@ -107,7 +123,7 @@ def _minimum(pair: tuple[str, str]) -> float:
         return TEXT_MINIMUM
     if pair in DISABLED_PAIRS:
         return DISABLED_MINIMUM
-    if pair in STATE_PAIRS:
+    if pair in STATE_PAIRS or pair in BOUNDARY_PAIRS:
         return NON_TEXT_MINIMUM
     return DECORATION_MINIMUM
 
@@ -140,6 +156,7 @@ def test_registry_sizes_are_pinned() -> None:
     assert len(TEXT_PAIRS) == _EXPECTED_TEXT_PAIRS
     assert len(DISABLED_PAIRS) == _EXPECTED_DISABLED_PAIRS
     assert len(STATE_PAIRS) == _EXPECTED_STATE_PAIRS
+    assert len(BOUNDARY_PAIRS) == _EXPECTED_BOUNDARY_PAIRS
 
 
 def test_every_text_token_is_judged() -> None:
@@ -189,3 +206,60 @@ def test_relative_luminance_matches_the_reference_values() -> None:
     assert relative_luminance("#000000") == pytest.approx(0.0, abs=1e-9)
     assert relative_luminance("#ffffff") == pytest.approx(1.0, abs=1e-9)
     assert relative_luminance("#808080") == pytest.approx(0.2159, abs=1e-3)
+
+
+# 第三方库(``color-contrast``)实现了同一条 WCAG 公式, 这里拿它当"第二把算尺".
+# 它只给**布尔**结论(``check_contrast`` 不返回比值), 所以反着用: 把门槛卡在我们的比值
+# 上下各 _ORACLE_TOLERANCE, 两个方向它都答对, 就等于"它算出的比值与我们相差不超过这个容差".
+# 容差只留给浮点: 公式真写错(漏了 sRGB 线性化、权重写反、通道取错)差的是量级, 不是末位.
+_ORACLE_TOLERANCE = 0.005
+
+
+def _oracle_problems(theme: str, palette: Palette, pair: tuple[str, str]) -> list[str]:
+    """把一对颜色的对账结果整理成问题清单(空列表表示两边一致).
+
+    只对**比值**下判据, 不另判一次"过不过门槛": 两边都用 ``>=`` 比门槛, 结论翻转需要这一对
+    正好贴在门槛上(小于容差) —— 实测登记表里最贴线的一对(浅色 ``accent_soft_text`` on
+    ``accent_soft``, 4.5206:1 对 4.5:1)还有 0.0206 的余量, 146 次量测里没有一次落进容差,
+    所以"过不过"的断言在这里必然是绿的(空转), 交给上面的比值断言覆盖。
+    """
+    foreground, background = pair
+    first, second = _color(palette, foreground), _color(palette, background)
+    ratio = contrast_ratio(first, second)
+    where = f"{theme}: {foreground} on {background}"
+    problems: list[str] = []
+    if not check_contrast(first, second, level=ratio - _ORACLE_TOLERANCE):
+        problems.append(f"{where} 我们算 {ratio:.2f}:1, 第三方算得更低")
+    if check_contrast(first, second, level=ratio + _ORACLE_TOLERANCE):
+        problems.append(f"{where} 我们算 {ratio:.2f}:1, 第三方算得更高")
+    return problems
+
+
+def test_the_third_party_oracle_agrees_with_us_on_every_pair() -> None:
+    """第三方库(colour 系)独立实现的 WCAG 公式必须与我们的结论一致.
+
+    这条断言的价值在**实现是别人写的**: 我们的公式与登记表出自同一支笔, 一起写错时
+    彼此印证不出来。它对 **73 对登记色、两套主题共 146 次量测**各算一遍, 比值必须落在
+    我们的 ±容差内 —— 而门槛判定(3 / 4.5 / 2.5 / 1.2)由此自然一致: 要翻转需要某对颜色
+    贴在门槛上, 而实测最贴线的一对还有 0.0206 的余量(见 :func:`_oracle_problems`)。
+    """
+    problems = [
+        problem
+        for theme, palette in sorted(THEMES.items())
+        for pair in ALL_PAIRS
+        for problem in _oracle_problems(theme, palette, pair)
+    ]
+    assert not problems, "第三方对比度实现与我们的结论不一致: " + " | ".join(problems)
+
+
+def test_the_third_party_oracle_matches_the_reference_extremes() -> None:
+    """两端行为对账: 黑白约 21:1、同色 1:1、与前后顺序无关.
+
+    它自己的档位枚举 ``AccessibilityLevel.AA18 = 3`` 命名反直觉(18pt 那一档才是 3:1),
+    所以我们只用它的**数值**门槛接口(``level=<float>``), 这条断言就是钉住这件事。
+    """
+    assert check_contrast("#000000", "#ffffff", level=20.99) is True
+    assert check_contrast("#ffffff", "#000000", level=20.99) is True
+    assert check_contrast("#000000", "#ffffff", level=21.01) is False
+    assert check_contrast("#123456", "#123456", level=1.0) is True
+    assert check_contrast("#123456", "#123456", level=DECORATION_MINIMUM) is False

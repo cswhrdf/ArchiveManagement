@@ -3914,7 +3914,9 @@ def test_settings_window_holds_theme_and_hotkey_shortcuts(
     palette = Palette.for_theme(app._theme)
     for box in (window._font_box, window._language_box):
         assert box.cget("fg_color") == palette.input_bg
-        assert box.cget("border_color") == palette.border
+        # 边界走**输入控件**那一份颜色: 面板/卡片那份 ``border`` 只有 1.28:1,
+        # 用它是"边界看不见"的老毛病(见 palette 里 input_border 的取值说明)。
+        assert box.cget("border_color") == palette.input_border
         assert box.cget("button_color") == palette.raised
         assert box.cget("text_color") == palette.text_body
         # 展开后的那层菜单同样要换: 只改外框时点开还是旧配色。

@@ -233,6 +233,9 @@ _CI_COMMAND_GROUPS = (
     # 质量门禁脚本的三组各跑什么: core/platform 是 ruff/mypy(质量组), analysis 是那 5 个工具。
     (r"create_allure_quality\.py --group (?:core|platform)", "quality"),
     (r"create_allure_quality\.py --group analysis", "analysis"),
+    # 视觉回归要 imagehash + scikit-image(那一组单独拆出来: 它带整套 numpy/scipy/networkx,
+    # 混进质量组等于让每个分片实例都下一遍)。
+    (r"create_allure_visual\.py", "visual"),
 )
 # 本地提交钩子与常见本地命令要用的工具: 默认组装不下它们, 本地就跑不了。
 _LOCAL_TOOLS = (

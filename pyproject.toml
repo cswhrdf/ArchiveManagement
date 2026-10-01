@@ -33,9 +33,14 @@ license-files = ["LICENSE"]
 # 哪一组装给谁, 由作业真正执行的命令决定:
 #   test     —— 跑 pytest(单元/集成/性能/安全)并采集 Allure 结果与失败现场
 #   coverage —— 只有报告作业需要(合并各片数据、判覆盖率门槛); 它不跑用例, 所以不装 pytest
-#   quality  —— 代码质量门禁(ruff / 格式 / 宿主平台 mypy)与本地提交钩子
+#   quality  —— 代码质量门禁(ruff / 格式 / 宿主平台 mypy)、对比度第三方算尺与本地提交钩子
 #   analysis —— 静态分析与依赖检查(由 create_allure_quality.py --group analysis 逐项调用)
+#   visual   —— 界面视觉回归(感知哈希 + SSIM, 由 create_allure_visual.py 调用); 见 PLAN.md 17.4
 #   package  —— PyInstaller 打包(只有 release 工作流需要)
+#
+# visual 单独一组而不是塞进 quality: 它要 numpy/scipy/networkx/imageio/tifffile 一整串
+# (scikit-image 的依赖树), 而 quality 组是每个平台每个分片都会装的 —— 混在一起等于让
+# 6 个分片实例重复下载这套东西。它只在 Ubuntu 的质量作业里跑一次。
 # 本地 `uv sync` 仍然**全部装上**(默认组在 [tool.uv] 的 default-groups 里), 所以下面的
 # 分组不会改变本地开发与提交钩子的用法。
 test = [
@@ -52,6 +57,7 @@ quality = [
     "ruff>=0.16",
     "mypy>=2.3",
     "pre-commit>=4",
+    "color-contrast>=0.1.1",
 ]
 
 analysis = [
@@ -60,6 +66,13 @@ analysis = [
     "radon>=6.0.1",
     "xenon>=0.9.3",
     "deptry>=0.25.1",
+]
+
+visual = [
+    # 感知哈希(pHash/dHash 一类的汉明距离)与结构相似度(SSIM)各司其职:
+    # imagehash 对"整体长相变了没有"敏感, scikit-image 的 SSIM 给出细粒度相似度。
+    "imagehash>=4.3.2",
+    "scikit-image>=0.26",
 ]
 
 package = ["pyinstaller>=6"]
@@ -99,7 +112,7 @@ package = true
 # 本地 `uv sync` / `uv run` 默认把**所有**开发依赖装上 —— 与拆分依赖组之前的行为完全一致,
 # 所以本地能直接 `uv run pytest` / `uv run ruff` / `uv run pyinstaller`。
 # 只有 CI 会显式跳过默认组(`--no-default-groups --group <组>`), 让每个作业少下几十 MB。
-default-groups = ["test", "coverage", "quality", "analysis", "package"]
+default-groups = ["test", "coverage", "quality", "analysis", "visual", "package"]
 
 [tool.ruff]
 target-version = "py312"
@@ -217,10 +230,27 @@ exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-result
 # 出现在 tests/ 里是正常的(DEP004 默认只在"运行时代码"里才该报警);
 # coredumpy 同理: 它只在用例失败时留现场(见 tests/crash_capture.py);
 # coverage 是 CI 里直接调用的工具(合并/报告覆盖率), 用例也用它验证"跨平台合并"这件事。
-DEP004 = ["pytest", "allure", "allure_pytest", "coredumpy", "coverage"]
+# color_contrast: 它是对比度门禁的**第三方算尺**, 只被 tests/unit/test_ui_contrast.py
+# 使用 —— 声明在 quality 组、又不在 src 里用, 因此必须 列在这里, 
+# 否则 deptry 会把"开发依赖出现在用例里"当成越界。
+# imagehash / skimage: 同理, 它们是视觉回归的算尺(声明在 visual 组), 只被
+# scripts/create_allure_visual.py 使用, 不在 src 里出现。
+DEP004 = [
+  "pytest",
+  "allure",
+  "allure_pytest",
+  "coredumpy",
+  "coverage",
+  "color_contrast",
+  "imagehash",
+  "skimage",
+]
 # `allure` 与 `allure_commons` 这两个模块由 allure-pytest 带进来, 测试里直接用它记
 # 附件(含 AttachmentType 类型标注)属正常用法。
-DEP003 = ["allure", "allure_commons"]
+# numpy 同理: 它由 scikit-image 带进来(不在 [project].dependencies 里), 而视觉回归要把
+# 截图转成 ndarray 才能交给 structural_similarity —— PIL 的 Image 没有 .shape, 传不进去。
+# 刻意不把 numpy 写进依赖清单: 它是这套算尺的实现细节, 跟着 scikit-image 的版本走才对。
+DEP003 = ["allure", "allure_commons", "numpy"]
 
 
 [tool.pytest.ini_options]

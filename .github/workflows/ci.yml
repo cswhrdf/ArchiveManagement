@@ -43,12 +43,15 @@ env:
 
 jobs:
   quality:
-    name: 质量检查、静态分析与性能基准 (ubuntu-latest)
-    # 三批检查在一个作业里依次跑: ruff / ruff format / mypy(宿主平台)、deptry / bandit /
-    # pip-audit / radon / xenon、性能基准。它们都与平台无关(不涉及路径分隔符、显示或字体;
-    # 性能基准的数值也需要稳定的运行环境, 所以固定在这一个平台上采集), 只在 Ubuntu 跑一遍
-    # 就够 —— 每个作业实例都要重付一遍 checkout / uv 安装 / 依赖同步的固定开销。
+    name: 质量检查、静态分析、性能基准与视觉回归 (ubuntu-latest)
+    # 四批检查在一个作业里依次跑: ruff / ruff format / mypy(宿主平台)、deptry / bandit /
+    # pip-audit / radon / xenon、性能基准、界面视觉回归(感知哈希 + SSIM)。它们都与平台无关
+    # (不涉及路径分隔符; 视觉回归要显示环境, 但由本作业自己的 xvfb 提供, 截出来的画面在这里
+    # 就是"标准画面"), 只在 Ubuntu 跑一遍就够 —— 每个作业实例都要重付一遍 checkout / uv
+    # 安装 / 依赖同步的固定开销。
     # 平台专属的两次 mypy 不在这个作业里(见 pytest 作业的片 0)。
+    # 视觉回归**不按平台展开**: 基线图入库、只在 Linux 采, 多平台会把"字体度量不同"变成
+    # 一堆假红(见 PLAN.md 17.4)。
     runs-on: ubuntu-latest
 
     steps:
@@ -65,13 +68,15 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        # 只装这一作业需要的组(见 pyproject 的 [dependency-groups]): 这个作业跑三道门禁
-        # —— 质量组(ruff/格式/mypy)、静态分析组(deptry/bandit/pip-audit/radon/xenon)
-        # 与性能基准(要 pytest + allure-pytest, 即测试组)。
+        # 只装这一作业需要的组(见 pyproject 的 [dependency-groups]): 这个作业跑四道门禁
+        # —— 质量组(ruff/格式/mypy)、静态分析组(deptry/bandit/pip-audit/radon/xenon)、
+        # 性能基准(要 pytest + allure-pytest, 即测试组)与视觉回归(视觉组: imagehash +
+        # scikit-image, 那套 numpy/scipy/networkx 只在**这里**装一次, 不进每个分片)。
         # `--no-default-groups` 是必需的: 默认组是给本地开发用的, 在 CI 里它会静悄悄把
         # 全套依赖装回来(守卫会核对每次 uv sync 都显式列组)。
-        # 这个作业是**唯一**不跳过安装项目的: 下面的 CLI 冒烟要真的用上可编辑包。
-        run: uv sync --locked --no-default-groups --group test --group quality --group analysis
+        # 这个作业是**唯一**不跳过安装项目的: 下面的 CLI 冒烟要真的用上可编辑包
+        # (视觉回归也靠它 import 应用代码)。
+        run: uv sync --locked --no-default-groups --group test --group quality --group analysis --group visual
 
       - name: Verify the CLI runs from the editable install
         # 项目装成可编辑包(见 pyproject 的 [tool.uv]), 其余作业都带 --no-install-project,
@@ -134,6 +139,57 @@ jobs:
         with:
           name: allure-results-performance
           path: allure-results-performance/
+          if-no-files-found: ignore
+
+      - name: Install Xvfb and a CJK font (quality job)
+        # 视觉回归要一个真实显示: Tk 在无头环境里起不来, 而"起不来"不该被记成"画面没问题"。
+        # 与 pytest 作业里那一步同一个配方(连 Chrome 源失效的绕行也一样): 界面是中文的,
+        # 而 Tk 的量宽全靠字形度量 —— 没有 CJK 字体时汉字会被量成近乎零宽, 截出来的画面
+        # 与基线对不上, 而且会以"文字没换行/没省略"的形态出现(2026-09-27 在分片里踩过)。
+        shell: bash
+        run: |
+          while IFS= read -r -d '' source; do
+            if grep -q 'dl.google.com/linux/chrome' "$source"; then
+              sudo mv "$source" "${source}.disabled"
+            fi
+          done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
+          sudo apt-get update
+          sudo apt-get install -y xvfb fonts-noto-cjk
+
+      - name: Run the visual regression
+        # 起一个真实窗口、拍空库那一组画面、与入库的基线图比(感知哈希距离 + SSIM)。
+        # 这是一道**门禁**: 界面变了就要有人看一眼再合, 所以不一致时这一步直接红。
+        # 基线图在 ui-review/baselines/(入库); 还没有基线时本脚本只产出候选基线并写明
+        # "基线尚未入库", 不判失败 —— 否则第一轮永远卡住(见脚本的模块说明)。
+        # 结论写进 allure-results-visual, 由汇总作业收进报告(标签 env=common +
+        # testCategory=quality, 于是它落进 Common 环境与"工程门禁:质量检查未通过"分类)。
+        #
+        # `-s "-screen 0 1600x1000x24"` 是必需的, 不是顺手加的: 画面尺寸直接进基线, 而
+        # xvfb-run 的默认屏幕(1280x1024)装不下应用请求的 1360x860 窗口 —— 窗口会被夹到
+        # 屏幕宽, 于是"默认屏幕是多少"就变成了画面尺寸的隐藏输入(xvfb-run 换默认值时
+        # 假红)。显式写死屏幕后, 截出来就是应用自己的 1360x860。深度 24 同理: 默认深度
+        # 偏低时颜色会被量化, 与基线对不上。
+        run: xvfb-run -a -s "-screen 0 1600x1000x24" uv run python scripts/create_allure_visual.py --results-dir allure-results-visual --baselines ui-review/baselines --candidates visual-baselines-candidates
+
+      - name: Upload visual Allure results
+        # 与质量/分析两份同理: 结论要进汇总报告。`if-no-files-found: error` —— 这一份缺了
+        # 报告里就少一类结论, 而作业状态看不出来。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-visual
+          path: allure-results-visual/
+          if-no-files-found: error
+
+      - name: Upload candidate baselines
+        # 这一份是**给人看的输入**而不是结论: 基线缺失或界面有意改动时, 把本轮真实画面传上来
+        # 供下载后提交到 ui-review/baselines/。所以 `ignore` 而不是 `error` —— 它没有产出
+        # 时, 上面那一步已经红了, 再红一次只是噪音。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-baselines-candidates
+          path: visual-baselines-candidates/
           if-no-files-found: ignore
 
   pytest:
@@ -703,10 +759,17 @@ jobs:
       id-token: write
     # 站点要挂在 github-pages 环境上(作业 URL 也来自它)。environment 同样只能挂作业级, 于是
     # **不要**给这个环境配“必需审批”: 那样每次 PR 都会停在这里等批准。
-    # url 用 `||` 兜底: 不发布的那几次运行没有 `steps.deploy`, 空的 url 会挂一个空链接。
+    #
+    # url **刻意不写兜底**: 原来写的是
+    #   `${{ steps.deploy.outputs.page_url || format('https://{0}.github.io/{1}/', ...) }}`
+    # 想给"没发布的那几次"也留个链接, 结果是**假链接**: `environment.url` 是作业级表达式,
+    # 无条件求值 —— 发布那三步因为 `github.ref != 默认分支` 被整段跳过时, 它照样把那个静态
+    # 字符串显示在运行摘要里, 点进去必然 404(2026-10-01 实测: dev 上的运行摘要挂着
+    # https://cswhrdf.github.io/ArchiveManagement/, 而同一次运行里发布三步一次都没执行)。
+    # 没有 `deploy` 就没有 `page_url` → url 为空 → 摘要不挂链接, 这才是诚实的状态。
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+      url: ${{ steps.deploy.outputs.page_url }}
     # 这里**刻意不写**原来那个 `concurrency: group: github-pages`: 汇总是每个 PR 都要跑的作业,
     # 共用一个组会让并发的几个 PR 互相排队(同组只允许一个 pending, 后来者会把前一个 pending
     # 取消掉)。而“两次发布撞车”本来就被顶层 concurrency(按 ref、cancel-in-progress)挡住了:
@@ -828,6 +891,17 @@ jobs:
         continue-on-error: true
         with:
           name: allure-results-analysis
+          path: allure-results
+
+      - name: Download visual Allure results
+        # 视觉回归也只在质量作业里跑一遍(基线图入库、只在 Linux 采), 同样一份。
+        # 它带 testCategory=quality, 于是运行总账的质量检查表里会多出这几行 —— 这正是
+        # "视觉回归也要体现到报告里"的落点(逐张的图作为那些结论项的附件)。
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          name: allure-results-visual
           path: allure-results
 
       - name: Download performance baseline

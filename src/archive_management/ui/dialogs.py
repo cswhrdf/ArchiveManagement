@@ -459,7 +459,7 @@ def ask_branch_name(
         window,
         width=320,
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         text_color=palette.text_body,
     )
     entry.insert(0, initial)
@@ -548,7 +548,7 @@ def import_game_dialog(
         window,
         width=440,
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         text_color=palette.text_body,
     )
     name_entry.insert(0, initial_name)
@@ -607,7 +607,7 @@ def import_game_dialog(
         entry = ctk.CTkEntry(
             row,
             fg_color=palette.input_bg,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
         )
         entry.insert(0, value)
@@ -804,7 +804,7 @@ def edit_tags_dialog(
         entry = ctk.CTkEntry(
             row,
             fg_color=palette.input_bg,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
         )
         entry.insert(0, value)
@@ -895,7 +895,7 @@ def ask_text(
         window,
         width=_TEXT_WIDTH,
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         text_color=palette.text_body,
     )
     entry.insert(0, initial)
@@ -1017,7 +1017,7 @@ def edit_backup_dialog(
         window,
         width=420,
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         text_color=palette.text_body,
     )
     name_entry.insert(0, initial_name)
@@ -1039,7 +1039,7 @@ def edit_backup_dialog(
         height=110,
         wrap="word",
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         border_width=1,
         text_color=palette.text_body,
         font=ctk.CTkFont(size=12),
@@ -1192,7 +1192,7 @@ def schedule_dialog(
         window,
         width=_SCHEDULE_FIELD_WIDTH,
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         text_color=palette.text_body,
     )
     interval_entry.insert(0, initial_interval)
@@ -1205,7 +1205,7 @@ def schedule_dialog(
         window,
         width=_SCHEDULE_FIELD_WIDTH,
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         text_color=palette.text_body,
     )
     keep_entry.insert(0, initial_keep)
@@ -1776,7 +1776,7 @@ def export_batch_dialog(
         width=460,
         placeholder_text=filter_label,
         fg_color=palette.input_bg,
-        border_color=palette.border,
+        border_color=palette.input_border,
         text_color=palette.text_body,
         font=ctk.CTkFont(size=13),
     )
@@ -1946,7 +1946,7 @@ def batch_import_dialog(
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
             dropdown_fg_color=palette.panel,
             dropdown_text_color=palette.text_body,
@@ -2113,7 +2113,7 @@ def _batch_location_entries(
             card,
             height=_CARD_CONTROL_HEIGHT,
             fg_color=palette.input_bg,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
         )
         entry.insert(0, item.default)
@@ -2152,7 +2152,7 @@ def _import_location_rows(
         entry = ctk.CTkEntry(
             frame,
             fg_color=palette.input_bg,
-            border_color=palette.border,
+            border_color=palette.input_border,
             text_color=palette.text_body,
         )
         entry.insert(0, item.default)
