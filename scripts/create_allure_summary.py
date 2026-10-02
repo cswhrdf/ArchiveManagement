@@ -13,8 +13,9 @@
    "Coverage conclusion" 条目;
 3. 写一份"运行总账"到 ``allure-run-ledger.md``(Markdown 附件: 报告里会**渲染**成
    表格与标题, 而不是丢一屏纯文本; 仓库根的 ``allurerc.mjs`` 按这个文件名把它收进报告
-   首页「全局附件」): 质量门逐项结论 + 覆盖率(各平台, 数字取自原始 XML) + 性能一行
-   + 安全各平台一行 + 产物清单(只列脚本生成的汇总结论项, 逐项核对原始文件在不在)。
+   首页「全局附件」): 开头一行数(应有/实有/缺) + 质量门逐项结论 + 覆盖率(各平台, 数字
+   取自原始 XML) + 性能一行 + 安全各平台一行, **末尾**是「证据核对(应有 vs 实有)」——
+   ① 结论项有没有进结果、② 每条结论项声明的原始文件在不在。
    Allure 原生「质量门」页签只有 ``allure run`` 会填(见 allurerc.mjs 的注释), 所以
    总账就是这份报告里"一眼看完"的入口;
 4. 把"有意不统计的覆盖"写成另一份全局附件 ``allure-coverage-exclusions.md``:
@@ -29,6 +30,7 @@
    结论项**并打印 ``::warning::`` —— 产物没产出/没上传/没合并进报告时, 总账里看得见,
    原生质量门也会跟着红。以前只渲染"手里有什么", 缺一整节是完全静默的(2026-10-02 漏掉
    视觉回归的产物与 ``test`` 组就是这么过去的)。
+   这一节在总账**末尾**(结论先看, 审计附录在后), 但开头留一行数 —— 见 ``run_ledger``。
 
 用法(CI 汇总 job):
 ``uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux``
@@ -899,8 +901,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--expect-platforms",
         default="",
         help=(
-            "本次运行声明要覆盖的平台, 逗号分隔(如 Windows,macOS,Linux)。它决定「结论清单」"
-            '里"应有"的那些每平台项; 不传时退回"结果里出现过的平台" ——'
+            "本次运行声明要覆盖的平台, 逗号分隔(如 Windows,macOS,Linux)。它决定总账末节"
+            '「证据核对」里"应有"的那些每平台项; 不传时退回"结果里出现过的平台" ——'
             "那样整个平台的产物都没交上来时看不出来"
         ),
     )
@@ -940,31 +942,48 @@ def self_written_items(
 
 
 def completeness_section(
-    expected: list[allure_catalog.Expected], actual: set[tuple[str, str]]
+    expected: list[allure_catalog.Expected],
+    missing: list[allure_catalog.Expected],
+    results_dir: Path,
+    payloads: list[dict[str, Any]],
 ) -> list[str]:
-    """「结论清单(应有 vs 实有)」一节: 由**清单**决定, 而不是由"手里有什么"决定.
+    """总账**末节**「证据核对(应有 vs 实有)」: 两张表回答两个不同的问题.
 
     这是总账里唯一能看出"这次缺了东西"的地方。以前每一节都是"有就渲染、没有就写一句没有",
     于是产物没产出/没上传/没合并进报告时, 报告的完整度完全看不出来 —— 它只会安静地少一节
     (2026-10-02 漏掉视觉回归的产物与 ``test`` 组就是这么过去的)。这里把清单里的每一项都
     列出来(应有), 再逐项标注收到没收到(实有), 缺了就点名。
 
+    为什么放**最后**、为什么与产物清单合并成一节: 前面几节是结论本身, 是读者真要看的;
+    "证据齐不齐"是审计性的附录。但移到末尾不能牺牲"一眼看见" —— 所以 :func:`run_ledger` 把
+    "应有/实有/缺"的**一行数**留在开头, 缺项时指路到这里。
+
+    为什么仍然分成**两张表**(① 结论清单 + ② 附件文件): 它们问的是不同粒度的问题 ——
+    ① 问"这一次该有的结论项有没有真的进到结果里"(节与节之间的空洞), ② 问"每条结论项声明的
+    原始文件有没有跟着进到结果目录里"(结论在、证据丢)。硬合成一张表要么得把文件按结论项
+    塞进一个个单元格, 要么就得做两者的笛卡尔积 —— 前者难读, 后者会把"缺结论项"这条最要命
+    的信号埋进几十行附件里。
+
     「判定」列是刻意加上的: 每条结论只由**一个**角色判定, 职责不重叠 —— ``总账`` 表示缺失时
     本脚本会另写一条 broken 结论项(原生质量门会跟着红); ``报告自检`` 表示那条由
     ``scripts/verify_allure_report.py`` 按 ``--expect-platforms`` 逐平台对数, 总账只把它
     **列出来**, 不重复判一遍。
     """
-    missing = set(allure_catalog.missing_items(expected, actual))
+    missing_set = set(missing)
     lines = [
-        "## 结论清单(应有 vs 实有)",
+        "## 证据核对(应有 vs 实有)",
         "",
-        f"- 应有 {len(expected)} 项, 实有 {len(expected) - len(missing)} 项"
-        + (f", **缺 {len(missing)} 项**" if missing else ", 全部到齐。"),
+        f"- 应有 {len(expected)} 项, 实有 {len(expected) - len(missing_set)} 项"
+        + (f", **缺 {len(missing_set)} 项**。" if missing_set else ", 全部到齐。"),
         "- 「应有」不是手写的: `scripts/allure_catalog.py` 从产出方**解析**出来"
         "(质量检查项取自 `create_allure_quality.py` 的 `CHECKS`, 在那边加一项检查, 这里立刻"
         '多一行)。所以"产物没产出/没上传/没合并进来"都会在这里显形。',
-        "- 状态列: `已收到` = 结果里真的有这一项(在它该出现的环境里); **缺失** = 应有而没有。"
-        "缺失项还会各写一条 broken 结论项 —— 总账是附件, 不点开是看不到的。",
+        "- ① 核对**结论项**: 应有而没有的标 **缺失**, 并各写一条 broken 结论项 —— "
+        "总账是附件, 不点开是看不到的。",
+        "- ② 核对**结论项声明的附件文件**: 结论在、原始文件却在打包/下载环节丢了, "
+        "只有这一列看得见(全局附件不在 `scripts/verify_allure_report.py` 的校验范围内)。",
+        "",
+        "### ① 结论清单",
         "",
         "| 结论项 | 预期产物 | 产出者 | 判定 | 状态 |",
         "| --- | --- | --- | --- | --- |",
@@ -973,13 +992,28 @@ def completeness_section(
         judge = "总账"
         if item.producer.gate != allure_catalog.GATE_SUMMARY:
             judge = "报告自检"
-        state = "**缺失**" if item in missing else "已收到"
+        state = "**缺失**" if item in missing_set else "已收到"
         lines.append(
             f"| {_cell(item.label)} | `{_cell(item.producer.artifact)}` "
             f"| `{_cell(item.producer.script)}` / 作业 `{_cell(item.producer.job)}` "
             f"| {judge} | {state} |"
         )
-    lines.append("")
+    lines += [
+        "",
+        "### ② 结论项声明的附件文件",
+        "",
+        "| 结论项 | 文件 | 大小 | 状态 |",
+        "| --- | --- | ---: | --- |",
+    ]
+    lines += [
+        f"| {_cell(owner)} | `{_cell(name)}` | {_cell(size)} | {_cell(state)} |"
+        for owner, name, size, state in artifact_rows(results_dir, payloads)
+    ]
+    lines += [
+        "",
+        "> 状态列: `已收录` = 原始文件确实在结果目录里(报告里点得开); "
+        "**缺失** = 结论项声明了它但文件不在 —— 说明这段证据在打包/下载环节丢了。",
+    ]
     return lines
 
 
@@ -1041,12 +1075,12 @@ def run_ledger(
     platforms: list[str] | None = None,
     expected: list[allure_catalog.Expected] | None = None,
 ) -> str:
-    """把四类结论与产物清单合成一份"运行总账"(报告首页「全局附件」页签).
+    """把四类结论与证据核对合成一份"运行总账"(报告首页「全局附件」页签).
 
     ``platforms`` 是本次运行涉及、且**应该**有覆盖率结论的平台(调用方在写任何新结论项之前
     采好的那一份); 不传时退回"结果里出现过的平台"。
 
-    ``expected`` 是本次运行**应该**有的结论项(清单展开的结果)。调用方传进来是为了让这一节与
+    ``expected`` 是本次运行**应该**有的结论项(清单展开的结果)。调用方传进来是为了让末节与
     它写下的 broken 结论项用同一个种子; 不传时按 ``known_platforms`` 现算一份 ——
     缺失项的身份前缀刻意与预期身份错开, 所以无论哪条路径, 刚写下的缺失项都不会被当成
     "这一族已经收到了"。
@@ -1062,9 +1096,13 @@ def run_ledger(
     actual = allure_catalog.actual_items(results_dir) | self_written_items(
         performance, security_payloads
     )
+    missing = allure_catalog.missing_items(expectation, actual)
     expected_coverage = [
         name for name in known_platforms if name not in {"unknown", "", "default"}
     ]
+    verdict = (
+        f"**缺 {len(missing)} 项 —— 见文末「证据核对」**" if missing else "全部到齐"
+    )
     lines = [
         "# 运行总账",
         "",
@@ -1072,11 +1110,12 @@ def run_ledger(
         f"(分支 {os.environ.get('GITHUB_REF_NAME', 'local')}"
         f", 运行 {os.environ.get('GITHUB_RUN_ID', 'local')})",
         f"- 涉及平台: {', '.join(known_platforms) if known_platforms else 'unknown'}",
-        "- 先是「结论清单」: 这次**应该**有哪些结论、哪些到齐了(缺了什么都点名); "
-        "然后是各节结论, 每节都注明原始产物在哪条结论项里; 末尾的产物清单逐项核对文件"
-        "是否存在。",
+        f"- 证据核对: 应有 {len(expectation)} 项 / 实有 "
+        f"{len(expectation) - len(missing)} 项 / {verdict}。",
+        "- 读法: 先看各节结论(质量门 → 覆盖率 → 性能 → 安全, 每节都注明原始产物在哪条结论项"
+        "里); 文末「证据核对」逐项核对这次**应该**有哪些结论项、哪些到齐了, 以及每条结论项"
+        "声明的附件文件在不在。",
         "",
-        *completeness_section(expectation, actual),
         quality_gate_report(
             quality_checks(results_dir),
             heading="## 质量门(与平台无关, 只在 Linux 跑一遍; 归入 `Common` 环境)",
@@ -1160,21 +1199,7 @@ def run_ledger(
         lines.append("本次运行没有安全结论文件。")
     lines += [
         "",
-        "## 产物清单",
-        "",
-        "| 结论项 | 文件 | 大小 | 状态 |",
-        "| --- | --- | ---: | --- |",
-    ]
-    lines += [
-        f"| {_cell(owner)} | `{_cell(name)}` | {_cell(size)} | {_cell(state)} |"
-        for owner, name, size, state in artifact_rows(results_dir, payloads)
-    ]
-    lines += [
-        "",
-        "> 状态列: `已收录` = 原始文件确实在结果目录里(报告里点得开); "
-        "**缺失** = 结论项声明了它但文件不在 —— 说明这段证据在打包/下载环节丢了。  ",
-        "> 说明: 全局附件不在 `scripts/verify_allure_report.py` 的校验范围内"
-        "(它只核对结果声明的附件), 上面的状态列就是补上的那道核对。",
+        *completeness_section(expectation, missing, results_dir, payloads),
     ]
     return "\n".join(lines) + "\n"
 

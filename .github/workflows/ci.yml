@@ -707,21 +707,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 三个平台一个不少地声明(与 pytest 的矩阵、报告要求的平台三处一致): macOS 是**降频**
-        # 不是砍平台 —— 安全用例确实要验平台语义(大小写不敏感的文件系统、符号链接权限)。
+        # 三个平台一个不少、**每轮都跑**(与 pytest 的矩阵、报告要求的平台三处一致)。安全用例要验
+        # 平台语义(大小写不敏感的文件系统、符号链接权限), 所以不做"只在默认分支跑 macOS"的降频:
+        # 降频期间 PR 与 dev 推送上看不到 macOS 的路径/权限语义, 而报告里会因此少一份
+        # `Security findings(macOS)` —— 那正是 2026-10-02 那次误报的来源。
+        # 代价要认: macOS runner 按 Linux 的 10 倍计价, 每个 PR 因此多一个 macOS 实例。
         os: [ubuntu-latest, windows-latest, macos-latest]
-        # macOS 那一条只在 push 到默认分支时跑(PLAN.md 11.4 第 10 条): macOS runner 按 Linux
-        # 的 10 倍计价, 而"每个 PR 都验一遍 macOS 的路径/权限语义"与"每个平台上都验过"比起来
-        # 边际收益很低。PR 与 dev 上的推送各少一个 macOS 实例, 默认分支上照旧三个平台全跑。
-        #
-        # 为什么写在 exclude 里: 作业级 `if` **拿不到** matrix(GitHub 的「上下文可用性」表里
-        # jobs.<job_id>.if 只认 github/needs/vars/inputs, 而且官方明确写了它在矩阵展开**之前**
-        # 求值), 而把同一条条件挂到作业里每个步骤上会留下"作业是绿的、其实一条安全用例都没跑"
-        # 的空壳 —— 那种失败是静默的, 与本仓库的纪律相反。
-        # 两个 JSON 里都**不写空格**(``{"os":"macos-latest"}``): 冒号后跟空格在 YAML 的普通
-        # 标量里非法, 会让整份工作流解析失败。
-        # 万一这行表达式不被接受, 工作流校验会**当场报错**(不是静默跳过), 退回静态的三平台列表即可。
-        exclude: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) && fromJSON('[]') || fromJSON('[{"os":"macos-latest"}]') }}
     # 安全防护是跨平台正确性属性: 路径越界、符号链接与权限差异都要在每个平台验证.
     steps:
       - name: Check out repository
@@ -1008,8 +999,8 @@ jobs:
 
       - name: Summarize performance and security into Allure
         # `--expect-platforms` 与 allurerc.mjs 的 `environmentsTested`、以及下面
-        # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账里
-        # 「结论清单」的"应有" —— 某个平台的产物整体没交上来时, 那些行会直接点名缺失
+        # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账末节
+        # 「证据核对」的"应有" —— 某个平台的产物整体没交上来时, 那些行会直接点名缺失
         # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
         if: always()
         shell: bash

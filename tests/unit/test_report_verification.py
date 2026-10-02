@@ -330,8 +330,10 @@ def test_required_platforms_match_the_ci_matrix() -> None:
     macOS 曾在开发阶段屏蔽(省额度), 2026-09-30 恢复后三处一起加回来(见 PLAN.md 第 11.9 节)。
 
     汇总脚本自己也吃同一份清单(``create_allure_summary.py --expect-platforms``): 它决定运行
-    总账「结论清单」里"应有"的那些每平台项 —— 少列一个平台, 那个平台整族的结论(用例/覆盖率/
-    安全)就没人点名, 而报告看上去仍然完整。所以是**同一份清单的第三处拷贝**, 一起钉住。
+    总账末节「证据核对」里"应有"的那些每平台项 —— 少列一个平台, 那个平台整族的结论(用例/
+    覆盖率/安全)就没人点名, 而报告看上去仍然完整。所以是**同一份清单的第三处拷贝**, 一起钉住。
+    这个列表还与工作流里每个作业的矩阵"每轮都跑"是一件事: 按平台展开的结论族不许对平台做
+    有条件排除(见 ``test_every_platform_conclusion_is_produced_on_every_run``)。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
@@ -406,42 +408,42 @@ def test_the_pages_actions_are_a_compatible_pair() -> None:
     assert int(deployed.group(1)) >= 4, "部署侧要 ≥ v4(v3 那版已被 v4 取代)"
 
 
-def test_the_macos_security_job_is_downgraded_to_the_default_branch() -> None:
-    """macOS 的安全用例只在 push 到默认分支时跑(PLAN.md 11.4 第 10 条).
+def test_every_platform_conclusion_is_produced_on_every_run() -> None:
+    """按平台展开的结论族, 它的产出作业不能对平台"有条件排除"(2026-10-02 的误报就这么来的).
 
-    这是**降频**不是砍平台: 安全用例确实验平台语义(大小写不敏感的文件系统、符号链接权限),
-    但 macOS runner 按 Linux 的 10 倍计价, 每个 PR 都跑一遍的边际收益很低。三条要一起成立,
-    缺任何一条都会往两个坏方向之一跑:
+    那条误报: security 的 macOS 曾写在矩阵 ``exclude`` 里(只在 push 到默认分支时跑), 而清单
+    仍在所有运行里要求 ``Security findings(macOS)`` —— 于是每次 PR 与 ``dev`` 推送都报一条
+    "缺少结论: Security findings(macOS)", 而那一份按设计就不该有。**假警报比不报更坏**:
+    看多了就没人当回事了。
 
-    1. 平台列表里必须**仍有** macOS —— 删掉它就成了"砍平台", 上一条守卫也会跟着红;
-    2. 排除它的条件必须是"push 到默认分支"的取反, 不能是别的分支/别的事件口径;
-    3. 只能写在矩阵的 ``exclude`` 里: 作业级 ``if`` 拿不到 ``matrix``(GitHub 的「上下文
-       可用性」表里它只认 github/needs/vars/inputs, 且官方写明它在矩阵展开**之前**求值),
-       而把条件挂到每个步骤上会留下"作业是绿的、其实一条用例都没跑"的空壳。
+    现在选的是"不降频"(用户 2026-10-02 的决定): 三个平台每轮都跑。代价要认 —— macOS runner
+    按 Linux 的 10 倍计价。所以这条守卫咬两件事: ① security 的矩阵里没有 ``exclude``、三个
+    平台都在; ② 更强的一条: **任何**按平台展开的结论族, 它的产出作业都不许有条件排除 ——
+    再有人加回一条 "某个平台只在某个事件里跑", 这里立刻红, 而不是等到报告里冒出一条假缺失。
     """
-    block = ci_workflow.job_block(
-        _WORKFLOW.read_text(encoding="utf-8"),
-        "security",
-    )
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    block = ci_workflow.job_block(workflow, "security")
 
     listed = re.search(r"os: \[([^\]]+)\]", block)
     assert listed is not None, "security 的矩阵里要有平台列表"
-    assert "macos-latest" in listed.group(1), (
-        "macOS 必须留在平台列表里: 这一条是降频, 不是砍掉一个平台"
+    runners = {item.strip() for item in listed.group(1).split(",")}
+    assert runners == set(ci_workflow.OS_PLATFORMS), (
+        f"security 要在每个平台上都跑(报告也按三个平台要求): {sorted(runners)}"
+    )
+    assert not re.search(r"^\s*exclude:", block, re.MULTILINE), (
+        "security 不做平台降频: 有条件排除就会在别的运行里少一份结论, "
+        "而总账会把它报成缺失(要么一起改清单, 要么别排除)"
     )
 
-    excluded = re.search(r"^\s*exclude:\s*(\S.*)$", block, re.MULTILINE)
-    assert excluded is not None, (
-        "降频条件要写在矩阵的 exclude 里(作业级 if 拿不到 matrix)"
-    )
-    condition = excluded.group(1)
-    assert "macos-latest" in condition, "排除的必须是 macOS 那一条"
-    assert "github.event_name == 'push'" in condition, (
-        "降频口径是'push 到默认分支', 事件名要对上"
-    )
-    assert "github.event.repository.default_branch" in condition, (
-        "分支要按默认分支判断(写死 main 会在改名后静默失效)"
-    )
+    catalog = _load_script("allure_catalog")
+    for item in catalog.CATALOG:
+        if item.scope != catalog.PER_PLATFORM:
+            continue
+        job = ci_workflow.job_block(workflow, item.job)
+        assert not re.search(r"^\s*exclude:", job, re.MULTILINE), (
+            f"{item.key} 是每平台一份的结论, 但它的产出作业 {item.job} 会按条件排除平台 —— "
+            f"那一种运行里总账会把少的那一份报成缺失, 而它按设计就不该有"
+        )
 
 
 def test_expect_platforms_flag_decides_the_run(
@@ -1282,9 +1284,15 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         "## 覆盖率",
         "## 性能基准",
         "## 安全测试",
-        "## 产物清单",
+        "## 证据核对(应有 vs 实有)",
+        "### ① 结论清单",
+        "### ② 结论项声明的附件文件",
     ):
         assert section in ledger
+    # 读序: 结论在前, 审计性的核对在末尾 —— 但"缺不漏"的那一行数留在开头。
+    assert ledger.index("## 安全测试") < ledger.index("## 证据核对(应有 vs 实有)")
+    assert ledger.rstrip().endswith("说明这段证据在打包/下载环节丢了。")
+    assert "- 证据核对: 应有 " in ledger, "开头要留一行数, 不然移到末尾就看不出来了"
     assert "91.82%" in ledger, "覆盖率数字要取自原始 XML"
     assert "75.00%" in ledger, "分支覆盖率也要写出来"
     assert "?" not in ledger.split("## 覆盖率")[1].split("##")[0], "覆盖率不该是问号"
@@ -2482,6 +2490,62 @@ def test_the_gate_category_matches_what_the_scripts_write() -> None:
 # -- 结论清单(应有 vs 实有): 清单要与产出方代码、CI 作业以及运行总账同步 ------------------
 
 
+def _conclusion_table(ledger: str) -> str:
+    """从总账里切出末节「证据核对」的 ① 结论清单表.
+
+    「证据核对」是**末节**(2026-10-02 调整读序: 前面是结论本身, 证据齐不齐是审计附录),
+    它与产物清单合并成一节、下面挂着 ①② 两张表, 所以切片要按小节标题而不是按 ``##``。
+    """
+    assert "### ① 结论清单" in ledger, "总账要有「证据核对」末节的 ① 结论清单"
+    return ledger.split("### ① 结论清单", 1)[1].split("### ②", 1)[0]
+
+
+def test_the_evidence_section_sits_at_the_end_with_a_verdict_up_front(
+    tmp_path: Path,
+) -> None:
+    """结论清单移到文末、与产物清单合成一节, 但"缺不漏"的一行数必须留在开头.
+
+    总账是报告首页的全局附件: 读者先看的是结论(质量门/覆盖率/性能/安全), "这次该有的证据
+    齐不齐"是审计性的附录, 放前面会挡路。代价是**移走之后不能看不见** —— 开头那行
+    "应有 N 项 / 实有 M 项 / 缺 K 项(见文末「证据核对」)"就是为此保留的, 所以两头都要守。
+    """
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    _write_platform_result(
+        results,
+        "cov-win",
+        ("env", "Windows"),
+        ("os", "Windows"),
+        full_name="archive-management.coverage",
+    )
+    ledger = module.run_ledger(results, module.result_payloads(results), None, [])
+
+    body = ledger.splitlines()
+    verdict = [line for line in body if line.startswith("- 证据核对:")]
+    assert len(verdict) == 1, "开头要有一行数(移到末尾才不至于看不见)"
+    assert "应有 " in verdict[0], f"那行数要给出应有/实有/缺: {verdict[0]}"
+    assert "实有 " in verdict[0], f"那行数要给出应有/实有/缺: {verdict[0]}"
+    assert "缺 " in verdict[0], f"那行数要给出应有/实有/缺: {verdict[0]}"
+    assert "见文末「证据核对」" in verdict[0], "缺了要指路到文末那一节"
+    # 末节必须真的在末尾: ① 表在 ② 表之后不再有任何二级标题。
+    tail = ledger.split("## 证据核对(应有 vs 实有)", 1)[1]
+    assert "## 结论清单" not in ledger, "旧标题不能残留(一节两处会让读者以为有两份)"
+    assert "\n## " not in tail, "「证据核对」后面不该还有二级节"
+    # 一行数里的数目要与 ① 表里的行数对得上(那行是给不点开的人也看得见的)。
+    rows = [
+        line
+        for line in _conclusion_table(ledger).splitlines()
+        if line.startswith("| ") and not line.startswith("| ---")
+    ][1:]
+    assert rows, "① 表要有数据行"
+    received = sum(line.rstrip().endswith("已收到 |") for line in rows)
+    assert f"应有 {len(rows)} 项" in verdict[0], "应有项数要等于 ① 表的行数"
+    assert f"实有 {received} 项" in verdict[0], (
+        f"开头那行数要与 ① 表的结论一致: {verdict[0]}"
+    )
+
+
 def _upstream_jobs(workflow: str, job: str) -> set[str]:
     """某个作业的上游(``needs`` 的传递闭包): 只有这些作业的产物它才拿得到.
 
@@ -2603,7 +2667,9 @@ def test_expected_items_expand_every_family_and_every_quality_check() -> None:
             per_platform[item.producer.key] += 1
     assert per_platform["tests"] == len(platforms)
     assert per_platform["coverage"] == len(platforms)
-    assert per_platform["security"] == len(platforms)
+    assert per_platform["security"] == len(platforms), (
+        "security 每轮三个平台都跑(不做降频), 所以三个平台各要一行"
+    )
 
 
 def _write_platform_result(
@@ -2698,7 +2764,7 @@ def test_missing_conclusions_are_loud_in_the_ledger_and_as_broken_items(
     )
 
     ledger = (tmp_path / "allure-run-ledger.md").read_text(encoding="utf-8")
-    table = ledger.split("## 结论清单(应有 vs 实有)", 1)[1].split("## 质量门", 1)[0]
+    table = _conclusion_table(ledger)
     assert "| Coverage report(macOS) |" in table
     assert "**缺失**" in table
     row = next(line for line in table.splitlines() if "Coverage report(macOS)" in line)
@@ -2752,6 +2818,4 @@ def test_missing_conclusions_are_loud_in_the_ledger_and_as_broken_items(
     # 再跑一次(现场已经多了那几条 broken 项): 结论不能变 —— 缺失项自己不能被当成"收到了"。
     assert module.main(["--expect-platforms", "Windows,macOS,Linux"]) == 0
     again = (tmp_path / "allure-run-ledger.md").read_text(encoding="utf-8")
-    assert again.split("## 质量门", 1)[0] == ledger.split("## 质量门", 1)[0], (
-        "重复跑汇总脚本时结论清单必须稳定"
-    )
+    assert _conclusion_table(again) == table, "重复跑汇总脚本时结论清单必须稳定"
