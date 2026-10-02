@@ -193,7 +193,11 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: .venv-visual
         run: |
-          uv sync --locked --no-default-groups --group visual --python /usr/bin/python3.12 --python-preference only-system
+          # 组要装齐**这一步真正用到的**: visual(感知哈希/SSIM) + test —— 脚本复用
+          # ``tests/crash_capture.py`` 的抓图原语, 而那个模块 import allure(附件 API);
+          # 少装 test 组时会在运行的一瞬间以 "No module named 'allure'" 退出 2
+          # (2026-10-02 实测: 34 个包装完, 脚本第一步就挂)。
+          uv sync --locked --no-default-groups --group test --group visual --python /usr/bin/python3.12 --python-preference only-system
           xvfb-run -a -s "-screen 0 1600x1000x24" uv run --no-sync python scripts/create_allure_visual.py --results-dir allure-results-visual --baselines tests/visual-baselines --candidates visual-baselines-candidates
 
       - name: Upload visual Allure results
@@ -1003,11 +1007,15 @@ jobs:
           cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
 
       - name: Summarize performance and security into Allure
+        # `--expect-platforms` 与 allurerc.mjs 的 `environmentsTested`、以及下面
+        # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账里
+        # 「结论清单」的"应有" —— 某个平台的产物整体没交上来时, 那些行会直接点名缺失
+        # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
         if: always()
         shell: bash
         run: |
           mkdir -p allure-results
-          uv run python scripts/create_allure_summary.py
+          uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux
 
       - name: Validate the quality gate
         # 规则在仓库根的 allurerc.mjs 里(唯一来源, 这里不重复传参)。先跑、先留日志:

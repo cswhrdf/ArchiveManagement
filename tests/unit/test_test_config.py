@@ -24,6 +24,7 @@ import ast
 import re
 import tomllib
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -236,6 +237,10 @@ _CI_COMMAND_GROUPS = (
     # 视觉回归要 imagehash + scikit-image(那一组单独拆出来: 它带整套 numpy/scipy/networkx,
     # 混进质量组等于让每个分片实例都下一遍)。
     (r"create_allure_visual\.py", "visual"),
+    # 视觉回归还要 **test** 组: 它复用 ``tests/crash_capture.py`` 的抓图原语, 而那个模块
+    # ``import allure``(附件 API)。少装它时环境看起来很正常, 直到运行的一瞬间报
+    # "No module named 'allure'"(2026-10-02 实测)。
+    (r"create_allure_visual\.py", "test"),
 )
 # 本地提交钩子与常见本地命令要用的工具: 默认组装不下它们, 本地就跑不了。
 _LOCAL_TOOLS = (
@@ -284,14 +289,47 @@ def _sync_by_environment(job_body: str) -> dict[str, list[str]]:
     return by_environment
 
 
+@dataclass
+class _EnvironmentPlan:
+    """作业里被 ``uv sync`` 装出来的一个环境(作业共用那个 + 任何 ``UV_PROJECT_ENVIRONMENT``)."""
+
+    syncs: list[str] = field(default_factory=list)
+    """装到这个环境里的 ``uv sync`` 命令行(已去注释)."""
+
+    steps: list[str] = field(default_factory=list)
+    """在这个环境里跑的步骤正文(用来算"它需要哪些组")."""
+
+
+def _environments(job_body: str) -> dict[str, _EnvironmentPlan]:
+    """按"这一步在哪个环境里跑"归类作业正文.
+
+    同一个作业可以故意装有**两份环境**: 视觉回归那一步要用发行版的 Tk(uv 管的那份 Python
+    在 X11 上只走核心位图字体, 汉字一个都画不出来, 见 PLAN §22), 于是它用
+    ``UV_PROJECT_ENVIRONMENT`` 指到另一个目录并单独 sync 一次。
+
+    分开归类之后两条规矩才能各自落到实处: ① "同一个环境里的多次 sync 必须一致"(后一次会把
+    前一次装好的组删掉); ② "每个环境都要装齐**装在里面那些步骤**需要的组" —— ② 不按环境分
+    的话, 独立环境会因为作业别处装了别的组而偷幸过关(2026-10-02 就是这么漏掉 allure 的)。
+    """
+    plans: dict[str, _EnvironmentPlan] = {}
+    for step in re.split(r"\n\s*- (?:name|uses|run):", job_body):
+        target = re.search(r"UV_PROJECT_ENVIRONMENT:\s*(\S+)", step)
+        plan = plans.setdefault(
+            target.group(1) if target else "(作业共用)", _EnvironmentPlan()
+        )
+        plan.steps.append(step)
+        plan.syncs.extend(re.findall(r"uv sync[^\n]*", _without_comments(step)))
+    return plans
+
+
 def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
     """CI 每个作业只装自己需要的那一组依赖, 而且每组都在 `uv sync` 里显式列出来.
 
     一趟 CI 有十几个作业实例, 每个都装全套开发依赖(bandit / pip-audit / pyinstaller ...)
     是最容易省掉的固定开销 —— 尤其冷缓存那一轮(锁文件一变, uv 缓存就得重建)。
-    两条判据: ① 作业里出现的命令所需的那几组必须都被某次 `uv sync` 装上(缺了会以
-    "Failed to spawn: xxx" 响亮地失败, 但仍值得在本地拦住); ② 同一作业里的每次 `uv sync`
-    必须是同一套参数(否则修复步骤那一次会把刚装好的组又删掉)。
+    两条判据**按环境**判(同一作业可以有两份环境, 见 :func:`_environments`): ① 装在里面那些
+    步骤需要的组必须都在那次 `uv sync` 里列出来; ② 同一个环境里的每次 `uv sync` 必须是同一套
+    参数(否则修复步骤那一次会把刚装好的组又删掉)。
 
     **不碰 uv 的作业**在 :data:`_UV_FREE_JOBS` 里登记(清单现在是空的: 原来那个只做下载/解压/发布的
     Pages 作业已与汇总合并); 登记项会被反向自查"真的一条 uv 命令都没有", 免得它变成绕过分组检查的后门。
@@ -300,43 +338,45 @@ def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
         text = workflow.read_text(encoding="utf-8")
         for name, body in ci_workflow.jobs(text).items():
             commands = _without_comments(body)
-            by_environment = _sync_by_environment(body)
+            environments = _environments(body)
+            synced = [line for plan in environments.values() for line in plan.syncs]
 
             if name in _UV_FREE_JOBS:
                 hint = f"{name} 登记为不用 uv, 却出现了 uv 命令: 要么让它 sync, 要么别用 uv"
                 assert "uv " not in commands, hint
                 continue
 
-            synced = [line for lines in by_environment.values() for line in lines]
             assert synced, f"{workflow.name} 的 {name} 没有 uv sync"
-            # 同一个环境里的多次 sync 必须一模一样; 另一个环境可以有自己的那一套。
-            for target, lines in by_environment.items():
+            for target, plan in environments.items():
                 hint = (
-                    f"{name} 在同一个环境({target})里的每次 uv sync 必须一致"
-                    f"(后一次会把前一次装好的组删掉): {lines}"
+                    f"{name} 的环境 {target} 里有步骤, 但这个环境一次 uv sync 都没有:"
+                    f" {plan.steps[0][:120]}"
                 )
-                assert len(set(lines)) == 1, hint
+                assert plan.syncs, hint
+                assert len(set(plan.syncs)) == 1, (
+                    f"{name} 在同一个环境({target})里的每次 uv sync 必须一致"
+                    f"(后一次会把前一次装好的组删掉): {plan.syncs}"
+                )
+                # 这一条**按环境**判: 独立环境不会因为作业别处装了别的组就偷幸过关。
+                listed = set(re.findall(r"--group ([\w-]+)", plan.syncs[0]))
+                needed = {
+                    group
+                    for pattern, group in _CI_COMMAND_GROUPS
+                    if re.search(pattern, "\n".join(plan.steps))
+                }
+                hint = (
+                    f"{name} 的环境 {target} 缺依赖组: {sorted(needed - listed)}"
+                    f"(它跑了需要这些组的命令)"
+                )
+                assert needed <= listed, hint
+                hint = f"{name} 的环境 {target} 引用了不存在的依赖组: {sorted(listed)}"
+                assert listed <= set(_dev_groups()), hint
+
             for line in synced:
                 assert "--locked" in line, f"{name} 的 uv sync 没用 --locked: {line}"
                 # 默认组是给本地开发用的: CI 里它会把整套依赖静默装回来(实测一次装回 51 个包)。
                 hint = f"{name} 的 uv sync 没关掉默认组: {line}"
                 assert "--no-default-groups" in line, hint
-
-            listed = set().union(
-                *(set(re.findall(r"--group ([\w-]+)", line)) for line in synced)
-            )
-            hint = f"{name} 引用了不存在的依赖组: {sorted(listed)}"
-            assert listed <= set(_dev_groups()), hint
-
-            needed = {
-                group
-                for pattern, group in _CI_COMMAND_GROUPS
-                if re.search(pattern, commands)
-            }
-            hint = (
-                f"{name} 缺依赖组: {sorted(needed - listed)} (它跑了需要这些组的命令)"
-            )
-            assert needed <= listed, hint
 
 
 def test_ci_only_installs_the_project_where_the_cli_smoke_needs_it() -> None:

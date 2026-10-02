@@ -1,6 +1,6 @@
 """把性能与安全测试结果汇总进 Allure 报告.
 
-汇总要做五件事:
+汇总要做六件事:
 
 1. 写入环境信息(操作系统、Python、提交 SHA、测试类别、覆盖率门槛、本次涉及的
    平台), 让每份报告都能回答"这次结果是在哪个平台、哪个提交上跑出来的";
@@ -22,13 +22,23 @@
    文件:行号、标记种类与原因)与 ``pyproject.toml`` 的 ``exclude_also`` —— 数据来自真实
    源码, 且每条豁免都必须写明原因(缺原因的会单独列为"写入问题");
 5. 缺少某类结果时不报错(例如只跑了单元测试), 只是跳过该类并写进环境信息与总账;
-   **但性能结果文件缺失时会写一条 broken 结论项** —— "没有这条"与"这条通过"必须能分辨。
+   **但性能结果文件缺失时会写一条 broken 结论项** —— "没有这条"与"这条通过"必须能分辨;
+6. 按一份**从产出方代码同步出来的清单**(``scripts/allure_catalog.py``)核对"应有 vs 实有":
+   把本次运行**应该**有的结论项列全(质量检查项直接从 ``create_allure_quality.py`` 的
+   ``CHECKS`` 解析出来, 不是手写清单), 逐项标"已收到 / 缺失", 每个缺失项**另写一条 broken
+   结论项**并打印 ``::warning::`` —— 产物没产出/没上传/没合并进报告时, 总账里看得见,
+   原生质量门也会跟着红。以前只渲染"手里有什么", 缺一整节是完全静默的(2026-10-02 漏掉
+   视觉回归的产物与 ``test`` 组就是这么过去的)。
 
-用法(CI 汇总 job): ``uv run python scripts/create_allure_summary.py``
+用法(CI 汇总 job):
+``uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux``
+(平台列表要与 CI 的矩阵和 ``allurerc.mjs`` 的 ``environmentsTested`` 一致; 不传时退回
+"结果里出现过的平台")
 """
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
@@ -37,9 +47,19 @@ import sys
 import time
 import tomllib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# 本脚本所在目录: 下面要用的清单模块与它同目录。``scripts`` 不是包(每处 ``uv sync`` 都带
+# ``--no-install-project``), 所以先把自己这一层加进 ``sys.path`` 再 import —— 与
+# ``create_allure_visual.py`` 借 ``tests/crash_capture.py`` 的做法一致。
+SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+if str(SCRIPT_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIRECTORY))
+
+import allure_catalog  # noqa: E402  (要先把自己所在目录加进 sys.path 才 import 得到)
 
 RESULTS_DIRECTORY = Path("allure-results")
 PERFORMANCE_JSON = Path("performance-results.json")
@@ -56,6 +76,21 @@ ENVIRONMENT_FILENAME = "environment.properties"
 QUALITY_GATE_REPORT = Path("allure-run-ledger.md")
 # 覆盖率项的全名: 它没有 testCategory 标签(见 create_allure_coverage.py), 用全名认。
 COVERAGE_FULL_NAME = "archive-management.coverage"
+# 本脚本自己产出的两类汇总项的身份。写成常量(而不是在调用处拼字符串)是为了让
+# scripts/allure_catalog.py 能对着源码核出"本仓库到底会写出哪些身份", 以及守卫能钉住
+# "清单里登记的每个身份都真的有人写" —— 见 tests/unit/test_report_verification.py。
+PERFORMANCE_IDENTITY = "archive-management.performance"
+SECURITY_IDENTITY = "archive-management.security"
+#: 缺失结论项的类别: 报的是"这次少了哪一类结论", 不是某个具体用例的结果。
+MISSING_CATEGORY = "missing"
+#: 缺失结论项的严重等级: 它表示证据链断了一节, 用 major 而不是汇总项的 trivial。
+MISSING_SEVERITY = "major"
+#: 缺失项自己不知道会落在哪台机器上 —— ``os`` 标签写 unknown, 免得它被当成"又测了一个
+#: 平台"(``os`` 标签是 ``tested_platforms()`` 认平台的地方); ``unknown`` 在平台列表里
+#: 本来就被过滤掉。身份前缀来自清单(``ABSENCE_IDENTITY``): 它与预期身份错开, 缺失项
+#: 自己永远不会被当成"这一族已经收到了"。
+MISSING_OS_LABEL = "unknown"
+MISSING_IDENTITY = allure_catalog.ABSENCE_IDENTITY
 # Allure CLI 原生质量门的输出: CI 在生成报告前跑一次并留日志(见 ci.yml), 工作流会在
 # 末尾追一行 `退出码: N`; 总账据此给出结论, 而不是去猜 CLI 的输出文本。
 NATIVE_GATE_LOG = Path("allure-quality-gate.txt")
@@ -855,19 +890,178 @@ def native_gate_section() -> list[str]:
     ]
 
 
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """解析命令行参数(不传就是"没有参数": 用例直接调 ``main()`` 时不碰 ``sys.argv``)."""
+    parser = argparse.ArgumentParser(
+        description="把性能/安全/覆盖率结论与环境信息写入 allure-results"
+    )
+    parser.add_argument(
+        "--expect-platforms",
+        default="",
+        help=(
+            "本次运行声明要覆盖的平台, 逗号分隔(如 Windows,macOS,Linux)。它决定「结论清单」"
+            '里"应有"的那些每平台项; 不传时退回"结果里出现过的平台" ——'
+            "那样整个平台的产物都没交上来时看不出来"
+        ),
+    )
+    arguments = parser.parse_args([] if argv is None else list(argv))
+    arguments.platforms = [
+        item.strip()
+        for item in str(arguments.expect_platforms).split(",")
+        if item.strip()
+    ]
+    return arguments
+
+
+def producer(key: str) -> allure_catalog.Producer:
+    """取清单里的一族结论(身份与标题的唯一来源, 免得在这边再抄一遍字面量)."""
+    return next(item for item in allure_catalog.CATALOG if item.key == key)
+
+
+def self_written_items(
+    performance: dict[str, Any] | None, security_payloads: list[dict[str, Any]]
+) -> set[tuple[str, str]]:
+    """本脚本自己会写下的结论项(它们不该在清单里被当成"没收到").
+
+    性能/安全这两类结论项是**这个脚本**写的, 而"应有 vs 实有"要在它们写下来之前就采好
+    (见 ``main``) —— 不把它们补进来, 每次跑都会把自己要写的那两类报成缺失。真正该盯着
+    的是**原始数据文件**在不在: 它不在时 ``Performance baseline`` 会写成 broken、安全那类
+    则根本不写 —— 两种情形在清单里都会如实反应。
+
+    "安全按平台各一份": 所以补的是"有数据的那几个平台", 某个平台的 ``security-results.json``
+    没交上来时, 它那一行依然是缺失(这正是我们要看见的)。
+    """
+    items: set[tuple[str, str]] = set()
+    if performance is not None:
+        items.add((PERFORMANCE_IDENTITY, ""))
+    for payload in security_payloads:
+        items.add((SECURITY_IDENTITY, platform_of(payload)))
+    return items
+
+
+def completeness_section(
+    expected: list[allure_catalog.Expected], actual: set[tuple[str, str]]
+) -> list[str]:
+    """「结论清单(应有 vs 实有)」一节: 由**清单**决定, 而不是由"手里有什么"决定.
+
+    这是总账里唯一能看出"这次缺了东西"的地方。以前每一节都是"有就渲染、没有就写一句没有",
+    于是产物没产出/没上传/没合并进报告时, 报告的完整度完全看不出来 —— 它只会安静地少一节
+    (2026-10-02 漏掉视觉回归的产物与 ``test`` 组就是这么过去的)。这里把清单里的每一项都
+    列出来(应有), 再逐项标注收到没收到(实有), 缺了就点名。
+
+    「判定」列是刻意加上的: 每条结论只由**一个**角色判定, 职责不重叠 —— ``总账`` 表示缺失时
+    本脚本会另写一条 broken 结论项(原生质量门会跟着红); ``报告自检`` 表示那条由
+    ``scripts/verify_allure_report.py`` 按 ``--expect-platforms`` 逐平台对数, 总账只把它
+    **列出来**, 不重复判一遍。
+    """
+    missing = set(allure_catalog.missing_items(expected, actual))
+    lines = [
+        "## 结论清单(应有 vs 实有)",
+        "",
+        f"- 应有 {len(expected)} 项, 实有 {len(expected) - len(missing)} 项"
+        + (f", **缺 {len(missing)} 项**" if missing else ", 全部到齐。"),
+        "- 「应有」不是手写的: `scripts/allure_catalog.py` 从产出方**解析**出来"
+        "(质量检查项取自 `create_allure_quality.py` 的 `CHECKS`, 在那边加一项检查, 这里立刻"
+        '多一行)。所以"产物没产出/没上传/没合并进来"都会在这里显形。',
+        "- 状态列: `已收到` = 结果里真的有这一项(在它该出现的环境里); **缺失** = 应有而没有。"
+        "缺失项还会各写一条 broken 结论项 —— 总账是附件, 不点开是看不到的。",
+        "",
+        "| 结论项 | 预期产物 | 产出者 | 判定 | 状态 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for item in expected:
+        judge = "总账"
+        if item.producer.gate != allure_catalog.GATE_SUMMARY:
+            judge = "报告自检"
+        state = "**缺失**" if item in missing else "已收到"
+        lines.append(
+            f"| {_cell(item.label)} | `{_cell(item.producer.artifact)}` "
+            f"| `{_cell(item.producer.script)}` / 作业 `{_cell(item.producer.job)}` "
+            f"| {judge} | {state} |"
+        )
+    lines.append("")
+    return lines
+
+
+def missing_digest(message: str) -> str:
+    """缺失结论项的描述: 缺了什么、去哪儿找、怎么补."""
+    return (
+        "## 缺少结论\n\n"
+        f"{message}\n\n"
+        "## 怎么办\n\n"
+        "- 先看产出它的 CI 作业有没有跑、产物有没有上传(上面点了名);\n"
+        "- 再看汇总作业有没有把那份产物下载下来(工作流里的 `download-artifact` 清单);\n"
+        "- 最后看合并进 `allure-results` 时有没有被别的东西盖掉。\n"
+    )
+
+
+def missing_conclusion_results(
+    results_dir: Path, missing: list[allure_catalog.Expected]
+) -> list[str]:
+    """给每个缺失的结论项写一条 broken 结论项, 返回日志用的告警文案.
+
+    为什么要在报告里另写一条: 总账是一份**附件**, 不点开看不到; 而原生质量门只数结果的
+    状态 —— 缺一节证据时如果什么都不写, 门禁会安静地通过。写一条 broken 项同时做三件事:
+    报告首页与用例树里一眼可见、失败数跟着涨(门禁红)、CI 日志里留下告警行。
+
+    只有 ``GATE_SUMMARY`` 的项在这里写 —— 平台用例那条由报告自检负责(分工见
+    ``scripts/allure_catalog.py`` 文件头), 两边都写会让同一件事报两遍。
+
+    身份用 ``archive-management.missing.<家族>``: 刻意不落在任何预期身份的前缀里, 这样
+    "缺失项自己"绝不会被当成"这一族已经收到了"。
+    """
+    messages: list[str] = []
+    for item in missing:
+        if item.producer.gate != allure_catalog.GATE_SUMMARY:
+            continue
+        message = allure_catalog.describe_missing(item)
+        write_result(
+            results_dir,
+            result_id=str(uuid.uuid4()),
+            identity=f"{MISSING_IDENTITY}{item.producer.key}",
+            category=MISSING_CATEGORY,
+            title=f"缺少结论: {item.label}",
+            description=missing_digest(message),
+            attachments=[],
+            platform=item.environment or "common",
+            status="broken",
+            status_message=message,
+            severity=MISSING_SEVERITY,
+            os_label=MISSING_OS_LABEL,
+        )
+        messages.append(message)
+    return messages
+
+
 def run_ledger(
     results_dir: Path,
     payloads: list[dict[str, Any]],
     performance: dict[str, Any] | None,
     security_payloads: list[dict[str, Any]],
     platforms: list[str] | None = None,
+    expected: list[allure_catalog.Expected] | None = None,
 ) -> str:
     """把四类结论与产物清单合成一份"运行总账"(报告首页「全局附件」页签).
 
     ``platforms`` 是本次运行涉及、且**应该**有覆盖率结论的平台(调用方在写任何新结论项之前
     采好的那一份); 不传时退回"结果里出现过的平台"。
+
+    ``expected`` 是本次运行**应该**有的结论项(清单展开的结果)。调用方传进来是为了让这一节与
+    它写下的 broken 结论项用同一个种子; 不传时按 ``known_platforms`` 现算一份 ——
+    缺失项的身份前缀刻意与预期身份错开, 所以无论哪条路径, 刚写下的缺失项都不会被当成
+    "这一族已经收到了"。
     """
     known_platforms = tested_platforms(results_dir) if platforms is None else platforms
+    # ``unknown`` 不算平台: 缺失结论项并不来自哪台机器, 它的 ``os`` 标签就是它。
+    known_platforms = [name for name in known_platforms if name not in {"unknown", ""}]
+    expectation = (
+        expected
+        if expected is not None
+        else allure_catalog.expected_items(list(known_platforms), SCRIPT_DIRECTORY)
+    )
+    actual = allure_catalog.actual_items(results_dir) | self_written_items(
+        performance, security_payloads
+    )
     expected_coverage = [
         name for name in known_platforms if name not in {"unknown", "", "default"}
     ]
@@ -878,9 +1072,11 @@ def run_ledger(
         f"(分支 {os.environ.get('GITHUB_REF_NAME', 'local')}"
         f", 运行 {os.environ.get('GITHUB_RUN_ID', 'local')})",
         f"- 涉及平台: {', '.join(known_platforms) if known_platforms else 'unknown'}",
-        "- 下面四节是本次运行的结论, 每节都注明原始产物在哪条结论项里; "
-        "末尾的产物清单逐项核对文件是否存在。",
+        "- 先是「结论清单」: 这次**应该**有哪些结论、哪些到齐了(缺了什么都点名); "
+        "然后是各节结论, 每节都注明原始产物在哪条结论项里; 末尾的产物清单逐项核对文件"
+        "是否存在。",
         "",
+        *completeness_section(expectation, actual),
         quality_gate_report(
             quality_checks(results_dir),
             heading="## 质量门(与平台无关, 只在 Linux 跑一遍; 归入 `Common` 环境)",
@@ -1053,6 +1249,7 @@ def write_result(
     results_dir: Path,
     *,
     result_id: str,
+    identity: str,
     category: str,
     title: str,
     description: str,
@@ -1060,8 +1257,15 @@ def write_result(
     platform: str,
     status: str = "passed",
     status_message: str = "",
+    severity: str = SUMMARY_SEVERITY,
+    os_label: str = "",
 ) -> None:
     """写入一条 Allure 结果(承载该类测试的汇总信息).
+
+    ``identity`` 是结果的 ``fullName``(如 ``archive-management.security``): 调用处传常量而
+    不是在这里拼字符串 —— 清单(``scripts/allure_catalog.py``)与守卫都靠这些常量对着源码
+    核对"这次到底应该写出哪些身份"。``category`` 则同时当 ``layer`` / ``testCategory`` 标签
+    与 historyId 的一部分。
 
     ``status`` 默认 ``passed``: 但汇总项必须能**体现失败** —— 例如安全用例红了一条,
     ``Security findings`` 却写 passed, 报告里就完全看不出问题(2026-09-25 的 Linux)。
@@ -1071,8 +1275,11 @@ def write_result(
     变成 Allure 的环境, 因此标题里也不再拼平台名; ``平台`` 参数与 ``os`` 标签是兼底
     (生成端没读到报告配置时, 环境会静默退回 ``default``)。
 
-    严重等级固定为 ``trivial``: 汇总项本身不验证任何行为, 只是把原始结论与附件
+    严重等级默认 ``trivial``: 汇总项本身不验证任何行为, 只是把原始结论与附件
     带进报告; 不打等级的话报告里会多出一个 no_severity 桶。
+
+    ``os_label`` 默认跟 ``platform`` 一样; 只有"缺失结论项"会传一个不同的值 —— 它并不来自
+    哪台机器, 而 ``os`` 标签是脚本认"这次涉及哪些平台"的依据。
     """
     timestamp = time.time_ns() // 1_000_000
     result: dict[str, Any] = {
@@ -1080,7 +1287,7 @@ def write_result(
         "historyId": str(
             uuid.uuid5(uuid.NAMESPACE_URL, f"archive-management-{category}")
         ),
-        "fullName": f"archive-management.{category}",
+        "fullName": identity,
         "name": title,
         "status": status,
         "stage": "finished",
@@ -1088,7 +1295,7 @@ def write_result(
         "stop": timestamp,
         "labels": [
             {"name": "suite", "value": "Test report"},
-            {"name": "os", "value": platform},
+            {"name": "os", "value": os_label or platform},
             # 与环境维度对齐: 仓库根的 allurerc.mjs 用 env 标签把结果归到各平台的环境,
             # 缺了它这些汇总项只会出现在 default 环境里(按环境筛选时就看不到了)。
             {"name": "env", "value": platform},
@@ -1097,7 +1304,7 @@ def write_result(
             {"name": "story", "value": title},
             {"name": "layer", "value": category},
             {"name": "testCategory", "value": category},
-            {"name": "severity", "value": SUMMARY_SEVERITY},
+            {"name": "severity", "value": severity},
         ],
         "parameters": [{"name": "平台", "value": platform}],
         "description": description,
@@ -1149,8 +1356,9 @@ def _write_performance_result(
     write_result(
         results_dir,
         result_id=result_id,
+        identity=producer("performance").identity,
         category="performance",
-        title="Performance baseline",
+        title=producer("performance").title,
         description=description,
         attachments=attachments,
         platform=platform,
@@ -1178,8 +1386,9 @@ def _write_security_results(results_dir: Path) -> None:
         write_result(
             results_dir,
             result_id=result_id,
+            identity=producer("security").identity,
             category="security",
-            title="Security findings",
+            title=producer("security").title,
             description=security_digest(status, failures)
             + "\n"
             + security_table(findings),
@@ -1202,8 +1411,10 @@ def _write_coverage_exclusions() -> None:
     print(f"覆盖率豁免清单已写入 {COVERAGE_EXCLUSIONS_REPORT}")
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """把性能/安全/覆盖率结论与环境信息写入 allure-results."""
+    ensure_utf8_output()
+    arguments = parse_args(argv)
     results_dir = RESULTS_DIRECTORY
     if not results_dir.is_dir():
         print(f"Allure 结果目录不存在: {results_dir}", file=sys.stderr)
@@ -1214,13 +1425,26 @@ def main() -> int:
         payload for payload in (read_json(path) for path in security_files()) if payload
     ]
 
+    # ``common`` 也算掉: 质量检查与缺失结论项落在这个环境里, 它不是"某个平台" ——
+    # 否则重复跑一次汇总脚本时它会混进平台列表(``os`` 标签被当成平台)。
     platforms = sorted(
         {
             *tested_platforms(results_dir),
             *([platform_of(performance)] if performance is not None else []),
             *(platform_of(payload) for payload in security_payloads),
         }
-        - {"unknown", ""}
+        - {"unknown", "", "common"}
+    )
+    # 「应有」清单必须在写任何新结论项**之前**采好: 缺失项自己也会写成结论项, 采晚了就会把
+    # 刚写下的那几条当成"已经有了"(身份前缀是第二道保险, 见 missing_conclusion_results)。
+    # 反过来, 本脚本要写的性能/安全那两类由 self_written_items 补进"实有"—— 它们尚未落盘,
+    # 但已经确定会落盘; 真正该盯的是它们的原始数据文件在不在。
+    declared = list(arguments.platforms) or platforms
+    expected = allure_catalog.expected_items(declared, SCRIPT_DIRECTORY)
+    missing = allure_catalog.missing_items(
+        expected,
+        allure_catalog.actual_items(results_dir)
+        | self_written_items(performance, security_payloads),
     )
     lines = environment_lines(
         performance, security_payloads[0] if security_payloads else None, platforms
@@ -1232,6 +1456,10 @@ def main() -> int:
     _write_performance_result(results_dir, performance)
     _write_security_results(results_dir)
     _write_coverage_exclusions()
+    for message in missing_conclusion_results(results_dir, missing):
+        # CI 日志里的告警行(汇总作业的平台用例检查也在用同一条通道): 报告本身是产物, 不点开
+        # 看不到, 而"这次少了哪一节证据"值得在日志里就看见。
+        print(f"::warning::{message}")
 
     if performance is None:
         print(
@@ -1244,19 +1472,22 @@ def main() -> int:
     checks = quality_checks(results_dir)
     payloads = result_payloads(results_dir)
     QUALITY_GATE_REPORT.write_text(
-        run_ledger(results_dir, payloads, performance, security_payloads, platforms),
+        run_ledger(
+            results_dir, payloads, performance, security_payloads, platforms, expected
+        ),
         encoding="utf-8",
     )
     artifacts = artifact_rows(results_dir, payloads)
-    missing = [row for row in artifacts if row[3] != "已收录"]
+    missing_artifacts = [row for row in artifacts if row[3] != "已收录"]
     print(
         f"运行总账已写入 {QUALITY_GATE_REPORT}: 质量门 {len(checks)} 项, "
-        f"产物 {len(artifacts)} 个(缺失 {len(missing)} 个)"
+        f"产物 {len(artifacts)} 个(缺失 {len(missing_artifacts)} 个), "
+        f"结论项应有 {len(expected)} 项(缺 {len(missing)} 项)"
     )
-    for owner, name, _size, state in missing:
+    for owner, name, _size, state in missing_artifacts:
         print(f"警告: 原始产物不可用 —— {owner} 的 {name}({state})", file=sys.stderr)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

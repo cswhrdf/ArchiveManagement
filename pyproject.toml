@@ -223,6 +223,7 @@ known_first_party = [
   "ci_workflow",
   "tk_guard",
   "timeout_guard",
+  "allure_catalog",
 ]
 exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
 

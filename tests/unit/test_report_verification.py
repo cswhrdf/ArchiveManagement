@@ -328,6 +328,10 @@ def test_required_platforms_match_the_ci_matrix() -> None:
     这三处一旦不一致就会变成两种错法: 矩阵里跑了而没要求 -> 那个平台的产物丢了没人发现;
     要求了而矩阵里没跑 -> 报告必然不完整, 门禁无意义地红。
     macOS 曾在开发阶段屏蔽(省额度), 2026-09-30 恢复后三处一起加回来(见 PLAN.md 第 11.9 节)。
+
+    汇总脚本自己也吃同一份清单(``create_allure_summary.py --expect-platforms``): 它决定运行
+    总账「结论清单」里"应有"的那些每平台项 —— 少列一个平台, 那个平台整族的结论(用例/覆盖率/
+    安全)就没人点名, 而报告看上去仍然完整。所以是**同一份清单的第三处拷贝**, 一起钉住。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
@@ -342,6 +346,16 @@ def test_required_platforms_match_the_ci_matrix() -> None:
     assert passed is not None, "汇总作业要传 --expect-platforms"
     assert set(passed.group(1).split(",")) == required, (
         "汇总作业的平台列表与 allurerc.mjs 不一致"
+    )
+
+    invoked = re.search(
+        r"create_allure_summary\.py[^\n]*--expect-platforms\s+(\S+)", workflow
+    )
+    assert invoked is not None, (
+        "汇总脚本要传 --expect-platforms(运行总账按它算「应有」)"
+    )
+    assert set(invoked.group(1).split(",")) == required, (
+        "运行总账的平台清单与 allurerc.mjs 不一致"
     )
 
     # CI 矩阵里实际跑测试的平台: pytest 与 pytest-report 用 include 逐条列(条目里的 os 是
@@ -744,8 +758,16 @@ def test_report_summary_items_declare_a_severity() -> None:
         assert '"name": "env"' in text, f"{script.name} 未给汇总项写 env 标签"
 
     summary = scripts[1].read_text(encoding="utf-8")
-    assert 'title="Performance baseline"' in summary, "性能汇总项的标题不应再拼平台名"
-    assert 'title="Security findings"' in summary, "安全汇总项的标题不应再拼平台名"
+    # 标题的唯一来源是清单(scripts/allure_catalog.py), 写入处只引用它 —— 于是"标题里拼没拼
+    # 平台名"只需要在一处盯住; 同时也要求写入处不要再各抄一份字面量(那样又会分叉出两份)。
+    titles = {item.key: item.title for item in _load_script("allure_catalog").CATALOG}
+    assert titles["performance"] == "Performance baseline"
+    assert titles["security"] == "Security findings"
+    assert 'title="Performance baseline"' not in summary, "标题不该在写入处再抄一份"
+    for name in titles.values():
+        assert not any(
+            platform in name for platform in ("Windows", "Linux", "macOS")
+        ), f"标题里不能拼平台名(平台由环境表达): {name}"
 
 
 _COVERAGE_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -2455,3 +2477,281 @@ def test_the_gate_category_matches_what_the_scripts_write() -> None:
     label, value = matched.group(1), matched.group(2)
     assert label == writer.CATEGORY_LABEL == summary.QUALITY_CATEGORY_LABEL
     assert value == writer.CATEGORY_VALUE == summary.QUALITY_CATEGORY
+
+
+# -- 结论清单(应有 vs 实有): 清单要与产出方代码、CI 作业以及运行总账同步 ------------------
+
+
+def _upstream_jobs(workflow: str, job: str) -> set[str]:
+    """某个作业的上游(``needs`` 的传递闭包): 只有这些作业的产物它才拿得到.
+
+    头一个作业(如 ``pytest``)没有 ``needs`` —— 上游为空, 不是错。
+    """
+
+    def declared(name: str) -> set[str]:
+        block = ci_workflow.job_block(workflow, name)
+        if not re.search(r"^\s*needs:", block, re.MULTILINE):
+            return set()
+        return ci_workflow.needs_of(workflow, name)
+
+    found: set[str] = set()
+    pending = list(declared(job))
+    while pending:
+        current = pending.pop()
+        if current in found:
+            continue
+        found.add(current)
+        pending.extend(declared(current) - found)
+    return found
+
+
+def test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions() -> None:
+    """结论清单必须与产出方代码**双向**同步 —— 这条就是"自动同步"的守卫.
+
+    为什么不能靠人维护: 清单决定总账里"应有"的一栏, 少了登记就等于那一类结论缺了也不会被
+    点名(2026-10-02: 视觉回归的产物与 ``test`` 组都没上传, 报告里安静地少了两节)。
+    两个方向都要拦: 代码里写了新身份而清单没登记 -> 缺了看不出; 清单登记了没人写的身份 ->
+    总账会一直报一项永远不会出现的缺失。
+
+    清单本身也是"从代码里解析出来的": 质量检查项来自 ``create_allure_quality.py`` 的
+    ``CHECKS``(见下一条守卫), 所以在这个脚本里加一项检查不需要回来改清单。
+    """
+    catalog = _load_script("allure_catalog")
+    uncatalogued, unwritten = catalog.identity_gaps(_REPO_ROOT / "scripts")
+
+    assert not uncatalogued, (
+        f"这些身份会被写进 Allure 结果, 但清单里没登记(缺了也不会被总账点名): "
+        f"{sorted(uncatalogued)} —— 加进 scripts/allure_catalog.py 的 CATALOG"
+    )
+    assert not unwritten, (
+        f"清单登记了这些身份, 但没有任何脚本会写它们(总账会永远报缺失): "
+        f"{sorted(unwritten)}"
+    )
+
+
+def test_every_expected_conclusion_names_a_live_script_and_an_upstream_job() -> None:
+    """清单里每条结论的"产出脚本 / 上传作业"必须真的存在, 而且那个作业在汇总作业的上游.
+
+    否则清单会慢慢变成一份"看上去很详细"的文档: 作业改了名、脚本搬了家、或者汇总作业
+    不再 ``needs`` 那个作业(产物根本下不下来), 都不会有人发现 —— 而总账只会照着清单
+    说"应该有", 报出来的缺失无法定位。
+    """
+    catalog = _load_script("allure_catalog")
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    workflow_jobs = ci_workflow.jobs(workflow)
+    upstream = _upstream_jobs(workflow, "allure-summary")
+
+    for item in catalog.CATALOG:
+        assert (_REPO_ROOT / item.script).is_file(), (
+            f"{item.key} 声明的产出脚本不存在: {item.script}"
+        )
+        assert item.job in workflow_jobs, (
+            f"{item.key} 声明的上传作业不在工作流里: {item.job}"
+        )
+        assert "actions/upload-artifact" in workflow_jobs[item.job], (
+            f"{item.job} 已经不上传任何产物, {item.key} 的缺失会被误报"
+        )
+        assert item.job in upstream, (
+            f"{item.key} 的产物由 {item.job} 上传, 但汇总作业拿不到它"
+            f"(不在 needs 链上: {sorted(upstream)})"
+        )
+
+
+def test_expected_items_expand_every_family_and_every_quality_check() -> None:
+    """「应有」清单的展开: 每族结论都要出现, 质量检查逐项展开且跟着 ``CHECKS`` 走.
+
+    逐项展开是关键 —— 只写"质量检查这一族"的话, ``bandit`` 那一项没产出时会被同一族的
+    别的检查顶上(家族前缀匹配的经典错法), 缺失永远看不出来。
+    """
+    catalog = _load_script("allure_catalog")
+    scripts = _REPO_ROOT / "scripts"
+    platforms = ["Windows", "macOS", "Linux"]
+    items = catalog.expected_items(platforms, scripts)
+
+    families = {item.producer.key for item in items}
+    assert families == {item.key for item in catalog.CATALOG}, (
+        "每族结论都要在「应有」里"
+    )
+
+    checks = catalog.quality_checks(scripts)
+    assert checks, "要从 create_allure_quality.py 里解析出检查项"
+    common = {f"archive-management.quality.{check.key}" for check in checks}
+    assert {item.identity for item in items} >= common, "每一项检查都要逐项展开"
+
+    platform_checks = [check for check in checks if check.host_platform]
+    environments = catalog.platform_environments(scripts)
+    assert (
+        environments == _load_script("create_allure_quality").PLATFORM_ENVIRONMENTS
+    ), "平台映射要从 create_allure_quality.py 解析出来, 且与它自己的常量一致"
+    expected_platform_rows = {
+        (item.identity, item.environment)
+        for item in items
+        if item.producer.key == "quality-platform"
+    }
+    assert expected_platform_rows == {
+        (
+            f"archive-management.quality.{check.key}",
+            environments[check.host_platform or ""],
+        )
+        for check in platform_checks
+    }, "平台专属检查要落在它自己的平台上"
+
+    # 每平台一项的结论按声明的平台各展开一份; 声明少一个平台, 那个平台就整族消失。
+    per_platform = {family.key: 0 for family in catalog.CATALOG}
+    for item in items:
+        if item.environment:
+            per_platform[item.producer.key] += 1
+    assert per_platform["tests"] == len(platforms)
+    assert per_platform["coverage"] == len(platforms)
+    assert per_platform["security"] == len(platforms)
+
+
+def _write_platform_result(
+    results: Path, slug: str, *labels: tuple[str, str], full_name: str = ""
+) -> None:
+    """写一条带标签的结果(占位用例与汇总结论项共用: 身份与所属环境都靠标签认)."""
+    payload: dict[str, Any] = {
+        "uuid": slug,
+        "name": slug,
+        "status": "passed",
+        "labels": [{"name": name, "value": value} for name, value in labels],
+    }
+    if full_name:
+        payload["fullName"] = full_name
+    (results / f"{slug}-result.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_missing_conclusions_are_loud_in_the_ledger_and_as_broken_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """产物没交上来时必须**点名**: 总账里标缺失, 报告里另写一条 broken 结论项.
+
+    以前总账每一节都是"有就渲染、没有就写一句没有", 于是"少了哪一节"完全看不出来 ——
+    报告永远是完整的, 只是内容少一块。这里锁定三件事: 应有/实行的逐项对照、缺失项在表里
+    标 **缺失**、以及每个缺失项各写一条 broken 结论项(报告里一眼可见, 原生质量门跟着红)。
+    """
+    module = _load_script("create_allure_summary")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    # 现象: 只有 Windows 交了产物, macOS/Linux 的覆盖率没了; 视觉回归整族没上传;
+    # 质量检查只交了一项(其余检查项各自算缺失, 不会被同一族顶掉)。
+    _write_platform_result(
+        results,
+        "cov-win",
+        ("env", "Windows"),
+        ("os", "Windows"),
+        full_name="archive-management.coverage",
+    )
+    _write_platform_result(
+        results,
+        "case-win",
+        ("env", "Windows"),
+        ("os", "Windows"),
+        ("framework", "pytest"),
+    )
+    _write_platform_result(
+        results,
+        "ruff",
+        ("env", "common"),
+        ("os", "Linux"),
+        ("testCategory", "quality"),
+        full_name="archive-management.quality.ruff-check",
+    )
+    # 性能/安全数据齐全: 它们的结论项由本脚本自己写, 不能被报成缺失(自报自缺的经典错法)。
+    (tmp_path / "performance-results.json").write_text(
+        json.dumps(
+            {
+                "platform": "Linux",
+                "environment": {"os_family": "Linux"},
+                "measurements": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    findings = tmp_path / "security-findings" / "Linux"
+    findings.mkdir(parents=True)
+    (findings / "security-results.json").write_text(
+        json.dumps({"environment": {"os_family": "Linux"}, "findings": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+    monkeypatch.setattr(
+        module, "PERFORMANCE_JSON", tmp_path / "performance-results.json"
+    )
+    monkeypatch.setattr(module, "PERFORMANCE_CSV", tmp_path / "performance-results.csv")
+    monkeypatch.setattr(module, "SECURITY_JSON", tmp_path / "security-results.json")
+    monkeypatch.setattr(
+        module, "SECURITY_FINDINGS_DIRECTORY", tmp_path / "security-findings"
+    )
+    monkeypatch.setattr(
+        module, "QUALITY_GATE_REPORT", tmp_path / "allure-run-ledger.md"
+    )
+    monkeypatch.setattr(
+        module, "COVERAGE_EXCLUSIONS_REPORT", tmp_path / "allure-coverage-exclusions.md"
+    )
+    monkeypatch.setattr(module, "NATIVE_GATE_LOG", tmp_path / "allure-quality-gate.txt")
+
+    assert module.main(["--expect-platforms", "Windows,macOS,Linux"]) == 0, (
+        "缺失不改汇总脚本的退出码: 判定交给原生质量门(我们写下的 broken 结论项会让它红)"
+    )
+
+    ledger = (tmp_path / "allure-run-ledger.md").read_text(encoding="utf-8")
+    table = ledger.split("## 结论清单(应有 vs 实有)", 1)[1].split("## 质量门", 1)[0]
+    assert "| Coverage report(macOS) |" in table
+    assert "**缺失**" in table
+    row = next(line for line in table.splitlines() if "Coverage report(macOS)" in line)
+    assert row.rstrip().endswith("**缺失** |"), f"缺的那一行要点名: {row}"
+    received = next(
+        line for line in table.splitlines() if "Coverage report(Windows)" in line
+    )
+    assert received.rstrip().endswith("已收到 |"), f"交上来的那行不能误报: {received}"
+    # 视觉回归整族没有产物: 一行一项(它是公共项, 不分平台)。
+    assert "| 视觉回归 |" in table
+    assert "**缺失**" in next(
+        line for line in table.splitlines() if line.startswith("| 视觉回归 |")
+    )
+    # 质量检查逐项判定: 交了的算收到, 没交的各自点名(不被同一族别的检查顶掉)。
+    assert "| Ruff check |" in table
+    for title in ("Bandit 安全扫描", "Xenon 复杂度门槛"):
+        assert "**缺失**" in next(
+            line for line in table.splitlines() if line.startswith(f"| {title}")
+        ), f"{title} 没交产物却没被点名"
+    # 本脚本自己写的那两类不能报缺失。
+    for title in ("Performance baseline", "Security findings(Linux)"):
+        assert "已收到" in next(
+            line for line in table.splitlines() if line.startswith(f"| {title}")
+        ), f"{title} 由本脚本自己写, 不该被报成缺失"
+
+    written = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(results.glob("*-result.json"))
+    ]
+    missing_items = {
+        payload["name"]: payload
+        for payload in written
+        if str(payload.get("fullName", "")).startswith(module.MISSING_IDENTITY)
+    }
+    assert "缺少结论: Coverage report(macOS)" in missing_items
+    assert "缺少结论: 视觉回归" in missing_items
+    assert "缺少结论: Performance baseline" not in missing_items
+    broken = missing_items["缺少结论: Coverage report(macOS)"]
+    assert broken["status"] == "broken", "缺失项要是 broken, 否则质量门不会跟着红"
+    assert broken["stage"] == "finished"
+    assert "coverage-data" in broken["statusDetails"]["message"], (
+        "缺什么要写在失败原因里"
+    )
+    assert broken["labels"][2]["value"] == "macOS", "缺失项要落在缺的那个平台上"
+    # 总账与日志都要看得见(报告是产物, 不点开看不到)。
+    printed = capsys.readouterr().out
+    assert "::warning::缺少结论: Coverage report(macOS)" in printed
+    assert "::warning::缺少结论: Performance baseline" not in printed
+    assert "结论项应有" in printed, "控制台也要给出应有/缺失的数目"
+
+    # 再跑一次(现场已经多了那几条 broken 项): 结论不能变 —— 缺失项自己不能被当成"收到了"。
+    assert module.main(["--expect-platforms", "Windows,macOS,Linux"]) == 0
+    again = (tmp_path / "allure-run-ledger.md").read_text(encoding="utf-8")
+    assert again.split("## 质量门", 1)[0] == ledger.split("## 质量门", 1)[0], (
+        "重复跑汇总脚本时结论清单必须稳定"
+    )
