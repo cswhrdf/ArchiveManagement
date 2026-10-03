@@ -1468,8 +1468,8 @@ def _job_has_a_backstop_scene(summary: Path) -> bool:
     return bool(payload.get("scene", True))
 
 
-def failure_diagnostics_report(directory: Path) -> str:
-    """把各作业**兜底现场**的 ``summary.md`` 拼成一份报告首页的附件.
+def failure_diagnostics_report(directory: Path) -> str | None:
+    """把各作业**兜底现场**的 ``summary.md`` 拼成一份报告首页的附件; 没有现场时返回 None.
 
     只收判定为"有兜底现场"的那些(2026-10-04 按用户的要求收紧): 普通失败的证据(断言输出、
     门禁不通过、步骤报错)已经在结果与运行日志里, 在全局附件里再讲一遍只是噪音。
@@ -1478,9 +1478,10 @@ def failure_diagnostics_report(directory: Path) -> str:
     会把这个页签埋掉; 而兜底现场本来就该连着看。摘要由 scripts/collect_job_diagnostics.py
     生成 —— 本函数只做拼接与过滤, 不猜其中任何一个字段。
 
-    一条都没有(本轮全绿, 或失败全是"结果里已经写明白"的那类)时返回一段说明, 而不是干脆
-    不写文件: ``globalAttachments`` 里列着这个名字, 文件缺失会让 Allure 在报告里留一条
-    "附件找不到"的告警。
+    **没有现场时返回 None(调用方不写文件, 并把上一次留下的那份删掉)** —— 用户 2026-10-04:
+    一份永远存在的"失败现场"只会让人以为可能崩过, 而点开才发现是空的。
+    ``allurerc.mjs`` 那条 `globalAttachments` 因此按**文件在不在**自己决定收不收(配置是 JS,
+    一行 ``existsSync`` 就够了), 于是也不会留"附件找不到"的告警。
     """
     scenes = [
         path
@@ -1488,12 +1489,7 @@ def failure_diagnostics_report(directory: Path) -> str:
         if _job_has_a_backstop_scene(path)
     ]
     if not scenes:
-        return (
-            "# 失败现场(兜底)\n\n"
-            "本轮**没有需要兜底的现场**: 失败的证据都在结果里(用例详情、门禁结论项、运行日志)。\n\n"
-            "这一页只收两类东西 —— **进程级崩溃**的现场(faulthandler 的线程栈、系统级崩溃报告)"
-            "与**证据缺失**(进程没走到会话结束, 例如覆盖率文件根本没落盘)。普通失败不在这里重复。\n"
-        )
+        return None
     parts = [
         "# 失败现场(兜底)",
         "",
@@ -1512,10 +1508,13 @@ def failure_diagnostics_report(directory: Path) -> str:
 
 
 def _write_failure_diagnostics() -> None:
-    """写"失败现场"附件(报告首页「全局附件」的一份)."""
-    FAILURE_DIAGNOSTICS_REPORT.write_text(
-        failure_diagnostics_report(FAILURE_DIAGNOSTICS_DIRECTORY), encoding="utf-8"
-    )
+    """写"失败现场"附件; **没有兜底现场时不写, 并把上一次留下的那份删掉**."""
+    report = failure_diagnostics_report(FAILURE_DIAGNOSTICS_DIRECTORY)
+    if report is None:
+        FAILURE_DIAGNOSTICS_REPORT.unlink(missing_ok=True)
+        print(f"没有兜底现场: 不生成 {FAILURE_DIAGNOSTICS_REPORT}(并清掉旧的)")
+        return
+    FAILURE_DIAGNOSTICS_REPORT.write_text(report, encoding="utf-8")
     print(f"失败现场已写入 {FAILURE_DIAGNOSTICS_REPORT}")
 
 

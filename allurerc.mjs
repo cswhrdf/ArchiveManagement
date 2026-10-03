@@ -29,6 +29,14 @@
  * (三个平台 + 一个 `Common` 环境, 外加启动期校验用的 `allowedEnvironments`)。
  * 其它可用键、以及"生成后自动打开浏览器""单 HTML 报告"为什么故意不设, 见下面各项的注释。
  */
+import { existsSync } from "node:fs";
+
+// 失败现场只在真有兜底现场时才由 scripts/create_allure_summary.py 生成 —— 这里按文件在不在
+// 决定收不收(见 globalAttachments 那一项的说明)。
+const failureDiagnostics = existsSync("allure-failure-diagnostics.md")
+  ? ["allure-failure-diagnostics.md"]
+  : [];
+
 export default {
   // 报告标题(显示在报告头部与 <title> 上). 不写就是通用的 "Allure Report"。
   name: "存档管理工具 · 测试报告",
@@ -92,13 +100,15 @@ export default {
   // 现在三项: 运行总账(整次运行的结论)、"有意不统计的覆盖"豁免清单(逐条列出
   // `# pragma: no cover` / `# pragma: no branch` 的位置与原因 + exclude_also) ——
   // 后者的数据来自真实源码, 由 scripts/create_allure_summary.py 生成; 以及**失败现场**
-  // (把各作业失败时 `collect_job_diagnostics.py` 写的摘要拼成一份: 覆盖率文件在不在、
-  // 崩溃日志多大、哪个作业的哪一步断了) —— 失败时它才有内容, 全绿时只有一行。
-  // 三项都由 scripts/create_allure_summary.py 写在仓库根, 这个作业的 cwd 就是仓库根。
+  // (把各作业失败时 `collect_job_diagnostics.py` 写的摘要拼成一份)。
+  // 第三项是**条件**收的(用户 2026-10-04): 没有兜底现场(崩溃 / 证据缺失)时那份文件
+  // 根本不存在 —— 一份永远挂在首页的"失败现场"只会让人以为可能崩过, 点开才发现是空的;
+  // 按文件在不在收也顺带避开了"附件找不到"的告警。前两项由 scripts/create_allure_summary.py
+  // 写在仓库根, 这个作业的 cwd 就是仓库根。
   globalAttachments: [
     "allure-run-ledger.md",
     "allure-coverage-exclusions.md",
-    "allure-failure-diagnostics.md",
+    ...failureDiagnostics,
   ],
   // 失败归类(Categories): 把"失败/损坏"的结果按**错误文本**分门别类, 与默认的
   // Product errors / Test errors 并存 —— 被某条规则命中的结果会被它"消费"掉, 不再落回默认分类。
@@ -178,18 +188,26 @@ export default {
    * **版本要求 ≥ 3.18.0**: 3.13~3.17 在配了 `historyPath` 时会**静默放行**(退 0 且不输出
    * 任何内容) —— 根因是本地历史流的句柄从不销毁, `AllureReport.done()` 永不返回, Node 在
    * 校验前就把进程退掉了(issue #895; 修在 3.18.0 的 PR #962, 另一个 PR #924 至今未合)。
-   * CI 因此把 CLI 钉在 **3.19.1**(≥ 3.18.0, 2026-10-03 升级); 升版本前先重跑一遍下面的
-   * 两行确认失败用例能让它退 1 —— `tests/unit/test_report_verification.py` 里那条守卫会
-   * 把工作流里钉的版本与这里写的最低要求对一遍, 两处不一致就红。
+   * CI 从 2026-10-04 起用**浮动标签** `allure@3`(用户决定动态取最新, 当时最新是 3.20.0), 所以
+   * 下限改在**运行期**核对: 工作流那句 `Check Allure version` 会解析实际版本, 低于 3.18.0
+   * 当场红(静默放行那种失效在报告里看不出来)。升版本前先重跑一遍下面的两行确认失败用例
+   * 能让它退 1 —— `tests/unit/test_report_verification.py` 里那条守卫把工作流里写的版本与
+   * 这里的最低要求对一遗(浮动标签则要求运行期校验必须在)。
+   *
+   * **3.20.0 起 `generate` 阶段也会执行质量门**(实测: 单平台的 `allure-results` 在
+   * `environmentsTested` 面前会以退 1 收场, 而 3.19.1 在同样输入下能生成成功)。汇总作业
+   * 本来就是三个平台齐全, 所以它跑得通; 逐平台的报告作业若撞上它, 用不带 `qualityGate` 的
+   * 配置就行(见 `allurerc.per-platform.mjs`)。
    *
    * 注意两点:
-   * - `allure generate` **不执行**校验, 所以首页「质量门」页签仍只有 `allure run` 会填;
-   *   CI 把这里的输出写成 `allure-quality-gate.txt`, 由运行总账(`allure-run-ledger.md`,
-   *   见 `scripts/create_allure_summary.py`)收进报告首页「全局附件」;
+   * - `allure generate` **不执行**校验(3.20.0 之前), 所以首页「质量门」页签仍只有
+   *   `allure run` 会填; CI 把这里的输出写成 `allure-quality-gate.txt`, 由运行总账
+   *   (`allure-run-ledger.md`, 见 `scripts/create_allure_summary.py`)收进报告首页
+   *   「全局附件」 —— 那一节就是“整次运行的门到底过没过、输出是什么”的落地处;
    * - `environmentsTested` 只在**汇总报告**里成立(本地单平台跑必然不通过, 这是预期)。
    *
    * 本地复现(在仓库根, 需要子目录里有 allure-results):
-   *   npx allure@3.19.1 quality-gate --config allurerc.mjs allure-results
+   *   npx allure@3 quality-gate --config allurerc.mjs allure-results
    */
   qualityGate: {
     rules: [

@@ -155,25 +155,25 @@ _POSTER_SLOT_WIDTH = _POSTER_WIDTH + 8
 # 海报卡片里名称的可用宽度: 卡片宽减左右各 10 的内边距.
 _POSTER_TEXT_WIDTH = _POSTER_WIDTH - 20
 _POSTER_NAME_LINES = 2
+# 名称块的**首帧**高度(逻辑像素): 设计值, 两行约 40。它只是兜底 —— 真正的值在控件落地之后
+# 按**渲染出来的行高**量出来(见 :meth:`HomePage._fit_poster_name_blocks`): 布局之前字体与
+# CTkLabel 量到的是默认字号的度量, 2026-10-04 的 Linux CI 因此在 28 与 39 之间对不上。
+_POSTER_NAME_BLOCK_FALLBACK = 40
 
 
-def poster_name_block_height(font: ctk.CTkFont, widget: tk.Misc) -> int:
-    """海报卡片里名称块的高度 = **两行字**(逻辑像素), 与文本实际占了几行无关.
+def poster_name_block_height(line: int, default: int) -> int:
+    """名称块的高度 = **一行行距 + 标签的默认高** 再加 2px 的取整余量(都是逻辑像素).
 
-    为什么要这么一个数: 名称块的高度决定了它下面"备份数 / 最近活动"两行的位置 ——
-    高度随文本行数变时, 一行名与两行名的卡片下面两行就差 11px(用户 2026-10-02 报的
-    "最近活动显示位置不同, 整个游戏的下边框被盖住")。而"让文本永远占两行"在平台之间
-    不成立: 尾随空行算不算一行由平台定, Linux(X11) 上不算(2026-10-04 的 Linux CI:
-    一行名 28px、两行名 39px, 同样的代码在 Windows/macOS 上绿)。
+    为什么是这两个数: ``CTkLabel`` 有一个与文本无关的**默认高**(默认 28 逻辑像素, 所以
+    一行名量出来就是 28、两行名才会长到 39 —— 2026-10-04 的 Linux CI 就是这个差); 一行名
+    与两行名要占同样高度, 就要在默认高之外额外留出**一行行距**。
 
-    所以高度从**字体行距**算(``linespace`` 是渲染字号下的一行高度, 见 :func:`measured_font`),
-    两行乘二再换回逻辑像素 —— 不量任何控件, 也不看文本里有几个换行。字号设置里改
-    "界面字号"时它跟着变。尾部的 +2 是给各平台的取整留余量: 容器宁可高一点也不要把
-    第二行压掉。
+    ``line``(一行行距)与 ``default``(默认高)都由调用方给出**实测值**
+    (见 :meth:`HomePage._fit_poster_name_blocks`) —— 这里不做字体度量: 布局之前量不准,
+    2026-10-04 的 Linux CI 算出来 28 而两行文本真的要 39。两个数都与**文本内容无关**,
+    所以同一字体下各卡片拿到同一个高度。
     """
-    scale = window_scaling(widget) or 1
-    lines = measured_font(font, widget).metrics("linespace") * _POSTER_NAME_LINES
-    return round(lines / scale) + 2
+    return line + default + 2
 
 
 # 滚动区宽度还没测量出来时的兜底宽度(启动首屏的 winfo_width() 只有 1): 否则首帧
@@ -276,6 +276,10 @@ class HomePage:
         self._sync_job: str | None = None
         self._poster_columns = 0
         self._poster_slots = 0
+        # 名称块(与它里面的名称标签)与已经量出来的块高: 海报卡片重建后按同一个数摆,
+        # 从而"一行名与两行名下面那两行"永远对齐(见 _fit_poster_name_blocks)。
+        self._poster_name_blocks: list[tuple[ctk.CTkFrame, ctk.CTkLabel]] = []
+        self._poster_name_height: int | None = None
         self._filter = HomeFilter()
         # 分页当前页(0 基)与每页条数由 HomeFilter.page_size 决定.
         self._page_index = 0
@@ -994,6 +998,7 @@ class HomePage:
         self._hover = None
         self._align_attempts = 0
         self._refit_attempts = 0
+        self._poster_name_blocks = []
         self._apply_poster_columns(0)
         games = self._visible_games()
         board = self._board
@@ -1023,6 +1028,9 @@ class HomePage:
             self._head.grid_remove()
             self._reserve_head_row(reserve=True)
             self._render_posters(games)
+            # 海报模式没有表头要对齐, 但名称块的高度同样要等落地之后再量一次(那条延后
+            # 任务的两种布局都跑, 见 _sync_list_layout / _fit_poster_name_blocks)。
+            self._schedule_list_sync()
         self._paint_rows()
         self._update_actions()
         self._sync_scrollbar()
@@ -1151,12 +1159,80 @@ class HomePage:
         self._sync_job = None
 
     def _sync_list_layout(self) -> None:
-        """把表头对齐到数据行, 并按名称块的**实际宽度**重新裁剪每行的名称."""
+        """把表头对齐到数据行, 并按名称块的**实际宽度**重新裁剪每行的名称.
+
+        海报模式没有表头, 也不重裁名称, 但**名称块的高度**同样要等控件落地之后才量得准
+        (见 :meth:`_fit_poster_name_blocks`), 所以那一步在两种布局下都跑。
+        """
         self._sync_job = None
+        self._fit_poster_name_blocks()
         if self._filter.layout is not HomeLayout.LIST or not self._rows:
             return
         self._align_table_header()
         self._refit_row_names()
+
+    def _fit_poster_name_blocks(self) -> None:
+        """按**实测行高**把名称块定成两行高(只在海报模式下有意义).
+
+        为什么必须延后量: 布局之前字体与 CTkLabel 量到的是默认字号的度量, 算出来 28px,
+        而两行文本真的要 39px(2026-10-04 的 Linux CI 就是这么红的)。这里量的是**一行**的
+        高度: 名称标签自己的请求高度 ÷ 它的行数(行数由文本里的换行数给出, 与用例同一条
+        算法), 取各卡片里最大的那个, 乘 :data:`_POSTER_NAME_LINES` 就是块高 —— 同一字体的
+        各卡片因此拿到同一个数, 一行名与两行名下面那两行必然对齐。
+        """
+        if not self._poster_name_blocks:
+            return
+        scale = window_scaling(self._list_box) or 1
+        font = measured_font(self._name_font, self._list_box)
+        # 标签的**默认高**与文本无关(实测 28 逻辑像素), 一行的行距取自字体: 两个数加起来
+        # 就是"一行名不再矮一截"所需的高度, 而且与具体名称无关(同类卡片必然一致)。
+        default = max(
+            int(label.cget("height")) for _, label in self._poster_name_blocks
+        )
+        line = round(int(font.metrics("linespace")) / scale)
+        height = poster_name_block_height(line, default)
+        if height == self._poster_name_height:
+            return
+        self._poster_name_height = height
+        for block, _ in self._poster_name_blocks:
+            block.configure(height=height)
+        self._refit_poster_cards()
+
+    def _refit_poster_cards(self) -> None:
+        """名称块高度变了之后重算卡片高度(卡片高度是按内容算的, 见 _fit_poster_height)."""
+        for card in self._rows.values():
+            frames = [
+                child
+                for child in card.winfo_children()
+                if isinstance(child, ctk.CTkFrame)
+            ]
+            labels = [
+                child
+                for child in card.winfo_children()
+                if isinstance(child, ctk.CTkLabel)
+            ]
+            if len(frames) < 2 or len(labels) < 2:  # pragma: no cover - 结构变了就该红
+                continue
+            cover, name_box = frames[0], frames[1]
+            badge, activity = labels[-2], labels[-1]
+            self._fit_poster_height(
+                card, self._poster_rows(cover, name_box, badge, activity)
+            )
+
+    @staticmethod
+    def _poster_rows(
+        cover: ctk.CTkFrame,
+        name_box: ctk.CTkFrame,
+        badge: ctk.CTkBaseClass,
+        activity: ctk.CTkBaseClass,
+    ) -> tuple[tuple[ctk.CTkBaseClass, tuple[int, int]], ...]:
+        """卡片里四行的"控件 + 上下间距"清单(建卡片与重算高度共用同一份)."""
+        return (
+            (cover, _POSTER_COVER_PAD_Y),
+            (name_box, (_POSTER_TITLE_GAP, 0)),
+            (badge, _POSTER_META_PAD_Y),
+            (activity, _POSTER_ACTIVITY_PAD_Y),
+        )
 
     def _header_offset(self) -> tuple[int, int] | None:
         """量表头内容与数据行的偏移(正数 = 表头偏右); 量不到时返回 None.
@@ -1335,7 +1411,7 @@ class HomePage:
         name_box = ctk.CTkFrame(
             card,
             fg_color="transparent",
-            height=poster_name_block_height(name_font, card),
+            height=self._poster_name_height or _POSTER_NAME_BLOCK_FALLBACK,
         )
         name_box.grid(
             row=1, column=0, sticky="ew", padx=10, pady=(_POSTER_TITLE_GAP, 0)
@@ -1363,6 +1439,8 @@ class HomePage:
         # 名称底对齐容器的上沿: 一行名与两行名的第一个字落在同一行上(比"在两行里垂直居中"
         # 更整齐)。
         name.grid(row=0, column=0, sticky="nw")
+        # 登记给 :meth:`_fit_poster_name_blocks`: 控件落地之后要按实测行高把块高改正。
+        self._poster_name_blocks.append((name_box, name))
         # 备份数(或"无有效存档路径")排在名称下方而不是压在封面上: 压在封面上的角标
         # 会盖住封面里的游戏 logo, 而它本来就是这个游戏的元信息, 与活动时间同一组。
         meta_font = ctk.CTkFont(size=10, weight="bold")

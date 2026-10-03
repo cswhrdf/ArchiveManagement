@@ -118,25 +118,25 @@ def test_summary_job_pulls_every_diagnostics_artifact() -> None:
 
 
 def test_diagnostics_report_lands_in_the_allure_config() -> None:
-    """报告首页的全局附件里要有那份"失败现场" —— 名字两边必须一致."""
+    """报告首页的全局附件里要有那份"失败现场", 而且它是**按文件在不在条件收的**.
+
+    用户 2026-10-04: 没有兜底现场时这份文档不该生成 —— 否则不点开只会以为"是不是崩过"。
+    两处一起才行: 脚本不写文件(见 test_no_backstop_scene_means_no_attachment), 配置按
+    ``existsSync`` 决定收不收 —— 否则 Allure 会在报告里留一条"附件找不到"的告警。
+    """
     module = _load_script("create_allure_summary")
     config = ALLURE_CONFIG.read_text(encoding="utf-8")
-    matched = re.search(r"globalAttachments:\s*\[([^\]]*)\]", config)
-    assert matched is not None, "配置里要有 globalAttachments"
-    # 数组写成多行时会有尾随逗号与缩进, 过滤掉空项再看集合。
-    names = {
-        name
-        for item in matched.group(1).split(",")
-        if (name := item.strip().strip('"'))
-    }
 
-    assert module.FAILURE_DIAGNOSTICS_REPORT.name in names
-    # 附件名出现在配置里但脚本不写这个文件时, Allure 会在报告里留一条"附件找不到"的告警,
-    # 而那正发生在最需要报告可信的时候 —— 所以两边必须点名同一个文件。
-    assert module.FAILURE_DIAGNOSTICS_REPORT.name == "allure-failure-diagnostics.md"
+    assert "globalAttachments:" in config, "配置里要有 globalAttachments"
+    name = module.FAILURE_DIAGNOSTICS_REPORT.name
+    assert name == "allure-failure-diagnostics.md"
+    assert name in config, "配置里要点名这份附件"
+    assert f'existsSync("{name}")' in config, (
+        "这份附件要按文件在不在决定收不收(没有现场时不该出现)"
+    )
     # 它是 CI 生成物, 也必须被忽略: 否则本地跑一次汇总就会污染工作区(另两份附件同样在列)。
     ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
-    assert module.FAILURE_DIAGNOSTICS_REPORT.name in ignored
+    assert name in ignored
 
 
 def test_diagnostics_report_is_a_pointer_not_a_copy(tmp_path: Path) -> None:
@@ -185,13 +185,11 @@ def test_main_writes_the_summary_and_echoes_it(
     assert "# 作业失败现场: pytest" in echoed, "没传 --label 时要退回 GITHUB_JOB"
 
 
-def test_all_green_run_still_writes_a_readable_attachment(tmp_path: Path) -> None:
-    """全绿时那份附件也要写出来(一段说明), 否则报告会多一条"附件找不到"."""
+def test_no_backstop_scene_means_no_attachment(tmp_path: Path) -> None:
+    """没有兜底现场时**不写**这份附件 —— 返回 None, 由调用方保证文件不存在."""
     module = _load_script("create_allure_summary")
 
-    text = module.failure_diagnostics_report(tmp_path / "missing")
-
-    assert "没有需要兜底的现场" in text
+    assert module.failure_diagnostics_report(tmp_path / "missing") is None
 
 
 def test_attachment_keeps_only_backstop_scenes(tmp_path: Path) -> None:

@@ -801,12 +801,15 @@ jobs:
         # 历史设置(historyPath/appendHistory/historyLimit)与环境映射都在仓库根的
         # allurerc.mjs 里, CLI 会从工作目录自动读取 —— 不再临时写 `.allure/allurerc.json`
         # 再 `--config` 指定(那样会忽略仓库配置, 平台也就不会成为报告的"环境").
+        # 但这里用 **allurerc.per-platform.mjs**: 3.20.0 起 `generate` 也会执行质量门, 而
+        # `environmentsTested` 只在汇总那份报告里成立 —— 本作业只合并**一个平台**的结果,
+        # 用主配置生成会以退 1 收场(实测)。那份配置从主配置继承, 只摘掉 qualityGate。
         if: always()
         shell: bash
         run: |
           mkdir -p .allure
           if [ -n "$(find allure-results -type f -print -quit 2>/dev/null)" ]; then
-            allure generate allure-results --output allure-report
+            allure generate allure-results --output allure-report --config allurerc.per-platform.mjs
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi

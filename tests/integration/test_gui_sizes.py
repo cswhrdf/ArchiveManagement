@@ -1018,7 +1018,15 @@ def _wait_settled_parent(app: Any, *, seconds: float = 3.0) -> None:
 
 
 def _assert_centered(parent: Any, window: Any, *, tolerance: int = 12) -> None:
-    """弹窗客户区中心要落在父窗口中心上(容差留给窗口管理器的取整)."""
+    """弹窗客户区中心要落在父窗口中心上(容差留给窗口管理器的取整).
+
+    纵向多一条:**父窗口比弹窗大不了多少时"贴父窗口上沿"也算过**. 那一刻理想偏移
+    ``(父高 - 弹窗高) / 2`` 只有十几像素, 而 CI 的小桌面上那正好是唯一可行的摆法
+    (2026-10-04 的 macOS CI: 父窗口 1024x720、弹窗 600x680, 理想偏移 20px、实际贴边 0px,
+    偏差刚好等于理想偏移)。横向不适用: 弹窗的宽远小于父窗口, 横向没有这个问题 ——
+    放宽纵向而不是把容差整体调大, 是为了不让"真的偏了几百像素"那种回归蒙混过关
+    (|dy| 仍然要 ≤ 那个十几像素的量级)。
+    """
     dx = (window.winfo_rootx() + window.winfo_width() / 2) - (
         parent.winfo_rootx() + parent.winfo_width() / 2
     )
@@ -1032,8 +1040,11 @@ def _assert_centered(parent: Any, window: Any, *, tolerance: int = 12) -> None:
         f"父窗口 {parent.winfo_width()}x{parent.winfo_height()} "
         f"@{parent.winfo_rootx()},{parent.winfo_rooty()}"
     )
+    vertical_limit = max(
+        tolerance, (parent.winfo_height() - window.winfo_height()) // 2
+    )
     assert abs(dx) <= tolerance, f"横向{hint}"
-    assert abs(dy) <= tolerance, f"纵向{hint}"
+    assert abs(dy) <= vertical_limit, f"纵向{hint}"
 
 
 def test_the_first_dialog_of_a_cold_start_is_centered(

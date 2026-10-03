@@ -1158,18 +1158,40 @@ def test_global_attachment_matches_what_the_summary_writes() -> None:
     names = {
         name
         for item in matched.group(1).split(",")
-        if (name := item.strip().strip('"'))
+        if (name := item.strip().strip('"')) and not name.startswith("...")
     }
     assert names == {
         module.QUALITY_GATE_REPORT.name,
         module.COVERAGE_EXCLUSIONS_REPORT.name,
-        module.FAILURE_DIAGNOSTICS_REPORT.name,
     }
+    # 失败现场那条是**条件**收的(没有兜底现场时那份文件根本不存在), 所以不在这里的集合里
+    # —— 两处一起由 tests/unit/test_ci_diagnostics.py 守着。
+    assert module.FAILURE_DIAGNOSTICS_REPORT.name in config
 
 
 def _version_tuple(text: str) -> tuple[int, ...]:
     """把 ``"3.19.1"`` 这样的版本号拆成可比大小的元组(段数不同的也能比)."""
     return tuple(int(part) for part in text.split("."))
+
+
+def test_per_platform_reports_skip_the_native_gate() -> None:
+    """逐平台的报告生成要用**不带质量门**的配置 —— 3.20.0 起 generate 阶段也会跑门.
+
+    门里的 ``environmentsTested`` 只在**汇总**那份报告里成立; ``pytest-report`` 每次都只合并
+    一个平台, 用主配置生成会退 1(实测 3.20.0: 同样输入在 3.19.1 下能生成成功)。汇总作业
+    继续用主配置 —— 它本来就是跑门的地方。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    config = (_REPO_ROOT / "allurerc.per-platform.mjs").read_text(encoding="utf-8")
+
+    assert 'from "./allurerc.mjs"' in config, "设置只有一处真相: 从主配置继承"
+    assert "qualityGate" in config, "它要说明自己摘掉的是什么"
+    assert (
+        "allure generate allure-results --output allure-report "
+        "--config allurerc.per-platform.mjs" in workflow
+    )
+    # 汇总作业那句仍不带 --config: 它要用主配置里的门。
+    assert "allure generate allure-results --output allure-report\n" in workflow
 
 
 def test_the_coverage_conclusion_is_published() -> None:

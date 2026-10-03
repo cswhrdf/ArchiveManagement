@@ -1613,12 +1613,20 @@ def _assert_no_half_chip(line: str, chips: Sequence[str]) -> None:
 
 
 def _card_labels(card: Any) -> list[Any]:
-    """海报卡片里的文本标签.
+    """海报卡片里的文本标签(**递归**).
 
     ``CTkFrame`` 不接受 ``cget("text")``(会抛 ValueError), 所以必须先按类型筛,
-    不能对卡片的每个子控件直接读 text。
+    不能对卡片的每个子控件直接读 text。名称现在装在**固定高度的名称块**里(见
+    ``home_page.poster_name_block_height``), 所以得往下走一层 —— 只查直接子控件会
+    漏掉名称, 那些 ``next(...)`` 会变成 StopIteration(2026-10-04 三个平台都这么红)。
     """
-    return [child for child in card.winfo_children() if isinstance(child, ctk.CTkLabel)]
+    found: list[Any] = []
+    for child in card.winfo_children():
+        if isinstance(child, ctk.CTkLabel):
+            found.append(child)
+        else:
+            found.extend(_card_labels(child))
+    return found
 
 
 def _binds_enter(widget: Any) -> bool:
