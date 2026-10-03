@@ -46,6 +46,30 @@ CI 红的第一件事是判断**这条断言在测什么**。同一个断言在�
         assert actual_position == position
     ```
 
+  - **尺寸的下限也受同一条约束**: 真桌面比 `WINDOW_MIN_SIZE` 还窄时, 上面那套"按规格算出来"
+    的期望值自己就装不下(2026-10-03 实测: 桌面 1024 宽、当时最小宽度 1200 → 算出来 1200,
+    窗口管理器给回来 1024, 两条 macOS 用例就这么红了)。判据要收成"不低于 **真桌面与最小
+    尺寸里更小的那个**"(宽桌面上照旧咬得住: 低于最小尺寸立即红), 重开那类比较则把尺寸
+    放进 `{期望值, 真桌面}` 两个允许值。
+    **同一天最小尺寸降到了 1024x720**(与 runner 桌面等宽, 见 PLAN §44): 那两条红是这么治本
+    的, 但这两句容忍度**不要删** —— 桌面比应用下限更窄的情况还会出现(更小的屏、以后的
+    runner), 那时判据该如实接受窗口管理器的决定。
+  - **"要更宽才能多显示几个字"这类判据不要靠拉窗口**: 桌面只有 1024 时它永远拿不到 1900
+    (2026-10-03 之前那条用例只能 `pytest.skip`, 等于判据在 CI 上不存在)。改成给被测的裁剪
+    函数**喂两个显式宽度**(`HomePage._fit_row_name` / `fit_label` 都收一个宽度参数): 与窗口
+    无关, 每个平台都真跑, 而且测的还是应用自己那条路。真窗口拉不宽时, 把**实测**宽度写进
+    判据的消息里, 别在标签里写着 1366 而实际是 1024。
+  - **麻烦在于替身装上之后就问不到真桌面了**: 屏宽/屏高替身换的是 `tkinter.Misc` 的属性, 所以
+    在**模块 import 时**先把那两个原函数存一份, 用它取真值:
+
+    ```python
+    _REAL_SCREEN_WIDTH = tkinter.Misc.winfo_screenwidth  # 替身装上之前抓的原函数
+
+
+    def _real_screen(window):
+        return int(_REAL_SCREEN_WIDTH(window)), int(_REAL_SCREEN_HEIGHT(window))
+    ```
+
   - "读-改-写"(关窗时把几何写回配置)这类判据**与桌面无关**, 断言 == 窗口**实测**的几何:
 
     ```python
@@ -265,6 +289,7 @@ def _widget_spot(view: TreeView, canvas_x: float, canvas_y: float) -> tuple[int,
         int(canvas_x - view.canvas.canvasx(0)),
         int(canvas_y - view.canvas.canvasy(0)),
     )
+
 
 # 别写成 canvasx(画面坐标): 那个方向是“控件 -> 画面”(名字里的 canvas 指的是画面那一侧)
 ```

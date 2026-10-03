@@ -2298,7 +2298,9 @@ class _SettleWindow:
 
     def __init__(self) -> None:
         self.pending: list[Callable[[], None]] = []
-        self.geometry_text: str | None = None
+        # 真窗口在映射前也能读到几何(Tk 给一个默认值; Windows 上实测是系统中意的
+        # `+8+31`), 所以这里也先给一个 —— 否则测不到"按当前位置纠偏"那条路。
+        self.geometry_text: str | None = "400x300+0+0"
         self.alive = True
 
     def after(self, _delay: int, callback: Callable[[], None]) -> None:
@@ -2313,8 +2315,12 @@ class _SettleWindow:
     def winfo_height(self) -> int:
         return 300
 
-    def geometry(self, value: str) -> None:
+    def geometry(self, value: str | None = None) -> str | None:
+        """无参调用是**读**当前位置(``_window_position`` 就是这么用的), 带参是摆位置."""
+        if value is None:
+            return self.geometry_text
         self.geometry_text = value
+        return None
 
 
 def _drive(window: _SettleWindow) -> None:
@@ -2330,13 +2336,18 @@ def test_centering_follows_the_parent_until_it_lands_and_then_stops() -> None:
     现场(用户 2026-10-03): 首次打开游戏设置时父窗口还没映射, ``winfo_width()`` 是布局前的
     200, 按它算居中会偏出几百像素(见 ``dialogs._settle_centering``)。这里把那一幕拆成
     "先排一次复查 → 父窗口落地 → 跟着重算 → 稳定后不再排"四步, 精确驱动定时器。
+
+    首轮会**先按占位尺寸摆一次**: 复查的职责是"把当前位置纠到目标位置"(Windows 上实测
+    弹窗停在系统摆的 ``+8+31`` 上, 只跟踪父窗口的尺寸变化是修不好的), 而这时还取不到弹窗
+    自己的位置, 只好先摆。
     """
     parent = _SettleParent()
     window = _SettleWindow()
 
     dialogs._settle_centering(parent, window, (0, 0))
     assert len(window.pending) == 1, "建好之后应当排一次复查"
-    assert window.geometry_text is None, "父窗口还没动, 不该重算位置"
+    _drive(window)
+    assert window.pending, "父窗口还是占位尺寸, 这时不能收工"
 
     # 父窗口落地: 尺寸从占位值变成真值(顺带映射)。
     parent.width, parent.height, parent.mapped = 1000, 800, True

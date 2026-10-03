@@ -15,6 +15,8 @@ from __future__ import annotations
 import faulthandler
 import gzip
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -34,6 +36,7 @@ pytestmark = [
 ]
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_TESTS_DIRECTORY = _REPO_ROOT / "tests"
 _CONFTEST = _REPO_ROOT / "tests" / "conftest.py"
 _GUI_SUPPORT = _REPO_ROOT / "tests" / "gui_support.py"
 _GITIGNORE = _REPO_ROOT / ".gitignore"
@@ -633,3 +636,46 @@ def test_gui_support_exposes_the_live_windows() -> None:
 def test_crash_dumps_are_not_committed() -> None:
     """现场文件是本地产物: 必须被忽略, 免得哪天被顺手提交上去."""
     assert "crash-dumps/" in _GITIGNORE.read_text(encoding="utf-8")
+
+
+def test_a_real_segfault_lands_in_our_file(tmp_path: Path) -> None:
+    """真崩一次: 段错误的线程栈必须写进 ``crash-dumps/``, 而不是只打到 stderr.
+
+    为什么非要在子进程里真崩一次: 别的写法只能证明"我们调过
+    ``faulthandler.enable(file=...)``", 证明不了"**最后一次** enable 是我们的"。
+    2026-10-03 的 macOS 分片恰好就翻在这一步 —— pytest 自带的 faulthandler 插件随后
+    把输出改回 stderr, 文件是 0 字节(栈只能在 CI 日志里翻), 而报告里那份摘要写着
+    "faulthandler.log 为空说明进程没被信号打死" —— 一条误导人的结论。
+    子进程里先把句柄抢走再抢回来, 就是复现那一幕。
+    """
+    script = (
+        "import faulthandler, pathlib, sys\n"
+        f"sys.path.insert(0, {str(_TESTS_DIRECTORY)!r})\n"
+        "import crash_capture\n"
+        "crash_capture.enable_hard_crash_log(pathlib.Path(sys.argv[1]))\n"
+        "crash_capture.reassert_hard_crash_log()\n"
+        "faulthandler.enable(file=sys.stderr, all_threads=True)\n"
+        "crash_capture.reassert_hard_crash_log()\n"
+        "import ctypes\n"
+        "ctypes.string_at(0)\n"
+    )
+    result = subprocess.run(  # noqa: S603 - 跑的是本仓库的用例在解释器自己, 参数全是常量
+        [sys.executable, "-c", script, str(tmp_path)],
+        capture_output=True,
+        timeout=120,
+    )
+
+    assert result.returncode != 0, "这个子进程本来就该被信号打死"
+    log = (tmp_path / crash_capture.CRASH_LOG_NAME).read_text(encoding="utf-8")
+    # 头一行的写法各平台不同("Fatal Python error: Segmentation fault" /
+    # "Windows fatal exception: access violation"), 所以认"致命"与那段栈本身。
+    assert "fatal" in log.lower(), f"没有致命错误的小标题: {log[:200]!r}"
+    assert "in string_at" in log, "栈没写进文件"
+
+
+def test_reassert_is_a_noop_before_anything_is_enabled() -> None:
+    """没启用过留证时"抢回来"要老实回答 False, 而不是假装成功."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(crash_capture, "_CRASH_LOG_HANDLE", None)
+
+        assert crash_capture.reassert_hard_crash_log() is False

@@ -61,9 +61,10 @@ allure-report*/
 # 分片跑测试时的产物(每片一份结果目录与覆盖率数据, 见 docs/testing.md)
 coverage-data-*/
 .allure/
-# 运行总账与覆盖率豁免清单(CI 生成, 由 allurerc.mjs 的 globalAttachments 收进报告「全局附件」)
+# 运行总账、覆盖率豁免清单与失败现场(CI 生成, 由 allurerc.mjs 的 globalAttachments 收进报告「全局附件」)
 allure-run-ledger.md
 allure-coverage-exclusions.md
+allure-failure-diagnostics.md
 performance-results.json
 performance-results.csv
 security-results.json

@@ -143,7 +143,13 @@ _TONE_COLORS: dict[str, str] = {
 }
 # 支持的最小窗口尺寸: 主页里那些固定宽度的行必须能放进"最小窗口下的内容区",
 # 否则在更窄的屏幕(窗口被窗口管理器再压小)上会越界并盖住描边。
-WINDOW_MIN_SIZE = (1200, 720)
+# 2026-10-03 从 1200x720 降到 **1024x720**: CI 的 Windows/macOS runner 桌面只有约
+# 1024x768, 而旧下限比桌面还宽 —— 窗口管理器会把窗口夹回 1024, 于是界面用例跑在应用
+# **自己声明不支持**的尺寸下(两条 macOS 尺寸用例正是这么红的, 见 PLAN §42.2/§44)。
+# 1024 落在 runner 与老式笔记本屏之内, 并且仍然装得下固定宽度的行 —— 后半句由
+# ``test_gui_layout.test_home_widgets_fit_the_supported_minimum_window`` 守着。
+# 高度 720 不变: 它是 768 高的屏去掉标题栏后的可用高度, 再矮就真的放不下内容。
+WINDOW_MIN_SIZE = (1024, 720)
 # 打开时的默认尺寸(设计尺寸): 屏幕装不下就按屏幕夹(见 initial_window_size)。
 WINDOW_DEFAULT_SIZE = (1360, 860)
 # 按屏幕夹尺寸时留出的余量: 标题栏 + 任务栏 + 一点呼吸空间。屏幕尺寸是整块屏幕
@@ -263,15 +269,15 @@ def current_window_geometry(
     )
 
 
-# 头部标题与概要卡里的游戏名**按控件实际宽度**裁剪: 窗口变宽就能多显示几个字。
-# 两个常量只是"控件尺寸还没测量出来时"的落位预算(取自最小窗口下的实测可用宽度:
-# 头部标题区 922px、概要卡信息区约 720px), 之后由 _refit_detail_names() 按真实
-# 宽度重裁。名称最多显示两行, 超出补省略号, 否则会把下面的内容整排推下去。
+# 头部标题(左上角那一处游戏名)**按控件实际宽度**裁剪: 窗口变宽就能多显示几个字。
+# 这个常量只是"控件尺寸还没测量出来时"的落位预算(取自最小窗口下的实测可用宽度:
+# 头部标题区 922px), 之后由 _refit_detail_names() 按真实宽度重裁。名称最多显示两行,
+# 超出补省略号, 否则会把下面的内容整排推下去。
+# 概要卡里**不再重复**印一遍游戏名(用户 2026-10-03: 名称只留左上角那一处), 所以这里
+# 也没有 _HERO_TEXT_WIDTH / _HERO_NAME_LINES 了。
 _HEADER_TEXT_WIDTH = 900
-_HERO_TEXT_WIDTH = 640
 # 名称最多显示的行数(超出补省略号): 完整名称仍可在游戏设置/重命名对话框里看到。
 _HEADER_NAME_LINES = 2
-_HERO_NAME_LINES = 2
 # 拖窗口时把名称重裁合并成一次(每个像素都跑一遍会卡).
 _REFIT_DELAY_MS = 60
 # 任务卡里的名称/值: 控件还没测量出来时的落位预算(实测侧栏内容宽约 314px, 去掉
@@ -995,17 +1001,13 @@ class ArchiveApp(ctk.CTk):
         self._hero_icon: ctk.CTkImage | None = None
 
         info = ctk.CTkFrame(left, fg_color="transparent")
-        # expand=True: 信息块占满色块右边的全部宽度, 名称因此能"撑满一行".
+        # expand=True: 信息块占满色块右边的全部宽度, 位置/来源那几行因此能"撑满一行".
         info.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        # 名称**只印在左上角那一处**(头部标题): 概要卡里不再重复一遍(用户 2026-10-03)。
+        # 这张卡留下的是"当前游戏在哪、验没验过、备份统计", 卡上那句 "当前游戏" 就是标题。
         self.kit.label(info, tr("hero.current_game"), style="muted", size=11).pack(
             anchor="w", pady=(2, 0)
         )
-        self._hero_name_label = self.kit.label(
-            info, "", style="primary", size=20, weight="bold"
-        )
-        self._hero_name_font = ctk.CTkFont(size=20, weight="bold")
-        self._hero_name_label.configure(wraplength=_HERO_TEXT_WIDTH, justify="left")
-        self._hero_name_label.pack(fill="x", anchor="w", pady=(2, 0))
         self._hero_location_label = self.kit.label(info, "", style="body", size=13)
         self._hero_location_label.pack(anchor="w", pady=(2, 0))
         self._hero_verified_label = ctk.CTkLabel(
@@ -1420,7 +1422,6 @@ class ArchiveApp(ctk.CTk):
         # "图标位缺一块颜色"(旧图残留在标签上), 而且旧图一旦被回收标签就报错.
         self._hero_tile.configure(image="", text="", fg_color=self._tone_color(None))
         self._hero_icon = None
-        self._hero_name_label.configure(text=tr("hero.no_game"))
         self._hero_location_label.configure(text="")
         self._hero_verified_label.configure(text="")
         self._hero_origin_label.pack_forget()
@@ -1639,17 +1640,6 @@ class ArchiveApp(ctk.CTk):
             self._subtitle_font,
             subtitle_budget,
             max_lines=_HEADER_NAME_LINES,
-        )
-        hero_budget = self._name_budget(self._hero_name_label, _HERO_TEXT_WIDTH)
-        self._hero_name_label.configure(
-            wraplength=wrap_budget(self._hero_name_label, hero_budget)
-        )
-        fit_label(
-            self._hero_name_label,
-            self._detail_name,
-            self._hero_name_font,
-            hero_budget,
-            max_lines=_HERO_NAME_LINES,
         )
 
     def _refit_detail_names(self) -> None:

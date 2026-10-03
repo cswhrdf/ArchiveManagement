@@ -155,6 +155,27 @@ _POSTER_SLOT_WIDTH = _POSTER_WIDTH + 8
 # 海报卡片里名称的可用宽度: 卡片宽减左右各 10 的内边距.
 _POSTER_TEXT_WIDTH = _POSTER_WIDTH - 20
 _POSTER_NAME_LINES = 2
+
+
+def poster_name_block_height(font: ctk.CTkFont, widget: tk.Misc) -> int:
+    """海报卡片里名称块的高度 = **两行字**(逻辑像素), 与文本实际占了几行无关.
+
+    为什么要这么一个数: 名称块的高度决定了它下面"备份数 / 最近活动"两行的位置 ——
+    高度随文本行数变时, 一行名与两行名的卡片下面两行就差 11px(用户 2026-10-02 报的
+    "最近活动显示位置不同, 整个游戏的下边框被盖住")。而"让文本永远占两行"在平台之间
+    不成立: 尾随空行算不算一行由平台定, Linux(X11) 上不算(2026-10-04 的 Linux CI:
+    一行名 28px、两行名 39px, 同样的代码在 Windows/macOS 上绿)。
+
+    所以高度从**字体行距**算(``linespace`` 是渲染字号下的一行高度, 见 :func:`measured_font`),
+    两行乘二再换回逻辑像素 —— 不量任何控件, 也不看文本里有几个换行。字号设置里改
+    "界面字号"时它跟着变。尾部的 +2 是给各平台的取整留余量: 容器宁可高一点也不要把
+    第二行压掉。
+    """
+    scale = window_scaling(widget) or 1
+    lines = measured_font(font, widget).metrics("linespace") * _POSTER_NAME_LINES
+    return round(lines / scale) + 2
+
+
 # 滚动区宽度还没测量出来时的兜底宽度(启动首屏的 winfo_width() 只有 1): 否则首帧
 # 会按"很窄的窗口"算列数, 4 款游戏被排成两行 —— 首帧之后 _on_frame_resize 会用
 # 真实宽度重排一次。
@@ -343,9 +364,14 @@ class HomePage:
         """筛选行: 视图页签(带数量) + 平台/类型下拉框 + 名称搜索.
 
         这一行的控件宽度是**固定的**, 它们的总和就是主页能容纳的最小宽度: 必须放得
-        进"支持的最小窗口(主窗口 minsize 1200)下的内容宽度"。否则在比设计尺寸窄的
+        进"支持的最小窗口(主窗口 minsize 1024)下的内容宽度"。否则在比设计尺寸窄的
         屏幕上(例如 CI 的虚拟显示器), 最后一个控件会越出行右边界并盖住描边——
         ``tests/integration/test_gui_layout.py`` 会直接报出来, 改宽度后请同步跑它。
+
+        2026-10-03 最小窗口从 1200 降到 1024 时这一行跟着收窄过一次(页签 112→96、
+        平台 112→104、类型 136→124、搜索框 150→120、两颗按钮 58→52): 收窄后合计
+        约 **924 逻辑像素**, 而 1024 窗口下的内容区约 949 —— 余量 25px 留给取整。
+        这些宽度都是固定的, 所以这条余量在任何字体/平台上都一样。
         """
         palette = self._palette
         bar = ctk.CTkFrame(
@@ -367,24 +393,24 @@ class HomePage:
                 bar,
                 text=view.label,
                 command=lambda selected=view: self._on_view(selected),
-                width=112,
+                width=96,
                 height=32,
                 corner_radius=8,
                 border_width=1,
                 font=ctk.CTkFont(size=12, weight="bold"),
             )
-            tab.grid(row=0, column=index, padx=(10, 6), pady=10)
+            tab.grid(row=0, column=index, padx=(8, 4), pady=10)
             self._tabs[view] = tab
-        self._origin_box = self._combo(bar, 112, self._on_origin_change)
+        self._origin_box = self._combo(bar, 104, self._on_origin_change)
         self._origin_box.grid(row=0, column=spacer + 1, padx=(0, 8), pady=10)
-        self._category_box = self._combo(bar, 136, self._on_category_change)
+        self._category_box = self._combo(bar, 124, self._on_category_change)
         self._category_box.grid(row=0, column=spacer + 2, padx=(0, 8), pady=10)
 
         search = ctk.CTkFrame(bar, fg_color="transparent")
         search.grid(row=0, column=spacer + 3, padx=(0, 12), pady=10)
         self._search_entry = ctk.CTkEntry(
             search,
-            width=150,
+            width=120,
             height=32,
             placeholder_text=tr("home.search_placeholder"),
             fg_color=palette.input_bg,
@@ -394,11 +420,11 @@ class HomePage:
         self._search_entry.pack(side="left")
         self._search_entry.bind("<Return>", lambda _event: self._submit_search())
         self._search_btn = self._button(
-            search, tr("home.search"), self._submit_search, width=58
+            search, tr("home.search"), self._submit_search, width=52
         )
         self._search_btn.pack(side="left", padx=(6, 0))
         self._clear_btn = self._button(
-            search, tr("home.clear"), self._clear_search, width=58
+            search, tr("home.clear"), self._clear_search, width=52
         )
         self._clear_btn.pack(side="left", padx=(6, 0))
 
@@ -1303,8 +1329,21 @@ class HomePage:
         # 这个底色(与父容器完全一致), 于是底衬彻底看不见。
         backing = poster_backing(cover_image, palette)
         name_font = self._name_font
-        name = ctk.CTkLabel(
+        # 名称块的**高度由这一层容器说了算**(固定两行), 后面那两行的位置因此不随名称
+        # 占了几行而变 —— 靠文本"永远两行"在 X11 上不成立(见
+        # :func:`poster_name_block_height` 的说明, Linux CI 实测 28 vs 39)。
+        name_box = ctk.CTkFrame(
             card,
+            fg_color="transparent",
+            height=poster_name_block_height(name_font, card),
+        )
+        name_box.grid(
+            row=1, column=0, sticky="ew", padx=10, pady=(_POSTER_TITLE_GAP, 0)
+        )
+        name_box.grid_propagate(False)
+        name_box.grid_columnconfigure(0, weight=1)
+        name = ctk.CTkLabel(
+            name_box,
             text="",
             anchor="w",
             justify="left",
@@ -1321,19 +1360,9 @@ class HomePage:
             scaled_px(name, _POSTER_TEXT_WIDTH),
             max_lines=_POSTER_NAME_LINES,
         )
-        # 名称占**两行**的高度, 一行名也占同样高 —— 于是"元信息"与"最近活动"两行的位置
-        # 在一行名与两行名的卡片里完全一致(用户 2026-10-02: 两行名时最近活动被顶出卡片
-        # 下沿, 看着像下边框被盖住)。
-        #
-        # **不能靠补一个空行**: 尾随空行算不算一行是由平台决定的 —— Linux(X11) 上
-        # ``text="短名\n"`` 仍旧只有一行的高度, Windows/macOS 上算两行。2026-10-03 的
-        # Linux CI 实测: 一行名 28px、两行名 39px, 两者差 11px(判据在 Windows/macOS 上
-        # 却是绿的)。所以这里直接把高度写成 **两行的行高**: 字号调大时它跟着变, 而内容
-        # 最多两行(``max_lines=_POSTER_NAME_LINES``), 永不会被裁。
-        line = measured_font(name_font, name).metrics("linespace")
-        name.configure(height=ceil(line * _POSTER_NAME_LINES / window_scaling(name)))
-        # 名称与下面的元信息之间留白: 两者只差字号时, 读起来像同一段被截断的文字。
-        name.grid(row=1, column=0, sticky="ew", padx=10, pady=(_POSTER_TITLE_GAP, 0))
+        # 名称底对齐容器的上沿: 一行名与两行名的第一个字落在同一行上(比"在两行里垂直居中"
+        # 更整齐)。
+        name.grid(row=0, column=0, sticky="nw")
         # 备份数(或"无有效存档路径")排在名称下方而不是压在封面上: 压在封面上的角标
         # 会盖住封面里的游戏 logo, 而它本来就是这个游戏的元信息, 与活动时间同一组。
         meta_font = ctk.CTkFont(size=10, weight="bold")
@@ -1373,7 +1402,7 @@ class HomePage:
             card,
             (
                 (cover, _POSTER_COVER_PAD_Y),
-                (name, (_POSTER_TITLE_GAP, 0)),
+                (name_box, (_POSTER_TITLE_GAP, 0)),
                 (badge, _POSTER_META_PAD_Y),
                 (activity, _POSTER_ACTIVITY_PAD_Y),
             ),
@@ -1383,6 +1412,7 @@ class HomePage:
             cover,
             placeholder,
             badge,
+            name_box,
             name,
             activity,
         ]

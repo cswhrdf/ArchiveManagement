@@ -119,6 +119,13 @@ MISSING_STATUS = "missing"
 # 有意不统计的覆盖(豁免清单): 与运行总账一样放在仓库根, 由 allurerc.mjs 的
 # globalAttachments 收进报告首页「全局附件」页签(改名要同时改配置与 .gitignore).
 COVERAGE_EXCLUSIONS_REPORT = Path("allure-coverage-exclusions.md")
+# 失败现场: 把各作业失败时 collect_job_diagnostics.py 写的 summary.md 拼成一份(同属
+# globalAttachments, 名字要与 allurerc.mjs 里那条一致).
+FAILURE_DIAGNOSTICS_DIRECTORY = Path("failure-diagnostics")
+FAILURE_DIAGNOSTICS_REPORT = Path("allure-failure-diagnostics.md")
+# 兜底判定文件名(由 scripts/collect_job_diagnostics.py 写在每个诊断目录里): 附件按它把
+# "结果里已经写明白"的普通失败滤掉。
+FAILURE_DIAGNOSTICS_VERDICT = "verdict.json"
 # 仓库根与源码树: 豁免清单的数据必须来自真实源码 + pyproject.toml, 不能是手工清单.
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_ROOT_NAME = "src"
@@ -906,6 +913,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "那样整个平台的产物都没交上来时看不出来"
         ),
     )
+    parser.add_argument(
+        "--write-failure-diagnostics",
+        action="store_true",
+        help=(
+            '只写报告首页的"失败现场"附件然后退出。附件的内容是各作业失败时上传的诊断摘要, '
+            '所以必须排在汇总作业"下载各作业诊断"那一步之后 —— 而本脚本的主流程跑在它之前, '
+            '写出来的会是空的(实测 2026-10-04: 附件一直显示"本轮没有作业失败")'
+        ),
+    )
     arguments = parser.parse_args([] if argv is None else list(argv))
     arguments.platforms = [
         item.strip()
@@ -1436,10 +1452,82 @@ def _write_coverage_exclusions() -> None:
     print(f"覆盖率豁免清单已写入 {COVERAGE_EXCLUSIONS_REPORT}")
 
 
+def _job_has_a_backstop_scene(summary: Path) -> bool:
+    """这个作业的摘要是不是"有兜底现场"的.
+
+    判定由 ``collect_job_diagnostics.py`` 写下的 ``verdict.json`` 给出 —— 去解析人读的文本
+    太脆。没有这份 JSON(旧产物、或收集脚本自己挂了)时按"有现场"处理: 宁可多显示一段,
+    也不要在最需要证据的时候把它藏起来。
+    """
+    try:
+        payload = json.loads(
+            (summary.parent / FAILURE_DIAGNOSTICS_VERDICT).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return True
+    return bool(payload.get("scene", True))
+
+
+def failure_diagnostics_report(directory: Path) -> str:
+    """把各作业**兜底现场**的 ``summary.md`` 拼成一份报告首页的附件.
+
+    只收判定为"有兜底现场"的那些(2026-10-04 按用户的要求收紧): 普通失败的证据(断言输出、
+    门禁不通过、步骤报错)已经在结果与运行日志里, 在全局附件里再讲一遍只是噪音。
+
+    为什么拼成一份而不是逐个挂: 报告首页的「全局附件」是个平铺列表, 十几个作业各挂一条
+    会把这个页签埋掉; 而兜底现场本来就该连着看。摘要由 scripts/collect_job_diagnostics.py
+    生成 —— 本函数只做拼接与过滤, 不猜其中任何一个字段。
+
+    一条都没有(本轮全绿, 或失败全是"结果里已经写明白"的那类)时返回一段说明, 而不是干脆
+    不写文件: ``globalAttachments`` 里列着这个名字, 文件缺失会让 Allure 在报告里留一条
+    "附件找不到"的告警。
+    """
+    scenes = [
+        path
+        for path in sorted(directory.glob("*/job-diagnostics/summary.md"))
+        if _job_has_a_backstop_scene(path)
+    ]
+    if not scenes:
+        return (
+            "# 失败现场(兜底)\n\n"
+            "本轮**没有需要兜底的现场**: 失败的证据都在结果里(用例详情、门禁结论项、运行日志)。\n\n"
+            "这一页只收两类东西 —— **进程级崩溃**的现场(faulthandler 的线程栈、系统级崩溃报告)"
+            "与**证据缺失**(进程没走到会话结束, 例如覆盖率文件根本没落盘)。普通失败不在这里重复。\n"
+        )
+    parts = [
+        "# 失败现场(兜底)",
+        "",
+        '只列判定为"有兜底现场"的作业(进程级崩溃 / 证据缺失); 普通失败的证据在结果与运行'
+        "日志里, 不在这里重复。",
+        "",
+    ]
+    for path in scenes:
+        # 目录结构: failure-diagnostics/<artifact 名>/job-diagnostics/summary.md
+        owner = path.parts[-3]
+        parts.append(f"## {owner}")
+        parts.append("")
+        parts.append(path.read_text(encoding="utf-8").strip())
+        parts.append("")
+    return "\n".join(parts)
+
+
+def _write_failure_diagnostics() -> None:
+    """写"失败现场"附件(报告首页「全局附件」的一份)."""
+    FAILURE_DIAGNOSTICS_REPORT.write_text(
+        failure_diagnostics_report(FAILURE_DIAGNOSTICS_DIRECTORY), encoding="utf-8"
+    )
+    print(f"失败现场已写入 {FAILURE_DIAGNOSTICS_REPORT}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """把性能/安全/覆盖率结论与环境信息写入 allure-results."""
     ensure_utf8_output()
     arguments = parse_args(argv)
+    if arguments.write_failure_diagnostics:
+        # 单独一个入口: 这一步必须跑在汇总作业"下载各作业诊断"之后, 而本脚本的主流程
+        # 跑在它之前(见 --write-failure-diagnostics 的说明)。
+        _write_failure_diagnostics()
+        return 0
     results_dir = RESULTS_DIRECTORY
     if not results_dir.is_dir():
         print(f"Allure 结果目录不存在: {results_dir}", file=sys.stderr)

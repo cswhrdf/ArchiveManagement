@@ -677,6 +677,10 @@ class ManageGameWindow:
         wanted = max(_BODY_MIN_HEIGHT, round(self._body_content_height() / scale))
         self._body.configure(height=min(wanted, room))
         self._window.update_idletasks()
+        # 高度取窗口**自己的**请求高度, 不再自己拼算式: 实测把算式(正文 + 页脚 + 外边距)直接
+        # 当成几何值会让页脚掉出窗口 —— 本机上关闭按钮跑到窗口下沿以下 148 像素
+        # (case: test_the_manage_window_hugs_its_content 的 below < 0)。Tk 算出来的请求里
+        # 还含一些我们没建模的间距, 自己拼就少给了一块。
         height = max(
             _WINDOW_MIN_HEIGHT,
             min(round(int(self._window.winfo_reqheight()) / scale), available),

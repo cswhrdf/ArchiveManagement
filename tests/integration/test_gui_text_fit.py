@@ -9,7 +9,7 @@
 "0 被硬裁"才有意义。同时要求"长到必须裁"的地方**真的出现了省略号**(夹具没白长,
 截断也是打了标记的)。
 
-两档宽度: 1366(设计尺寸) 与 1200(主窗口最小尺寸, 布局的硬下限)。
+两档宽度: 1366(设计尺寸) 与 1024(主窗口最小尺寸, 布局的硬下限)。
 """
 
 from __future__ import annotations
@@ -53,8 +53,10 @@ pytestmark = [
     pytest.mark.layer("e2e"),
 ]
 
-# 两档宽度(与 test_gui_sizes.py 同一套基准).
-WIDTHS = ((1366, 820), (1200, 720))
+# 两档宽度(与 test_gui_sizes.py 同一套基准): 设计尺寸与主窗口最小尺寸。
+# 桌面比 1366 窄时第一档会被窗口管理器压回去 —— 用例会把**实测**宽度写进判据标签
+# (不再假装测过 1366), 裁剪逻辑本身的两档由 tests/unit/test_textfit.py 守着。
+WIDTHS = ((1366, 820), (1024, 720))
 # 长内容: 真实世界里出现过的长名称(中英混排) + 很深的安装路径.
 _LONG_NAME = (
     "Kaiju Princess 2: Poochi Q ASMR - A Magic Ticket That Grants Any Desire - "
@@ -230,6 +232,16 @@ def _problems(name: str, container: Any, *, expect_truncation: bool) -> list[str
     return problems
 
 
+def _resize(app: ArchiveApp, width: int, height: int) -> int:
+    """把主窗口调到 ``width``, 返回**实际**宽度(桌面比它窄时窗口管理器会压回来)."""
+    app.geometry(f"{width}x{height}")
+    _pump(app)
+    # 重裁是延后的任务: 先把它真跑一次, 否则量的是按旧宽度裁的文本(见 _flush_delayed).
+    _flush_delayed(app)
+    _pump(app)
+    return int(app.winfo_width())
+
+
 def _assert_areas(app: ArchiveApp, areas: list[tuple[str, Any, bool]]) -> None:
     """逐块区域收集问题, 有问题就把它们全列出来."""
     problems: list[str] = []
@@ -307,13 +319,13 @@ def test_list_and_table_text_is_never_clipped_without_an_ellipsis(
     """两档宽度下, 每个列表/表格里的文字要么放得下, 要么带省略号."""
     try:
         for width, height in WIDTHS:
-            app.geometry(f"{width}x{height}")
-            _pump(app)
-            # 重裁是延后的任务: 先把它真跑一次, 否则量的是按旧宽度裁的文本(见 _flush_delayed).
-            _flush_delayed(app)
-            _pump(app)
+            # 桌面比请求窄时窗口管理器会把窗口压回去(CI 的 runner 桌面约 1024): 那种情况下
+            # 两档其实是同一个宽度 —— 这里**如实把实测宽度写进判据标签**, 不再假装测过 1366。
+            # 裁剪逻辑本身的两档由 tests/unit/test_textfit.py 直接喂预算守着。
+            actual = _resize(app, width, height)
+            stamp = f"{width}" if actual == width else f"{width}(实际 {actual})"
             areas = [
-                (f"{width}-{name}", container, expect)
+                (f"{stamp}-{name}", container, expect)
                 for name, container, expect in _areas(app)
             ]
             _assert_areas(app, areas)
@@ -335,8 +347,8 @@ def test_hint_text_is_never_clipped_without_an_ellipsis(app: ArchiveApp) -> None
     page._show_section(HomeSection.DISCOVERY)
     _pump(app)
     for width, height in WIDTHS:
-        app.geometry(f"{width}x{height}")
-        _pump(app)
+        actual = _resize(app, width, height)
+        stamp = f"{width}" if actual == width else f"{width}(实际 {actual})"
         hints = (
             ("发现页说明", DiscoveryPage.CANDIDATES, page._discovery._hint_label),
             ("监控目录说明", DiscoveryPage.MONITORED, page._discovery._dirs_hint),
@@ -345,7 +357,7 @@ def test_hint_text_is_never_clipped_without_an_ellipsis(app: ArchiveApp) -> None
             # 两块说明在不同的子页上: 隐藏的那一页量不出宽度, 必须切过去再量。
             page._discovery._show_page(holder)
             _pump(app)
-            _assert_areas(app, [(f"{width}-{name}", label, False)])
+            _assert_areas(app, [(f"{stamp}-{name}", label, False)])
 
     page._show_section(HomeSection.ACTIVATION)
     _pump(app)

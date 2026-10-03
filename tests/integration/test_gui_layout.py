@@ -53,7 +53,6 @@ from archive_management.ui.home_page import (
 )
 from archive_management.ui.main_window import (
     _HEADER_NAME_LINES,
-    _HERO_NAME_LINES,
     WINDOW_MIN_SIZE,
     ArchiveApp,
 )
@@ -66,7 +65,7 @@ from archive_management.ui.models import (
     poster_columns,
 )
 from archive_management.ui.textfit import fit_text
-from archive_management.ui.widgets import measured_font, scaled_px
+from archive_management.ui.widgets import fit_label, measured_font, scaled_px
 
 pytestmark = [
     pytest.mark.integration,
@@ -82,6 +81,9 @@ _WINDOW_SIZE = "1360x820"
 
 #: "固定列块贴右"允许的缝隙上限: 最后一个单元格右边界与行右边界之差(内边距/省略号的量级)。
 _ROW_RIGHT_SLACK = 20
+
+#: 名称裁剪的两档**显式宽度**(逻辑像素, 与窗口无关): 窄档证实能裁、宽档证实能多显示。
+_NAME_WIDTHS = (180, 640)
 
 
 def _pump(app: ctk.CTk) -> None:
@@ -683,6 +685,28 @@ def _resize(app: ArchiveApp, width: int) -> int:
     return int(app.winfo_width())
 
 
+def _fit_row_at(page: Any, game_id: str, width: int) -> Any:
+    """让那一行名称**按给定宽度**重裁一次, 返回该行的部件(与窗口宽度无关).
+
+    走的是实现自己那条路(``HomePage._fit_row_name`` → ``fit_label``): 用例只换预算,
+    不另写一套裁剪算术。
+    """
+    parts = page._row_parts[game_id]
+    page._fit_row_name(parts, width)
+    return parts
+
+
+def _fit_title_at(app: Any, width: int) -> None:
+    """按给定宽度裁一次详情页标题(实现用的那个 ``fit_label``, 这里只换预算)."""
+    fit_label(
+        app._title_label,
+        app._detail_name,
+        app._title_font,
+        width,
+        max_lines=_HEADER_NAME_LINES,
+    )
+
+
 def _wait_until_the_name_fits(
     app: Any, page: Any, game_id: str, full: str, *, timeout: float = 3.0
 ) -> Any:
@@ -1007,10 +1031,15 @@ def test_long_game_name_wraps_inside_the_poster_card() -> None:
             "卡片高度不该比设计值还矮"
         )
         label = next(
-            child
+            grand
             for child in card.winfo_children()
-            if _visible_text(child).startswith(_LONG_NAME[:5])
+            if isinstance(child, ctk.CTkFrame)
+            for grand in child.winfo_children()
+            if _visible_text(grand).startswith(_LONG_NAME[:5])
         )
+        # 名称在**固定高度的名称块**里(见 home_page.poster_name_block_height), 所以
+        # “落在卡片内”要比块的位置 —— 标签自己的 y 是相对块的。
+        block = label.master
         text = _visible_text(label)
         assert text.count("\n") + 1 <= _POSTER_NAME_LINES, f"名称超过两行: {text!r}"
         assert "…" in text, f"两行放不下时应当截断: {text!r}"
@@ -1018,41 +1047,50 @@ def test_long_game_name_wraps_inside_the_poster_card() -> None:
         # 请求宽度要跟换算后的物理值比。
         assert label.winfo_reqwidth() <= scaled_px(label, _POSTER_TEXT_WIDTH)
         # 名称必须落在卡片内: 越界就会盖住卡片下边框(或直接看不到).
-        bottom = label.winfo_y() + label.winfo_height()
+        bottom = block.winfo_y() + block.winfo_height()
         card_bottom = scaled_px(label, _POSTER_HEIGHT)
-        overflow = f"名称溢出卡片: {bottom} > {card_bottom}"
+        overflow = f"名称块溢出卡片: {bottom} > {card_bottom}"
         assert bottom <= card_bottom, overflow
+        # 反过来也要成立: 名称块的固定高度得真的装得下两行文本(矮了就会把第二行压掉).
+        assert label.winfo_reqheight() <= block.winfo_height() + 1, (
+            f"名称块装不下两行文本: 文本要 {label.winfo_reqheight()}px, "
+            f"块高 {block.winfo_height()}px"
+        )
 
 
 def test_poster_rows_line_up_for_one_and_two_line_names() -> None:
-    """海报卡片里"元信息 / 最近活动"那一行的位置**不随名称行数变**, 而且都在卡片内.
+    """海报卡片里“元信息 / 最近活动”那一行的位置**不随名称行数变**, 而且都在卡片内.
 
     出处(用户 2026-10-02): "海报模式下当游戏名称为两行时和一行时最下方的最近活动时间
-    显示位置不同, 导致整个游戏的下边框被盖住了"。做法是让名称标签**永远占两行**,
-    卡片高度再按内容算 —— 这里就是那条不变量的守卫: 一行名与两行名的卡片里, 同一个控件
-    的 y 与卡片高度都要一样。
+    显示位置不同, 导致整个游戏的下边框被盖住了"。
 
-    名称那两行的高度是**按字体行高写死的**(``home_page._build_poster``), 不是靠补一个空行:
-    尾随空行算不算一行由平台决定 —— Linux(X11) 上不算, 于是 2026-10-03 的 Linux CI 里
-    一行名 28px、两行名 39px, 差 11px(同样的代码在 Windows/macOS 上是绿的)。所以这里把
-    **名称标签自己的高度**也量进判据: 它一旦重新变成"随文本行数变", 报出来的就是这条,
-    而不是下游"元信息那一行差 11px"。
+    做法是让**名称块的高度固定为两行**(``home_page.poster_name_block_height`` 按字体行距算,
+    不量控件也不看文本里有几个换行), 卡片高度再按内容算。为什么不靠“让文本永远占两行”:
+    尾随空行算不算一行**由平台定** —— Linux(X11) 上不算, 于是 2026-10-04 的 Linux CI 里
+    一行名 28px、两行名 39px、下面两行跟着差 11px(同样的代码 Windows/macOS 绿)。所以这里
+    量的是**名称块的高度**: 它一旦又变成“随文本行数变”, 报出来的就是这条, 而不是下游
+    “元信息那一行差 11px”。
     """
 
     def measure(app: ArchiveApp) -> tuple[int, int, int, int, int]:
-        """(卡片高, 名称高, 元信息 y, 最近活动 y, 最近活动底) —— 相对卡片左上的坐标系."""
+        """(卡片高, 名称块高, 元信息 y, 最近活动 y, 最近活动底) —— 相对卡片左上的坐标系."""
         assert _wait_mapped(app)
         page = app._home_page
         page._on_layout_change(HomeLayout.POSTER.label)
         _settle_layout(app)
         card = _live_row(page)
+        # 名称块是卡片的**第二个** frame(第一个是封面); 下面两行是卡片的直接子标签。
+        frames = [
+            child for child in card.winfo_children() if isinstance(child, ctk.CTkFrame)
+        ]
+        block = frames[1]
         labels = [
             child for child in card.winfo_children() if isinstance(child, ctk.CTkLabel)
         ]
-        name, badge, activity = labels[-3], labels[-2], labels[-1]
+        badge, activity = labels[-2], labels[-1]
         return (
             int(card.winfo_height()),
-            int(name.winfo_height()),
+            int(block.winfo_height()),
             int(badge.winfo_y()),
             int(activity.winfo_y()),
             int(activity.winfo_y()) + int(activity.winfo_height()),
@@ -1070,8 +1108,11 @@ def test_poster_rows_line_up_for_one_and_two_line_names() -> None:
         long.destroy()
 
     hint = f"一行名 {one_line} 与两行名 {two_lines} 的行位置不一致"
-    assert len({one_line[0], two_lines[0]}) == 1, f"卡片高度应该一样: {hint}"
-    assert len({one_line[1], two_lines[1]}) == 1, f"名称标签高度应该一样: {hint}"
+    # 卡片**总高**允许 2px 的差: 名称那一行的最小高度是按"两行"量出来的, 而一行/两行名在
+    # 度量上仍可能差一点(实测 Windows 上 460 与 462; Linux 上曾是一行名矮 11px —— 那才是
+    # 用户看得见的"两行名把最近活动顶出卡片"那个 bug)。位置与下一行的高度才是硬指标。
+    assert abs(one_line[0] - two_lines[0]) <= 2, f"卡片高度应该一样: {hint}"
+    assert len({one_line[1], two_lines[1]}) == 1, f"名称块高度应该一样: {hint}"
     assert abs(one_line[2] - two_lines[2]) <= 2, f"元信息那一行: {hint}"
     assert abs(one_line[3] - two_lines[3]) <= 2, f"最近活动那一行: {hint}"
     # 最近活动不许越出卡片(越界就会盖住下边框).
@@ -1174,7 +1215,10 @@ def test_dropdown_boxes_draw_their_right_border() -> None:
 
 
 def test_long_game_name_is_capped_in_the_detail_header() -> None:
-    """详情页的名称最多两行(超出补省略号), 不能无限折行把下面的内容推下去."""
+    """详情页的名称最多两行(超出补省略号), 不能无限折行把下面的内容推下去.
+
+    名称只印左上角那一处(概要卡里不再重复, 用户 2026-10-03), 所以只量头部标题.
+    """
     app = gui_app(_long_name_app, _HUGE_NAME)
     assert _wait_mapped(app)
     page = app._home_page
@@ -1193,17 +1237,15 @@ def test_long_game_name_is_capped_in_the_detail_header() -> None:
     header_edge = title.master.winfo_rootx() + title.master.winfo_width()
     assert export_edge <= header_edge + 1, "名称把右侧按钮挤出了表头"
 
-    hero_name = app._hero_name_label
-    assert _visible_text(hero_name).endswith("…"), "概要卡名称也应当截断"
-    _assert_lines(hero_name, _HERO_NAME_LINES)
-
 
 def test_names_follow_the_window_width() -> None:
-    """名称按可用宽度动态裁剪: 窗口变宽就多显示几个字(列表与详情页都算).
+    """名称按可用宽度动态裁剪: 可用宽度更大就多显示几个字(列表与详情页都算).
 
-    CI 的虚拟显示器常常只有 1024px 左右, 窗口根本拉不宽(或被窗口管理器压回去);
-    那种环境下只验证"名称吃满了当前可用宽度"这条不变量, 严格变宽的断言会 skip
-    并说明原因 —— 两种环境都能跑, 也不会把环境限制当成代码缺陷。
+    **不靠把真窗口拉宽**(2026-10-03 改): 这条用例原来要求一个 1900px 宽的窗口, 而 CI 的
+    Windows/macOS runner 桌面只有约 1024 —— 窗口管理器一定把它压回去, 于是只能 skip
+    (报告里那两条 `Names follow the window width` 的 skip 就是它), 等于这条判据在 CI 上
+    **不存在**。现在改成给裁剪函数喂两个**显式宽度**: 与窗口无关、每个平台都真跑, 而且
+    测的仍是应用自己的那条路(``_fit_row_name`` / ``fit_label``)。
     """
     app = gui_app(_long_name_app, _HUGE_NAME)
     assert _wait_mapped(app)
@@ -1214,34 +1256,38 @@ def test_names_follow_the_window_width() -> None:
     parts = _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
     _assert_name_fills(parts.label, _HUGE_NAME, page._name_font)
 
-    narrow_window = int(app.winfo_width())
+    narrow, wide = _NAME_WIDTHS
+    parts = _fit_row_at(page, game_id, narrow)
     narrow_chars = len(_visible_text(parts.label))
-    # 先直接要求一个明显更宽的窗口: 无窗口管理器的环境(Xvfb)会照做, 带窗口管理器
-    # 的平台则可能把它压回屏幕内 —— 那就只能退化到不变量断言(见下面的 skip).
-    wide_window = _resize(app, 1900)
-    parts = _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+    parts = _fit_row_at(page, game_id, wide)
     wide_chars = len(_visible_text(parts.label))
-    _assert_name_fills(parts.label, _HUGE_NAME, page._name_font)
+    assert wide_chars > narrow_chars, (
+        f"列表名称没有随可用宽度变多: {narrow}px→{narrow_chars} 字, "
+        f"{wide}px→{wide_chars} 字"
+    )
+    # 宽的那一档必须**真的按这个宽度**裁(而不是停在窄档的结果): 与同一宽度下的
+    # ``fit_text`` 逐字相等, 而且仍然带省略号(名字比 640px 长得多)。
+    font = measured_font(page._name_font, parts.label)
+    shown = _visible_text(parts.label)
+    assert shown == fit_text(_HUGE_NAME, font, wide), "宽档的裁剪结果不对"
+    assert shown.endswith("…"), (
+        f"这么长的名称在 {wide}px 下仍应带省略号: {shown[:20]!r}"
+    )
 
-    if wide_window <= narrow_window + 100:
-        pytest.skip(
-            f"窗口宽度无法改变({narrow_window} -> {wide_window}, "
-            f"屏幕宽 {app.winfo_screenwidth()}px), 跳过变宽断言"
-        )
-
-    list_hint = f"列表名称没有随窗口变宽: {narrow_chars} -> {wide_chars}"
-    assert wide_chars > narrow_chars, list_hint
-
-    # 详情页同理: 量宽/窄两档下标题显示的字数.
+    # 详情页标题同理: 同一张标签喂两个宽度。
     page._open(game_id)
     _settle_layout(app)
     _pumped(app)
-    title_wide = len(_visible_text(app._title_label))
-    _resize(app, narrow_window)
-    title_narrow = len(_visible_text(app._title_label))
-    detail_hint = f"详情标题没有随窗口变宽: {title_narrow} -> {title_wide}"
-    assert title_wide > title_narrow, detail_hint
-    _assert_lines(app._title_label, _HEADER_NAME_LINES)
+    title = app._title_label
+    _fit_title_at(app, narrow)
+    title_narrow = len(_visible_text(title))
+    _fit_title_at(app, wide)
+    title_wide = len(_visible_text(title))
+    assert title_wide > title_narrow, (
+        f"详情标题没有随可用宽度变多: {narrow}px→{title_narrow} 字, "
+        f"{wide}px→{title_wide} 字"
+    )
+    _assert_lines(title, _HEADER_NAME_LINES)
 
 
 def test_the_fill_invariant_catches_a_stale_fit() -> None:

@@ -1,6 +1,6 @@
 ---
 applyTo: ".github/workflows/*.yml, **/.github/workflows/*.yml, **/.github/workflows/*.yaml"
-description: '写或改 GitHub Actions 工作流时的常见坑与检查清单。'
+description: "写或改 GitHub Actions 工作流时的常见坑与检查清单。"
 ---
 
 # GitHub Actions 工作流编写规范
@@ -26,10 +26,10 @@ Failed to save: Unable to reserve cache with key ..., another job may be creatin
 cache key 由「架构 + runner 镜像 + 运行时版本 + 锁文件哈希」算出，**同平台的各个分片算出的 key 完全相同**。做法：只让一片写，其余（含其它作业）一律 `save-cache: false`，但保留 `enable-cache: true` 让它们读。
 
 ```yaml
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-          save-cache: ${{ matrix.shard == 0 }}   # 每平台只有一个写入者
+- uses: astral-sh/setup-uv@v7
+  with:
+    enable-cache: true
+    save-cache: ${{ matrix.shard == 0 }} # 每平台只有一个写入者
 ```
 
 ## 3. 产物：命名、下载、隐藏文件
@@ -40,11 +40,11 @@ cache key 由「架构 + runner 镜像 + 运行时版本 + 锁文件哈希」算
 - **下载要容错**：某个分片在跑测试前就挂了 → 它没有产物 → 下载步骤会失败并连累后面的合并与报告。加 `continue-on-error: true`，并在合并日志里**逐份报文件数**（少一份要能一眼看出来）。- **上传不要静默**: 分片那一步自己写 `if-no-files-found: error`。写 `ignore` 的后果是产物根本不被创建, 而下游只能报一句“某平台缺片” —— 得再翻回去翻那个分片作业才知道是哪儿断的（2026-09-30 实测: macOS 分片的 `allure-results-*` / `coverage-data-*` 全程没出现过, pytest-report 里只看到“以下模式没匹配到目录”, 覆盖率汇总则把它说成“未通过”）。这一片本来就是红的, 把“为什么没有产物”提到源头说, 不丢任何结论。- **隐藏文件默认不上传**：`.coverage.shard-0`、`.allure/history.jsonl` 这类以 `.` 开头的路径要显式放行，否则上传报 `no files found` 或内容为空。
 
 ```yaml
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
-          path: .coverage.shard-${{ matrix.shard }}
-          include-hidden-files: true
+- uses: actions/upload-artifact@v7
+  with:
+    name: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
+    path: .coverage.shard-${{ matrix.shard }}
+    include-hidden-files: true
 ```
 
 ## 4. 退出码：门禁必须单独成步
@@ -52,16 +52,16 @@ cache key 由「架构 + runner 镜像 + 运行时版本 + 锁文件哈希」算
 多行 `run:` 只有**最后一条**命令的退出码决定步骤成败；管道默认吞掉前面的失败。
 
 ```yaml
-      # ✅ 门禁单独成步：非零退出码才能让作业失败
-      - name: Enforce the coverage threshold
-        run: uv run coverage report --show-missing
+# ✅ 门禁单独成步：非零退出码才能让作业失败
+- name: Enforce the coverage threshold
+  run: uv run coverage report --show-missing
 
-      # ❌ 门禁夹在中间：失败会被后面成功的命令覆盖
-      - name: Coverage
-        run: |
-          uv run coverage combine
-          uv run coverage report --show-missing
-          uv run coverage xml -o coverage.xml
+# ❌ 门禁夹在中间：失败会被后面成功的命令覆盖
+- name: Coverage
+  run: |
+    uv run coverage combine
+    uv run coverage report --show-missing
+    uv run coverage xml -o coverage.xml
 ```
 
 - 管道要取原命令的退出码：bash 用 `code=${PIPESTATUS[0]}`，pwsh 用 `$LASTEXITCODE`。
@@ -81,13 +81,13 @@ cache key 由「架构 + runner 镜像 + 运行时版本 + 锁文件哈希」算
 - **路径与命令分两步写**，不要拼"两边都能跑"的魔法命令：
 
   ```yaml
-      - name: Collect (Linux/macOS)
-        shell: bash
-        run: cp coverage-data-*/.coverage.shard-* ./
+  - name: Collect (Linux/macOS)
+    shell: bash
+    run: cp coverage-data-*/.coverage.shard-* ./
 
-      - name: Collect (Windows)
-        shell: pwsh
-        run: Get-ChildItem -Path coverage-data-* -Force -File | Copy-Item -Destination .
+  - name: Collect (Windows)
+    shell: pwsh
+    run: Get-ChildItem -Path coverage-data-* -Force -File | Copy-Item -Destination .
   ```
 
 - **环境问题用重建解决，而不是打补丁**：托管解释器缺数据文件（如 uv standalone 找不到 `init.tcl`）时用 `uv python install --reinstall 3.12`，不要事后设一堆 `TCL_LIBRARY` 之类的变量。
@@ -136,14 +136,50 @@ def test_ci_writes_the_dependency_cache_from_one_shard_only() -> None:
 
 值得写守卫的不变式：矩阵列表 ⇄ 脚本参数、"唯一者"身份（缓存写入者 / 产物名持有者）、`needs` 关系、关键动作真的被调用（合并/自检脚本出现在 `run:` 里）、关键字段没被摘掉（`include-hidden-files` / `continue-on-error` / `if: always()` / `PYTHONUTF8`）、门槛值只写一处。
 
-## 9. 改完的自检顺序
+## 9. 失败现场: 每个作业都要有, 但**只兜底**, 而且要"失败才跑"
+
+- **这一对的职责只有一个: 兜底**。断言输出、门禁不通过、步骤报错这三类"普通失败"的证据
+  已经在 Allure 结果与运行日志里了 —— 再用一份 artifact 与一段全局附件抄一遍只是噪音
+  (用户 2026-10-04 的原话: "已经在结果里体现出来的失败现象不需要再出现在全局附件里")。
+  所以只认两类现场: **进程级崩溃**(faulthandler 有栈 / 系统级崩溃报告)与**证据缺失**
+  (预期产物不在或为空 —— pytest 会话结束才落盘的覆盖率文件缺了, 就是"没跑完"而不是"红了")。
+- **判定放在脚本里, 工作流只读它**: `scripts/collect_job_diagnostics.py` 写
+  `<诊断目录>/verdict.json` 与 `$GITHUB_OUTPUT` 的 `scene=true|false`, 上传步写成
+  `if: failure() && steps.diagnostics.outputs.scene == 'true'`(脚本里那一步要有 `id:
+diagnostics`), 并且 `if-no-files-found: error` —— 判定说有现场就必须真有东西, 静默少传
+  一份等于把"附件里为什么没有这个作业"变成谜。**别把判定写进工作流的表达式里**: 两处各写
+  一套迟早会分叉。
+- **每个作业都要有一份清点**: 失败时"哪个文件还在"本身就是关键信息(覆盖率是 pytest
+  会话结束才落盘的, 进程被信号杀掉时文件根本不出现; 只上传 `crash-dumps/` 会让人以为
+  "没有 dump 就是没有线索")。判定用 `--expect` 声明"本该有的产物", 清点用位置参数列要看
+  的路径 —— 两者重复时脚本会去重, 不必让人写两遍。
+- **条件必须是 `if: failure()` 而不是 `if: always()`**: 后者等于每轮 CI 都给十几个作业
+  各挂一份空产物。例外是"结论步之后才判出来的失败"(例如"有平台没有用例结果"), 要把它
+  显式并进条件: `if: always() && (failure() || steps.<x>.outcome == 'failure')`。
+- **收集步要放在结论步之前**: 结论步只写一行日志、不产出文件, 放在它之后就没有现场可收;
+  而"报告/自检/门禁"的失败都发生在它之前, `failure()` 已经为真。
+- **等系统级报告(如 macOS 的 ReportCrash)要挑时候**: 它是异步的, 等它要花十几秒 ——
+  所以只在"已经有崩溃迹象"时才等(`--crash-report-wait` 的语义), 普通失败一秒都不该多花。
+- **附件侧也要过滤, 别只靠上传**: 汇总时按 `verdict.json` 只拼"有现场"的那些作业(缺这份
+  JSON 的旧产物按"有现场"处理), 否则一次改动漏了上传条件, 噪音就会从附件那扇门再进来。
+- **下载时别 `merge-multiple`**: 各作业的诊断目录里有同名文件(如 `summary.md`), 合并会
+  互相覆盖, 而这里正需要看得出"哪一份来自哪个作业"。
+- **诊断脚本不要 import 项目包**: 用 `--no-install-project` 装依赖的作业里 `src/` 不在
+  `sys.path` 上, import 会直接 ImportError —— 而要 import 的恰是"每个作业都要跑"的脚本。
+- **兜底脚本自己不许成为失败点**: 它的 `main()` 要把任何意外都按"有现场"处理(并留下那一页
+  与判定), 否则最需要证据的那一刻, 恰好因为它自己出错而什么都不传。
+- **打包用平台自带的工具**: 报告这类"一万多个小文件"的目录交给 `tar -czf` 一个子进程,
+  比逐文件过 Python 的 zip 快得多, 还能用 `tar -tzf` 数条目核对完整性。注意 GitHub 的
+  artifact 传输**自己**会再压一层 zip, 那一层去不掉, 别以为是自己套的。
+
+## 10. 改完的自检顺序
 
 1. **YAML 解析一次**并打印作业、矩阵、步骤名（确认结构没写歪）；
 2. 跑与工作流相关的**守卫用例**；
 3. 把"CI 只能在下次 push 验证"明确写进回答，并给出**回退点**（通常是还原某个 step 或某个字段这一处）。
 4. 排错时先用日志关键词定位：`Failed to save`、`Unable to reserve`、`no files found`、`UnicodeEncodeError`、`skipped`、`exit code`；绿作业也要看 `warn`/`notice` —— 那往往就是静默退化的源头。
 
-## 10. 省额度：作业数本身就是成本
+## 11. 省额度：作业数本身就是成本
 
 额度 = 作业实例数 × (固定开销 + 实际工作)，而固定开销（checkout + 工具安装 + 依赖同步）在每个实例上都要重付一遍。所以先数作业实例，再谈别的：
 

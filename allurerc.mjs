@@ -46,10 +46,10 @@ export default {
   // 各平台自己的事实(CI 镜像)放在 `environments` 里的**按环境变量**中, 切环境时跟着变。
   variables: {
     // 与 pyproject.toml 的 [tool.coverage.report] fail_under 一致(守卫会核对)。
-    "覆盖率门槛": "95%",
+    覆盖率门槛: "95%",
     // 本地默认只收集前两类(见 pyproject.toml 的 testpaths): 读报告的人看到没有性能/安全
     // 结果时, 第一反应往往是"漏跑了" —— 这里直接说明那是有意的。
-    "用例分层": "unit / integration 每次跑 · performance / security 只在 CI",
+    用例分层: "unit / integration 每次跑 · performance / security 只在 CI",
   },
   plugins: {
     // Awesome 报告(默认报告)的界面选项.
@@ -89,10 +89,17 @@ export default {
   // 只放"没有归属"的东西: 覆盖率/性能/安全报告已经各自挂在对应的汇总项上(见
   // scripts/create_allure_quality.py 与 create_allure_summary.py), 再放进这里只会
   // 让报告 zip 变大一倍, 所以刻意不加。要加就把文件名追加到这个数组。
-  // 现在两项: 运行总账(整次运行的结论)与"有意不统计的覆盖"豁免清单(逐条列出
+  // 现在三项: 运行总账(整次运行的结论)、"有意不统计的覆盖"豁免清单(逐条列出
   // `# pragma: no cover` / `# pragma: no branch` 的位置与原因 + exclude_also) ——
-  // 后者的数据来自真实源码, 由 scripts/create_allure_summary.py 生成。
-  globalAttachments: ["allure-run-ledger.md", "allure-coverage-exclusions.md"],
+  // 后者的数据来自真实源码, 由 scripts/create_allure_summary.py 生成; 以及**失败现场**
+  // (把各作业失败时 `collect_job_diagnostics.py` 写的摘要拼成一份: 覆盖率文件在不在、
+  // 崩溃日志多大、哪个作业的哪一步断了) —— 失败时它才有内容, 全绿时只有一行。
+  // 三项都由 scripts/create_allure_summary.py 写在仓库根, 这个作业的 cwd 就是仓库根。
+  globalAttachments: [
+    "allure-run-ledger.md",
+    "allure-coverage-exclusions.md",
+    "allure-failure-diagnostics.md",
+  ],
   // 失败归类(Categories): 把"失败/损坏"的结果按**错误文本**分门别类, 与默认的
   // Product errors / Test errors 并存 —— 被某条规则命中的结果会被它"消费"掉, 不再落回默认分类。
   //
@@ -171,7 +178,9 @@ export default {
    * **版本要求 ≥ 3.18.0**: 3.13~3.17 在配了 `historyPath` 时会**静默放行**(退 0 且不输出
    * 任何内容) —— 根因是本地历史流的句柄从不销毁, `AllureReport.done()` 永不返回, Node 在
    * 校验前就把进程退掉了(issue #895; 修在 3.18.0 的 PR #962, 另一个 PR #924 至今未合)。
-   * CI 因此把 CLI 钉在 3.18.0; 升版本前先重跑一遍下面的两行确认失败用例能让它退 1。
+   * CI 因此把 CLI 钉在 **3.19.1**(≥ 3.18.0, 2026-10-03 升级); 升版本前先重跑一遍下面的
+   * 两行确认失败用例能让它退 1 —— `tests/unit/test_report_verification.py` 里那条守卫会
+   * 把工作流里钉的版本与这里写的最低要求对一遍, 两处不一致就红。
    *
    * 注意两点:
    * - `allure generate` **不执行**校验, 所以首页「质量门」页签仍只有 `allure run` 会填;
@@ -180,7 +189,7 @@ export default {
    * - `environmentsTested` 只在**汇总报告**里成立(本地单平台跑必然不通过, 这是预期)。
    *
    * 本地复现(在仓库根, 需要子目录里有 allure-results):
-   *   npx allure@3.18.0 quality-gate --config allurerc.mjs allure-results
+   *   npx allure@3.19.1 quality-gate --config allurerc.mjs allure-results
    */
   qualityGate: {
     rules: [
@@ -254,7 +263,7 @@ export default {
     common: {
       // 名字与三个平台保持同一种风格(单个英文词)、与环境 id 一致。
       name: "Common",
-      variables: { "执行方": "Ubuntu 上的公共检查(结论与平台无关)" },
+      variables: { 执行方: "Ubuntu 上的公共检查(结论与平台无关)" },
       matcher: ({ labels }) =>
         labels.some(({ name, value }) => name === "env" && value === "common"),
     },

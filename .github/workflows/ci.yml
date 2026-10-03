@@ -5,7 +5,7 @@ on:
     branches: [main, dev]
     # 纯文档改动不值得跑整套 CI(一轮约 21 个作业)。**只加在 push 上**: pull_request 若被
     # 路径过滤跳过, 分支保护里的必需检查会永远停在 pending, PR 反而合不了 —— 需要给 PR
-    # 也省额度就改用"轻量作业 + 条件跳过重量级作业", 而不是让整个工作流不触发。你m
+    # 也省额度就改用"轻量作业 + 条件跳过重量级作业", 而不是让整个工作流不触发。
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -242,6 +242,41 @@ jobs:
           path: visual-baselines-candidates/
           if-no-files-found: ignore
 
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 这一步是**兜底**, 不是"失败记录的另一个副本"(2026-10-04 按用户的期望收紧): 普通
+        # 失败的证据(断言输出、门禁不通过、步骤报错)已经在 Allure 结果与运行日志里了, 这里
+        # 只回答"进程是不是根本没走到最后 / 有没有运行时崩溃的现场", 并把判定写进
+        # ``$GITHUB_OUTPUT``(scene)。没有兜底现场时下面的上传步不跑 —— 它也就不会出现在报告
+        # 首页那份附件里。
+        # 全绿时这一步根本不跑, 所以不会给每轮 CI 多挂一份空产物。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "质量检查 (quality)" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results-quality \
+            --expect allure-results-performance \
+            --expect allure-results-visual \
+            crash-dumps allure-results-visual visual-baselines-candidates \
+            performance-results.json performance-results.csv
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步): 结果里已经写清楚的失败不再多占一份 artifact,
+        # 也不再出现在报告首页的附件里。
+        # `if-no-files-found: error`: 判定说有现场就必须真的有东西 —— 静默地少传一份, 等于把
+        # "附件里为什么没有这个作业"变成无解的谜。诊断目录 + 崩溃现场一起收: 一个 artifact 就够。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-quality
+          path: |
+            job-diagnostics/
+            crash-dumps/
+          if-no-files-found: error
+
   pytest:
     # 套件按平台拆成几片并行跑, 各片只负责自己那部分用例, 由后续的 pytest-report
     # 作业把 Allure 结果与覆盖率数据合并成一份报告 —— 墙钟时间只取决于最慢的一片。
@@ -450,6 +485,48 @@ jobs:
           path: allure-results-quality-platform/
           if-no-files-found: ignore
 
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 失败现场留证(见 tests/crash_capture.py): 用例失败的 coredumpy dump 已经挂在 Allure
+        # 附件里, 但**进程级崩溃**(SIGSEGV/SIGABRT) 挂不进 —— coredumpy 是 Python 层的钩子,
+        # 进程被内核杀掉时它没机会跑, pytest-cov 也来不及落盘覆盖率。它挂不进结果, 却是
+        # 这一整套诊断**唯一**真正需要它的地方, 所以判定就看两件事: faulthandler 有没有栈、
+        # `--expect` 的覆盖率文件在不在。
+        # 断言失败这类普通红不会被算成现场(覆盖率文件在、没有栈) —— 它们的证据在用例详情里,
+        # 上下两个步骤也就都不会把它们再抄一遍(2026-10-04 按用户的期望收紧)。
+        # 回显 faulthandler 日志是保留的老习惯: 排查时最顺手的地方仍然是运行日志。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "pytest (${{ matrix.os }}, 分片 ${{ matrix.shard }})" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results \
+            --expect .coverage.shard-${{ matrix.shard }} \
+            crash-dumps allure-results allure-results-quality-platform \
+            allure-manifest.json .coverage.shard-${{ matrix.shard }} coverage.xml \
+            --crash-reports-from "$HOME/Library/Logs/DiagnosticReports" \
+            --crash-report-wait 20
+          for log in crash-dumps/*.log; do
+            [ -f "$log" ] || continue
+            echo "===== $log ====="
+            cat "$log"
+          done
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步): 断言失败这类红在结果里已经写清楚了。
+        # 得等系统级报告的那 20 秒也只在"已经有崩溃迹象"时才花(见脚本里的 collect_and_judge)。
+        # `if-no-files-found: error`: 判定说有现场就必须真的有东西。
+        # crash-dumps 不在这个路径里: 分片级的 `crash-dumps-<os>-<shard>` 仍由中间那步上传
+        # (名字不变, 免得已经在下它的流程断掉), 这里只收清点出来的诊断摘要。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-${{ matrix.os }}-${{ matrix.shard }}
+          path: job-diagnostics/
+          if-no-files-found: error
+
   pytest-report:
     # 每个平台一份报告: 把该平台各片的 Allure 结果与覆盖率数据合并成一份。
     # **两台机器都在 Ubuntu 上**(矩阵里只列平台, 不再列 runner): 合并、覆盖率汇总、报告生成
@@ -533,7 +610,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.npm
-          key: npm-allure-3.18.0-${{ matrix.os }}
+          key: npm-allure-3-${{ matrix.os }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -541,12 +618,25 @@ jobs:
           node-version: 22
 
       - name: Install Allure 3 CLI
-        # 钉住 3.18.0: 3.13~3.17 在配了 historyPath 时会让质量门静默放行(issue #895,
-        # 3.18.0 的 PR #962 修复)。升级前请照 allurerc.mjs 里的说明重跑一次门禁。
-        run: npm install --global allure@3.19.1
+        run: npm install --global allure@3
 
       - name: Check Allure version
-        run: allure --version
+        # 版本下限在**运行期**判定: 工作流用的是浮动标签 `allure@3`(2026-10-04 用户按需求改成
+        # 动态取最新), 而 3.13~3.17 在配了 historyPath 时会让**质量门静默放行**(退 0 且不输出
+        # 任何内容, issue #895; 3.18.0 的 PR #962 修复) —— 那种失效在报告里看不出来, 所以装完
+        # 当场比一次。静态那一条由 tests/unit/test_report_verification.py 守着(只允许浮动标签
+        # 或 ≥ 配置里最低要求的钉住版本)。
+        shell: bash
+        run: |
+          version="$(allure --version)"
+          echo "Allure CLI: ${version}"
+          major="${version%%.*}"
+          rest="${version#*.}"
+          minor="${rest%%.*}"
+          if [ "${major:-0}" -lt 3 ] || { [ "${major:-0}" -eq 3 ] && [ "${minor:-0}" -lt 18 ]; }; then
+            echo "::error::Allure CLI ${version} 低于 3.18.0: 配了 historyPath 时质量门会静默放行"
+            exit 1
+          fi
 
       - name: Download shard Allure results
         # 落地目录按平台给(见矩阵里 download_path 的说明): 单片平台的 path 必须**正好是那个
@@ -611,14 +701,13 @@ jobs:
         if: steps.collect-coverage.outcome == 'success'
         run: uv run coverage report --show-missing
 
-      - name: Write coverage reports
+      - name: Write the coverage report
         # 数据不全时**什么报告都不产出**: 残缺数据的百分比会把"少了一片"说成"覆盖率掉了"。
         # `--fail-under=0`: 门槛判定只留给上面那一步 —— 否则同一个失败被报两次, 而且这里的
         # 文案会把缺片说成覆盖率不够。
+        # 只写 XML: HTML 那份产物已经不上传了(见 Upload coverage XML 的说明), 没必要再生成。
         if: always() && steps.collect-coverage.outcome == 'success'
-        run: |
-          uv run coverage xml -o coverage.xml --fail-under=0
-          uv run coverage html
+        run: uv run coverage xml -o coverage.xml --fail-under=0
 
       - name: Attach coverage report to Allure
         # 脚本把覆盖率摘要写成一条结果(按平台归到各环境), 并把原始 coverage.xml 作为
@@ -630,7 +719,22 @@ jobs:
         # 数据不全时不写这条结论: 报告里那一格会显示为"缺覆盖率结论"(汇总脚本按平台核对),
         # 比给一个看起来"掉了几个点"的百分比诚实。
         if: always() && steps.collect-coverage.outcome == 'success'
-        run: uv run python scripts/create_allure_coverage.py --platform "${{ matrix.platform }}"
+        run: uv run python scripts/create_allure_coverage.py --platform "${{ matrix.platform }}" --publish-dir allure-results-coverage
+
+      - name: Upload the coverage conclusion
+        # 这条覆盖率结论是这个作业**独有**的产出(别的作业不会写它), 而合并后的
+        # `allure-results/` 从 2026-10-04 起不再上传(见 PLAN §41) —— 少这一份, 汇总报告里
+        # 三个平台会全部报“缺少结论: Coverage report”, 而报告作业自己是绿的, 作业状态上看不出
+        # 任何异常。目录名以 `allure-results-` 开头, 汇总作业用一份 `pattern: allure-results-*`
+        # 就能收走(artifact 名用 matrix.platform: 三个平台的这个作业都跑在 ubuntu 上,
+        # 用 matrix.os 会撞名并互相合并)。
+        # 缺片时上一步不写结论, 这里也就不传 —— 那时“缺覆盖率结论”本身就是如实的状态。
+        if: always() && steps.collect-coverage.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-coverage-${{ matrix.platform }}
+          path: allure-results-coverage/
+          if-no-files-found: error
 
       - name: Report the shard gap
         # 缺片的结论必须落在作业状态上: 上面那步是 continue-on-error(不让它把后面的步骤
@@ -710,35 +814,41 @@ jobs:
       - name: Verify Allure report
         # 报告是静态站点: 用例详情页要按需取 data/test-results/*.json。这个目录一旦
         # 在传输/解压环节丢掉, 报告就只剩"通过/失败", 点开用例是空的 —— 所以发布前
-        # 先自检, 并通过 --zip 打成单个文件发布(整目录被静默丢掉的情况不会再出现)。
+        # 先自检, 并通过 --archive 打成单个文件发布(整目录被静默丢掉的情况不会再出现)。
+        # 打包交给系统的 tar: 本作业在 Ubuntu 上, 一万多个小文件用一个子进程完事; 而
+        # 上传时 GitHub 的 artifact 传输**自己**会再压一层 zip, 那一层不是我们套的。
         # --expect-platforms 传的是矩阵里的平台: 要求这份报告里真的有**用例**结果,
         # 只有覆盖率/安全汇总项不算(本作业跑在 Ubuntu 上, runner.os 会说 Linux)。
         # --manifest 把报告里的用例数与分片自报的条数对齐 —— 少一片只有这里能发现。
         id: verify-report
         if: always()
         shell: bash
-        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip --expect-platforms "${{ matrix.platform }}" --manifest allure-manifest.json
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --archive --expect-platforms "${{ matrix.platform }}" --manifest allure-manifest.json
 
       - name: Upload Allure resources
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: allure-resources-${{ matrix.os }}
+          # 只留"下一次运行要用到的两样": 历史(趋势)与产物清单(对数)。**合并后的
+          # `allure-results/` 不再重复上传**: 分片作业已经各上传了一份, 而汇总作业直接下
+          # 分片的产物就是同一批文件(`merge_allure_results.py` 只按文件名搬到一处, 不改
+          # 内容), 再传一份等于把整份结果集多传一次(每平台一万多个文件)。
           path: |
             .allure/history.jsonl
             allure-manifest.json
-            allure-results/
           include-hidden-files: true
           if-no-files-found: ignore
 
-      - name: Upload coverage report
+      - name: Upload coverage XML
+        # 以前连 `htmlcov/` 一起传: 那是每平台几百个 HTML 文件, 而同一份数据已经在报告里
+        # 以 `coverage.xml` 附件挂着(见 pytest-report 的 Attach coverage report to Allure),
+        # 本地想看 HTML 一条 `uv run coverage html` 就能生成。这里只留 XML。
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}
-          path: |
-            coverage.xml
-            htmlcov/
+          path: coverage.xml
           if-no-files-found: ignore
 
       - name: Upload Allure report
@@ -747,8 +857,35 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-${{ matrix.os }}
-          path: allure-report.zip
+          path: allure-report.tar.gz
           if-no-files-found: ignore
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 报告作业失败的原因多半是"输入不齐": 哪个平台的用例没合并进来、哪份结果目录是空的。
+        # 所以除了结果目录, 连自检用的 manifest 与生成出来的报告一起清点。
+        # 仍是**兜底**语义(2026-10-04 收紧): `--expect` 只看"结果集与报告到底有没有生成出来"
+        # —— 生成了就说明这只是普通失败(断言、自检不通过、缺片), 证据在结果与日志里, 不上传。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "报告生成 (${{ matrix.os }})" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results \
+            --expect allure-report \
+            allure-results allure-results-* allure-manifest.json \
+            allure-report allure-report.tar.gz
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步)。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-report-${{ matrix.os }}
+          path: job-diagnostics/
+          if-no-files-found: error
 
   security:
     name: 安全测试 (${{ matrix.os }})
@@ -799,6 +936,32 @@ jobs:
           name: allure-results-security-${{ matrix.os }}
           path: allure-results-security/
           if-no-files-found: ignore
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 安全用例也是 pytest 跑的, 判定与 pytest 作业同一条: 结果目录生成了就说明这只是
+        # 普通失败(断言、门禁不通过), 只有**进程级崩溃 / 结果目录压根没生成**才算兜底现场
+        # (2026-10-04 收紧)。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "安全测试 (${{ matrix.os }})" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results-security \
+            crash-dumps security-results.json security-findings allure-results-security
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步); `if-no-files-found: error` 的理由同其它作业。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-security-${{ matrix.os }}
+          path: |
+            job-diagnostics/
+            crash-dumps/
+          if-no-files-found: error
 
   allure-summary:
     # 汇总与发布**合并成一个作业**（2026-09-30）：这两件事本来就是“先生成报告、再发站点”的固定
@@ -870,7 +1033,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.npm
-          key: npm-allure-3.18.0-linux
+          key: npm-allure-3-linux
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -879,7 +1042,7 @@ jobs:
 
       - name: Install Allure 3 CLI
         # 与 pytest 作业同一个钉住的版本(质量门在这里跑, 版本不对会静默放行)。
-        run: npm install --global allure@3.19.1
+        run: npm install --global allure@3
 
       - name: Download Allure resources
         if: always()
@@ -890,14 +1053,29 @@ jobs:
           path: downloaded-allure-resources
           merge-multiple: false
 
+      - name: Download Allure results from every job
+        # **一份 pattern 收全**: 各分片的原始结果 + 质量/静态分析/性能/平台检查/视觉/安全
+        # 那几份结论项。以前是五次按名字下载(而分片结果走的是 `allure-resources-<平台>` 里
+        # 那份"合并后的副本") —— 现在合并副本不再上传, 这里直接下分片产物。
+        # `merge-multiple: false`: 每片落在自己目录里, 下面按目录摊平(一片没下来能一眼看出
+        # 缺了谁)。不能直接 `merge-multiple: true` 摊进 `allure-results/`: 产物内部保留的
+        # 是路径**相对最近公共祖先**的部分, 摊出来会是 `allure-results/allure-results/*`。
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: allure-results-*
+          path: downloaded-shard-results
+          merge-multiple: false
+
       - name: Collect platform Allure results
         if: always()
         shell: bash
         run: |
           mkdir -p allure-results
-          if [ -d downloaded-allure-resources ]; then
-            find downloaded-allure-resources -type f -path '*/allure-results/*' \
-              -exec cp {} allure-results/ \;
+          if [ -d downloaded-shard-results ]; then
+            # 一次 cp 多个文件(-exec ... +): 这里动辄上万个文件, 每个文件起一个 cp 太慢。
+            find downloaded-shard-results -type f -exec cp -t allure-results/ {} +
           fi
 
       - name: Collect shard manifests
@@ -914,64 +1092,6 @@ jobs:
             done
           fi
           ls -1 allure-manifests || true
-
-      - name: Download performance Allure results
-        if: always()
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          name: allure-results-performance
-          path: allure-results
-
-      - name: Download security Allure results
-        if: always()
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          pattern: allure-results-security-*
-          path: allure-results
-          merge-multiple: true
-
-      - name: Download quality Allure results
-        # 只有 Ubuntu 上传了这一份(见 quality job): 公共检查不分平台, 所以每个门禁在报告里
-        # 仍只有一条结论; 平台专属的那两条在下一份里。
-        if: always()
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          name: allure-results-quality
-          path: allure-results
-
-      - name: Download platform check Allure results
-        # 平台专属检查(当前只剩 Windows 的 mypy --platform win32)在对应平台上产出,
-        # 归入那个平台的环境; macOS 屏蔽期间没有这份产物(下载步骤容忍缺失)。
-        if: always()
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          pattern: allure-results-quality-platform-*
-          path: allure-results
-          merge-multiple: true
-
-      - name: Download analysis Allure results
-        # 静态分析与依赖检查同样只上传 Ubuntu 一份。
-        if: always()
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          name: allure-results-analysis
-          path: allure-results
-
-      - name: Download visual Allure results
-        # 视觉回归也只在质量作业里跑一遍(基线图入库、只在 Linux 采), 同样一份。
-        # 它带 testCategory=quality, 于是运行总账的质量检查表里会多出这几行 —— 这正是
-        # "视觉回归也要体现到报告里"的落点(逐张的图作为那些结论项的附件)。
-        if: always()
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          name: allure-results-visual
-          path: allure-results
 
       - name: Download performance baseline
         if: always()
@@ -1077,6 +1197,27 @@ jobs:
           fi
           echo "没有可用的 allure-results, 跳过质量门校验" | tee allure-quality-gate.txt
 
+      - name: Download failure diagnostics from every job
+        # 各作业只在**失败时**上传诊断(见各自的 Collect/Upload failure diagnostics)。
+        # 用 pattern 一次收全; **不** merge 到同一目录: 各 artifact 都含同名的 summary.md,
+        # 合并会互相覆盖, 而这里正需要看得出"哪一份来自哪个作业"(每份都有自己的作业标签)。
+        # 汇总脚本再把它们拼成报告首页的一份附件(allure-failure-diagnostics.md)。
+        # 没有失败作业时这一步什么也不下载, 脚本会为附件写一行"本轮没有作业失败"。
+        if: always()
+        uses: actions/download-artifact@v7
+        with:
+          pattern: job-diagnostics-*
+          path: failure-diagnostics
+
+      - name: Write the failure-diagnostics attachment
+        # 必须排在上面那一步**之后**: 附件的内容就是刚收下来的那些摘要。
+        # 为什么会单独成一步(2026-10-04): 汇总脚本的另一半(性能/安全结论)写在更早的
+        # "Summarize performance and security into Allure" 里, 那时还没下载, 顺手把这份
+        # 附件也写了 —— 结果它永远显示"本轮没有作业失败", 与作业红不红无关。
+        if: always()
+        shell: bash
+        run: uv run python scripts/create_allure_summary.py --write-failure-diagnostics
+
       - name: Generate final Allure report
         # 同 pytest 作业: 历史与环境设置都在仓库根的 allurerc.mjs 里。
         if: always()
@@ -1094,7 +1235,7 @@ jobs:
         id: verify-report
         if: always()
         shell: bash
-        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --zip
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --archive
 
       - name: Check every platform contributed tests
         # "环境存在"很容易被覆盖率/安全汇总项或平台专属的质量检查满足 —— 那样"某个平台的
@@ -1117,9 +1258,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: allure-resources-final
-          path: |
-            .allure/history.jsonl
-            allure-results/
+          # 与各平台的 `allure-resources-<os>` 同一个道理: 历史文件是下一轮唯一要取回的
+          # 东西(见上面的 Resolve previous successful run), 而**整份结果集**在这里再传一次
+          # 是本工作流里最大的单笔上传 —— 它是 `allure-results-<os>-<分片>` 那几份的合集,
+          # 人要原始数据去下分片产物即可。
+          path: .allure/history.jsonl
           include-hidden-files: true
           if-no-files-found: ignore
 
@@ -1128,7 +1271,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-final
-          path: allure-report.zip
+          path: allure-report.tar.gz
+          archive: false # 不打包，直接上传原始文件
           if-no-files-found: ignore
 
       # -- 发布到 GitHub Pages(只有默认分支的 push 会真的走到) ------------------------------
@@ -1143,7 +1287,7 @@ jobs:
         #   `github.ref_name == 'dev' || ...`, 但两边会互相覆盖, 得自己想清楚);
         # `steps.verify-report.outcome == 'success'` —— 就是上面 `Upload final Allure report`
         #   的挂载条件: 没通过自检的报告不发布(宁可这一轮没有站点, 也不把“打不开详情”的报告发出去)。
-        # 直接解工作区里的 `allure-report.zip`: 合并成一个作业之后它就是本作业上一步的产物,
+        # 直接解工作区里的 `allure-report.tar.gz`: 合并成一个作业之后它就是本作业上一步的产物,
         # 不必再让 artifact 绕一圈(原来那个“下载 allure-report-final”的唯一用途就是跨作业取文件)。
         id: unpack
         if: always() && !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.verify-report.outcome == 'success'
@@ -1156,15 +1300,15 @@ jobs:
         run: |
           rm -rf site
           mkdir -p site
-          archive="allure-report.zip"
+          archive="allure-report.tar.gz"
           if [ ! -f "$archive" ]; then
             echo "::warning::没有找到 $archive, 跳过发布(报告可能没通过自检)"
             exit 0
           fi
-          # Pages 要的是一个**目录**(站点根就是它): 直接传 zip 的话, 打开网址只会下载一个压缩包。
-          # zip 里的条目带一层报告目录名(见 scripts/verify_allure_report.py 的打包逻辑),
+          # Pages 要的是一个**目录**(站点根就是它): 直接传压缩包的话, 打开网址只会下载一个文件。
+          # 归档里的条目带一层报告目录名(见 scripts/verify_allure_report.py 的打包逻辑),
           # 所以解开之后就是 site/allure-report/。
-          unzip -q "$archive" -d site
+          tar -xzf "$archive" -C site
           test -f site/allure-report/index.html
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
@@ -1183,6 +1327,36 @@ jobs:
         continue-on-error: true
         id: deploy
         uses: actions/deploy-pages@v4
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 位置说明: 放在门禁结论步**之前**。报告/自检/原生质量门这些步骤的失败都发生在这里
+        # 之前, `failure()` 已经为真; 唯一的例外是"有平台没有用例结果"——那是结论步自己判的,
+        # 所以那个条件单独补一次。不放在结论步之后, 是因为结论步只写一行日志、不产出文件,
+        # 没有现场可收。
+        # 判定(2026-10-04 收紧): 只有**结果集或最终报告压根没生成**(说明是崩溃/中断, 而不是
+        # 某个结论不达标)才算兜底现场 —— 门禁不过、某个平台缺片这类失败的证据已经在结果与
+        # 日志里了, 不再上传一份相册。
+        if: always() && (failure() || steps.verify-platforms.outcome == 'failure')
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "汇总 (allure-summary)" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results \
+            --expect allure-report \
+            allure-results allure-results-* allure-report allure-report.tar.gz \
+            allure-manifest.json coverage.xml performance-results.json security-results.json
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步); `if-no-files-found: error` 的理由同其它作业。
+        if: always() && (failure() || steps.verify-platforms.outcome == 'failure') && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-summary
+          path: job-diagnostics/
+          if-no-files-found: error
 
       - name: Report quality gate verdict
         # 质量门是"结论"而不是"步骤": 报告已生成、两份 artifact 都上传完了, 现在再用它的

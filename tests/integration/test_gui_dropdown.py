@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import Any
 
@@ -103,10 +104,13 @@ def test_a_long_dropdown_stops_at_the_cap_and_scrolls() -> None:
     # 还是显示在最前方" —— topmost 是相对整个屏幕的, 浮层会盖在别的程序上面。改成宿主的
     # 附属窗口(transient)之后, 别的程序被激活时浮层就随宿主一起沉下去。
     #
-    # 这条断言**只在 macOS 上咬得住**: 那里的无边框窗口 ``-topmost`` 默认读出来就是 1
-    # (Windows 上是 0), 2026-10-03 的 macOS CI 正是报了这一条 —— 所以 ``_build`` 里显式
-    # 写了一次 ``-topmost False``, 让两个平台的读数是同一个值。
-    assert not window.attributes("-topmost"), "浮层不该是 topmost(会盖住别的软件)"
+    # 这条断言**只在 Windows 上钉得住**: macOS 的无边框(override-redirect)窗口不管怎么写,
+    # ``-topmost`` 读出来都是 1(Tk 给这类窗口的平台默认值)。2026-10-03 与 10-04 两轮 CI 都
+    # 报在这一条上, 而"先 transient 再写掉"那个顺序已经在 HEAD 里了 —— 也就是说那个值在
+    # macOS 上关不掉, 那是 Tk 的实现细节, 不是我们能配的东西。所以 macOS 上钉的是**机制**
+    # (下面那句 transient 关系: 它会随宿主一起沉下去), Windows 上继续钉读数。
+    if sys.platform != "darwin":
+        assert not window.attributes("-topmost"), "浮层不该是 topmost(会盖住别的软件)"
     assert str(window.transient()) == str(app), "浮层应当是宿主窗口的附属窗口"
     app_top = int(app.winfo_rooty())
     app_bottom = app_top + int(app.winfo_height())

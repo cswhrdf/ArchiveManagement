@@ -329,17 +329,33 @@ def pytest_collection_modifyitems(
     _apply_shard(config, items)
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config) -> None:
     """会话一开始就把"硬崩溃也要留证"接上(见 ``crash_capture.enable_hard_crash_log``).
 
     coredumpy 只覆盖"用例失败"这一层; 段错误/中止会直接杀掉进程, 那时唯一能留下的就是
-    faulthandler 的栈 —— 这里让它同时写进 ``crash-dumps/``, 由 CI 当 artifact 上传。
+    faulthandler 的栈 —— 这里让它写进 ``crash-dumps/``, 由 CI 当 artifact 上传。
+
+    ``trylast`` 是必须的: pytest 自带的 faulthandler 插件也会调 ``faulthandler.enable()``
+    (不带 ``file`` = stderr)。同类钩子的调用顺序是**后注册的先跑**, 而它注册得比 conftest
+    早 —— 不标 ``trylast`` 的话我们反而先跑, 随后被它覆盖, 文件永远是空的(实测 2026-10-03
+    的 macOS 分片: 文件 0 字节, 而栈在 CI 日志里)。
     """
     depth = int(config.getoption("--crash-dump-depth"))
     if depth <= 0:
         return  # 显式关掉留证时不写文件
     directory = Path(str(config.getoption("--crash-dump-dir")))
     crash_capture.enable_hard_crash_log(directory)
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """会话真正开始前再抢一次 faulthandler 的输出(见 ``reassert_hard_crash_log``).
+
+    为什么不能只靠上面的 ``trylast``: 插件可以在 ``pytest_configure`` **之后**才注册
+    (``-p`` / 命令行插件), 那时它的钩子又会后跑一次。``pytest_sessionstart`` 跑在所有
+    ``pytest_configure`` 之后, 是唯一能保证"最后一次 enable 是我们"的位置。
+    """
+    crash_capture.reassert_hard_crash_log()
 
 
 def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:

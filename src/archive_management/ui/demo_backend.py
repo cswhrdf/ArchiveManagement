@@ -393,25 +393,30 @@ class DemoArchiveService:
     """基于内存演示数据的 :class:`ArchiveService` 实现."""
 
     def __init__(self, *, delay: float = 0.5) -> None:
-        """用内存数据构造演示后端; ``delay`` 控制模拟耗时."""
+        """用内存数据构造演示后端; ``delay`` 控制模拟耗时.
+
+        演示数据的装配按"三类互不相干的状态"拆成下面三个 ``_seed_*``: 构造函数只留
+        ``delay`` 与几个计数器 —— 它是这个类里唯一"每加一个字段就变复杂"的地方, 而
+        xenon 的复杂度门槛对它是硬要求(CI 的 analysis 作业会拦, 2026-10-03 就红在这里)。
+        """
         self._delay = delay
         self._theme = "dark"
+        self._keep_auto = 3
+        self._revision = 0
         # 每个游戏的定时备份配置: game_id -> (周期文本, 是否启用, 保留份数).
         self._schedules: dict[str, tuple[str, bool, int]] = {
             "outer-wilds": ("1d", True, 3),
         }
-        self._keep_auto = 3
-        self._revision = 0
-        self._items: dict[str, list[BackupItem]] = {
-            game_id: list(items) for game_id, items in _BACKUPS.items()
-        }
-        self._current: dict[str, str | None] = {}
-        self._meta: dict[str, GameSummary] = {game.game_id: game for game in _GAMES}
-        self._details = dict(_DETAILS)
-        self._locations: dict[str, list[LocationItem]] = {}
         self._next_game_id = 1
         self._next_location_id = 1
-        # 演示监控目录与探测结果(固定数据, 不触碰真实磁盘).
+        self._seed_reference_data()
+        self._seed_backups()
+        self._seed_home_state()
+
+    def _seed_reference_data(self) -> None:
+        """登记游戏、详情、监控目录与探测结果(演示数据全是固定常量, 不触碰真实磁盘)."""
+        self._meta: dict[str, GameSummary] = {game.game_id: game for game in _GAMES}
+        self._details = dict(_DETAILS)
         self._monitored_dirs: dict[str, MonitoredDirItem] = {
             item.directory_id: item for item in _MONITORED_DIRS
         }
@@ -426,35 +431,48 @@ class DemoArchiveService:
             if item.status == "ignored"
         }
         self._next_dir_id = len(_MONITORED_DIRS) + 1
-        # 演示主页的筛选条件、归档标记与自定义标签.
-        self._home_filter = HomeFilter()
-        self._archived: dict[str, bool] = dict.fromkeys(self._meta, False)
-        # 用户自己指定的封面/图标: 演示后端不写用户的磁盘, 只记住路径(语义与真实后端
-        # 一致: 用户图优先、可恢复默认), 所以界面用例可以走同一条完整路径。
-        self._user_artwork: dict[tuple[str, ArtworkKind], str] = {}
-        self._tags: dict[str, tuple[str, ...]] = {key: () for key in self._meta}
+
+    def _seed_backups(self) -> None:
+        """铺每个游戏的备份节点、当前节点与主存档位置."""
+        self._items: dict[str, list[BackupItem]] = {
+            game_id: list(items) for game_id, items in _BACKUPS.items()
+        }
+        self._current: dict[str, str | None] = {}
+        self._locations: dict[str, list[LocationItem]] = {}
         for game in _GAMES:
             existing = self._items.get(game.game_id, [])
             self._current[game.game_id] = existing[-1].backup_id if existing else None
             self._items.setdefault(game.game_id, [])
-            primary = self._details[game.game_id].main_location
-            if primary:
-                self._locations[game.game_id] = [
-                    LocationItem(
-                        # 位置 id 必须带上游戏 id: 演示数据每个游戏各有一个主位置,
-                        # 用固定 id 会让按 id 查找/删除命中别的游戏.
-                        location_id=f"{game.game_id}-primary",
-                        game_id=game.game_id,
-                        path=primary,
-                        path_kind="directory",
-                        source="manual",
-                        is_primary=True,
-                        ok=True,
-                        note=tr("loc.verified"),
-                    )
-                ]
-            else:
-                self._locations[game.game_id] = []
+            self._locations[game.game_id] = self._primary_locations(game)
+
+    def _primary_locations(self, game: GameSummary) -> list[LocationItem]:
+        """一个游戏的主存档位置(演示数据里每个游戏最多一个, 没有就是空表)."""
+        primary = self._details[game.game_id].main_location
+        if not primary:
+            return []
+        return [
+            LocationItem(
+                # 位置 id 必须带上游戏 id: 演示数据每个游戏各有一个主位置,
+                # 用固定 id 会让按 id 查找/删除命中别的游戏.
+                location_id=f"{game.game_id}-primary",
+                game_id=game.game_id,
+                path=primary,
+                path_kind="directory",
+                source="manual",
+                is_primary=True,
+                ok=True,
+                note=tr("loc.verified"),
+            )
+        ]
+
+    def _seed_home_state(self) -> None:
+        """主页那一摊状态: 筛选条件、归档标记、自定义标签与用户指定的封面/图标."""
+        self._home_filter = HomeFilter()
+        self._archived: dict[str, bool] = dict.fromkeys(self._meta, False)
+        self._tags: dict[str, tuple[str, ...]] = {key: () for key in self._meta}
+        # 用户自己指定的封面/图标: 演示后端不写用户的磁盘, 只记住路径(语义与真实后端
+        # 一致: 用户图优先、可恢复默认), 所以界面用例可以走同一条完整路径。
+        self._user_artwork: dict[tuple[str, ArtworkKind], str] = {}
 
     # -- 读接口 -------------------------------------------------------------
 

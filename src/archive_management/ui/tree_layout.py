@@ -391,6 +391,62 @@ def _tree_edges(nodes: Sequence[TreeNode], boxes: Mapping[str, NodeBox]) -> list
     return edges
 
 
+@dataclass(frozen=True)
+class _Folds:
+    """折叠在布局里的三个结论(见 :func:`_resolve_folds`)."""
+
+    folded: frozenset[str]
+    visible: list[str]
+    branches: frozenset[str]
+
+
+def _resolve_folds(
+    order: Sequence[str],
+    children: Mapping[str, tuple[str, ...]],
+    collapsed: Collection[str],
+) -> _Folds:
+    """把调用方给的折叠集合收敛成"真的生效的那几个", 并给出还看得见的节点.
+
+    * ``branches``: 有孩子的节点(只有它们能折叠);
+    * ``folded``: 与它**取交集** —— 树里没有的 id 与**叶子**都不算(叶子本来就没什么可藏);
+    * ``visible``: 从根往下走, 碰到折叠节点就不再进它的子树。
+    """
+    branches = frozenset(node_id for node_id in order if children.get(node_id))
+    folded = frozenset(node_id for node_id in collapsed if node_id in branches)
+    return _Folds(folded, _visible_ids(order, children, folded), branches)
+
+
+def _build_layout(
+    folds: _Folds,
+    boxes: Mapping[str, NodeBox],
+    edges: Sequence[Edge],
+    *,
+    forest_width: float,
+    counts: Mapping[str, int],
+    deepest: int,
+    size: TreeMetrics,
+) -> TreeLayout:
+    """把算好的零件组装成 :class:`TreeLayout`.
+
+    两处"取交集"都在这: 宽度/高度都按**看得见的**算(藏起来的层不该继续占着可滚范围),
+    而"报哪些折叠"也只报看得见的 —— 藏在另一个折叠节点肚子里的那些连标记都画不出来。
+    """
+    visible = folds.visible
+    return TreeLayout(
+        boxes=tuple(boxes[node_id] for node_id in visible if node_id in boxes),
+        edges=tuple(edges),
+        width=max(forest_width + size.padding, size.box_width + size.padding * 2),
+        height=deepest * size.row_height + size.box_height + size.padding * 2,
+        metrics=size,
+        index=boxes,
+        collapsed=folds.folded.intersection(visible),
+        descendants={
+            node_id: counts[node_id] for node_id in visible if node_id in folds.folded
+        },
+        branches=folds.branches.intersection(visible),
+    )
+
+
 def tree_layout(
     nodes: Sequence[TreeNode],
     *,
@@ -414,29 +470,18 @@ def tree_layout(
         return TreeLayout((), (), 0.0, 0.0, size, {})
 
     order, children, depth_of = _node_maps(nodes)
-    branches = frozenset(node_id for node_id in order if children.get(node_id))
-    folded = frozenset(node_id for node_id in collapsed if node_id in branches)
-    visible = _visible_ids(order, children, folded)
-    shown = set(visible)
-    widths = _subtree_widths(visible, children, size, shown)
+    folds = _resolve_folds(order, children, collapsed)
+    shown = set(folds.visible)
+    widths = _subtree_widths(folds.visible, children, size, shown)
     boxes, forest_width = _place_forest(
-        visible, children, widths, depth_of, shown, size
+        folds.visible, children, widths, depth_of, shown, size
     )
-    edges = _tree_edges(nodes, boxes)
-
-    # 只有**看得见且真的被折叠**的节点才报后代数: 藏在另一个折叠节点肚子里的那些, 连
-    # 标记都不会画出来(它们不在 ``visible`` 里), 报出来也没有展示的地方。
-    counts = _descendant_counts(order, children)
-    descendants = {node_id: counts[node_id] for node_id in visible if node_id in folded}
-    deepest = max(depth_of[node_id] for node_id in visible)
-    return TreeLayout(
-        boxes=tuple(boxes[node_id] for node_id in visible if node_id in boxes),
-        edges=tuple(edges),
-        width=max(forest_width + size.padding, size.box_width + size.padding * 2),
-        height=deepest * size.row_height + size.box_height + size.padding * 2,
-        metrics=size,
-        index=boxes,
-        collapsed=folded.intersection(visible),
-        descendants=descendants,
-        branches=branches.intersection(shown),
+    return _build_layout(
+        folds,
+        boxes,
+        _tree_edges(nodes, boxes),
+        forest_width=forest_width,
+        counts=_descendant_counts(order, children),
+        deepest=max(depth_of[node_id] for node_id in folds.visible),
+        size=size,
     )

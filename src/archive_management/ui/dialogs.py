@@ -79,14 +79,22 @@ _DIALOG_CHROME_HEIGHT = 52
 # 舒适线夹取的收敛轮数: 每轮按"现在量到的高度"收一次, 收完再量(布局不保证 1:1 跟着正文区走)。
 # 上限只是保险 —— 正常情况下第一轮或第二轮就落到线内了。
 _CLAMP_PASSES = 4
-# 居中重校: 每隔 _CENTER_DELAY_MS 看一眼父窗口, 尺寸一变就重算位置; "尺寸没变且父窗口
-# 已映射"就收工。上限只是保险 —— 实测父窗口在 16ms 内就落地了, 正常两轮就结束。
-_CENTER_PASSES = 24
+# 居中重校: 每隔 _CENTER_DELAY_MS 看一眼父窗口 —— 位置不对(或父窗口几何变了)就重算,
+# "位置已经对 + 父窗口已映射 + 复杣够"才收工。上限只是保险。
+#
+# 2026-10-03 的 CI 把两个数同时改了: 一是上限 24 → 40(约 1s) —— Windows 的 runner 上
+# 主窗口被窗口管理器摆完位置要几百毫秒; 二是收工条件多了"位置确实对"那一条 —— 旧口径
+# 只看"这一轮父窗口几何没变 + 已映射", 而慢机器上会出现"窗口已映射、几何还是布局前那个
+# 占位值"的那几拍, 于是提前收工、位置永远撚在那里(实测弹窗停在 +8+31, 商心差 456px)。
+_CENTER_PASSES = 40
 _CENTER_DELAY_MS = 25
-# 收工前至少复查这么多轮(≈ 75ms): 窗口管理器摆位置比映射晚一拍 —— 实测有整组跑时
+# 收工前至少复杣这么多轮(≈ 75ms): 窗口管理器摆位置比映射晚一拍 —— 实测有整组跑时
 # 父窗口映射瞬间的 rootx 还是 0, 位置读数要再过一个循环才对, 不复查就会偏几百像素
 # (用例 test_the_first_dialog_of_a_cold_start_is_centered 先红后绿的那次)。
 _CENTER_MIN_PASSES = 3
+# 位置读数与目标的允差(像素): 窗口管理器可能把坐标取整或加上装饰偏移, 完全相等不是
+# 一个稳定可达的目标; 比这个值小就不算"位置不对"。
+_CENTER_SLOP = 2
 # 勾选行下面那行提示的左缩进: 24(正文距边) + 22(方框宽与它到文字的间距), 量出来是为了
 # 与复选框的**文字**左对齐 -- 这条对齐没法落在间距刻度上, 所以留个具名常量。
 _CHECK_HINT_PAD = (24 + 22, 24)
@@ -348,6 +356,12 @@ def _settle_centering(
     收工前多复查几轮(:data:`_CENTER_MIN_PASSES`): 窗口管理器摆位置比映射晚一拍, 实测有
     一次整组跑时映射那一刻读到父窗口 ``rootx=0``, 位置读数再过一拍才对 —— 只看"这一轮
     没变"就收工会把位差留在弹窗上(用例先红后绿的那次, 偏 407 像素)。
+
+    **"位置确实对"也是收工条件之一**(2026-10-03 的 CI): 慢机器上会出现"窗口已经映射、
+    ``winfo_*`` 还是布局前那个占位值"的好几拍, 旧口径在这几拍里就把自己收工了 —— 实测
+    Windows runner 上弹窗撚在 ``+8+31``, 离中心 456 像素, 而父窗口的几何要到几百毫秒后
+    才更新。现在每轮都拿弹窗**当前的位置**与目标比一比(允差 :data:`_CENTER_SLOP`), 对不
+    上就继续重算, 于是"什么时候收工"不再依赖于猜。
     """
     seen = _parent_box(parent)
     passes = 0
@@ -358,22 +372,57 @@ def _settle_centering(
             return
         passes += 1
         current = _parent_box(parent)
-        if current != seen:
+        target = _centered_position(
+            parent, window, (window.winfo_width(), window.winfo_height()), offset
+        )
+        if current != seen or _position_delta(window, target) > _CENTER_SLOP:
             seen = current
-            window.geometry(
-                _centered_position(
-                    parent,
-                    window,
-                    (window.winfo_width(), window.winfo_height()),
-                    offset,
-                )
-            )
+            window.geometry(target)
         elif parent.winfo_ismapped() and passes >= _CENTER_MIN_PASSES:
-            return  # 尺寸稳定且父窗口已落地(且复查够了): 位置已经算对了
+            return  # 位置已对 + 父窗口已落地 + 复查够了: 收工
         if passes < _CENTER_PASSES:
             window.after(_CENTER_DELAY_MS, check)
 
     window.after(_CENTER_DELAY_MS, check)
+
+
+def _window_position(window: ctk.CTkToplevel) -> tuple[int, int] | None:
+    """弹窗现在的位置(从 ``geometry()`` 的尾巴里取), 读不到时给 ``None``.
+
+    ``geometry()`` 回来的是 ``宽x高+x+y``(一个字符串), 位置就在最后两段里; 窗口还没
+    映射或窗口管理器还没回过话时可能读不出来 —— 那是"不知道", 不要当成 0(当成 0 会让
+    "位置对不对"这条判据把一个位于左上角的窗口当成"已经对了")。
+    """
+    try:
+        text = window.geometry()
+    except tk.TclError:  # pragma: no cover - 窗口已经销毁
+        return None
+    if not text:  # 窗口管理器还没回过话: 也是"不知道", 不要当成 0
+        return None
+    parts = text.rsplit("+", 2)
+    if len(parts) != 3:  # pragma: no cover - 形如 "600x680" (还没有位置)
+        return None
+    try:
+        return int(parts[1]), int(parts[2])
+    except ValueError:  # pragma: no cover - 负数坐标的 "-x-y" 写法
+        return None
+
+
+def _position_delta(window: ctk.CTkToplevel, target: str) -> float:
+    """弹窗当前的位置与目标位置差多少(取两个轴里大的那个); 任一读不到就给 0."""
+    current = _window_position(window)
+    wanted = _window_position_of(target)
+    if current is None or wanted is None:
+        return 0.0
+    return max(abs(current[0] - wanted[0]), abs(current[1] - wanted[1]))
+
+
+def _window_position_of(geometry: str) -> tuple[int, int] | None:
+    """从 ``+x+y`` 这样的位置字符串里取出坐标(读不到就给 ``None``)."""
+    parts = geometry.rsplit("+", 2)
+    if len(parts) != 3:  # pragma: no cover - _centered_position 只产出这种形状
+        return None
+    return int(parts[1]), int(parts[2])
 
 
 def _parent_box(parent: ctk.CTk) -> tuple[int, int, int, int]:

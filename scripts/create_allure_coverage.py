@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import shutil
 import time
 import tomllib
 import uuid
@@ -91,6 +92,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "这条结论属于哪个平台(Windows/Linux/macOS); 不传则按当前主机判断。"
             "报告作业跑在 Ubuntu 上但合并的是别的平台的数据, 必须显式传。"
         ),
+    )
+    parser.add_argument(
+        "--publish-dir",
+        type=Path,
+        default=None,
+        help="把这条结论(结果 JSON + 附件)再复制一份到这个目录, 供 CI 单独上传",
     )
     return parser.parse_args(argv)
 
@@ -276,11 +283,28 @@ def with_raw_report_note(description: str, attachments: list[dict[str, str]]) ->
     )
 
 
-def write_result(result: dict[str, Any], result_id: str) -> None:
-    """将一条覆盖率结果写入 Allure 结果目录."""
+def write_result(
+    result: dict[str, Any], result_id: str, publish_dir: Path | None = None
+) -> None:
+    """将一条覆盖率结果写入 Allure 结果目录(``publish_dir`` 给了就再复制一份过去)."""
     RESULTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
     result_path = RESULTS_DIRECTORY / f"{result_id}-result.json"
     result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    if publish_dir is not None:
+        publish(result_id, publish_dir)
+
+
+def publish(result_id: str, directory: Path) -> None:
+    """把这条结论的文件(结果 JSON + 附件)复制一份到 ``directory``.
+
+    为什么要单独一份: 在 pytest-report 作业里, 这条结论写进的是**整份合并结果集**
+    (``allure-results/``), 而那个目录从 2026-10-04 起不再上传(见 PLAN §41) —— 少了这一份,
+    汇总报告里三个平台全部报"缺少结论: Coverage report", 而报告作业自己是绿的, 作业状态
+    上看不出任何异常。附件与结果一起复制: 报告里那一条要能直接下载原始 ``coverage.xml``。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for source in sorted(RESULTS_DIRECTORY.glob(f"{result_id}-*")):
+        shutil.copyfile(source, directory / source.name)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -291,7 +315,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     """
     result_id = str(uuid.uuid4())
     timestamp = time.time_ns() // 1_000_000
-    name = resolve_platform(parse_args(argv).platform)
+    arguments = parse_args(argv)
+    name = resolve_platform(arguments.platform)
     threshold = coverage_threshold()
     attachments = raw_report_attachments(result_id)
     result: dict[str, Any] = {
@@ -321,7 +346,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"## 覆盖率不可用\n\n覆盖率命令没有产出 `{COVERAGE_XML}`。",
             attachments,
         )
-        write_result(result, result_id)
+        write_result(result, result_id, arguments.publish_dir)
         return
 
     try:
@@ -333,7 +358,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"## 覆盖率不可用\n\n覆盖率文件无法解析: `{exc}`",
             attachments,
         )
-        write_result(result, result_id)
+        write_result(result, result_id, arguments.publish_dir)
         return
 
     section, status, message = verdict_section(combined_rate(root.attrib), threshold)
@@ -343,7 +368,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     result["description"] = with_raw_report_note(
         section + "\n" + build_description(root), attachments
     )
-    write_result(result, result_id)
+    write_result(result, result_id, arguments.publish_dir)
 
 
 if __name__ == "__main__":

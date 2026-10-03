@@ -20,7 +20,7 @@ import json
 import re
 import shutil
 import sys
-import zipfile
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -578,15 +578,15 @@ def test_absent_report_is_not_a_failure(
     assert "跳过校验" in capsys.readouterr().out
 
 
-def test_zip_packages_every_file(
+def test_archive_packages_every_file(
     layout: _Layout, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``--zip`` 必须把目录里每个文件都装进 zip, 并打印条目数与 SHA256."""
+    """``--archive`` 必须把目录里每个文件都装进 tar.gz, 并打印条目数与 SHA256."""
     exit_code = verifier.main(
-        [str(layout.report), "--results", str(layout.results), "--zip"]
+        [str(layout.report), "--results", str(layout.results), "--archive"]
     )
     output = capsys.readouterr().out
-    archive = layout.report.with_suffix(".zip")
+    archive = layout.report.parent / f"{layout.report.name}.tar.gz"
 
     assert exit_code == 0
     assert archive.is_file()
@@ -595,9 +595,11 @@ def test_zip_packages_every_file(
         for path in layout.report.rglob("*")
         if path.is_file()
     )
-    with zipfile.ZipFile(archive) as bundle:
+    with tarfile.open(archive, "r:gz") as bundle:
         packed = sorted(
-            name.removeprefix(f"{layout.report.name}/") for name in bundle.namelist()
+            member.name.removeprefix(f"{layout.report.name}/")
+            for member in bundle.getmembers()
+            if member.isfile()
         )
     assert packed == on_disk
     assert f"{len(on_disk)} 个条目" in output
@@ -621,14 +623,14 @@ def test_ci_publishes_only_verified_report() -> None:
         if line.strip().startswith("run:") and "verify_allure_report.py" in line
     ]
     assert len(commands) == verifications, "自检点数量与命令数量对不上"
-    zip_checks = [command for command in commands if "--zip" in command]
-    assert len(zip_checks) == 2, "pytest 与汇总作业各出一份 zip 报告"
+    archive_checks = [command for command in commands if "--archive" in command]
+    assert len(archive_checks) == 2, "pytest 与汇总作业各出一份归档报告"
     # 挂在"出 zip 的那次自检通过"上的地方有三处: 两个作业各一次 `Upload ... Allure report`,
     # 再加汇总作业里"把 zip 解开发布到 Pages"的第一步(2026-09-30 合并发布作业时新增)。
     # 只数命令行(注释里也会引这句话当说明), 所以先把注释剥掉再数。
     gated = code.count("steps.verify-report.outcome == 'success'")
-    assert gated == len(zip_checks) + 1, f"自检与发布挂钩的地方对不上: {gated}"
-    assert workflow.count("path: allure-report.zip") == len(zip_checks)
+    assert gated == len(archive_checks) + 1, f"自检与发布挂钩的地方对不上: {gated}"
+    assert workflow.count("path: allure-report.tar.gz") == len(archive_checks)
     assert "path: allure-report/" not in workflow, "报告目录不再直接发布"
     # 平台用例检查: pytest 作业的报告传矩阵里的平台(报告作业固定跑在 Ubuntu 上,
     # runner.os 会说 Linux), 汇总作业传汇总要求的两个平台 —— 两处都要有, 少一处就等于
@@ -682,7 +684,7 @@ def test_ci_judges_the_coverage_only_on_complete_shard_data() -> None:
     for step in (
         "Combine coverage data",
         "Enforce the coverage threshold",
-        "Write coverage reports",
+        "Write the coverage report",
         "Attach coverage report to Allure",
     ):
         body = code.split(f"name: {step}", 1)[1].split("- name:", 1)[0]
@@ -1152,11 +1154,40 @@ def test_global_attachment_matches_what_the_summary_writes() -> None:
     config = _ALLURE_CONFIG.read_text(encoding="utf-8")
     matched = re.search(r"globalAttachments:\s*\[([^\]]*)\]", config)
     assert matched is not None, "配置里要有 globalAttachments"
-    names = {item.strip().strip('"') for item in matched.group(1).split(",")}
+    # 数组写成多行时会有尾随逗号与缩进, 过滤掉空项再看集合。
+    names = {
+        name
+        for item in matched.group(1).split(",")
+        if (name := item.strip().strip('"'))
+    }
     assert names == {
         module.QUALITY_GATE_REPORT.name,
         module.COVERAGE_EXCLUSIONS_REPORT.name,
+        module.FAILURE_DIAGNOSTICS_REPORT.name,
     }
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    """把 ``"3.19.1"`` 这样的版本号拆成可比大小的元组(段数不同的也能比)."""
+    return tuple(int(part) for part in text.split("."))
+
+
+def test_the_coverage_conclusion_is_published() -> None:
+    """覆盖率结论必须**单独上传** —— 合并后的 ``allure-results/`` 不再上传(见 PLAN §41).
+
+    2026-10-04 实测: 少了这一份, 汇总报告里三个平台全部报“缺少结论: Coverage report”,
+    而报告作业自己是绿的 —— 这类“漏了个消费者”在作业状态上看不出来, 只能靠守卫钉。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+
+    assert "--publish-dir allure-results-coverage" in workflow, (
+        "结论要复制到可上传的目录"
+    )
+    assert "name: allure-results-coverage-${{ matrix.platform }}" in workflow, (
+        "三个平台的这个作业都跑在 ubuntu 上, 用 matrix.os 会撞名"
+    )
+    # 上传了还得被收走: 汇总作业那**一个** pattern 要能匹配到它。
+    assert "pattern: allure-results-*" in workflow
 
 
 def test_native_quality_gate_is_configured_and_pinned() -> None:
@@ -1175,16 +1206,36 @@ def test_native_quality_gate_is_configured_and_pinned() -> None:
     assert re.search(r"^\s*qualityGate\s*:", config, re.MULTILINE) is not None
     for rule in ("maxFailures", "successRate", "environmentsTested"):
         assert rule in config, f"配置里缺少规则 {rule}"
-    assert "3.18.0" in config, "注释里要写明版本要求与原因"
+    minimum = re.search(r"版本要求 ≥ ([0-9.]+)", config)
+    assert minimum is not None, "注释里要写明版本要求与原因"
     assert "#895" in config, "注释里要留 issue 号, 便于日后重测"
 
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     gate = "allure quality-gate --config allurerc.mjs allure-results"
     assert gate in workflow, "CI 要真的跑原生质量门"
-    assert "npm install --global allure@3.18.0" in workflow, "CLI 必须钉在修好的版本"
-    assert "npm install --global allure@3\n" not in workflow, (
-        "不能再用浮动标签 allure@3"
-    )
+    # 版本判据是**两处的关系**, 不是写死一个号: 工作流里钉的版本必须 ≥ 配置里写的最低要求,
+    # 而且工作流里只能有一处出处。2026-10-03 的 CI 就红在这条上 —— 工作流已经升到 3.19.1,
+    # 而断言还在找 3.18.0(两处都是人肉同步的注释, 不同步时没有东西会提醒)。
+    pinned = set(re.findall(r"npm install --global allure@([0-9.]+)", workflow))
+    assert len(pinned) == 1, f"CLI 版本必须只有一处出处: {sorted(pinned)}"
+    version = pinned.pop()
+    # 两种写法都允许, 但都必须真的满足下限:
+    #   * 钉住的完整版本(``3.19.1``): 静态就能判;
+    #   * 浮动标签(``3``): 必须在 CI 里**运行期**判定, 否则 3.13~3.17 那种"静默放行门槛"
+    #     会静默回来(2026-10-04: 用户有意把版本改成动态取最新, 下限因此从静态改成运行期)。
+    parts = _version_tuple(version)
+    if len(parts) < 2:
+        # 浮动标签: 下限静态判不了, 必须在 CI 里**运行期**比一次, 而且过期时要响亮地红
+        # (3.13~3.17 配 historyPath 会静默放行质量门, 那种失效在报告里看不出来)。
+        assert "allure --version" in workflow, "浮动标签必须当场打印实际版本"
+        assert "::error::Allure CLI" in workflow, "浮动标签要在 CI 里真的比一次下限"
+        assert parts[0] >= _version_tuple(minimum.group(1))[0], (
+            f"CI 用的浮动标签 {version} 连最低要求的主版本都不到"
+        )
+    else:
+        assert parts >= _version_tuple(minimum.group(1)), (
+            f"CI 钉的 {version} 低于配置里要求的最低版本 {minimum.group(1)}"
+        )
     assert "Report quality gate verdict" in workflow, "门禁结论要能决定作业成败"
     # 先跑门禁(留日志给总账), 再生成报告: 顺序反了日志就进不了报告。
     assert workflow.index(gate) < workflow.index("Generate final Allure report")
@@ -2166,7 +2217,9 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
     )
 
     summary = ci_workflow.job_block(workflow, "allure-summary")
-    assert "name: allure-results-visual" in summary, "汇总作业要把这份结论收进报告"
+    assert "pattern: allure-results-*" in summary, (
+        "汇总作业要把这份结论收进报告(现在是一份 pattern 把各作业的结果一起收全)"
+    )
 
     # 标签决定归属: 改动这两处会让结论落错环境或从总账里消失。
     assert module.ENVIRONMENT == "common"
@@ -2290,7 +2343,9 @@ def test_platform_check_runs_in_a_job_on_its_own_platform() -> None:
     # 汇总作业必须能等到它, 并把产物收进报告。
     summary = re.search(r"\n  allure-summary:\n(.*)", workflow, re.DOTALL)
     assert summary is not None, "ci.yml 里找不到 allure-summary job"
-    assert "pattern: allure-results-quality-platform-*" in summary.group(1)
+    assert "pattern: allure-results-*" in summary.group(1), (
+        "汇总要用一份 pattern 收全各作业的结果(平台专属检查那份也在里面)"
+    )
 
 
 def test_ci_cancels_superseded_runs_and_skips_docs_only_pushes() -> None:
@@ -2375,9 +2430,77 @@ def test_the_report_is_published_to_pages_from_the_default_branch_only() -> None
     assert "contents: read" in job, "作业级 permissions 是覆盖: 漏了它 checkout 会失败"
     assert "environment:" in job, "站点要挂在 github-pages 环境上(作业 URL 也来自它)"
     assert "github-pages" in job, "environment 的名字必须是 github-pages"
-    assert "allure-report.zip" in publish, "发布的是自检通过后打好的那个 zip"
-    assert "unzip" in publish, "Pages 要目录: 必须先把 zip 解开"
+    assert "allure-report.tar.gz" in publish, "发布的是自检通过后打好的那个归档"
+    assert "tar -xzf" in publish, "Pages 要目录: 必须先把归档解开"
     assert "path: site/allure-report" in publish, "上传的必须是解出来的报告目录"
+
+
+def test_report_artifacts_do_not_duplicate_the_whole_result_set() -> None:
+    """同一个平台的结果集只能上传**一次** —— 合并后的副本再传一份是白花的额度。
+
+    现场(2026-10-04, 用户要求减少上传): `allure-resources-<平台>` 里除了历史与产物清单,
+    还带着一整份合并后的 `allure-results/`(每个平台一万多个文件), 而它**没有任何消费者**:
+    两个报告作业取回历史时都只 `cp .../.allure/history.jsonl`; 汇总作业收的是同一批文件
+    (`scripts/merge_allure_results.py` 按文件名搬到一处, 不改内容), 直接下分片产物即可。
+    `allure-resources-final` 里那份更贵 —— 它是所有平台的合集, 是本工作流里最大的单笔上传。
+    """
+    workflow = ci_workflow.workflow_text()
+
+    for step_name, artifact in (
+        ("Upload Allure resources", "allure-resources-${{ matrix.os }}"),
+        ("Upload final Allure resources", "allure-resources-final"),
+    ):
+        # 按**步骤名**取(而不是产物名): 产物名在"下载上一次历史"那一步里也会出现, 而它排在
+        # 上传之前 —— 按产物名切会切到那一步上, 断言就变成在检查下载了。
+        upload = workflow.split(f"name: {step_name}", 1)[1].split("- name:", 1)[0]
+        # 只看真正生效的行: 这一步的注释里正拿 `allure-results/` 当反面说明(与本仓库其它几条
+        # 守卫同一个口径 —— 注释是文档, 不是配置)。
+        body = "\n".join(
+            line for line in upload.splitlines() if not line.strip().startswith("#")
+        )
+        assert f"name: {artifact}" in body, f"{step_name} 上传的是 {artifact}"
+        assert "allure-results/" not in body, (
+            f"{artifact} 又带上了整份结果集: 分片产物已经传过一遍了"
+        )
+        assert ".allure/history.jsonl" in body, "历史文件必须在(趋势靠它)"
+        assert "include-hidden-files: true" in body, "历史文件是隐藏文件, 要显式放行"
+
+    # 汇总作业要**一次**把各作业的结果收全: 以前是五次按名字下载 + 从合并副本里摊平。
+    summary = ci_workflow.job_block(workflow, "allure-summary")
+    assert "pattern: allure-results-*" in summary, (
+        "汇总要能一份 pattern 收全(分片 + 质量/分析/性能/平台检查/视觉/安全)"
+    )
+    assert "merge-multiple: false" in summary, (
+        "各片要落在自己目录里: 摊平那一步按目录收, 缺了哪一片看得出"
+    )
+    for gone in (
+        "name: Download performance Allure results",
+        "name: Download security Allure results",
+        "name: Download quality Allure results",
+        "name: Download analysis Allure results",
+        "name: Download visual Allure results",
+        "name: Download platform check Allure results",
+    ):
+        assert gone not in summary, f"{gone} 已被一份 pattern 取代, 留着就是重复下载"
+
+
+def test_htmlcov_is_not_uploaded_by_every_platform() -> None:
+    """HTML 覆盖率报告不再三份都传: 同一份数据已经在报告里以 `coverage.xml` 附件挂着。
+
+    两道口径要一起守住: 不再上传它之后, 本地的产物也不能留着不管 —— 生成步骤只写 XML,
+    诊断清单里也不该还挂着它(否则每次失败都报一句"那个目录不存在", 而那是正常的)。
+    只看**命令与上传路径**(注释里正拿这件事当反面说明, 与本仓库其它几条守卫同一个口径)。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in workflow.splitlines() if not line.strip().startswith("#")
+    )
+
+    assert "htmlcov" not in code, "已经不上传了, 命令与清单里都不该再出现"
+    assert "coverage html" not in code, (
+        "别再生成本地产物了: 传不上去, 只会让人以为有人看"
+    )
+    assert "coverage xml -o coverage.xml --fail-under=0" in code
 
 
 def test_history_trends_survive_the_pages_deploy() -> None:
@@ -2410,8 +2533,10 @@ def test_history_trends_survive_the_pages_deploy() -> None:
     assert "continue-on-error" not in deploy_keys, (
         "合并后它不能挂在作业上: 那会把质量门的结论一起吞掉(只该落在发布那几步上)"
     )
+    # 发布三步的窗口终点是"失败诊断"那一步: 它排在门禁结论**之前**(失败时才跑, 只收现场),
+    # 并不属于"发布"。
     publish = summary.split("name: Unpack the report for Pages", 1)[1].split(
-        "name: Report quality gate verdict", 1
+        "name: Collect failure diagnostics", 1
     )[0]
     for block in publish.split("\n      - name: "):
         assert "continue-on-error: true" in block, (

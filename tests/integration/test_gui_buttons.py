@@ -4994,7 +4994,7 @@ def test_deleting_last_game_clears_hero_panel(
             )
     app._refresh_after_manage(select="shanhai")
     _pump(app)
-    assert app._hero_name_label.cget("text") == "山海旅人"
+    assert app._title_label.cget("text") == "山海旅人"
 
     manager = _open_manager(
         app,
@@ -5012,7 +5012,7 @@ def test_deleting_last_game_clears_hero_panel(
     assert app._items == []
     assert app._cards == {}
     # 概要区与标题行回到空状态, 不再残留被删游戏的名字.
-    assert app._hero_name_label.cget("text") == "未选择游戏"
+    assert app._title_label.cget("text") == "未选择游戏"
     assert app._hero_location_label.cget("text") == ""
     assert "山海旅人" not in app._title_label.cget("text")
     assert app._selected_name.cget("text") == "未选择节点"
@@ -5034,7 +5034,7 @@ def test_reload_after_external_delete_clears_panels() -> None:
     _pump(app)
 
     assert app._game_id is None
-    assert app._hero_name_label.cget("text") == "未选择游戏"
+    assert app._title_label.cget("text") == "未选择游戏"
     assert app._items == []
 
 

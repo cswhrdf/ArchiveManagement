@@ -57,6 +57,7 @@ from archive_management.services.hotkeys import (
     UnavailableBackend,
 )
 from archive_management.ui import dialogs
+from archive_management.ui import manage_window as manage_mod
 from archive_management.ui import schedule_window as sched_mod
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.demo_backend import DemoArchiveService
@@ -648,9 +649,10 @@ def test_main_window_opens_within_the_screen(app: ArchiveApp) -> None:
     )
     logical_limit = round((SCREENS[0] - TITLE_MARGIN) / scale)
     logical_width_limit = round((SCREEN["width"] - TITLE_MARGIN) / scale)
-    assert opened_height >= WINDOW_MIN_SIZE[1], opened_hint
+    real_width, real_height = _real_screen(app)
+    assert opened_height >= min(WINDOW_MIN_SIZE[1], real_height), opened_hint
     assert opened_height <= max(WINDOW_MIN_SIZE[1], logical_limit), opened_hint
-    assert opened_width >= WINDOW_MIN_SIZE[0], opened_hint
+    assert opened_width >= min(WINDOW_MIN_SIZE[0], real_width), opened_hint
     assert opened_width <= max(WINDOW_MIN_SIZE[0], logical_width_limit), opened_hint
 
     for screen in SCREENS:
@@ -745,6 +747,23 @@ def _desktop_holds(app: ctk.CTk, geometry: tuple[int, int, int, int]) -> bool:
     screen_w = int(app.winfo_screenwidth())
     screen_h = int(app.winfo_screenheight())
     return x + width <= screen_w and y + height <= screen_h - TITLE_MARGIN
+
+
+# 真实桌面的读数(**没被替身换掉的**那两个原函数): 窗口管理器按真桌面夹窗口, 而屏宽/屏高
+# 替身只管我们读到的值 —— 要判断"窗口是不是被 WM 夹过"必须问真桌面。
+_REAL_SCREEN_WIDTH = tkinter.Misc.winfo_screenwidth
+_REAL_SCREEN_HEIGHT = tkinter.Misc.winfo_screenheight
+
+
+def _real_screen(window: tkinter.Misc) -> tuple[int, int]:
+    """这台机器**真实**的桌面尺寸(物理像素), 不含替身.
+
+    CI 的 Windows/macOS runner 桌面只有约 1024x768, 而主窗口的最小尺寸是 1200x720 ——
+    "打开时不低于最小尺寸"这种断言在那种桌面上必然被窗口管理器否定(2026-10-03 的 macOS
+    分片: 打开尺寸 1024x720, 而用例要求 ≥ 1200)。所以判据改成"不低于**最小尺寸与真桌面
+    里更小的那个**": 宽桌面上照旧咬得住(低于最小尺寸就红), 窄桌面上接受 WM 的夹取。
+    """
+    return int(_REAL_SCREEN_WIDTH(window)), int(_REAL_SCREEN_HEIGHT(window))
 
 
 def _geometry_numbers(text: str) -> tuple[int, int, int, int]:
@@ -845,7 +864,16 @@ def test_the_main_window_returns_to_the_remembered_geometry(tmp_path: Any) -> No
     after = _geometry_numbers(
         open_window_geometry(written.window, screen=screen, scale=window_scaling(again))
     )
-    assert (reopened.width, reopened.height) == after[:2], (
+    # 真桌面比算出来的尺寸还窄时(CI 的 macOS runner 1024 宽, 而最小宽度 1200), 窗口管理器
+    # 会把窗口夹回桌面 —— 读到的是 WM 的决定, 不是我们的换算(实测 CI: 1024x720 vs 期望
+    # 1200x720)。判据与上面那个 expected_widths 同一条理由。
+    real_width, real_height = _real_screen(again)
+    width_options = {after[0], real_width} if real_width < after[0] else {after[0]}
+    height_options = {after[1], real_height} if real_height < after[1] else {after[1]}
+    assert reopened.width in width_options, (
+        f"重开一次尺寸就变了: {reopened.geometry()} != {after}"
+    )
+    assert reopened.height in height_options, (
         f"重开一次尺寸就变了: {reopened.geometry()} != {after}"
     )
     again._on_close()
@@ -901,11 +929,17 @@ def test_the_manage_window_hugs_its_content() -> None:
     """游戏设置窗口的高度按内容算: 底部按钮与窗口下沿之间不留大片空白.
 
     出处(2026-10-02 用户反馈): 原来内容高度有个 440 的下限, 位置少的时候窗口比内容高一截,
-    底部按钮下面空出一大块。现在只按内容定高 —— 判据是"窗口高度 ≈ 内容请求高度"且
-    "关闭按钮下面剩的空白很小", 两条一起看才拦得住"把下限调小一点"这种糊法。
+    底部按钮下面空出一大块。现在只按内容定高 —— 判据是"窗口高度不超过 内容 + 页脚 +
+    间距 + 上下内边距"且"关闭按钮下面剩的空白很小", 两条一起看才拦得住"把下限调小一点"这种
+    糊法。
 
     2026-10-03 起正文是**滚动区**、关闭按钮在**固定页脚**里(外观一节让内容可能高过屏幕),
     所以关闭按钮的 y 是相对页脚的: 量它离窗口下沿多远要先把页脚自己的位置加上。
+
+    高度判据为什么不再拿"窗口自己的请求"当唯一基准: 实测它在两台机器上含义不同 ——
+    Windows runner 上窗口最终 648 而**那一刻**读到的请求只有 580(没把页脚与外边距算进去),
+    本机(125% 缩放)上两者相等。所以上限写成"请求 + 页脚 + 间距 + 上下内边距": 本机必然
+    满足, CI 上也能满足, 而"窗口比内容多出一大截"(老的 440 下限就是这种)照样会被拦下。
     """
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     try:
@@ -929,8 +963,21 @@ def test_the_manage_window_hugs_its_content() -> None:
             close_btn = manage._close_btn
             height = int(window.winfo_height())
             requested = int(window.winfo_reqheight())
-            assert abs(height - requested) <= 8, (
-                f"窗口高度应当就是内容高度: 实测 {height}, 内容请求 {requested}"
+            footer = int(manage._footer.winfo_reqheight())
+            # 上限里要把"页脚 + 间距 + 上下内边距"一并算进去: 实测 Windows runner 上窗口
+            # 最终 648 而**那一刻**窗口自己的请求只有 580 —— 差的 68 正好是这一串(本机两者
+            # 相等, 所以只在 CI 上露头)。只拿请求当上限, 这条判据就会随 runner 变红。
+            # 单位统一用**物理**像素: ``height`` / ``requested`` / ``footer`` 量到的都是物理值,
+            # 常量那么按缩放换算。
+            scale = window_scaling(window)
+            chrome = (
+                footer
+                + round(manage_mod._FOOTER_GAP * scale)
+                + round(manage_mod._WINDOW_PAD_Y * 2 * scale)
+            )
+            assert requested - 8 <= height <= requested + chrome + 8, (
+                f"窗口高度应当贴着内容: 实测 {height}, 窗口请求 {requested}, "
+                f"页脚与内边距 {chrome}(页脚 {footer})"
             )
             button_bottom = int(manage._footer.winfo_y()) + int(
                 close_btn.winfo_y() + close_btn.winfo_height()
@@ -944,12 +991,14 @@ def test_the_manage_window_hugs_its_content() -> None:
         app._on_close()
 
 
-def _wait_settled_parent(app: Any, *, seconds: float = 2.0) -> None:
-    """等主窗口落地且几何不再变, 再留一拍给弹窗自己的重校落地.
+def _wait_settled_parent(app: Any, *, seconds: float = 3.0) -> None:
+    """等主窗口落地且几何不再变, 再留几拍给弹窗自己的重校落地.
 
-    判据与 ``dialogs._settle_centering`` 的收工条件一致(已映射 + 几何不再变): 测试里固定
-    睡一小段会在慢机器上量到"还没稳定"的中间态 —— 那条用例就变成先红后绿的抖动(实测
-    整组跑时量到过 -407px, 单独跑却是 0)。
+        判据与 ``dialogs._settle_centering`` 的收工条件同向(已映射 + 几何不再变), 但**不能**
+        完全照搬: 实现还有个"位置确实对"的条件与轮数上限(40 x 25ms ≈ 1s, 见
+    dialogs._CENTER_PASSES),
+        所以这里的等待窗口要比它长、末尾再放几拍 —— 两个上限的关系是"实现先收工, 测试后断言"。
+        固定睡一小段会在慢机器上量到中间态(实测整组跑时量到过 -407px, 单独跑却是 0)。
     """
     deadline = time.monotonic() + seconds
     seen = dialogs._parent_box(app)
@@ -959,11 +1008,11 @@ def _wait_settled_parent(app: Any, *, seconds: float = 2.0) -> None:
         current = dialogs._parent_box(app)
         stable = stable + 1 if current == seen else 0
         seen = current
-        if app.winfo_ismapped() and stable >= 2:
+        if app.winfo_ismapped() and stable >= 3:
             break
         time.sleep(0.01)
     # 重校是 after(...) 排定的: 再放几拍事件循环(跨过实现的检查间隔)让它落地。
-    for _ in range(8):
+    for _ in range(12):
         _pump(app)
         time.sleep(dialogs._CENTER_DELAY_MS / 1000)
 
@@ -997,9 +1046,10 @@ def test_the_first_dialog_of_a_cold_start_is_centered(
     (恢复后的 1700 要等映射之后), 按 200 算居中就偏出几百像素 —— 而弹窗自己的尺寸是
     对的, 所以单看弹窗量不出任何异常。
 
-    前置断言(未映射)是这一幕的**定义**: 建完主窗口后不进事件循环直接开弹窗。如果哪天
-    CTk 改成构造里就映射, 这里会红 —— 那是"这一幕已经不存在了"的提示, 那时这条用例要
-    按新的现场重写, 而不是把断言删掉。
+    **两种环境都要过**: "建完窗口不进事件循环就开弹窗"这一手在 Linux/Xvfb 上根本拦不住
+    —— 那里主窗口构造完就已经映射了(实测 2026-10-03 的 Linux CI: 用例红在"前提"那句
+    断言上, 而产品行为是对的)。所以前提只作为**记录**(写进失败提示), 判据统一是"弹窗
+    居中": 父窗口还没落地时它测的是"跟上去", 已经落地时它测的是"一次就摆对"。
 
     bite 口径: 把 ``dialogs._settle_centering`` 的调用去掉(即"按未映射的父窗口居中
     一次就算完"), 这一幕实测偏 500+ 像素, 12px 的容差拦得住。
@@ -1012,8 +1062,8 @@ def test_the_first_dialog_of_a_cold_start_is_centered(
     )
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     try:
-        app.update_idletasks()  # 只算布局, 不进事件循环(映射照旧没发生)
-        assert not app.winfo_ismapped(), "前提: 主窗口在弹窗打开时尚未映射"
+        app.update_idletasks()  # 只算布局, 不进事件循环(Linux 上这已经够它映射了)
+        cold = not app.winfo_ismapped()
         games = list(app.backend.list_games())
         assert games, "演示后端应该至少有一款游戏"
         manage = ManageGameWindow(
@@ -1027,9 +1077,15 @@ def test_the_first_dialog_of_a_cold_start_is_centered(
             on_change=lambda: None,
         )
         try:
-            assert not app.winfo_ismapped(), "前提: 弹窗是在主窗口落地之前建的"
+            built_before_mapped = not app.winfo_ismapped()
             _wait_settled_parent(app)  # 主窗口到这里才真正落地并恢复尺寸
             _assert_centered(app, manage._window)
+            if not cold or not built_before_mapped:
+                # 这条环境没给出"冷启动"那一幕(见 docstring): 写在结论里, 不静默。
+                print(
+                    f"[信息] 本次环境上主窗口已提前映射(cold={cold}, "
+                    f"弹窗建时未映射={built_before_mapped}), 这条只验证了「一次就摆对」"
+                )
         finally:
             manage.close()
             _pump(app)

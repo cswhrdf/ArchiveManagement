@@ -70,6 +70,11 @@ MAX_FILE_NAME = 120
 # 一个用例只留一次现场: 失败后 teardown 常常跟着再报一次错, 第二次没有新信息, 只会让附件翻倍。
 CAPTURED = pytest.StashKey[bool]()
 
+# 硬崩溃日志的句柄(见 :func:`enable_hard_crash_log` 与 :func:`reassert_hard_crash_log`)。
+# 留着它是为了在会话真正开始前**再抢一次** —— 否则句柄会被 pytest 自带的 faulthandler
+# 插件覆盖掉, 文件永远是空的(实测 2026-10-03 的 macOS 分片)。
+_CRASH_LOG_HANDLE: Any = None
+
 # 文件名里只保留这些字符, 其余压成下划线(避免路径分隔符/冒号/参数里的怪异字符)。
 _UNSAFE = re.compile(r"[^0-9A-Za-z._-]+")
 
@@ -87,21 +92,47 @@ def enable_hard_crash_log(directory: Path) -> Path | None:
     上传(并在同一个作业里回显进运行日志, 见 .github/workflows/ci.yml)。
 
     代价写在这里: 进程被内核杀掉时**只**有这份栈, 没有任何局部变量 —— 想要变量就得让
-    coredumpy 抓到(即先让崩溃变成一个普通的测试失败)。
+    coredumpy 抓到(即先让崩溃变成一个普通的测试失败)。另外**本函数一个人不管用**:
+    pytest 自带的 faulthandler 插件也会调 ``faulthandler.enable()``(不给 ``file`` 就是
+    stderr), 而它注册得比 conftest 早 —— 同名钩子的调用顺序是后注册的先跑, 所以
+    conftest 里那次反而先执行, 随后被它覆盖。会话开始前还要调一次
+    :func:`reassert_hard_crash_log` 把句柄抢回来。
 
     **无论成败都不抛**: 留证失败不能把整个会话变成 INTERNALERROR(实测: 直接 throw 会让
     pytest_configure 挂掉, 所有用例一个都跑不了)。
     """
+    global _CRASH_LOG_HANDLE
     try:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / CRASH_LOG_NAME
         handle = path.open("a", encoding="utf-8", buffering=1)
+        _CRASH_LOG_HANDLE = handle
         faulthandler.enable(file=handle, all_threads=True)
     except Exception as exc:  # pragma: no cover - 目录不可写/句柄不给用
         # 带上类名: 同一条消息可能来自不同的失败(权限/描述符用完), 只留消息不好定位。
         print(f"[crash] 无法准备崩溃日志: {type(exc).__name__}: {exc}")
         return None
     return path
+
+
+def reassert_hard_crash_log() -> bool:
+    """把 faulthandler 的输出再抢回 ``crash-dumps/``; 抢不了(没启用过)时给 ``False``.
+
+    现场(2026-10-03 的 macOS 分片): ``crash-dumps/faulthandler.log`` 是 **0 字节**, 而那段
+    线程栈却出现在 CI 日志里。原因不是"没崩溃", 而是**输出被 pytest 抢走了**: pytest 的
+    faulthandler 插件在 ``pytest_configure`` 里也调 ``faulthandler.enable()``(不带参数 =
+    stderr), 它注册得比 conftest 早, 于是 conftest 的那次先跑、随后被它覆盖。
+
+    修法有两处, 缺一不可: conftest 的 ``pytest_configure`` 标 ``trylast``; 再在
+    ``pytest_sessionstart``(一定跑在所有 ``pytest_configure`` 之后)调本函数再抢一次。
+    """
+    if _CRASH_LOG_HANDLE is None:
+        return False
+    try:
+        faulthandler.enable(file=_CRASH_LOG_HANDLE, all_threads=True)
+    except Exception:  # pragma: no cover - 句柄已被关掉
+        return False
+    return True
 
 
 Box = tuple[int, int, int, int]

@@ -20,15 +20,15 @@
 6. ``--expect-platforms`` 指定的每个平台环境里都要有**真实用例**结果 —— 覆盖率/安全/质量
    这些脚本生成的汇总项也带平台的 ``env``, 只看"环境存在"会把它们当成"这个平台测过了"
    (详见 :func:`platform_test_problems`; pytest 作业传自己那个平台, 汇总作业传三个平台);
-7. ``--zip`` 额外把报告打成单个 ``<报告目录>.zip``: 单个文件发布不会出现"整个目录
-   被悄悄丢掉"的静默损坏, 并打印条目数与 SHA256 便于人工核对.
+7. ``--archive`` 额外把报告打成单个 ``<报告目录>.tar.gz``(交给系统的 ``tar`` 做): 单个文件
+   发布不会出现"整个目录被悄悄丢掉"的静默损坏, 并打印条目数与 SHA256 便于人工核对.
 
 报告目录不存在视为"本次没有结果, 未生成报告"(退出码 0); 其余情况缺资源即退出码 1.
 
 用法:
 
 - CI(pytest-report 作业): ``uv run python scripts/verify_allure_report.py allure-report
-  --results allure-results --zip --expect-platforms "${{ matrix.platform }}"``
+  --results allure-results --archive --expect-platforms "${{ matrix.platform }}"``
 - CI(allure-summary 作业): 同上, 但 ``--expect-platforms Windows,macOS,Linux``
 - 本地核对下载的 artifact: ``uv run python scripts/verify_allure_report.py allure-report``
 """
@@ -39,8 +39,9 @@ import argparse
 import contextlib
 import hashlib
 import json
+import shutil
+import subprocess
 import sys
-import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -541,23 +542,40 @@ def sha256_of(path: Path) -> str:
 
 
 def package_report(report_dir: Path, archive: Path) -> tuple[int, str]:
-    """把报告目录打成单个 zip, 返回 (条目数, SHA256).
+    """把报告目录打成单个 ``tar.gz``, 返回 (条目数, SHA256).
 
     单个文件发布可以避免"整个 ``data/test-results`` 目录在传输/解压时被静默丢掉"
     这类损坏: 文件要么完整到达, 要么直接报错。
+
+    为什么用系统的 ``tar`` 而不是 Python 的 ``zipfile``: 这一步**只在 Linux 上执行**
+    (两个报告作业都跑在 ubuntu-latest), 而报告目录是一万多个小文件, 逐个过 Python 的
+    zip 明显偏慢; ``tar -czf`` 一个子进程就完事, 还能用 ``tar -tzf`` 列条目来核对
+    完整性。归档的顶层目录名与以前一致(解压出来仍是 ``allure-report/``): 用 ``-C``
+    从报告目录的**上一层**打包, 目录名天然进归档。
     """
     files = [path for path in sorted(report_dir.rglob("*")) if path.is_file()]
     archive.unlink(missing_ok=True)
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
-        for path in files:
-            bundle.write(path, Path(report_dir.name) / path.relative_to(report_dir))
-    with zipfile.ZipFile(archive) as bundle:
-        entries = len(bundle.namelist())
-    if entries != len(files):
+    tar = shutil.which("tar")
+    if tar is None:  # pragma: no cover - Linux/macOS 自带, Windows 10+ 也带 bsdtar
+        raise ValueError("找不到 tar 命令: 打包报告需要它")
+    root = report_dir.resolve()
+    # 安全: 参数是本地拼的常量列表(不经过 shell), 路径来自命令行参数而不是外部输入。
+    subprocess.run(  # noqa: S603
+        [tar, "-czf", str(archive.resolve()), "-C", str(root.parent), root.name],
+        check=True,
+    )
+    listing = subprocess.run(  # noqa: S603
+        [tar, "-tzf", str(archive.resolve())],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    entries = [line for line in listing.stdout.splitlines() if not line.endswith("/")]
+    if len(entries) != len(files):
         raise ValueError(
-            f"打包不完整: 目录内 {len(files)} 个文件, zip 里只有 {entries} 个"
+            f"打包不完整: 目录内 {len(files)} 个文件, tar 里只有 {len(entries)} 个"
         )
-    return entries, sha256_of(archive)
+    return len(entries), sha256_of(archive)
 
 
 def report_facts(facts: ReportFacts, report_dir: Path) -> None:
@@ -623,9 +641,9 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="allure-results 目录, 用于核对结果条数",
     )
     parser.add_argument(
-        "--zip",
+        "--archive",
         action="store_true",
-        help="校验通过后把报告打包成 <报告目录>.zip",
+        help="校验通过后把报告打包成 <报告目录>.tar.gz",
     )
     parser.add_argument(
         "--expect-platforms",
@@ -654,7 +672,7 @@ def expected_platforms(args: argparse.Namespace) -> tuple[str, ...]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """命令行入口: 校验报告, 可选用 ``--zip`` 打包后再发布."""
+    """命令行入口: 校验报告, 可选用 ``--archive`` 打包后再发布."""
     ensure_utf8_output()
     args = parse_args(argv)
     report_dir = Path(args.report)
@@ -672,8 +690,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for problem in problems:
             print(f"报告资源不完整: {problem}", file=sys.stderr)
         return 1
-    if args.zip:
-        archive = report_dir.with_suffix(".zip")
+    if args.archive:
+        archive = report_dir.parent / f"{report_dir.name}.tar.gz"
         entries, digest = package_report(report_dir, archive)
         size_mib = archive.stat().st_size / (1024 * 1024)
         print(f"已打包: {archive} ({entries} 个条目, {size_mib:.1f} MiB)")

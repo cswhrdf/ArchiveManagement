@@ -233,14 +233,19 @@ class DropdownPopup:
         try:
             window = tk.Toplevel(self.anchor)
             window.overrideredirect(True)
-            # **显式关掉 topmost**: macOS 上无边框(override-redirect) 窗口的 ``-topmost``
-            # 读出来是 1 —— 那是 Tk 给这类窗口的**平台默认值**, 不是我们设的(Windows 上同样
-            # 的代码读出来是 0)。只在 Windows 上量这条判据就漏掉了 macOS 的差异:
-            # 2026-10-03 macOS CI 实测, 用例报 "浮层不该是 topmost(会盖住别的软件)" 失败。
-            # 写死 False 后两个平台的**行为**都钉在"不盖住别的软件"上, 浮层仍然靠下面的
-            # 附属窗口关系待在宿主之上。
-            window.attributes("-topmost", False)
             window.transient(host)
+            # 显式关掉 topmost(**写在 ``transient`` 之后**: 它会让 Tk 在 macOS 上把这个
+            # 窗口重新置于父窗口之上)。
+            #
+            # 实测 2026-10-03 / 10-04 两轮 CI: **macOS 上这句写不掉** —— 无边框
+            # (override-redirect) 窗口的 ``-topmost`` 无论先写后写、写几次, 读出来都是 1
+            # (Windows 上同样的代码读出来是 0)。那是 Tk 给这类窗口的平台默认值, 不要
+            # 再试"换个顺序"或"重写一遍": 两个顺序都已经在 CI 上验过了。
+            # 真正在起作用的机制是上面那句 ``transient`` —— 浮层是宿主的附属窗口, 宿主被
+            # 隐藏/最小化时它跟着消失, 也不会随别的前台程序一起跑到最上层。所以用例里
+            # "不盖住别的软件"那条只在 Windows 上钉读数(见 test_gui_dropdown 的说明),
+            # macOS 上钉的是附属关系。
+            window.attributes("-topmost", False)
             frame = tk.Frame(
                 window,
                 background=self.palette.panel,

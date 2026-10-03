@@ -249,6 +249,12 @@ def _fd_path_from_kernel(fd: int) -> str | None:
 
     缓冲区用**可变**的那种(``bytearray``): 内核是把路径写进我们这块内存里, 只读缓冲区
     拿不回结果(那种失败是静默的: 缓冲区留空, 于是记账退回裸文件名)。
+
+    **失败必须一并咽掉 ``TypeError``**: macOS 的 CPython 里 ``fcntl.fcntl(fd, cmd, buf)``
+    对 bytearray 直接抛 `'bytearray' object cannot be interpreted as an integer` —— 这条
+    路本来是"尽力而为", 抛出去只会把两条安全用例变成 broken(2026-10-03 的 macOS CI 就是
+    这样: `Security findings` 跟着一起红)。咽掉之后由 :func:`_fd_path_from_cwd` 接手,
+    而 `fchdir` + `getcwd` 在 macOS 上是真的能把目录问出来的。
     """
     module = _fcntl
     if module is None:
@@ -259,7 +265,7 @@ def _fd_path_from_kernel(fd: int) -> str | None:
     buffer = bytearray(_FD_PATH_BUFFER)
     try:
         module.fcntl(fd, command, buffer)
-    except OSError:  # fd 已经关掉时内核会报 EBADF
+    except (OSError, TypeError, ValueError):  # EBADF / 平台不接受这种缓冲区
         return None
     base = os.fsdecode(bytes(buffer).split(b"\0", 1)[0])
     return base or None
