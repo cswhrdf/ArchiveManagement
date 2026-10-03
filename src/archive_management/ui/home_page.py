@@ -1321,14 +1321,17 @@ class HomePage:
             scaled_px(name, _POSTER_TEXT_WIDTH),
             max_lines=_POSTER_NAME_LINES,
         )
-        shown = str(name.cget("text"))
-        if "\n" not in shown:
-            # 名称占**两行**的高度: 一行名也补一个空行, 于是它在卡片里占的高度与两行名
-            # 一样 —— 一行名与两行名的卡片因此完全同高, 下面的元信息与"最近活动"位置也
-            # 一致(用户 2026-10-02: "两行名时最下方的最近活动时间位置不同, 导致整个游戏
-            # 的下边框被盖住")。不能靠固定像素: 行高随"界面字号"变, 写死 2 行的高度在
-            # 字号调大后又会溢出。
-            name.configure(text=f"{shown}\n")
+        # 名称占**两行**的高度, 一行名也占同样高 —— 于是"元信息"与"最近活动"两行的位置
+        # 在一行名与两行名的卡片里完全一致(用户 2026-10-02: 两行名时最近活动被顶出卡片
+        # 下沿, 看着像下边框被盖住)。
+        #
+        # **不能靠补一个空行**: 尾随空行算不算一行是由平台决定的 —— Linux(X11) 上
+        # ``text="短名\n"`` 仍旧只有一行的高度, Windows/macOS 上算两行。2026-10-03 的
+        # Linux CI 实测: 一行名 28px、两行名 39px, 两者差 11px(判据在 Windows/macOS 上
+        # 却是绿的)。所以这里直接把高度写成 **两行的行高**: 字号调大时它跟着变, 而内容
+        # 最多两行(``max_lines=_POSTER_NAME_LINES``), 永不会被裁。
+        line = measured_font(name_font, name).metrics("linespace")
+        name.configure(height=ceil(line * _POSTER_NAME_LINES / window_scaling(name)))
         # 名称与下面的元信息之间留白: 两者只差字号时, 读起来像同一段被截断的文字。
         name.grid(row=1, column=0, sticky="ew", padx=10, pady=(_POSTER_TITLE_GAP, 0))
         # 备份数(或"无有效存档路径")排在名称下方而不是压在封面上: 压在封面上的角标

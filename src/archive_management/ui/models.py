@@ -640,6 +640,8 @@ class ScanSummary:
     unusable: int
     # 命中平台工具排除清单、被默认隐藏(已忽略)的候选数量.
     excluded: int = 0
+    # 这次扫描清理掉(磁盘上已经没有, 且不是已导入)的旧候选数量.
+    pruned: int = 0
     errors: tuple[str, ...] = ()
 
     @property
@@ -658,6 +660,8 @@ class ScanSummary:
             parts.append(tr("discovery.scan_excluded", count=self.excluded))
         if self.linked:
             parts.append(tr("discovery.scan_linked", count=self.linked))
+        if self.pruned:
+            parts.append(tr("discovery.scan_pruned", count=self.pruned))
         if self.errors:
             parts.append(tr("discovery.scan_errors", count=len(self.errors)))
         return " · ".join(parts)

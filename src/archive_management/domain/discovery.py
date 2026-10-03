@@ -116,8 +116,20 @@ def candidate_sort_key(candidate: GameCandidate) -> tuple[int, int, str]:
     return (
         -CONFIDENCE_RANK.get(candidate.confidence, 0),
         -SOURCE_RANK.get(candidate.source, 0),
-        candidate.name.casefold(),
+        normalize_game_name(candidate.name),
     )
+
+
+def normalize_game_name(name: str) -> str:
+    """游戏名的**比较键**: 去首尾空白 + ``casefold``.
+
+    全应用只这一处定义"两个名字算不算同一个": 候选与库里同名游戏的对应
+    (``_known_games`` / ``_link_existing``)、平台工具排除清单的名称匹配
+    (``ExcludedProgram.matches``)、以及"按名字记住的忽略"(见 ``ignored_candidates``
+    表) 用的都是它。改名会换一个键 —— 这是这个口径的已知代价(改过名的已忽略游戏会
+    重新回到待处理), 所以只在这一处定义, 以后要收紧(例如去掉版本后缀)也只改这里。
+    """
+    return name.strip().casefold()
 
 
 def dedupe_candidates(candidates: Iterable[GameCandidate]) -> list[GameCandidate]:

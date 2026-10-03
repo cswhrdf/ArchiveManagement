@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import archive_management.application.restore as restore_mod
 from archive_management.application.backup import BackupService
 from archive_management.application.restore import (
     PROBLEM_KIND_MISMATCH,
@@ -175,6 +176,44 @@ def test_plan_blocks_target_inside_backup_root(tmp_path: Path) -> None:
     assert [target.problem for target in plan.targets] == [None, "protected"]
     with pytest.raises(ArchiveManagementError):
         env.restore.restore(env.game_id, _node_id(node))
+
+
+@pytest.mark.blocker  # “为了报错而扫遍整块磁盘”本身就是缺陷: 用户主目录有几十万项
+def test_plan_does_not_walk_a_blocked_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """预检不去统计**危险**的写回目标 —— 那会为了一句报错扫遍整棵目录树.
+
+    2026-10-03 实测: 位置被篡改成用户主目录后, 预检要遍历几十万项(本机 >120s, 安全用例
+    因此超时; CI 的 runner 主目录是空的, 那边秒级 —— “本机红、CI 绿”的典型)。次序与
+    ``application.locations.removal_plan`` 一致: 先判定危险, 只对允许的位置统计。
+
+    咬合: 把 ``_has_save_content`` 里那句 ``if reason is not None: continue`` 去掉, 本用例
+    立刻变红(危险位置会被问一次, ``walked`` 非空)。
+    """
+    env = _setup(tmp_path)
+    node = env.backup()
+    # 备份先做(那时位置还是真存档目录), 之后才篡改成危险位置 —— 反过来的话 create_backup
+    # 会去拷主目录, 那是灾难。
+    home = str(Path.home())
+    with env.database.session() as connection:
+        connection.execute(
+            "UPDATE save_locations SET path = ? WHERE game_id = ?",
+            (home, env.game_id),
+        )
+    walked: list[str] = []
+
+    def counting(path: str) -> bool:
+        walked.append(str(path))
+        return False
+
+    monkeypatch.setattr(restore_mod, "has_any_content", counting)
+
+    plan = env.restore.plan(env.game_id, _node_id(node))
+
+    assert plan.blocked_targets, "这种位置必须被标成拦截"
+    assert walked == [], f"危险目标不该被统计: {walked}"
+    assert plan.safety_point_available is False, "不能恢复的位置不必建安全点"
 
 
 def test_plan_warns_when_more_locations_than_snapshot(tmp_path: Path) -> None:

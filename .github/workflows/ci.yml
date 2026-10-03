@@ -404,6 +404,34 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      - name: Upload crash dumps
+        # 失败现场留证(见 tests/crash_capture.py):
+        #   * 用例失败的 coredumpy dump 已经挂在 Allure 附件里(随上面那份结果一起上传);
+        #   * **进程级崩溃**(SIGSEGV/SIGABRT) 挂不进 Allure —— coredumpy 是 Python 层的钩子,
+        #     进程被内核杀掉时它没机会跑, pytest-cov 也来不及落盘覆盖率。2026-10-03 的
+        #     macOS 分片正是这种情况, 事后只能去翻那一次运行的日志。
+        # 所以这里把整个目录也当 artifact 收一份(faulthandler 的输出会写进
+        # `crash-dumps/faulthandler.log`, 见 conftest 的 pytest_configure)。
+        # `if-no-files-found: ignore`: 大多数分片本来就没有崩溃现场, 不该因此变红。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-dumps-${{ matrix.os }}-${{ matrix.shard }}
+          path: crash-dumps/
+          if-no-files-found: ignore
+
+      - name: Echo crash dumps into the run log
+        # 崩溃日志写进了文件(见上一步), 这里再回显一遍: 排查时最顺手的地方仍然是运行日志,
+        # 不该逼着人先下载 artifact。没有文件时什么都不做。
+        if: always()
+        shell: bash
+        run: |
+          for log in crash-dumps/*.log; do
+            [ -f "$log" ] || continue
+            echo "===== $log ====="
+            cat "$log"
+          done
+
       - name: Run the platform-specific check (Windows/macOS, shard 0)
         # 平台专属类型检查(mypy --platform win32 / darwin)只在该平台上跑: `--platform` 只是
         # "检查哪支代码", 并不校验执行环境 —— 放到 Ubuntu 上跑出来的结论, 挂到 Windows 环境里
@@ -515,7 +543,7 @@ jobs:
       - name: Install Allure 3 CLI
         # 钉住 3.18.0: 3.13~3.17 在配了 historyPath 时会让质量门静默放行(issue #895,
         # 3.18.0 的 PR #962 修复)。升级前请照 allurerc.mjs 里的说明重跑一次门禁。
-        run: npm install --global allure@3.18.0
+        run: npm install --global allure@3.19.1
 
       - name: Check Allure version
         run: allure --version

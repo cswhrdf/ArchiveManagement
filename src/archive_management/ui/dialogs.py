@@ -79,6 +79,14 @@ _DIALOG_CHROME_HEIGHT = 52
 # 舒适线夹取的收敛轮数: 每轮按"现在量到的高度"收一次, 收完再量(布局不保证 1:1 跟着正文区走)。
 # 上限只是保险 —— 正常情况下第一轮或第二轮就落到线内了。
 _CLAMP_PASSES = 4
+# 居中重校: 每隔 _CENTER_DELAY_MS 看一眼父窗口, 尺寸一变就重算位置; "尺寸没变且父窗口
+# 已映射"就收工。上限只是保险 —— 实测父窗口在 16ms 内就落地了, 正常两轮就结束。
+_CENTER_PASSES = 24
+_CENTER_DELAY_MS = 25
+# 收工前至少复查这么多轮(≈ 75ms): 窗口管理器摆位置比映射晚一拍 —— 实测有整组跑时
+# 父窗口映射瞬间的 rootx 还是 0, 位置读数要再过一个循环才对, 不复查就会偏几百像素
+# (用例 test_the_first_dialog_of_a_cold_start_is_centered 先红后绿的那次)。
+_CENTER_MIN_PASSES = 3
 # 勾选行下面那行提示的左缩进: 24(正文距边) + 22(方框宽与它到文字的间距), 量出来是为了
 # 与复选框的**文字**左对齐 -- 这条对齐没法落在间距刻度上, 所以留个具名常量。
 _CHECK_HINT_PAD = (24 + 22, 24)
@@ -315,6 +323,70 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     # 定焦要等窗口真的映射出来(tk 会把"最后一次聚焦"记在这个窗口上).
     if modal:
         focus_first(window)
+    # 冷启动首次打开时, 父窗口可能还在布局前那一刻(见 _settle_centering).
+    _settle_centering(parent, window, offset)
+
+
+def _settle_centering(
+    parent: ctk.CTk, window: ctk.CTkToplevel, offset: tuple[int, int]
+) -> None:
+    """父窗口尺寸/位置一变就把弹窗跟上去, 它落地并稳定后自行收工.
+
+    出处(用户 2026-10-03): "软件启动时首次打开游戏详情的游戏设置, 窗口不在软件中间,
+    偏右一点"。现场实测: 那一刻父窗口**还没映射**, ``winfo_width()`` 只有布局前的 200
+    (它恢复成 1700 要等映射之后), 弹窗自己的尺寸倒是对的 —— 拿那个 200 算居中会偏出
+    中心几百像素, 而之后再也无人重算。
+
+    为什么不"等一会儿再校一次": 父窗口什么时候落地由窗口管理器决定, 固定时长要么不够、
+    要么白等 —— 而它落地与否有一个**可判定的判据**(``winfo_ismapped()`` 为真且尺寸不再变),
+    所以这里按那个判据轮询到稳定为止, 上限只是保险。
+
+    也不能指望父窗口的 ``<Configure>``: Tk 会把**所有子控件**的 Configure 一起送进挂在顶层
+    窗口上的绑定(实测一次开窗收到 595 条), 里面任何一条"尺寸没变"都会让监听提前收工 ——
+    父窗口真正落地时已经没人听了(这就是第一版为什么没修好)。
+
+    收工前多复查几轮(:data:`_CENTER_MIN_PASSES`): 窗口管理器摆位置比映射晚一拍, 实测有
+    一次整组跑时映射那一刻读到父窗口 ``rootx=0``, 位置读数再过一拍才对 —— 只看"这一轮
+    没变"就收工会把位差留在弹窗上(用例先红后绿的那次, 偏 407 像素)。
+    """
+    seen = _parent_box(parent)
+    passes = 0
+
+    def check() -> None:
+        nonlocal seen, passes
+        if not window.winfo_exists():  # 弹窗已经关了
+            return
+        passes += 1
+        current = _parent_box(parent)
+        if current != seen:
+            seen = current
+            window.geometry(
+                _centered_position(
+                    parent,
+                    window,
+                    (window.winfo_width(), window.winfo_height()),
+                    offset,
+                )
+            )
+        elif parent.winfo_ismapped() and passes >= _CENTER_MIN_PASSES:
+            return  # 尺寸稳定且父窗口已落地(且复查够了): 位置已经算对了
+        if passes < _CENTER_PASSES:
+            window.after(_CENTER_DELAY_MS, check)
+
+    window.after(_CENTER_DELAY_MS, check)
+
+
+def _parent_box(parent: ctk.CTk) -> tuple[int, int, int, int]:
+    """父窗口当前的 (x, y, 宽, 高); 读不到时给全 0."""
+    try:
+        return (
+            int(parent.winfo_rootx()),
+            int(parent.winfo_rooty()),
+            int(parent.winfo_width()),
+            int(parent.winfo_height()),
+        )
+    except tk.TclError:  # pragma: no cover - 父窗口已经销毁
+        return (0, 0, 0, 0)
 
 
 def confirm_dialog(

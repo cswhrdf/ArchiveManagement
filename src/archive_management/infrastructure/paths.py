@@ -52,8 +52,17 @@ class ApplicationPaths:
         """应用自有导出根目录: 自动导出的归档包默认落在这里(备份目录的旁边)."""
         return self.data_dir / "exports"
 
+    @property
+    def artwork_dir(self) -> Path:
+        """用户自己指定的封面/图标根目录.
+
+        存在 ``data_dir`` 而不是 ``cache_dir``: 缓存会按年龄/容量清理, 而用户选的那张
+        图是用户数据, 不该被清理掉。
+        """
+        return self.data_dir / "artwork"
+
     def ensure(self) -> ApplicationPaths:
-        """创建全部目录(含备份根与导出根), 幂等."""
+        """创建全部目录(含备份根、导出根与自定义图片根), 幂等."""
         for directory in (
             self.config_dir,
             self.data_dir,

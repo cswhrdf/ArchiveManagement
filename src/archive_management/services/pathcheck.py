@@ -164,6 +164,27 @@ def summarize_path(raw: str) -> PathSummary:
     return tally.summary()
 
 
+def has_any_content(raw: str) -> bool:
+    """这个路径里有没有**至少一项**内容(不跟随符号链接, 读不到就当没有).
+
+    与 :func:`summarize_path` 的判定等价(文件/子目录/符号链接任一存在即为真), 区别是
+    **遇到第一项就返回**: 调用方要的经常只是一个布尔(如"要不要建恢复前安全点"), 而完整
+    统计会把整棵树走一遍 —— 用户把位置错填成用户主目录时那就是几十万项、几分钟
+    (2026-10-03 实测: 木机主目录前 20 秒只数到 18 万项, 队列里还有两百多个目录)。
+    """
+    path = Path(raw)
+    if path.is_symlink():  # 链接本身算一项(与 summarize_path 的 symlinks 计数一致)
+        return True
+    if path.is_file():
+        return True
+    if not path.is_dir():
+        return False
+    try:
+        return next(iter(path.iterdir()), None) is not None
+    except OSError:  # 读不到(权限/已删): 与 summarize_path 一致地当作“没有内容”
+        return False
+
+
 def _lexical_parts(path: Path) -> tuple[str, ...]:
     """把路径拆成词法片段(自行处理 ``..`` 与 ``.``, 不访问文件系统)."""
     parts: list[str] = []

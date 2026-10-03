@@ -16,7 +16,7 @@ import tkinter as tk
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 import customtkinter as ctk
 
@@ -151,19 +151,39 @@ def scaled_px(window: tk.Misc, value: int) -> int:
     return round(value * window_scaling(window))
 
 
+class MetricsFont(MeasurableFont, Protocol):
+    """能给出**文字宽度与字体度量**的字体(``CTkFont`` / ``tkinter.font.Font`` 都满足).
+
+    为什么不把 ``metrics`` 加进 :class:`textfit.MeasurableFont`: 裁文字那条路径只需要宽度,
+    而它的替身遍布各测试 —— 往共享协议上加方法等于逼所有替身一起实现。这里只要它能给出
+    行高(海报卡片"一行名也占两行高"要用, 见 ``measured_font``)。
+    """
+
+    def metrics(self, option: str) -> int:
+        """返回字体度量(如 ``"linespace"``), 单位是像素."""
+        ...
+
+
 @dataclass(frozen=True)
 class _ScaledFont:
-    """按窗口缩放换算过的字体度量(见 :func:`measured_font`)."""
-
-    font: MeasurableFont
+    font: MetricsFont
     scale: float
 
     def measure(self, text: str) -> int:
         """这条文字**实际渲染**出来的宽度(物理像素)."""
         return round(self.font.measure(text) * self.scale)
 
+    def metrics(self, option: str) -> int:
+        """这条字体在**渲染字号**下的度量(物理像素).
 
-def measured_font(font: MeasurableFont, window: tk.Misc) -> MeasurableFont:
+        ``metrics`` 与 ``measure`` 一样必须过缩放: "行高"这类尺寸拿未缩放的字号同样
+        量不准 —— 125% 的屏上 ``CTkFont(size=13)`` 量出 15, 控件里真正那支字体是 19。
+        海报卡片里"一行名也要占两行的高度"就靠它算(见 ``home_page._build_poster``)。
+        """
+        return round(self.font.metrics(option) * self.scale)
+
+
+def measured_font(font: MetricsFont, window: tk.Misc) -> MetricsFont:
     """把字体包成"**渲染字号**下的度量"; 窗口缩放为 1 时原样返回.
 
     为什么必须包一层: ``CTkFont.measure()`` 量的是**未缩放**的字号, 而 CTk 控件渲染文字
@@ -804,10 +824,14 @@ def track_fit(
     **不能靠 ``wraplength`` 顶这半边**: Tk 只在空格处断, 一整段没有空格的中日韩文字
     实测会被摆在 1038px 的一行里(容器只有 815px), 照样硬裁。
     ``inset`` 可以给个函数 —— 前面的小标题/图标宽度要等控件建好才知道。
+    **单位约定**: 整数 ``inset`` 是**设计**值(逻辑像素, 与 ``padx`` 同一套), 函数返回值是
+    **量出来的**宽度(物理像素)。差这一步会在高 DPI 上让预算比控件宽出"内衬乘缩放"那一段
+    —— 2026-10-03 实测(125%, 内衬 24): 预算比标签宽 6px, 于是标签里显示的那一段比"按标签
+    宽度裁"多一个字符, 守卫在本机红、CI(100%)绿。
     """
 
     def budget() -> int:
-        gap = inset() if callable(inset) else inset
+        gap = inset() if callable(inset) else scaled_px(container, inset)
         return int(container.winfo_width()) - gap
 
     def clip(text: str, width: int) -> str:
@@ -1066,7 +1090,7 @@ def sync_tooltip(
 def fit_label(
     label: ctk.CTkLabel,
     text: str,
-    font: MeasurableFont,
+    font: MetricsFont,
     width: int,
     *,
     max_lines: int = 1,

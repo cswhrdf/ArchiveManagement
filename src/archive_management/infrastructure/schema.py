@@ -395,6 +395,26 @@ _V13_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 14: "按名字记住的忽略".
+#
+# 重新扫描时会把**这次没扫到、且不是已导入**的候选清掉(磁盘上没有的东西不该继续占着
+# 列表, 用户 2026-10-03 的要求), 而"用户忽略过某些游戏"这个决定不能跟着记录一起没 ——
+# 否则同一款游戏重新装上/重新扫到就会又冒回待处理。所以忽略改记在这张**与路径无关**的
+# 表上: ``key`` 是规范化后的名字(见 ``domain.discovery.normalize_game_name``), ``name``
+# 保留最后一次的原拼写供界面展示。
+#
+# 已知代价(写在这里免得以后当成 bug): 同名不同安装会一起被忽略; 名字变了(译名/版本
+# 后缀/平台改名)就匹配不上, 那条已忽略的游戏会回到待处理。
+_V14_STATEMENTS: Sequence[str] = (
+    """
+    CREATE TABLE IF NOT EXISTS ignored_candidates (
+        key TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
@@ -409,6 +429,7 @@ SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (11, _V11_STATEMENTS),
     (12, _V12_STATEMENTS),
     (13, _V13_STATEMENTS),
+    (14, _V14_STATEMENTS),
 )
 
 

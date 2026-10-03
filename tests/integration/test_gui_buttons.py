@@ -882,6 +882,57 @@ def test_discovery_panel_scans_filters_and_imports_candidate(
         app.destroy()
 
 
+def test_discovery_clear_results_keeps_imported_and_remembers_ignores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """\"清空结果\"按钮的完整路径: 待处理/已忽略清掉、已导入保留、忽略按名字记住.
+
+    出处(用户 2026-10-03): 重新扫描时清空当前记录重新扫, 只按名字记住设置了忽略的游戏。
+
+    走的是界面上的真按钮: 忽略一条 → 点\"清空结果\"(确认) → 列表里只剩已导入的那条 →
+    再扫描一遍, 被忽略的那条**直接回到已忽略**(不会又变成待处理), 其余重新出现。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.discovery_page import DiscoveryPanel
+    from archive_management.ui.palette import Palette
+
+    _patch_dialogs(monkeypatch)
+    monkeypatch.setattr(disc_mod, "confirm_dialog", lambda *_a, **_k: True)
+    try:
+        app = _new_app(DemoArchiveService(delay=0))
+    except TclError as exc:
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        _pump(app)
+        panel = DiscoveryPanel(
+            ctk.CTkFrame(app),
+            backend=app.backend,
+            palette=Palette.for_theme(app._theme),
+        )
+        panel._select_candidate("cand-2")
+        panel._on_ignore()
+        _pump(app)
+
+        panel._on_clear_scan()
+        _pump(app)
+        left = {item.candidate_id for item in app.backend.list_candidates()}
+        assert left == {"cand-1"}, f"清空后应该只剩已导入的那条: {left}"
+        assert panel._summary_label.cget("text") != "", "清空后要给一句结果提示"
+
+        panel._on_scan()
+        _pump(app)
+        ignored = {
+            item.candidate_id for item in app.backend.list_candidates(status="ignored")
+        }
+        pending = {
+            item.candidate_id for item in app.backend.list_candidates(status="new")
+        }
+        assert ignored == {"cand-2", "cand-5"}, f"忽略过的名字要按名字记住: {ignored}"
+        assert pending == {"cand-3", "cand-4", "cand-6"}, f"其余应重新出现: {pending}"
+    finally:
+        app.destroy()
+
+
 def test_discovery_panel_hides_already_imported_candidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1115,11 +1166,14 @@ def test_discovery_panel_defaults_to_candidates_and_switches_pages(
         assert candidates.grid_info() != {}
         assert monitored.grid_info() == {}
 
-        # 候选页的按钮恰好是导入/忽略/修正路径三个(没有"加入监控").
+        # 候选页的按钮恰好是导入/忽略/修正路径 + 清空结果四个(没有"加入监控").
+        # "清空结果"是整页动作(2026-10-03): 一次清掉非已导入的候选, 已忽略的按名字记住 ——
+        # 它也在这一排里, 所以这里的判据跟着加上它(数量断言仍然钉住"没有多余的按钮")。
         expected = {
             tr("discovery.cand_import"),
             tr("discovery.cand_ignore"),
             tr("discovery.cand_relocate"),
+            tr("discovery.clear_scan"),
         }
         assert set(_button_texts(candidates)) & expected == expected
         assert len(_button_texts(candidates)) == len(expected)
@@ -2943,6 +2997,9 @@ def test_archived_game_keeps_only_the_documented_actions(
     assert state(window._schedule_btn) == "disabled"
     assert {state(button) for button in window._location_buttons} == {"disabled"}
     assert state(window._delete_origin_btn) == "disabled"
+    assert {
+        state(button) for pair in window._artwork_buttons.values() for button in pair
+    } <= {"disabled"}
     window.close()
 
 
@@ -3097,6 +3154,133 @@ def test_manage_window_rename_passes_the_current_name_as_context(
 
     assert seen["context"] == tr("dialog.rename_context", name="星际拓荒")
     window.close()
+
+
+def _picked_image(tmp_path: Path) -> Path:
+    """写一张真 PNG(扮演"用户挑的那张图")."""
+    from PIL import Image
+
+    path = tmp_path / "picked.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (240, 360), "green").save(path, format="PNG")
+    return path
+
+
+def _build_manage_window(app: ArchiveApp, on_change: Any) -> Any:
+    """构造一个带指定回调的管理窗口(要断言"通知外部刷新"的用例用)."""
+    from archive_management.ui.manage_window import ManageGameWindow
+
+    return ManageGameWindow(
+        app,
+        backend=app.backend,
+        palette=app.p,
+        game_id="outer-wilds",
+        name="星际拓荒",
+        enabled=True,
+        backup_location="—",
+        on_change=on_change,
+    )
+
+
+def test_manage_window_sets_and_resets_a_custom_cover(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """管理窗口里能挑一张图当封面, 也能恢复默认(用户 2026-10-03 的要求).
+
+    演示后端不写用户的磁盘, 但**语义与真实后端一致**(用户指定的图优先、可恢复默认),
+    所以这条走的是与生产同一条界面路径: 点按钮 → 选文件 → 写后端 → 重画预览与状态 →
+    通知外部刷新(主页海报要跟着变)。真实后端的落盘/归一化/拒收由
+    ``tests/unit/test_sql_backend.py`` 与 ``tests/unit/test_artwork.py`` 守。
+    """
+    from archive_management.ui import manage_window as manage_mod
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    picked = _picked_image(tmp_path)
+    monkeypatch.setattr(manage_mod, "pick_file", lambda **_kwargs: str(picked))
+    refreshed: list[str] = []
+    window = _build_manage_window(app, lambda: refreshed.append("changed"))
+    try:
+        assert window._artwork_state["cover"].cget("text") == tr(
+            "manage.artwork_builtin"
+        )
+        assert str(window._artwork_buttons["cover"][1].cget("state")) == "disabled"
+
+        window._artwork_buttons["cover"][0].invoke()
+        _pump(app)
+
+        assert app.backend.user_artwork_path("outer-wilds", "cover") == str(picked)
+        assert app.backend.artwork_path("outer-wilds", "cover") == str(picked)
+        assert window._artwork_state["cover"].cget("text") == tr(
+            "manage.artwork_custom"
+        )
+        assert str(window._artwork_buttons["cover"][1].cget("state")) == "normal"
+        assert window._artwork_preview["cover"].cget("image") is not None, (
+            "预览要真的换成这张图"
+        )
+        assert refreshed == ["changed"], "改完图要通知外部刷新"
+
+        window._artwork_buttons["cover"][1].invoke()
+        _pump(app)
+
+        assert app.backend.user_artwork_path("outer-wilds", "cover") == ""
+        assert window._artwork_state["cover"].cget("text") == tr(
+            "manage.artwork_builtin"
+        )
+        assert str(window._artwork_buttons["cover"][1].cget("state")) == "disabled"
+        # 图标没被动过(两类互不影响).
+        assert window._artwork_state["icon"].cget("text") == tr(
+            "manage.artwork_builtin"
+        )
+    finally:
+        window.close()
+
+
+def test_a_picked_file_that_cannot_be_used_shows_the_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """挑到不能用的图: 按原因代码弹一句"为什么不能用", 状态与后端都不变.
+
+    静默失败最坏 —— 用户会以为界面没反应。真实后端在这里抛
+    ``ArtworkImageError(code)``, 界面负责把代码翻成当前语言的一句话。
+    """
+    from archive_management.exceptions import ArtworkImageError
+    from archive_management.ui import manage_window as manage_mod
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mgr_mod,
+        "info_dialog",
+        lambda _parent, _palette, *, title, message: shown.append((title, message)),
+    )
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    junk = tmp_path / "not-an-image.txt"
+    junk.write_text("这不是图片", encoding="utf-8")
+    monkeypatch.setattr(manage_mod, "pick_file", lambda **_kwargs: str(junk))
+
+    def refuse(_game_id: str, _kind: Any, source: str) -> str:
+        raise ArtworkImageError("not_an_image", source)
+
+    monkeypatch.setattr(app.backend, "set_game_artwork", refuse)
+    window = _build_manage_window(app, lambda: None)
+    try:
+        window._artwork_buttons["cover"][0].invoke()
+        _pump(app)
+
+        assert shown == [
+            (tr("manage.artwork_problem"), tr("artwork.error.not_an_image"))
+        ]
+        assert app.backend.user_artwork_path("outer-wilds", "cover") == ""
+        assert window._artwork_state["cover"].cget("text") == tr(
+            "manage.artwork_builtin"
+        )
+    finally:
+        window.close()
 
 
 def test_manage_window_location_buttons_stay_inside_the_window(

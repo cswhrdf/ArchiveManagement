@@ -300,6 +300,10 @@ class ArchiveService(Protocol):
         """扫描平台安装目录与监控目录, 返回结果摘要(失败也不抛异常)."""
         ...
 
+    def clear_scan_results(self) -> int:
+        """清空探测结果, 返回删了几条(已导入的候选与按名字记住的忽略都保留)."""
+        ...
+
     def list_candidates(self, *, status: str | None = None) -> list[CandidateItem]:
         """返回探测到的候选游戏(可按处理进度筛选)."""
         ...
@@ -333,7 +337,29 @@ class ArchiveService(Protocol):
     # -- 图片 ---------------------------------------------------------------
 
     def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
-        """返回封面/图标的本地路径(只查缓存与平台本地资源, 不联网)."""
+        """返回封面/图标的本地路径(用户自己指定的优先, 其次缓存与平台本地资源, 不联网)."""
+        ...
+
+    def user_artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+        """只看**用户自己指定**的那份图(没有则空串).
+
+        与 :meth:`artwork_path` 分开: 设置界面要区分"当前用的是自定义图还是内置图"
+        (决定"恢复默认"能不能点、状态文字写什么), 而 "内置图" 本身可能来自缓存/平台。
+        """
+        ...
+
+    def set_game_artwork(
+        self, game_id: str, kind: ArtworkKind, source_path: str
+    ) -> str:
+        """把用户选的文件存成这款游戏的封面/图标, 返回落点.
+
+        图片不可用时抛 :class:`~archive_management.exceptions.ArtworkImageError`
+        (带原因代码, 界面据此取文案)。
+        """
+        ...
+
+    def clear_game_artwork(self, game_id: str, kind: ArtworkKind) -> bool:
+        """恢复默认: 删掉用户指定的那份图, 返回是否真的删掉了东西."""
         ...
 
     def prefetch_artwork(self) -> None:

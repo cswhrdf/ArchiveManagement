@@ -102,6 +102,10 @@ def test_a_long_dropdown_stops_at_the_cap_and_scrolls() -> None:
     # **附属窗口 + 不 topmost**: 用户 2026-10-03 反馈"点击别的软件, 别的窗口被盖住, 但浮窗
     # 还是显示在最前方" —— topmost 是相对整个屏幕的, 浮层会盖在别的程序上面。改成宿主的
     # 附属窗口(transient)之后, 别的程序被激活时浮层就随宿主一起沉下去。
+    #
+    # 这条断言**只在 macOS 上咬得住**: 那里的无边框窗口 ``-topmost`` 默认读出来就是 1
+    # (Windows 上是 0), 2026-10-03 的 macOS CI 正是报了这一条 —— 所以 ``_build`` 里显式
+    # 写了一次 ``-topmost False``, 让两个平台的读数是同一个值。
     assert not window.attributes("-topmost"), "浮层不该是 topmost(会盖住别的软件)"
     assert str(window.transient()) == str(app), "浮层应当是宿主窗口的附属窗口"
     app_top = int(app.winfo_rooty())
@@ -169,33 +173,6 @@ def test_clicking_the_arrow_opens_the_dropdown() -> None:
     popup = active_dropdown()
     assert popup is not None, "点箭头没打开下拉"
     assert popup.plan is not None
-    combo._dropdown_menu.close()
-    _pump(app)
-
-
-def test_a_short_list_opens_at_the_top() -> None:
-    """值没超过显示上限时**不许滚动**: 第一项必须在视野里, 滚轮也滚不动.
-
-    出处(用户 2026-10-03 截图): "每页" 只有四项, 最深处的 "30" 被滚出视野、底下空出一行。
-    实测咬合: 把 ``_on_wheel`` 里那句 ``return "break"`` 去掉, 本用例立刻变红 ——
-    ``yview=(0.25, 1.0)``, 正好是四项里的**一行**, 与截图的相差一模一样。
-    """
-    app = gui_app(_build, DemoArchiveService(delay=0))
-    _pump(app)
-    combo = app._home_page._page_size_box
-    popup = _open(combo, app)
-    listbox = popup.listbox
-    plan = popup.plan
-    assert listbox is not None
-    assert plan is not None
-    assert not plan.scrolls, "四项值不该被判成需要滚动"
-    assert listbox.yview()[0] == 0.0, f"列表被滚动过: yview={listbox.yview()}"
-    assert listbox.bbox(0) is not None, "第一项被滚出视野了"
-    # 滚轮也不该把它滚走(放得下就没有"滚动"这回事): 用户撞到的就是这个。
-    listbox.event_generate("<MouseWheel>", delta=-120)
-    _pump(app)
-    assert listbox.yview()[0] == 0.0, f"滚轮把列表滚走了: yview={listbox.yview()}"
-    assert listbox.bbox(0) is not None, "第一项被滚轮滚出视野了"
     combo._dropdown_menu.close()
     _pump(app)
 

@@ -44,9 +44,9 @@ from archive_management.infrastructure.repository import (
 from archive_management.services.audit import log_action, log_failure, redacted_path
 from archive_management.services.pathcheck import (
     dangerous_target_reason,
+    has_any_content,
     is_within,
     is_writable_target,
-    summarize_path,
 )
 from archive_management.services.processes import (
     ProcessNameProvider,
@@ -529,10 +529,24 @@ class RestoreService:
         )
 
     def _has_save_content(self, locations: Sequence[SaveLocation]) -> bool:
-        """判断当前存档位置是否真的有内容(决定是否值得建安全点)."""
+        """判断当前存档位置是否真的有内容(决定是否值得建安全点).
+
+        **被判定为危险的位置不统计**: 它们一定会被 :meth:`_ensure_restorable` 拦下, 而统计
+        要遍历整棵树 —— 用户把位置错填成用户主目录时那就是几十万项、预检要几分钟
+        (2026-10-03 实测: 木机主目录前 20 秒只数到 18 万项)。次序与
+        :func:`archive_management.application.locations.removal_plan` 一致: **先判定危险,
+        只对允许的位置统计**, 免得“为了报错而扫遍整块磁盘”。
+
+        每一项只要一个布尔, 所以用 :func:`has_any_content`(遇到第一项就返回)而不是
+        :func:`summarize_path`(会数完整棵树): 合法的巨大存档目录同样净赚。
+        """
         for location in locations:
-            summary = summarize_path(location.path)
-            if summary.entries or summary.directories:
+            reason = dangerous_target_reason(
+                location.path, protected=(str(self._root),)
+            )
+            if reason is not None:
+                continue
+            if has_any_content(location.path):
                 return True
         return False
 

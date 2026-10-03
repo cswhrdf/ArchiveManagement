@@ -375,6 +375,13 @@ class DiscoveryPanel:
             (self._import_btn, self._ignore_btn, self._relocate_btn)
         ):
             button.grid(row=0, column=index + 1, padx=(6, 0))
+        # 取消忽略/忽略是逐条动作, 而"清空扫描结果"是整页动作(用户 2026-10-03):
+        # 它一次清掉所有非已导入的候选(已忽略的先按名字记下), 之后重新扫一遍就是干净的。
+        # 它是**破坏性**动作: 按其风格走 danger, 而且要点确认。
+        self._clear_btn = self._button(
+            actions, tr("discovery.clear_scan"), self._on_clear_scan, style="danger"
+        )
+        self._clear_btn.grid(row=0, column=4, padx=(6, 0))
 
         self._cand_box = ctk.CTkScrollableFrame(
             panel,
@@ -869,6 +876,27 @@ class DiscoveryPanel:
         self.reload()
         self._summary_label.configure(text=report.label)
         self._detail_label.configure(text=report.detail)
+
+    def _on_clear_scan(self) -> None:
+        """清空探测结果(需要确认): 已导入的候选与按名字记住的忽略都会保留."""
+        if not confirm_dialog(
+            self.frame,
+            self._palette,
+            title=tr("dialog.clear_scan_title"),
+            message=tr("dialog.clear_scan_message"),
+            confirm_text=tr("discovery.clear_scan"),
+            danger=True,
+        ):
+            log_action("ui.clear_scan_results", basic=True, result="cancelled")
+            return
+        log_action("ui.clear_scan_results", basic=True)
+        try:
+            removed = self._backend.clear_scan_results()
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
+        self.reload()
+        self._summary_label.configure(text=tr("discovery.clear_done", count=removed))
 
     def _on_add_dir(self) -> None:
         """添加监控目录(可选择"浏览"按钮挑目录)."""

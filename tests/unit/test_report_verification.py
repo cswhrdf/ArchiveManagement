@@ -2369,6 +2369,27 @@ def test_history_trends_survive_the_pages_deploy() -> None:
     assert "history.jsonl" not in publish, "站点只是副本: 发布那几步不该碰历史文件"
 
 
+def test_ci_keeps_the_evidence_of_a_hard_crash() -> None:
+    """进程级崩溃(SIGSEGV/SIGABRT) 留不进 Allure —— 必须靠 artifact 把 ``crash-dumps`` 带出来.
+
+    2026-10-03 的 macOS 分片实测: 段错误发生在界面的 ``update_idletasks`` 里, 进程被内核
+    杀掉, coredumpy(挂在"用例失败"这个 Python 钩子上)根本没机会跑, pytest-cov 也来不及
+    落盘覆盖率 —— 事后只剩"那一次运行的日志"这一个地方可查。所以这个目录要当产物上传,
+    并在同一个作业里回显进运行日志(调试时最顺手的地方还是日志)。
+    """
+    job = ci_workflow.job_block(ci_workflow.workflow_text(), "pytest")
+
+    upload = job.split("name: Upload crash dumps", 1)[1].split("\n      - name:", 1)[0]
+    assert "if: always()" in upload, "用例失败/进程崩溃后仍然要上传"
+    assert "path: crash-dumps/" in upload
+    assert "if-no-files-found: ignore" in upload, (
+        "大多数分片本来就没有现场: 不该因此把作业变红(与覆盖率产物'缺了就报错'的取舍不同)"
+    )
+
+    echo = job.split("name: Echo crash dumps into the run log", 1)[1]
+    assert "cat " in echo, "崩溃日志要回显进运行日志(不该逼着人先下载 artifact)"
+
+
 def test_tkinter_check_still_fails_the_job_when_tcl_is_broken() -> None:
     """Tkinter 自检要保留"修不好就红"的语义(只是从"每次重装"改成"失败才重装").
 

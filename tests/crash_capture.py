@@ -30,6 +30,7 @@ dump 里是**真实的局部变量**, 可能带上用户路径与配置内容: c
 
 from __future__ import annotations
 
+import faulthandler
 import hashlib
 import io
 import os
@@ -48,6 +49,9 @@ from allure_commons.types import AttachmentType
 # 现场文件的落点: 仓库根下的独立目录(已在 .gitignore 里), 便于本地 `coredumpy load`。
 DUMP_DIRECTORY = Path("crash-dumps")
 DUMP_EXTENSION = ".dump"
+# **进程级崩溃**留下的文件(coredumpy 抓不到的那一类, 见 :func:`enable_hard_crash_log`)。
+# CI 把整个目录当 artifact 上传(见 .github/workflows/ci.yml 的 "Upload crash dumps")。
+CRASH_LOG_NAME = "faulthandler.log"
 # dump 附件的媒体类型: 用 Allure **不认识**的二进制类型, 报告里就只给一个下载链接,
 # 不会再开一块预览区。coredumpy 的 dump 是纯文本(JSON), 以前按 ``text/plain`` 挂,
 # Allure 会把整份文件读进来渲染 —— 实测上兆字节的 dump 一打开就把页面卡死。
@@ -68,6 +72,38 @@ CAPTURED = pytest.StashKey[bool]()
 
 # 文件名里只保留这些字符, 其余压成下划线(避免路径分隔符/冒号/参数里的怪异字符)。
 _UNSAFE = re.compile(r"[^0-9A-Za-z._-]+")
+
+
+def enable_hard_crash_log(directory: Path) -> Path | None:
+    """让**段错误/中止**这类硬崩溃也留下现场, 返回日志路径(关掉留证时返回 ``None``).
+
+    为什么 coredumpy 不够: 它挂在"用例失败的那一刻"(Python 层的钩子), 而 SIGSEGV /
+    SIGABRT 直接杀掉进程 —— 钩子根本没机会跑。2026-10-03 的 macOS 分片就是这样: 段错误
+    发生在一个界面的 ``update_idletasks`` 里, 事后只有 pytest 内置 faulthandler 打在
+    **CI 日志**里的那段线程栈, 既没有 dump 也没有覆盖率数据(覆盖率是 pytest-cov 在会话
+    结束才落盘的, 进程没了就一起没了)。
+
+    所以这里把 faulthandler 的输出写进 ``crash-dumps/faulthandler.log``, 由 CI 当 artifact
+    上传(并在同一个作业里回显进运行日志, 见 .github/workflows/ci.yml)。
+
+    代价写在这里: 进程被内核杀掉时**只**有这份栈, 没有任何局部变量 —— 想要变量就得让
+    coredumpy 抓到(即先让崩溃变成一个普通的测试失败)。
+
+    **无论成败都不抛**: 留证失败不能把整个会话变成 INTERNALERROR(实测: 直接 throw 会让
+    pytest_configure 挂掉, 所有用例一个都跑不了)。
+    """
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / CRASH_LOG_NAME
+        handle = path.open("a", encoding="utf-8", buffering=1)
+        faulthandler.enable(file=handle, all_threads=True)
+    except Exception as exc:  # pragma: no cover - 目录不可写/句柄不给用
+        # 带上类名: 同一条消息可能来自不同的失败(权限/描述符用完), 只留消息不好定位。
+        print(f"[crash] 无法准备崩溃日志: {type(exc).__name__}: {exc}")
+        return None
+    return path
+
+
 Box = tuple[int, int, int, int]
 # (窗口, 窗口在屏幕上的范围) -> PIL 图像: 注入这个替身就能在不建真窗口的情况下测截图。
 Grabber = Callable[[Any, Box], Any]

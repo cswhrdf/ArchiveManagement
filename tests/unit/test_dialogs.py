@@ -279,6 +279,15 @@ class _FakeWindow(_FakeWidget):
     def update_idletasks(self) -> None:
         return None
 
+    def after(self, _delay: int, _callback: Any = None, *args: Any) -> None:
+        """假窗口不跑事件循环: 居中重校排下的复查不会执行.
+
+        真窗口里它只是几十毫秒的定时器(父窗口落地前后各看一眼, 见
+        ``dialogs._settle_centering``), 单测里没有"父窗口晚一拍落地"这件事 ——
+        断言只看**这一次**量出来的位置, 所以不作调度。
+        """
+        return
+
     def update(self) -> None:
         self.calls.append("update()")
 
@@ -2256,3 +2265,105 @@ def test_ask_text_browse_fills_the_entry_and_ignores_a_cancelled_pick(
 
     assert picks == [], "两次点击都要真的请求过路径"
     assert result == "C:/picked"
+
+
+class _SettleParent:
+    """居中重校用例的假父窗口: 几何随手改, 映射状态可切."""
+
+    def __init__(self) -> None:
+        self.x = 0
+        self.y = 0
+        self.width = 200  # 布局前的占位值(真窗口实测过 200)
+        self.height = 200
+        self.mapped = False
+
+    def winfo_rootx(self) -> int:
+        return self.x
+
+    def winfo_rooty(self) -> int:
+        return self.y
+
+    def winfo_width(self) -> int:
+        return self.width
+
+    def winfo_height(self) -> int:
+        return self.height
+
+    def winfo_ismapped(self) -> bool:
+        return self.mapped
+
+
+class _SettleWindow:
+    """居中重校用例的假弹窗: 把 ``after`` 排的回调存下来, 由用例按轮驱动."""
+
+    def __init__(self) -> None:
+        self.pending: list[Callable[[], None]] = []
+        self.geometry_text: str | None = None
+        self.alive = True
+
+    def after(self, _delay: int, callback: Callable[[], None]) -> None:
+        self.pending.append(callback)
+
+    def winfo_exists(self) -> bool:
+        return self.alive
+
+    def winfo_width(self) -> int:
+        return 400
+
+    def winfo_height(self) -> int:
+        return 300
+
+    def geometry(self, value: str) -> None:
+        self.geometry_text = value
+
+
+def _drive(window: _SettleWindow) -> None:
+    """跑一轮"定时器到期"(假窗口不跑事件循环, 由用例自己驱动)."""
+    pending, window.pending = window.pending, []
+    for callback in pending:
+        callback()
+
+
+def test_centering_follows_the_parent_until_it_lands_and_then_stops() -> None:
+    """冷启动居中: 父窗口落地那一下要重算, 稳定之后要停手.
+
+    现场(用户 2026-10-03): 首次打开游戏设置时父窗口还没映射, ``winfo_width()`` 是布局前的
+    200, 按它算居中会偏出几百像素(见 ``dialogs._settle_centering``)。这里把那一幕拆成
+    "先排一次复查 → 父窗口落地 → 跟着重算 → 稳定后不再排"四步, 精确驱动定时器。
+    """
+    parent = _SettleParent()
+    window = _SettleWindow()
+
+    dialogs._settle_centering(parent, window, (0, 0))
+    assert len(window.pending) == 1, "建好之后应当排一次复查"
+    assert window.geometry_text is None, "父窗口还没动, 不该重算位置"
+
+    # 父窗口落地: 尺寸从占位值变成真值(顺带映射)。
+    parent.width, parent.height, parent.mapped = 1000, 800, True
+    _drive(window)
+    assert window.geometry_text == "+300+250", (
+        f"应当按落地后的尺寸居中: 实测 {window.geometry_text}"
+    )
+
+    for _ in range(dialogs._CENTER_MIN_PASSES):
+        _drive(window)
+    assert not window.pending, "尺寸稳定且已映射之后不该再排复查"
+    assert window.geometry_text == "+300+250", "稳定之后不该再动位置"
+
+
+def test_centering_gives_up_at_the_pass_limit_or_when_the_window_is_gone() -> None:
+    """两个"别无限跟下去"的出口: 父窗口一直在变, 或者弹窗已经关掉."""
+    parent = _SettleParent()
+    window = _SettleWindow()
+    dialogs._settle_centering(parent, window, (0, 0))
+
+    for step in range(1, dialogs._CENTER_PASSES + 5):
+        parent.x = step  # 一直在变(窗口管理器一直在挪)
+        _drive(window)
+    assert not window.pending, "跑满轮数上限之后必须停手"
+    assert window.geometry_text is not None
+
+    window.alive = False  # 弹窗已经被关掉
+    dialogs._settle_centering(parent, window, (0, 0))
+    _drive(window)
+    assert not window.pending, "弹窗没了就不该再排复查"

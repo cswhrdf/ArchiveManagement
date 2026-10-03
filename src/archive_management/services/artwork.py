@@ -27,12 +27,13 @@ import httpx
 from PIL import Image
 
 from archive_management.domain import (
+    ARTWORK_KINDS,
     ArtworkKind,
     ArtworkRef,
     PlatformGame,
     PlatformId,
 )
-from archive_management.exceptions import ArtworkError
+from archive_management.exceptions import ArtworkError, ArtworkImageError
 from archive_management.infrastructure.paths import ApplicationPaths
 
 logger = logging.getLogger(__name__)
@@ -240,6 +241,120 @@ def artwork_cache_at(cache_dir: Path) -> ArtworkCache:
 def artwork_cache(paths: ApplicationPaths) -> ArtworkCache:
     """返回应用缓存目录下的封面缓存."""
     return artwork_cache_at(paths.cache_dir)
+
+
+# ------------------------------------------------------- 用户自己指定的图片
+# 存在 **data_dir** 而不是 cache_dir: 缓存会按年龄/容量清理, 用户挑的那张图是用户数据。
+USER_ARTWORK_DIR_NAME = "artwork"
+# 归一化后的统一容器: 存 PNG(与图标缓存一致), 界面与校验只认这一种。
+USER_ARTWORK_SUFFIX = ".png"
+# 单张原图的上限与其长边上限(海报卡片最大也只画 ~250 宽, 再大只是白占磁盘与内存)。
+MAX_USER_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_USER_COVER_SIDE = 1200
+# 失败原因代码: 界面按代码取文案(服务层不拼人类语言, 见 ArtworkImageError)。
+NOT_AN_IMAGE = "not_an_image"
+TOO_LARGE = "too_large"
+UNREADABLE = "unreadable"
+WRITE_FAILED = "write_failed"
+
+
+class UserArtworkStore:
+    """用户自己指定/上传的封面与图标(按**游戏 id** 存, 与平台取图缓存分开).
+
+    为什么要单独一份: 平台取图由适配器与 CDN 决定, 手动添加的游戏压根没有平台图
+    (``_artwork_game`` 会返回 None) —— 用户自己挑的图必须能覆盖它, 而且不能被
+    "缓存清理"带走。搜索/下载那条路仍然只写缓存, 两不会互相覆盖。
+    """
+
+    def __init__(self, root: Path) -> None:
+        """绑定根目录(通常来自 :func:`user_artwork_store`)."""
+        self._root = root
+
+    @property
+    def root(self) -> Path:
+        """根目录(``<data_dir>/artwork``)."""
+        return self._root
+
+    def directory(self, game_id: str) -> Path:
+        """返回一款游戏的自定义图片目录."""
+        return self._root / _slug(game_id)
+
+    def path_for(self, game_id: str, kind: ArtworkKind) -> Path:
+        """返回用户那份图的落点(固定 PNG, 不按版本命名 —— 它永远只有一份)."""
+        return self.directory(game_id) / f"{_slug(kind)}{USER_ARTWORK_SUFFIX}"
+
+    def find(self, game_id: str, kind: ArtworkKind) -> Path | None:
+        """用户给过这张图吗(存在且还是一张可识别的图片时返回路径)."""
+        path = self.path_for(game_id, kind)
+        return path if _usable(path) else None
+
+    def save(self, game_id: str, kind: ArtworkKind, source: Path) -> Path:
+        """校验并归一化用户选的文件, 原子写入, 返回落点.
+
+        失败抛 :class:`ArtworkImageError`(带原因代码): 不可用的图片不进库, 免得界面上
+        出现一张黑图却没人知道为什么。
+        """
+        content = normalized_image(source, kind)
+        target = self.path_for(game_id, kind)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f"{target.name}.part")
+            temporary.write_bytes(content)
+            temporary.replace(target)
+        except OSError as exc:
+            raise ArtworkImageError(WRITE_FAILED, str(exc)) from exc
+        return target
+
+    def clear(self, game_id: str, kind: ArtworkKind | None = None) -> list[Path]:
+        """恢复默认: 删掉用户指定的那份(``kind=None`` 清这款游戏的全部), 返回被删的文件."""
+        removed: list[Path] = []
+        for item in ARTWORK_KINDS if kind is None else (kind,):
+            path = self.path_for(game_id, item)
+            if path.is_file():
+                path.unlink(missing_ok=True)
+                removed.append(path)
+        with contextlib.suppress(OSError):  # 空了就别留空目录
+            self.directory(game_id).rmdir()
+        return removed
+
+
+def user_artwork_store(paths: ApplicationPaths) -> UserArtworkStore:
+    """返回应用数据目录下的自定义图片存储."""
+    return UserArtworkStore(paths.artwork_dir)
+
+
+def normalized_image(source: Path, kind: ArtworkKind) -> bytes:
+    """把用户选的文件读成"可以直接用"的 PNG 字节(校验 + 归一化).
+
+    三道闸, 各有自己的原因代码: 读得到(``unreadable``)、真的是一张图(``not_an_image``)、
+    没超体积上限(``too_large``)。图标复用 :func:`square_icon`(与官方图标同一条路: 居中
+    裁方 + 固定边长 + 保留透明通道), 封面保留长宽比、只把长边压到
+    :data:`MAX_USER_COVER_SIDE` 以内。
+    """
+    try:
+        if not source.is_file():
+            raise ArtworkImageError(UNREADABLE, str(source))
+        size = source.stat().st_size
+    except OSError as exc:
+        raise ArtworkImageError(UNREADABLE, str(exc)) from exc
+    if size > MAX_USER_IMAGE_BYTES:
+        raise ArtworkImageError(TOO_LARGE, f"{size} > {MAX_USER_IMAGE_BYTES}")
+    if kind == "icon":
+        content = square_icon(source)
+        if content is None:
+            raise ArtworkImageError(NOT_AN_IMAGE, str(source))
+        return content
+    try:
+        with Image.open(source) as image:
+            picture = _keep_transparency(image)
+            picture.thumbnail(
+                (MAX_USER_COVER_SIDE, MAX_USER_COVER_SIDE), Image.Resampling.LANCZOS
+            )
+            buffer = io.BytesIO()
+            picture.save(buffer, format="PNG")
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ArtworkImageError(NOT_AN_IMAGE, str(exc)) from exc
+    return buffer.getvalue()
 
 
 def local_artwork(game: PlatformGame, kind: ArtworkKind) -> Path | None:

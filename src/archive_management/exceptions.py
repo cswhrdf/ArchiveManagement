@@ -76,5 +76,18 @@ class ArtworkError(ArchiveManagementError):
     """封面/图标的下载、内容校验或缓存写入失败."""
 
 
+class ArtworkImageError(ArtworkError):
+    """用户自己选的图片不可用(``code`` 是给界面取文案用的原因代码).
+
+    消息里只写代码与原始细节(进日志), 面向用户的那句话由界面按 ``code`` 取
+    i18n 文案 —— 服务层不去拼人类语言, 否则换语言与换电脑都会漏。
+    """
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        """记下原因代码与可选的原始细节."""
+        super().__init__(f"{code}: {detail}" if detail else code)
+        self.code = code
+
+
 class PackageError(StorageError):
     """导出包的读写失败(格式非法、内容与清单不一致、解包越界或超限)."""

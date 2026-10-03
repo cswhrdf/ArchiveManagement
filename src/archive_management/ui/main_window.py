@@ -3271,7 +3271,10 @@ def run_gui(
     database = Database(paths.database_path)
     database.migrate()
     backend: ArchiveService = SqlArchiveService(
-        database, backup_root=paths.backup_root, cache_dir=paths.cache_dir
+        database,
+        backup_root=paths.backup_root,
+        cache_dir=paths.cache_dir,
+        artwork_dir=paths.artwork_dir,
     )
     app = ArchiveApp(
         backend,

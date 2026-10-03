@@ -25,6 +25,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 
+from archive_management.domain.discovery import normalize_game_name
+
 logger = logging.getLogger(__name__)
 
 # 排除清单的文件名(随程序发布, 位于包内 resources 目录).
@@ -69,7 +71,7 @@ class ExcludedProgram:
             return False
         if app_id is not None and str(app_id) in self.app_ids:
             return True
-        folded = name.strip().casefold()
+        folded = normalize_game_name(name)
         if folded in self.names:
             return True
         return any(folded.startswith(prefix) for prefix in self.name_prefixes)
@@ -116,7 +118,9 @@ def _parse_program(entry: object) -> ExcludedProgram | None:
     if not isinstance(entry, dict):
         return None
     app_ids = frozenset(_text_list(entry.get("app_ids")))
-    names = frozenset(text.casefold() for text in _text_list(entry.get("names")))
+    names = frozenset(
+        normalize_game_name(text) for text in _text_list(entry.get("names"))
+    )
     prefixes = tuple(text.casefold() for text in _text_list(entry.get("name_prefixes")))
     if not app_ids and not names and not prefixes:
         return None

@@ -233,7 +233,12 @@ def _app_id(game: Game) -> str:
 def _resolve_install_dir(
     database: Database, game_id: int, explicit: str | Path | None
 ) -> Path | None:
-    """确定游戏的安装目录: 优先用调用方给的, 否则回查已导入的探测结果."""
+    """确定游戏的安装目录: 优先用调用方给的, 否则回查已导入的探测结果.
+
+    **依赖一条不变量**: 探测结果里 ``status='imported'`` 的行永远不会被清理
+    (见 ``application.discovery._prune_candidates`` 的说明) —— 它们带着 ``game_id``,
+    是这里唯一的兜底来源。只清"待处理/已忽略"的行不会影响这条路径。
+    """
     if explicit is not None:
         return Path(normalize_path(str(explicit)))
     repository = CandidateRepository(database)

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import gzip
 import sqlite3
 from pathlib import Path
@@ -555,6 +556,57 @@ def test_attach_failure_evidence_never_raises(
     assert "留证失败, 已跳过: RuntimeError: 留证炸了" in capsys.readouterr().out
 
 
+# -------------------------------------------------------------- 硬崩溃留证
+
+
+def test_hard_crash_log_opens_a_real_file_for_faulthandler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """进程级崩溃的栈要落到 ``crash-dumps`` 下的文件里(CI 靠它留证).
+
+    用替身而不是真调 ``faulthandler.enable``: 后者是**全局**开关, 一个用例翻完, 后面所有
+    用例崩溃时就不再有那条栈了。
+
+    ``fileno()`` 是这条的关键: faulthandler 只接受有真实文件描述符的对象(它直接往 fd 上
+    写)。想把输出顺手抄给 stderr 的包装对象会在 ``enable`` 时 AttributeError —— 实测那个
+    异常发生在 ``pytest_configure`` 里, 整个会话直接 INTERNALERROR, 一个用例都跑不了。
+    """
+    calls: list[dict[str, Any]] = []
+
+    def fake_enable(*, file: Any, all_threads: bool = False) -> None:
+        calls.append({"file": file, "all_threads": all_threads})
+
+    monkeypatch.setattr(faulthandler, "enable", fake_enable)
+
+    path = crash_capture.enable_hard_crash_log(tmp_path)
+
+    assert path == tmp_path / crash_capture.CRASH_LOG_NAME
+    assert path is not None
+    assert path.is_file(), "日志文件要当场建出来, 否则 artifact 里什么都没有"
+    assert calls[0]["all_threads"] is True, "段错误可能发生在任何一个线程里"
+    handle = calls[0]["file"]
+    assert isinstance(handle.fileno(), int), "faulthandler 要求句柄有 fileno"
+    handle.write("探针\n")
+    handle.flush()
+    assert "探针" in path.read_text(encoding="utf-8"), "写入要真的到文件(行缓冲)"
+
+
+def test_hard_crash_log_never_breaks_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """留证失败只打一行日志: 它绝不能把会话变成 INTERNALERROR."""
+
+    def boom(*, file: Any, all_threads: bool = False) -> None:
+        raise RuntimeError("faulthandler 用不了")
+
+    monkeypatch.setattr(faulthandler, "enable", boom)
+
+    assert crash_capture.enable_hard_crash_log(tmp_path) is None
+    assert "[crash] 无法准备崩溃日志: RuntimeError: faulthandler 用不了" in (
+        capsys.readouterr().out
+    )
+
+
 def test_conftest_registers_the_crash_options_and_hook() -> None:
     """接线守卫: 参数与钩子被摘掉时, 留证会静默消失(用例不会因此变红)."""
     text = _CONFTEST.read_text(encoding="utf-8")
@@ -564,6 +616,10 @@ def test_conftest_registers_the_crash_options_and_hook() -> None:
     assert "def pytest_runtest_makereport" in text
     assert "crash_capture.attach_failure_evidence(" in text
     assert "wrapper=True" in text
+    # 硬崩溃(SIGSEGV/SIGABRT) 走的是另一条路: coredumpy 等不到那一刻, 只能靠会话一开始就
+    # 接上的 faulthandler 把栈写进文件。
+    assert "def pytest_configure" in text
+    assert "crash_capture.enable_hard_crash_log(" in text
 
 
 def test_gui_support_exposes_the_live_windows() -> None:

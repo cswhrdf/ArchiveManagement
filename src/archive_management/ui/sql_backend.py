@@ -77,6 +77,7 @@ from archive_management.infrastructure.repository import (
 )
 from archive_management.services.artwork import (
     ArtworkCache,
+    UserArtworkStore,
     artwork_cache_at,
     cached_artwork,
     icon_version,
@@ -302,6 +303,7 @@ class SqlArchiveService:
         *,
         backup_root: Path,
         exports_dir: Path | None = None,
+        artwork_dir: Path | None = None,
         scheduler: BackupScheduler | None = None,
         cache_dir: Path | None = None,
         save_source: SaveCandidateSource | None = None,
@@ -315,12 +317,18 @@ class SqlArchiveService:
         占位图, 不去碰真实用户缓存目录。``process_provider`` 是自动启停用的进程名
         提供者, 省略时用 psutil(测试注入假进程表)。``exports_dir`` 是自动导出的
         落点, 省略时取备份目录旁边(生产里就是 :attr:`ApplicationPaths.exports_dir`);
-        它**不在这里创建**, 只在真的要写出告别包时创建。
+        它**不在这里创建**, 只在真的要写出告别包时创建。``artwork_dir`` 是**用户自己
+        指定**的封面/图标落点, 同样省略时取备份目录旁边(生产里是
+        :attr:`ApplicationPaths.artwork_dir`) —— 它与 ``cache_dir`` 分开: 缓存可以
+        整体清理, 用户挑的图不能。
         """
         self._database = database
         self._backup_root = backup_root
         self._exports_dir = (
             exports_dir if exports_dir is not None else backup_root.parent / "exports"
+        )
+        self._artwork_dir = (
+            artwork_dir if artwork_dir is not None else backup_root.parent / "artwork"
         )
         self._games = GameRepository(database)
         self._locations = SaveLocationRepository(database)
@@ -523,7 +531,12 @@ class SqlArchiveService:
         self._artwork_attempts.discard(str(gid))
 
     def _forget_artwork(self, game: Game) -> None:
-        """把这款游戏探测到的封面与图标缓存一起删掉."""
+        """把这款游戏探测到的封面与图标缓存一起删掉, 连用户指定的那份一起清.
+
+        游戏已经不存在了, 留着只会让下次同名/同 AppID 的游戏误用旧图。
+        """
+        for path in self._user_artwork().clear(str(game.id)):
+            logger.debug("已清理自定义图片: %s", path)
         cache = self._artwork_cache()
         referenced = None if cache is None else _library_game(game)
         if cache is None or referenced is None:
@@ -851,8 +864,15 @@ class SqlArchiveService:
             linked=report.linked,
             unusable=report.unusable,
             excluded=report.excluded,
+            pruned=report.pruned,
             errors=report.errors,
         )
+
+    def clear_scan_results(self) -> int:
+        """清空探测结果(保留已导入的候选与按名字记住的忽略)."""
+        removed = discovery_cases.clear_scan_results(self._database)
+        self._touch()
+        return removed
 
     def list_candidates(self, *, status: str | None = None) -> list[CandidateItem]:
         """返回探测到的候选游戏(可按处理进度筛选)."""
@@ -1119,13 +1139,64 @@ class SqlArchiveService:
     # -- 图片 ---------------------------------------------------------------
 
     def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
-        """返回封面/图标的本地路径(只查缓存与平台本地资源, 不联网)."""
+        """返回封面/图标的本地路径(用户指定的优先, 其次缓存与平台本地资源, 不联网).
+
+        用户自己挑的图排在最前面: 它是明确的意图, 井且手动添加的游戏压根没有平台图
+        (``_artwork_game`` 返回 None), 只有这一条路能给出封面。
+        """
+        user = self._user_artwork_path(game_id, kind)
+        if user:
+            return user
         cache = self._artwork_cache()
         game, _gid = self._game_ref(game_id)
         referenced = self._artwork_game(game)
         if cache is None or referenced is None:
             return ""
         found = cached_artwork(referenced, kind, cache)
+        return "" if found is None else str(found)
+
+    def user_artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+        """只看用户自己指定过的那份图(没有则空串)."""
+        return self._user_artwork_path(game_id, kind)
+
+    def set_game_artwork(
+        self, game_id: str, kind: ArtworkKind, source_path: str
+    ) -> str:
+        """把用户选的文件存成这款游戏的封面/图标, 返回落点.
+
+        图片不可用时抛 :class:`~archive_management.exceptions.ArtworkImageError`
+        (带原因代码): 界面临摹不到"为什么这张图不能用"就只能静默失败。
+        """
+        game, gid = self._game_ref(game_id)
+        path = self._user_artwork().save(str(gid), kind, Path(source_path))
+        log_action(
+            "game.artwork_set",
+            game_id=game.id,
+            kind=kind,
+            source=redacted_path(str(source_path)),
+        )
+        return str(path)
+
+    def clear_game_artwork(self, game_id: str, kind: ArtworkKind) -> bool:
+        """恢复默认: 删掉用户指定过的那份图."""
+        game, gid = self._game_ref(game_id)
+        removed = self._user_artwork().clear(str(gid), kind)
+        if removed:
+            log_action("game.artwork_clear", game_id=game.id, kind=kind)
+        return bool(removed)
+
+    def _user_artwork(self) -> UserArtworkStore:
+        """用户指定的封面/图标存储(绑定数据目录下的画像目录)."""
+        return UserArtworkStore(self._artwork_dir)
+
+    def _user_artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+        """用户指定的那份图的绝对路径(没给过/文件不可用/游戏不存在时都返回空串)."""
+        try:
+            _game, gid = self._game_ref(game_id)
+        except ArchiveManagementError as exc:  # 游戏刚被删/参数不对: 缺图不影响渲染
+            logger.debug("读取自定义图片失败: %s", exc)
+            return ""
+        found = self._user_artwork().find(str(gid), kind)
         return "" if found is None else str(found)
 
     def prefetch_artwork(self) -> None:

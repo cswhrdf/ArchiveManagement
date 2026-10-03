@@ -18,6 +18,7 @@ from archive_management.services.pathcheck import (
     PathProbe,
     PathSummary,
     dangerous_target_reason,
+    has_any_content,
     is_within,
     summarize_path,
 )
@@ -66,6 +67,57 @@ def test_summarize_skips_symlink_children(tmp_path: Path) -> None:
     assert summary.symlinks == 1
     assert summary.directories == 0
     assert summary.entries == 2
+
+
+def test_has_any_content_agrees_with_the_full_summary(tmp_path: Path) -> None:
+    """``has_any_content`` 与 ``summarize_path`` 的判定必须一致(它只是不看数量).
+
+    两者会被不同调用方拿去问同一个问题(``restore.plan`` 问"要不要建安全点"), 判定一旦
+    分叉, 就会出现"统计说有内容、快查说没有"这种只在某一个入口看得见的怪状态。
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    only_empty_dirs = tmp_path / "nested-empty"
+    (only_empty_dirs / "a" / "b").mkdir(parents=True)
+    filled = tmp_path / "save"
+    filled.mkdir()
+    (filled / "slot.dat").write_text("x", encoding="utf-8")
+    single_file = tmp_path / "save.dat"
+    single_file.write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    _symlink_or_skip(link, filled)
+
+    for path in (empty, only_empty_dirs, filled, single_file, link):
+        summary = summarize_path(str(path))
+        expected = bool(summary.entries or summary.directories)
+        assert has_any_content(str(path)) is expected, f"判定不一致: {path}"
+
+    assert has_any_content(str(tmp_path / "nope")) is False
+
+
+def test_has_any_content_stops_at_the_first_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只要一个布尔: 遇到第一项就不该继续问下去(用户把位置填错时的救命索).
+
+    完整统计会把整棵树走一遍 —— 2026-10-03 实测: 本机主目录前 20 秒只数到 18 万项,
+    队列里还有两百多个目录没走。这里靠"数了几次 ``iterdir``"咬住它。
+    """
+    root = tmp_path / "save"
+    root.mkdir()
+    for index in range(50):
+        (root / f"slot{index:02d}.dat").write_text("x", encoding="utf-8")
+    real_iterdir = Path.iterdir
+    calls: list[Path] = []
+
+    def counting_iterdir(self: Path) -> Iterator[Path]:
+        calls.append(self)
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+    assert has_any_content(str(root)) is True
+    assert calls == [root], f"只该问一次目录: {calls}"
 
 
 def test_summarize_file_without_readable_stat_is_still_counted(

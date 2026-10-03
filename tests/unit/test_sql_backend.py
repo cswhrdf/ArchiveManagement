@@ -30,7 +30,7 @@ from archive_management.domain import (
     SavePathCandidate,
     ScheduledJob,
 )
-from archive_management.exceptions import ArchiveManagementError
+from archive_management.exceptions import ArchiveManagementError, ArtworkImageError
 from archive_management.i18n import set_locale, tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
@@ -43,6 +43,7 @@ from archive_management.infrastructure.repository import (
 from archive_management.services.artwork import (
     ICON_SIZE,
     ICON_VERSION,
+    NOT_AN_IMAGE,
     STEAM_COVER_ASSET,
     artwork_cache_at,
     steam_cover,
@@ -1859,6 +1860,71 @@ def test_artwork_path_reads_only_the_cache(tmp_path: Path) -> None:
     assert plain.artwork_path(plain_id, "cover") == ""
 
 
+def _picked_cover(tmp_path: Path) -> Path:
+    """写一张真 PNG(扮演"用户挑的那张封面")."""
+    from PIL import Image
+
+    path = tmp_path / "picked.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (240, 360), "green").save(path, format="PNG")
+    return path
+
+
+def test_a_custom_cover_wins_and_clearing_it_restores_the_builtin(
+    tmp_path: Path,
+) -> None:
+    """用户自己指定的图优先于缓存/平台图; 恢复默认之后回到内置图.
+
+    两套图放在不同目录(自定义图在 ``data_dir/artwork``, 平台图在 ``cache_dir``), 所以
+    清理缓存不会把用户的选择带走 —— 这也是这个功能必须单独一份存储的原因。
+    """
+    cache = artwork_cache_at(tmp_path / "cache")
+    builtin = cache.store(
+        "steam", "730", "cover", STEAM_COVER_ASSET, content=_PNG, extension="png"
+    )
+    service, game_id, _database = _steam_service(tmp_path, cache_dir=tmp_path / "cache")
+    picked = _picked_cover(tmp_path)
+
+    assert service.artwork_path(game_id, "cover") == str(builtin)
+    assert service.user_artwork_path(game_id, "cover") == ""
+
+    stored = service.set_game_artwork(game_id, "cover", str(picked))
+
+    assert Path(stored).is_file()
+    assert service.user_artwork_path(game_id, "cover") == stored
+    assert service.artwork_path(game_id, "cover") == stored, "用户指定的图要优先"
+
+    assert service.clear_game_artwork(game_id, "cover") is True
+    assert service.user_artwork_path(game_id, "cover") == ""
+    assert service.artwork_path(game_id, "cover") == str(builtin), "回到内置图"
+    assert service.clear_game_artwork(game_id, "cover") is False, "没图可清时返回假"
+
+
+def test_a_custom_cover_works_for_a_game_without_platform_art(tmp_path: Path) -> None:
+    """手动添加的游戏(平台给不出图)也能有封面 —— 这是这个功能最直接的动机."""
+    service, game_id, _database = _steam_service(tmp_path)  # 无 cache_dir
+    picked = _picked_cover(tmp_path)
+
+    assert service.artwork_path(game_id, "cover") == "", "没有缓存时本来就是空"
+
+    stored = service.set_game_artwork(game_id, "cover", str(picked))
+
+    assert service.artwork_path(game_id, "cover") == stored
+
+
+def test_a_broken_picked_file_is_refused_with_a_reason_code(tmp_path: Path) -> None:
+    """用户选了个不是图片的文件: 带原因代码报错, 而且不留下半张图."""
+    service, game_id, _database = _steam_service(tmp_path)
+    junk = tmp_path / "not-an-image.txt"
+    junk.write_text("这不是图片", encoding="utf-8")
+
+    with pytest.raises(ArtworkImageError) as rejected:
+        service.set_game_artwork(game_id, "cover", str(junk))
+
+    assert rejected.value.code == NOT_AN_IMAGE
+    assert service.user_artwork_path(game_id, "cover") == ""
+
+
 def test_prefetch_names_localizes_only_the_names_it_wrote(tmp_path: Path) -> None:
     """译名只写到"名字还是程序写的"游戏上: 用户起的名字优先, 取不到就保留原名."""
     fetcher = _StubNames({"730": "无尽塔防 2", "1": "无名游戏"})
@@ -2042,7 +2108,7 @@ def test_prefetch_names_fills_candidate_names_without_touching_games(
 
 
 def test_delete_game_removes_its_artwork_cache(tmp_path: Path) -> None:
-    """删游戏时把它探测到的封面/图标缓存一起删掉(缓存是可再生的派生数据)."""
+    """删游戏时把它的缓存图与**用户指定的图**一起删掉(都是这款游戏的派生数据)."""
     cache_dir = tmp_path / "cache"
     cache = artwork_cache_at(cache_dir)
     cache.store(
@@ -2050,11 +2116,15 @@ def test_delete_game_removes_its_artwork_cache(tmp_path: Path) -> None:
     )
     cache.store("steam", "730", "icon", ICON_VERSION, content=_PNG, extension="png")
     service, game_id, _database = _steam_service(tmp_path, cache_dir=cache_dir)
+    custom = Path(
+        service.set_game_artwork(game_id, "icon", str(_picked_cover(tmp_path)))
+    )
 
     service.delete_game(game_id, str(tmp_path / "exports" / "steam.zip"))
 
     assert cache.lookup_any("steam", "730", "cover") is None
     assert cache.lookup_any("steam", "730", "icon") is None
+    assert not custom.exists(), "游戏没了, 用户指定的那张图也不该留着"
 
 
 def test_icon_is_derived_from_the_cover(tmp_path: Path) -> None:

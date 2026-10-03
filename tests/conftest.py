@@ -329,6 +329,19 @@ def pytest_collection_modifyitems(
     _apply_shard(config, items)
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """会话一开始就把"硬崩溃也要留证"接上(见 ``crash_capture.enable_hard_crash_log``).
+
+    coredumpy 只覆盖"用例失败"这一层; 段错误/中止会直接杀掉进程, 那时唯一能留下的就是
+    faulthandler 的栈 —— 这里让它同时写进 ``crash-dumps/``, 由 CI 当 artifact 上传。
+    """
+    depth = int(config.getoption("--crash-dump-depth"))
+    if depth <= 0:
+        return  # 显式关掉留证时不写文件
+    directory = Path(str(config.getoption("--crash-dump-dir")))
+    crash_capture.enable_hard_crash_log(directory)
+
+
 def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
     """按 ``--shard-count`` / ``--shard-index`` 只保留本片要跑的用例.
 

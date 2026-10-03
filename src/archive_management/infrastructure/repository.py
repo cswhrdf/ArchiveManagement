@@ -33,6 +33,7 @@ from archive_management.domain import (
     SaveLocation,
     ScheduledJob,
 )
+from archive_management.domain.discovery import normalize_game_name
 from archive_management.exceptions import DatabaseError
 from archive_management.infrastructure.database import Database, iso_utc_now
 
@@ -1162,6 +1163,22 @@ class CandidateRepository:
                 "DELETE FROM game_candidates WHERE id = ?", (candidate_id,)
             )
 
+    def delete_many(self, candidate_ids: Sequence[int]) -> int:
+        """批量删除候选记录, 返回真的删了几条.
+
+        重新扫描的"清掉这次没扫到的"与界面上的"清空扫描结果"都走它: 一次事务删完,
+        不会删一半就断(否则会留下半张表的状态)。空的 ``candidate_ids`` 直接返回。
+        """
+        ids = [int(candidate_id) for candidate_id in candidate_ids]
+        if not ids:
+            return 0
+        with self._database.session() as connection:
+            connection.executemany(
+                "DELETE FROM game_candidates WHERE id = ?",
+                [(candidate_id,) for candidate_id in ids],
+            )
+        return len(ids)
+
     def release_imported(self, game_id: int) -> int:
         """把挂在该游戏上的"已导入"候选退回待处理, 返回改动条数.
 
@@ -1187,6 +1204,60 @@ class CandidateRepository:
         for row in rows:
             counts[str(row[0])] = int(row[1])
         return counts
+
+
+class IgnoredCandidateRepository:
+    """``ignored_candidates`` 表的行级访问: 按**名字**记住"这条游戏忽略过".
+
+    与 ``game_candidates.status='ignored'`` 的分工:
+
+    * 候选行上的 ``ignored`` 是"这一条探测结果现在的样子"(界面靠它分组与计数);
+    * 这张表是"哪款游戏被忽略过"这个**与路径无关**的决定 —— 候选行会因为重新扫描
+      (磁盘上已经没有了)被清掉, 而忽略这件事必须留下来: 同一款游戏重新装上/重新扫到
+      时, 新建的候选行会直接被标记为已忽略, 不会又冒回待处理。
+
+    键是规范化后的名字(``domain.discovery.normalize_game_name``), ``name`` 存最后一次
+    的原拼写(界面展示与取消忽略时回显)。
+    """
+
+    def __init__(self, database: Database) -> None:
+        """绑定到指定的数据库封装."""
+        self._database = database
+
+    def remember(self, name: str) -> str:
+        """记住这个名字被忽略过, 返回规范化后的键(重复记住只刷新原拼写)."""
+        key = normalize_game_name(name)
+        if not key:
+            return key
+        with self._database.session() as connection:
+            connection.execute(
+                "INSERT INTO ignored_candidates (key, name) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET name = excluded.name",
+                (key, name.strip()),
+            )
+        return key
+
+    def forget(self, name: str) -> None:
+        """取消忽略(把某个名字从表里删掉; 不在表里也当成功)."""
+        key = normalize_game_name(name)
+        if not key:
+            return
+        with self._database.session() as connection:
+            connection.execute("DELETE FROM ignored_candidates WHERE key = ?", (key,))
+
+    def keys(self) -> set[str]:
+        """全部被忽略的名字键(扫描时按它把新扫到的候选直接标为已忽略)."""
+        with self._database.connect() as connection:
+            rows = connection.execute("SELECT key FROM ignored_candidates").fetchall()
+        return {str(row[0]) for row in rows}
+
+    def list_all(self) -> list[str]:
+        """全部被忽略的名字(原拼写, 按名字升序)."""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT name FROM ignored_candidates ORDER BY name"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
 
 class SaveCandidateRepository:

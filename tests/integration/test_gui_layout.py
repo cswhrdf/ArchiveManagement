@@ -1028,13 +1028,19 @@ def test_poster_rows_line_up_for_one_and_two_line_names() -> None:
     """海报卡片里"元信息 / 最近活动"那一行的位置**不随名称行数变**, 而且都在卡片内.
 
     出处(用户 2026-10-02): "海报模式下当游戏名称为两行时和一行时最下方的最近活动时间
-    显示位置不同, 导致整个游戏的下边框被盖住了"。做法是让名称标签**永远占两行**
-    (一行名也补一个空行), 卡片高度再按内容算 —— 这里就是那条不变量的守卫: 一行名与
-    两行名的卡片里, 同一个控件的 y 与卡片高度都要一样。
+    显示位置不同, 导致整个游戏的下边框被盖住了"。做法是让名称标签**永远占两行**,
+    卡片高度再按内容算 —— 这里就是那条不变量的守卫: 一行名与两行名的卡片里, 同一个控件
+    的 y 与卡片高度都要一样。
+
+    名称那两行的高度是**按字体行高写死的**(``home_page._build_poster``), 不是靠补一个空行:
+    尾随空行算不算一行由平台决定 —— Linux(X11) 上不算, 于是 2026-10-03 的 Linux CI 里
+    一行名 28px、两行名 39px, 差 11px(同样的代码在 Windows/macOS 上是绿的)。所以这里把
+    **名称标签自己的高度**也量进判据: 它一旦重新变成"随文本行数变", 报出来的就是这条,
+    而不是下游"元信息那一行差 11px"。
     """
 
-    def measure(app: ArchiveApp) -> tuple[int, int, int, int]:
-        """(卡片高, 元信息 y, 最近活动 y, 最近活动底) —— 相对卡片左上的坐标系."""
+    def measure(app: ArchiveApp) -> tuple[int, int, int, int, int]:
+        """(卡片高, 名称高, 元信息 y, 最近活动 y, 最近活动底) —— 相对卡片左上的坐标系."""
         assert _wait_mapped(app)
         page = app._home_page
         page._on_layout_change(HomeLayout.POSTER.label)
@@ -1043,9 +1049,10 @@ def test_poster_rows_line_up_for_one_and_two_line_names() -> None:
         labels = [
             child for child in card.winfo_children() if isinstance(child, ctk.CTkLabel)
         ]
-        badge, activity = labels[-2], labels[-1]
+        name, badge, activity = labels[-3], labels[-2], labels[-1]
         return (
             int(card.winfo_height()),
+            int(name.winfo_height()),
             int(badge.winfo_y()),
             int(activity.winfo_y()),
             int(activity.winfo_y()) + int(activity.winfo_height()),
@@ -1064,11 +1071,12 @@ def test_poster_rows_line_up_for_one_and_two_line_names() -> None:
 
     hint = f"一行名 {one_line} 与两行名 {two_lines} 的行位置不一致"
     assert len({one_line[0], two_lines[0]}) == 1, f"卡片高度应该一样: {hint}"
-    assert abs(one_line[1] - two_lines[1]) <= 2, f"元信息那一行: {hint}"
-    assert abs(one_line[2] - two_lines[2]) <= 2, f"最近活动那一行: {hint}"
+    assert len({one_line[1], two_lines[1]}) == 1, f"名称标签高度应该一样: {hint}"
+    assert abs(one_line[2] - two_lines[2]) <= 2, f"元信息那一行: {hint}"
+    assert abs(one_line[3] - two_lines[3]) <= 2, f"最近活动那一行: {hint}"
     # 最近活动不许越出卡片(越界就会盖住下边框).
-    assert one_line[3] <= one_line[0], f"一行名时越界: {one_line}"
-    assert two_lines[3] <= two_lines[0], f"两行名时越界: {two_lines}"
+    assert one_line[4] <= one_line[0], f"一行名时越界: {one_line}"
+    assert two_lines[4] <= two_lines[0], f"两行名时越界: {two_lines}"
 
 
 # 高 DPI 现场的强制缩放: 本机是 125%、CI 是 100% —— 把缩放强设成 1.25 让这条判据在**任何**

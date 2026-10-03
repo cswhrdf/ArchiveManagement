@@ -26,11 +26,13 @@ from archive_management.domain import (
     GameCandidate,
     MonitoredDirectory,
 )
+from archive_management.domain.discovery import normalize_game_name
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     CandidateRepository,
     GameRepository,
+    IgnoredCandidateRepository,
     MonitoredDirectoryRepository,
 )
 from archive_management.services.audit import log_action, log_failure, redacted_path
@@ -62,6 +64,8 @@ class ScanReport:
     unusable: int
     # 命中平台工具排除清单、被默认隐藏(已忽略)的候选数量.
     excluded: int = 0
+    # 这次扫描清理掉(磁盘上已经没有, 且不是已导入)的旧候选数量.
+    pruned: int = 0
     errors: tuple[str, ...] = ()
 
     @property
@@ -248,6 +252,7 @@ def scan_library(
     errors: list[str] = []
     found = _scan_found(engine, active, errors)
     candidates = CandidateRepository(database)
+    ignored = IgnoredCandidateRepository(database)
     seen: set[str] = set()
     counts = _store_candidates(
         candidates,
@@ -255,8 +260,12 @@ def scan_library(
         known=_known_games(database),
         seen=seen,
         exclusions=active_exclusions,
+        ignored=ignored,
     )
     _refresh_candidate_health(candidates, seen=seen)
+    # 先把自己标为已忽略的名字都记下来(包括之前那几次扫描标的), 再清掉磁盘上已经没有的
+    # 旧候选 —— 忽略决定按名字留在表里, 记录本身不再占着列表。
+    pruned = _prune_candidates(candidates, ignored, seen=seen)
 
     log_action(
         "discovery.scan",
@@ -269,6 +278,7 @@ def scan_library(
         linked=counts.linked,
         unusable=counts.unusable,
         excluded=counts.excluded,
+        pruned=pruned,
     )
     return ScanReport(
         monitored=len(directories),
@@ -279,6 +289,7 @@ def scan_library(
         linked=counts.linked,
         unusable=counts.unusable,
         excluded=counts.excluded,
+        pruned=pruned,
         errors=tuple(errors),
     )
 
@@ -321,9 +332,9 @@ def _scan_found(
 
 
 def _known_games(database: Database) -> dict[str, Game]:
-    """已入库游戏按名称(小写)索引, 用来判断候选是否已经在库里."""
+    """已入库游戏按名称比较键索引, 用来判断候选是否已经在库里."""
     return {
-        game.name.casefold(): game
+        normalize_game_name(game.name): game
         for game in GameRepository(database).list()
         if game.id
     }
@@ -335,7 +346,7 @@ def _link_existing(
     """候选项与库里同名游戏对上时标记为"已纳入库", 返回是否真的标了."""
     if stored.status != "new" or stored.id is None:
         return False
-    match = known.get(stored.name.casefold())
+    match = known.get(normalize_game_name(stored.name))
     if match is None or match.id is None:
         return False
     candidates.set_status(stored.id, "imported", game_id=match.id)
@@ -349,9 +360,15 @@ def _store_candidates(
     known: dict[str, Game],
     seen: set[str],
     exclusions: Exclusions,
+    ignored: IgnoredCandidateRepository,
 ) -> _ScanCounts:
-    """把扫描结果写入候选表, 顺带统计各类数量(同时记录这次见过的路径)."""
+    """把扫描结果写入候选表, 顺带统计各类数量(同时记录这次见过的路径).
+
+    "按名字记住的忽略"在这里生效: 一条**新**候选只要名字在忽略表里, 建出来就直接是
+    已忽略 —— 用户忽略过的游戏重新装上/重新扫到不会又冒回待处理。
+    """
     counts = _ScanCounts()
+    ignored_keys = ignored.keys()
     for candidate in found:
         seen.add(_directory_key(candidate.install_dir))
         if candidate.health != "ok":
@@ -364,9 +381,74 @@ def _store_candidates(
         if _hide_excluded(candidates, stored, exclusions=exclusions):
             counts.excluded += 1
             continue
+        if _hide_ignored(candidates, stored, keys=ignored_keys):
+            counts.excluded += 1
+            continue
         if _link_existing(candidates, stored, known=known):
             counts.linked += 1
     return counts
+
+
+def _prune_candidates(
+    candidates: CandidateRepository,
+    ignored: IgnoredCandidateRepository,
+    *,
+    seen: set[str],
+    only_unseen: bool = True,
+) -> int:
+    """清掉不再需要的候选记录, 返回删了几条.
+
+    规则(用户 2026-10-03 的要求: 重新扫描时清空旧记录, 忽略只按名字记):
+
+    * **已忽略的**: 名字先记进 ``ignored_candidates``, 然后连同记录一起删 —— 磁盘上
+      已经没有、用户也不想要的条目不该继续占着列表; 以后同名游戏再出现时会自动回到
+      已忽略(见 :func:`_hide_ignored`);
+    * **已导入的: 一条都不删**。它们带着 ``game_id``(删除游戏时的退回依据), 并且是
+      :func:`archive_management.application.candidates._resolve_install_dir`
+      在游戏没显式给安装目录时的**唯一来源** —— 删了会让"探测存档位置"退化成失败。
+      数量受游戏库规模约束, 不会堆积。
+    * 其余(待处理)的: ``only_unseen`` 为真时只删这次没扫到的(重新扫描的收尾); 手工
+      "清空扫描结果"时传 ``False``, 一次清干净。
+    """
+    doomed: list[int] = []
+    for item in candidates.list_all():
+        if item.id is None or item.status == "imported":
+            continue
+        if only_unseen and _directory_key(item.install_dir) in seen:
+            continue
+        if item.status == "ignored":
+            ignored.remember(item.name)
+        doomed.append(item.id)
+    removed = candidates.delete_many(doomed)
+    if removed:
+        log_action("discovery.prune", basic=True, removed=removed, unseen=only_unseen)
+    return removed
+
+
+def clear_scan_results(database: Database) -> int:
+    """清空探测结果(保留已导入的候选与按名字记住的忽略), 返回删了几条.
+
+    界面上是一个带确认的危险动作(用户 2026-10-03): 想从头再扫一遍时按它, 不必等到下次
+    扫描的收尾。已导入的候选不在此列 —— 它们是游戏的安装目录来源(见
+    :func:`_prune_candidates` 的说明)。
+    """
+    candidates = CandidateRepository(database)
+    ignored = IgnoredCandidateRepository(database)
+    removed = _prune_candidates(candidates, ignored, seen=set(), only_unseen=False)
+    log_action("discovery.clear", basic=True, removed=removed)
+    return removed
+
+
+def _hide_ignored(
+    candidates: CandidateRepository, stored: GameCandidate, *, keys: set[str]
+) -> bool:
+    """名字在忽略表里的新候选直接标为已忽略, 返回是否真的标了."""
+    if stored.status != "new" or stored.id is None:
+        return False
+    if normalize_game_name(stored.name) not in keys:
+        return False
+    candidates.set_status(stored.id, "ignored", game_id=stored.game_id)
+    return True
 
 
 def _hide_excluded(
@@ -435,6 +517,12 @@ def import_candidate(
     final_name = (name if name is not None else candidate.name).strip()
     if not final_name:
         raise ArchiveManagementError("游戏名称不能为空")
+    # 同名拦截: 候选记录会被重新扫描的收尾清掉(用户 2026-10-03 的"清空重扫"),
+    # 已导入这条状态不再是可靠依据 —— 按名字再挡一道, 否则改过名的那条候选会被重复导入成
+    # 两款同名游戏。代价是"两份同名游戏"也挡了(需要的话只能先改名再导)。
+    known = _known_games(database).get(normalize_game_name(final_name))
+    if known is not None:
+        raise ArchiveManagementError(f"同名游戏「{known.name}」已在库中")
     game = games.add(
         Game(name=final_name, original_name=candidate.name, origin=candidate.source)
     )
@@ -471,10 +559,13 @@ def candidate_app_id(candidate: GameCandidate) -> int | None:
 def ignore_candidate(database: Database, candidate_id: int) -> GameCandidate:
     """把一条候选标记为"已忽略"(后续扫描不会重新变成待处理).
 
-    已关联的游戏保持不变, 这样用户之后执行"恢复"时还能识别出它已在库中。
+    已关联的游戏保持不变, 这样用户之后执行"恢复"时还能识别出它已在库中。同时把**名字**
+    记进 ``ignored_candidates``: 候选记录本身会被重新扫描的收尾清掉, 而"这款游戏忽略过"
+    这个决定要留下来(它重新出现时直接回到已忽略)。
     """
     candidates = CandidateRepository(database)
     candidate = _require_candidate(candidates, candidate_id)
+    IgnoredCandidateRepository(database).remember(candidate.name)
     updated = candidates.set_status(candidate_id, "ignored", game_id=candidate.game_id)
     log_action("discovery.ignore", candidate_id=candidate_id)
     return updated
@@ -484,6 +575,7 @@ def restore_candidate(database: Database, candidate_id: int) -> GameCandidate:
     """把忽略过的候选恢复为"待处理"(若游戏仍在库中则直接标记为已纳入库)."""
     candidates = CandidateRepository(database)
     candidate = _require_candidate(candidates, candidate_id)
+    IgnoredCandidateRepository(database).forget(candidate.name)
     game = None
     if candidate.game_id is not None:
         game = GameRepository(database).get(candidate.game_id)

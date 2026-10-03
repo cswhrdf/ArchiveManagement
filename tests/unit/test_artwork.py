@@ -16,18 +16,25 @@ import pytest
 from PIL import Image
 
 from archive_management.domain import ArtworkRef, PlatformGame
-from archive_management.exceptions import ArtworkError
+from archive_management.exceptions import ArtworkError, ArtworkImageError
 from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.services import artwork as artwork_mod
 from archive_management.services.artwork import (
     ICON_SIZE,
     ICON_VERSION,
+    MAX_USER_COVER_SIDE,
+    MAX_USER_IMAGE_BYTES,
+    NOT_AN_IMAGE,
     STEAM_CDN_ROOT,
     STEAM_COVER_ASSET,
     STEAM_ICON_CDN_ROOT,
+    TOO_LARGE,
+    UNREADABLE,
+    USER_ARTWORK_SUFFIX,
     ArtworkCache,
     FetchedArtwork,
     HttpArtworkFetcher,
+    UserArtworkStore,
     artwork_cache,
     artwork_cache_at,
     cached_artwork,
@@ -40,6 +47,7 @@ from archive_management.services.artwork import (
     steam_artwork,
     steam_cover,
     steam_icon,
+    user_artwork_store,
 )
 
 pytestmark = [
@@ -588,3 +596,125 @@ def test_validate_rejects_empty_and_unsupported_payloads() -> None:
     assert empty_type == ""
     assert "不受支持" in declared_reason
     assert declared_type == ""
+
+
+# ------------------------------------------------ 用户自己指定的封面与图标
+
+
+def _picked_png(path: Path, size: tuple[int, int], color: str = "red") -> Path:
+    """写一张真 PNG(用例里扮演"用户挑的文件")."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color).save(path, format="PNG")
+    return path
+
+
+def test_user_artwork_store_saves_a_normalized_png(tmp_path: Path) -> None:
+    """用户挑的文件被归一化成 PNG 存进数据目录(不是原样摊在那里), 按游戏隔离."""
+    store = UserArtworkStore(tmp_path / "artwork")
+    source = _picked_png(tmp_path / "picked.png", (800, 1200))
+
+    stored = store.save("3", "cover", source)
+
+    assert stored.parent == store.directory("3")
+    assert stored.suffix == USER_ARTWORK_SUFFIX
+    assert store.find("3", "cover") == stored
+    with Image.open(stored) as image:
+        assert image.format == "PNG"
+    assert store.find("4", "cover") is None, "另一款游戏不该串到这张图"
+
+
+def test_user_artwork_store_shrinks_a_huge_cover(tmp_path: Path) -> None:
+    """封面保留长宽比, 只把长边压到上限内(海报卡片最大也只画 ~250 宽)."""
+    store = UserArtworkStore(tmp_path / "artwork")
+    source = _picked_png(tmp_path / "wide.png", (3000, 1000))
+
+    stored = store.save("7", "cover", source)
+
+    with Image.open(stored) as image:
+        assert max(image.size) == MAX_USER_COVER_SIDE
+        assert image.width == image.height * 3, "长宽比不许被改掉"
+
+
+def test_user_artwork_store_makes_an_icon_square(tmp_path: Path) -> None:
+    """图标走与官方图标同一条路: 居中裁方 + 固定边长(界面里头像位不会忽大忽小)."""
+    store = UserArtworkStore(tmp_path / "artwork")
+    source = _picked_png(tmp_path / "cover.png", (600, 900))
+
+    stored = store.save("9", "icon", source)
+
+    with Image.open(stored) as image:
+        assert image.size == (ICON_SIZE, ICON_SIZE)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("not-an-image.txt", NOT_AN_IMAGE),
+        ("missing.png", UNREADABLE),
+    ],
+)
+def test_user_artwork_store_rejects_unusable_files(
+    tmp_path: Path, name: str, expected: str
+) -> None:
+    """不可用的图片带着**原因代码**被拒(界面据此取文案), 而且不进库."""
+    store = UserArtworkStore(tmp_path / "artwork")
+    source = tmp_path / name
+    if name != "missing.png":
+        source.write_text("这不是图片", encoding="utf-8")
+
+    with pytest.raises(ArtworkImageError) as rejected:
+        store.save("3", "cover", source)
+
+    assert rejected.value.code == expected
+    assert store.find("3", "cover") is None
+
+
+def test_user_artwork_store_rejects_an_oversized_file(tmp_path: Path) -> None:
+    """超过体积上限的图直接拒掉(不往内存里读整张)."""
+    store = UserArtworkStore(tmp_path / "artwork")
+    source = _picked_png(tmp_path / "big.png", (900, 900))
+    source.write_bytes(source.read_bytes() + b"\x00" * MAX_USER_IMAGE_BYTES)
+
+    with pytest.raises(ArtworkImageError) as rejected:
+        store.save("3", "cover", source)
+
+    assert rejected.value.code == TOO_LARGE
+
+
+def test_user_artwork_store_clears_one_kind_or_everything(tmp_path: Path) -> None:
+    """恢复默认按类型清; 一次清空两类时连空目录一起收掉(不堆空文件夹)."""
+    store = UserArtworkStore(tmp_path / "artwork")
+    source = _picked_png(tmp_path / "picked.png", (200, 300))
+    store.save("5", "cover", source)
+    store.save("5", "icon", source)
+
+    removed = store.clear("5", "cover")
+
+    assert [path.name for path in removed] == ["cover.png"]
+    assert store.find("5", "cover") is None
+    assert store.find("5", "icon") is not None
+
+    assert len(store.clear("5")) == 1
+    assert not store.directory("5").exists()
+
+
+def test_user_artwork_store_forgets_a_file_that_is_not_an_image_anymore(
+    tmp_path: Path,
+) -> None:
+    """存下来之后被外部改坏: 当作"用户没给过", 回落内置图而不是拿去渲染."""
+    store = UserArtworkStore(tmp_path / "artwork")
+    stored = store.save("6", "cover", _picked_png(tmp_path / "picked.png", (200, 300)))
+    stored.write_text("坏掉了", encoding="utf-8")
+
+    assert store.find("6", "cover") is None
+
+
+def test_user_artwork_lives_in_the_data_dir_not_the_cache(tmp_path: Path) -> None:
+    """用户图存 ``data_dir``(缓存会按年龄清理, 用户挑的图不该被清理掉)."""
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    source = _picked_png(tmp_path / "picked.png", (200, 300))
+
+    stored = user_artwork_store(paths).save("3", "cover", source)
+
+    assert stored.is_relative_to(paths.data_dir)
+    assert not stored.is_relative_to(paths.cache_dir)

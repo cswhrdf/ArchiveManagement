@@ -16,6 +16,7 @@ import pytest
 from archive_management.application.discovery import (
     add_candidate_as_monitored,
     add_monitored_directory,
+    clear_scan_results,
     ignore_candidate,
     import_candidate,
     relocate_candidate,
@@ -31,6 +32,7 @@ from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     CandidateRepository,
     GameRepository,
+    IgnoredCandidateRepository,
     MonitoredDirectoryRepository,
 )
 from archive_management.services.exclusions import ExcludedProgram, Exclusions
@@ -231,10 +233,19 @@ def test_scan_persists_candidates_and_marks_directory_status(tmp_path: Path) -> 
     assert directory.last_scan_status == "ok"
 
 
-def test_scan_keeps_user_decision_and_refreshes_path_health(tmp_path: Path) -> None:
+def test_scan_prunes_stale_records_but_remembers_the_ignore_by_name(
+    tmp_path: Path,
+) -> None:
+    """磁盘上没有的旧记录会被清掉, 而"忽略过哪款游戏"按**名字**留下来.
+
+    出处(用户 2026-10-03): 重新扫描时清空当前记录重新扫, 只按名字记住设置了忽略的游戏。
+
+    这条以前钉的是相反的行为(已忽略的记录永久留着、只刷新路径状态)。现在:
+    * 第二次扫描没扫到它 → 记录被清掉(``pruned``), 列表不再挂着僵尸行;
+    * 但名字进了 ``ignored_candidates`` → 第三次扫描(同名、换了目录)扫到它时, 新建的
+      候选**直接就是已忽略**, 用户不会又被问一遍。
+    """
     database = _database(tmp_path)
-    games = tmp_path / "Stale"
-    games.mkdir()
     stale = tmp_path / "Gone"
     stale.mkdir()
     first = scan_library(database, scanner=_stub_scanner([_candidate("Gone", stale)]))
@@ -243,14 +254,79 @@ def test_scan_keeps_user_decision_and_refreshes_path_health(tmp_path: Path) -> N
     assert candidate.id is not None
     ignore_candidate(database, candidate.id)
 
-    # 游戏被卸载后再次扫描: 已忽略的候选不会被重新变成待处理, 但路径状态会更新.
+    # 游戏被卸载后再次扫描: 记录清掉, 忽略按名字记住.
     stale.rmdir()
     second = scan_library(database, scanner=_stub_scanner([]))
 
     assert second.total == 0
-    refreshed = CandidateRepository(database).list_all()[0]
-    assert refreshed.status == "ignored"
-    assert refreshed.health == "missing"
+    assert second.pruned == 1
+    assert CandidateRepository(database).list_all() == []
+    assert IgnoredCandidateRepository(database).list_all() == ["Gone"]
+
+    # 重新装上(换了目录)后再扫: 同名候选直接回到已忽略.
+    reinstalled = tmp_path / "GoneAgain"
+    reinstalled.mkdir()
+    third = scan_library(
+        database, scanner=_stub_scanner([_candidate("Gone", reinstalled)])
+    )
+
+    assert third.added == 1
+    returned = CandidateRepository(database).list_all()[0]
+    assert returned.status == "ignored"
+    assert returned.health == "ok"
+
+
+def test_scan_keeps_imported_candidates_on_disk_and_links_them_by_name(
+    tmp_path: Path,
+) -> None:
+    """已导入的候选一条都不清(它们是游戏安装目录的来源), 且按名字重新对上库里的游戏."""
+    database = _database(tmp_path)
+    installed = tmp_path / "Hades"
+    installed.mkdir()
+    scan_library(database, scanner=_stub_scanner([_candidate("Hades", installed)]))
+    candidate = CandidateRepository(database).list_all()[0]
+    assert candidate.id is not None
+    game = import_candidate(database, candidate.id)
+
+    # 这次什么都没扫到: 已导入的那条仍在(否则"探测存档位置"的兜底会断).
+    report = scan_library(database, scanner=_stub_scanner([]))
+
+    assert report.pruned == 0
+    stored = CandidateRepository(database).list_all()
+    assert [item.status for item in stored] == ["imported"]
+    assert stored[0].game_id == game.id
+
+
+def test_clear_scan_results_keeps_imported_and_ignored_decisions(
+    tmp_path: Path,
+) -> None:
+    """手动"清空扫描结果": 待处理/已忽略都清掉, 已导入与忽略名单留下."""
+    database = _database(tmp_path)
+    installed = tmp_path / "Hades"
+    installed.mkdir()
+    scan_library(
+        database,
+        scanner=_stub_scanner(
+            [
+                _candidate("Hades", installed),
+                _candidate("Hollow", tmp_path / "Hollow"),
+            ]
+        ),
+    )
+    stored = {item.name: item for item in CandidateRepository(database).list_all()}
+    imported = stored["Hades"]
+    assert imported.id is not None
+    import_candidate(database, imported.id)
+    ignored = stored["Hollow"]
+    assert ignored.id is not None
+    ignore_candidate(database, ignored.id)
+
+    removed = clear_scan_results(database)
+
+    assert removed == 1, "只清待处理/已忽略的那条"
+    left = CandidateRepository(database).list_all()
+    assert [item.status for item in left] == ["imported"]
+    assert IgnoredCandidateRepository(database).list_all() == ["Hollow"]
 
 
 def test_scan_links_candidates_that_match_existing_games(tmp_path: Path) -> None:

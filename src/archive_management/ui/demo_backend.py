@@ -37,6 +37,7 @@ from archive_management.domain import (
     plan_deletion,
 )
 from archive_management.domain.activation import REASON_UNAVAILABLE
+from archive_management.domain.discovery import normalize_game_name
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import current_locale, tr
 from archive_management.services.audit import log_action
@@ -417,10 +418,20 @@ class DemoArchiveService:
         self._candidates: dict[str, CandidateItem] = {
             item.candidate_id: item for item in _CANDIDATES
         }
+        # "按名字记住的忽略": 夹具里已经是 ignored 的那几条就是初始名单, 之后由用户操作
+        # (忽略/恢复)维护 —— 重新扫描时忽略名单决定新扫到的候选是不是直接算已忽略。
+        self._ignored_names: set[str] = {
+            normalize_game_name(item.name)
+            for item in _CANDIDATES
+            if item.status == "ignored"
+        }
         self._next_dir_id = len(_MONITORED_DIRS) + 1
         # 演示主页的筛选条件、归档标记与自定义标签.
         self._home_filter = HomeFilter()
         self._archived: dict[str, bool] = dict.fromkeys(self._meta, False)
+        # 用户自己指定的封面/图标: 演示后端不写用户的磁盘, 只记住路径(语义与真实后端
+        # 一致: 用户图优先、可恢复默认), 所以界面用例可以走同一条完整路径。
+        self._user_artwork: dict[tuple[str, ArtworkKind], str] = {}
         self._tags: dict[str, tuple[str, ...]] = {key: () for key in self._meta}
         for game in _GAMES:
             existing = self._items.get(game.game_id, [])
@@ -1241,7 +1252,12 @@ class DemoArchiveService:
         self._revision += 1
 
     def scan_candidates(self) -> ScanSummary:
-        """模拟一次探测: 刷新扫描时间并返回结果摘要."""
+        """模拟一次探测: 刷新扫描时间, 清理不再需要的记录, 并返回结果摘要.
+
+        与真实后端同一套语义: 未扫到且不是已导入的候选会被清掉, 忽略过的名字留在
+        ``_ignored_names`` 里(重新扫到即直接是已忽略)。演示数据没有"导入目录"这套
+        探测源, 因此"这次扫到什么"就用现有候选表示。
+        """
         active = [item for item in self._monitored_dirs.values() if item.enabled]
         now = _now_label()
         for directory_id, item in self._monitored_dirs.items():
@@ -1251,6 +1267,8 @@ class DemoArchiveService:
                 last_scan_label=now,
                 health=health if item.enabled else item.health,
             )
+        pruned = self._prune_candidates(keep_ids=set())
+        self._seed_candidates()
         candidates = list(self._candidates.values())
         return ScanSummary(
             monitored=len(self._monitored_dirs),
@@ -1260,7 +1278,46 @@ class DemoArchiveService:
             updated=len(candidates),
             linked=sum(1 for item in candidates if item.status == "imported"),
             unusable=sum(1 for item in candidates if item.health != "ok"),
+            pruned=pruned,
         )
+
+    def clear_scan_results(self) -> int:
+        """清空演示探测结果(保留已导入的候选与按名字记住的忽略)."""
+        removed = self._prune_candidates(keep_ids=set())
+        self._revision += 1
+        return removed
+
+    def _seed_candidates(self) -> None:
+        """把演示候选按当前忽略名单重新铺一遍(相当于真实后端的一次扫描).
+
+        已导入的候选不重建: 它的 ``game_id`` 是运行期状态(导入哪一款), 夹具里没有。
+        """
+        for item in _CANDIDATES:
+            if item.status != "imported" and item.candidate_id in self._candidates:
+                continue
+            if item.status == "imported":
+                if item.candidate_id not in self._candidates:
+                    self._candidates[item.candidate_id] = item
+                continue
+            status = (
+                "ignored"
+                if normalize_game_name(item.name) in self._ignored_names
+                else "new"
+            )
+            self._candidates[item.candidate_id] = replace(item, status=status)
+
+    def _prune_candidates(self, *, keep_ids: set[str]) -> int:
+        """删掉非已导入的候选, 返回删了几条(已忽略的先记进忽略名单)."""
+        doomed = [
+            candidate_id
+            for candidate_id, item in self._candidates.items()
+            if item.status != "imported" and candidate_id not in keep_ids
+        ]
+        for candidate_id in doomed:
+            item = self._candidates.pop(candidate_id)
+            if item.status == "ignored":
+                self._ignored_names.add(normalize_game_name(item.name))
+        return len(doomed)
 
     def list_candidates(self, *, status: str | None = None) -> list[CandidateItem]:
         """返回演示探测结果(可按处理进度筛选), 并带上当前语言的译名."""
@@ -1300,6 +1357,11 @@ class DemoArchiveService:
         item = self._require_candidate(candidate_id)
         updated = replace(item, status="ignored" if ignored else "new")
         self._candidates[candidate_id] = updated
+        key = normalize_game_name(item.name)
+        if ignored:
+            self._ignored_names.add(key)
+        else:
+            self._ignored_names.discard(key)
         return updated
 
     def relocate_candidate(self, candidate_id: str, path: str) -> CandidateItem:
@@ -1339,8 +1401,34 @@ class DemoArchiveService:
     # -- 图片 ---------------------------------------------------------------
 
     def artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
-        """演示后端不提供图片(界面回落名称/色块占位)."""
-        return ""
+        """返回本地图片路径: 只有用户自己指定过的那份, 其余回落名称/色块占位."""
+        return self._user_artwork.get((game_id, kind), "")
+
+    def user_artwork_path(self, game_id: str, kind: ArtworkKind) -> str:
+        """只看用户自己指定过的那份图(演示后端也只记路径)."""
+        return self._user_artwork.get((game_id, kind), "")
+
+    def set_game_artwork(
+        self, game_id: str, kind: ArtworkKind, source_path: str
+    ) -> str:
+        """记住用户选的文件(不校验也不归一化: 演示后端不写用户的磁盘).
+
+        真实后端会在这一步把图拷进应用数据目录并归一化成 PNG; 演示后端只把路径记下来,
+        于是界面里“自定义了没有/能不能恢复默认”这两条状态与真实后端完全一致。
+        """
+        self._require_artwork_game(game_id)
+        self._user_artwork[(game_id, kind)] = source_path
+        return source_path
+
+    def clear_game_artwork(self, game_id: str, kind: ArtworkKind) -> bool:
+        """恢复默认: 忘掉用户指定过的那份图."""
+        removed = self._user_artwork.pop((game_id, kind), None)
+        return removed is not None
+
+    def _require_artwork_game(self, game_id: str) -> None:
+        """确认这款游戏存在(与真实后端 `_game_ref` 同样的失败语义)."""
+        if game_id not in self._details:
+            raise ArchiveManagementError(tr("error.unknown_game", game_id=game_id))
 
     def prefetch_artwork(self) -> None:
         """演示后端不下载图片."""

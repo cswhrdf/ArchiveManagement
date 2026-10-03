@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import builtins
-import ctypes
 import importlib
 import io
 import os
@@ -24,7 +23,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,10 +216,18 @@ def _dir_fd_is_available() -> bool:
     return _ORIGINAL_UNLINK in os.supports_dir_fd
 
 
-# “fd → 目录”的两条常见路径(Linux 用 /proc, macOS 用 /dev); 读到就接回绝对路径。
+# “fd → 目录”的两条常见路径模板(Linux 用 /proc, macOS 用 /dev)。
 # 注意 macOS 的 `/dev/fd/<fd>` **不是符号链接**, realpath 会原样返回 —— 所以它不够用,
 # 还要问内核, 见 :func:`_fd_directory`。
 _FD_PATH_TEMPLATES = ("/proc/self/fd/{fd}", "/dev/fd/{fd}")
+# “指回某个 fd”的路径前缀: 它们**不是**真实位置。
+#
+# macOS 的 `/dev/fd/<fd>` 是 fdesc 节点(不是符号链接, `realpath` 原样返回), 而它 `isdir()`
+# 又是真的 —— 记账器会以为自己拿到了绝对路径, 于是把一次**合法**删除记成
+# `/dev/fd/13/slot.dat` 并判成越界(2026-09-30 与 2026-10-03 的 macOS CI 现场, 两条安全
+# 用例都红在这里)。Linux 的 `/proc/self/fd/<fd>` 是符号链接, `realpath` 正常能解开;
+# 解不开时它同样只是“又一次指回 fd”, 也不能当答案。
+_FD_PATH_PREFIXES = ("/dev/fd/", "/proc/self/fd/")
 # macOS 上“问出 fd 指向哪个目录”只能走 `fcntl.F_GETPATH`; Windows 没有 fcntl 这个模块
 # (那一支也走不到 —— `dir_fd` 只有 POSIX 支持)。用 importlib 拿它: 写成 try/except import
 # 反而要多一个 type: ignore, 而这里只需要“有就拿来用”。
@@ -229,42 +236,92 @@ _fcntl = importlib.import_module("fcntl") if sys.platform != "win32" else None
 _FD_PATH_BUFFER = 1024
 
 
+def _looks_like_an_fd_path(path: str) -> bool:
+    """这个候选是不是“又一次指回某个 fd”(见 :data:`_FD_PATH_PREFIXES`).
+
+    这种路径在 macOS 上 `isdir()` 为真, 所以只查“是不是目录”挡不住它 —— 必须单独判形状。
+    """
+    return any(path.startswith(prefix) for prefix in _FD_PATH_PREFIXES)
+
+
+def _fd_path_from_kernel(fd: int) -> str | None:
+    """问内核这个 fd 指向哪个目录(``fcntl.F_GETPATH``, macOS 的正路); 问不到返回 None.
+
+    缓冲区用**可变**的那种(``bytearray``): 内核是把路径写进我们这块内存里, 只读缓冲区
+    拿不回结果(那种失败是静默的: 缓冲区留空, 于是记账退回裸文件名)。
+    """
+    module = _fcntl
+    if module is None:
+        return None
+    command = getattr(module, "F_GETPATH", None)
+    if command is None:  # pragma: no cover - 非 macOS 的 POSIX 上没有这个命令
+        return None
+    buffer = bytearray(_FD_PATH_BUFFER)
+    try:
+        module.fcntl(fd, command, buffer)
+    except OSError:  # fd 已经关掉时内核会报 EBADF
+        return None
+    base = os.fsdecode(bytes(buffer).split(b"\0", 1)[0])
+    return base or None
+
+
+def _fd_path_from_cwd(fd: int) -> str | None:
+    """切到那个 fd 再读回工作目录(``fchdir`` + ``getcwd``); 走不通返回 None.
+
+    与 F_GETPATH 是两条**不同**的内核路径(macOS 上只有这两条能给出真实位置, 模板那条在
+    那边只会得到 `/dev/fd/<fd>`), 所以两边都试。无论成败都把工作目录切回去 —— 记账器
+    绝不该改变被测代码看到的工作目录(而且解析发生在原函数**之前**, 切不回来就会改变
+    被测代码执行时的相对路径语义)。
+    """
+    fchdir = getattr(os, "fchdir", None)
+    if fchdir is None:  # pragma: no cover - Windows 没有这一支
+        return None
+    try:
+        origin = Path.cwd()
+        fchdir(fd)
+    except OSError:  # fd 不是目录 / 已经关掉 / 当前目录已删
+        return None
+    try:
+        return str(Path.cwd())
+    except OSError:  # pragma: no cover - 读不回来
+        return None
+    finally:
+        with suppress(OSError):
+            os.chdir(origin)
+
+
 def _fd_directory(fd: int) -> str | None:
     """问出 ``fd`` 指向的那个目录; 问不到返回 None(调用方退回裸文件名, 于是响亮地判越界).
 
-    两条路都要试, 且**先问内核**:
+    三条路依次问, 且候选必须**既不是“指回 fd”的路径, 又真的是个目录**:
 
     * `fcntl.F_GETPATH`(macOS 的正路)把真实路径写进缓冲区;
-    * 两条路径模板 —— Linux 走 `/proc/self/fd/<fd>`(它是指向目标的符号链接, `realpath` 就能
-      解开)。
+    * 路径模板 —— Linux 走 `/proc/self/fd/<fd>`(它是指向目标的符号链接, `realpath` 就能
+      解开; macOS 上这条只会得到被拒的 `/dev/fd/<fd>`);
+    * `fchdir` + `getcwd` 兜底 —— 会切一轮工作目录, 所以排在最后(前面两条都没结果时才用)。
 
-    macOS **不能**只靠模板: `/dev/fd/<fd>` 是 fdesc 节点而不是符号链接, `realpath` 原样返回,
-    而那个路径的 `isdir()` 又是真的 —— 记账器会以为自己拿到了绝对路径, 于是一次**合法**删除
-    被记成 `/dev/fd/13/slot.dat`、再被判成越界变更(2026-09-30 的 macOS CI 现场: 两条安全
-    用例都在这里红)。
+    为什么宁可返回 None 也不接受 `/dev/fd/<fd>`: 那个路径在 macOS 上 `isdir()` 为真,
+    记下来会让一次**合法**删除被判成越界变更(2026-09-30 / 2026-10-03 的 macOS CI);
+    而退回裸文件名时用例会**响亮地**报“越界”, 至少不会把错的当成对的。
     """
-    module = _fcntl
-    if module is not None:
-        getpath = getattr(module, "F_GETPATH", None)
-        if getpath is not None:
-            buffer = ctypes.create_string_buffer(_FD_PATH_BUFFER)
-            try:
-                module.fcntl(fd, getpath, buffer)
-            except OSError:  # fd 已经关掉时内核会报 EBADF
-                pass
-            else:
-                base = os.fsdecode(buffer.value)
-                if base and Path(base).is_dir():
-                    return base
+    for candidate in _fd_directory_candidates(fd):
+        if not candidate or _looks_like_an_fd_path(candidate):
+            continue
+        if Path(candidate).is_dir():
+            return candidate
+    return None
+
+
+def _fd_directory_candidates(fd: int) -> Iterator[str | None]:
+    """上面三条路依次给出的候选(每条都可能给不出东西)."""
+    yield _fd_path_from_kernel(fd)
     for template in _FD_PATH_TEMPLATES:
         marker = template.format(fd=fd)
         try:
-            base = os.path.realpath(marker)
-        except OSError:  # 读不到就试下一条
-            continue
-        if base and Path(base).is_dir():
-            return base
-    return None
+            yield os.path.realpath(marker)
+        except OSError:  # pragma: no cover - 读不到就试下一条
+            yield None
+    yield _fd_path_from_cwd(fd)
 
 
 def _resolve_dir_fd(dir_fd: object, path: str) -> str:
@@ -343,7 +400,7 @@ def test_the_recorder_resolves_paths_relative_to_a_directory_fd(
     真的没有 `dir_fd` 这一支的平台(Windows)明确跳过, 原因里写清缺的是哪一项能力。
 
     路径按**解析后**的形式比较: 记账器还原出来的是 `realpath`(经 `/proc/self/fd` 或
-    `/dev/fd`), 而 macOS 的临时目录本身是符号链接(`/var` → `/private/var`), 拿 `tmp_path`
+    问内核), 而 macOS 的临时目录本身是符号链接(`/var` → `/private/var`), 拿 `tmp_path`
     的原始字符串比会在 macOS 上假报失败。
     """
     if not _dir_fd_is_available():
@@ -381,6 +438,9 @@ def test_the_directory_fd_falls_back_to_the_kernel_when_the_templates_do_not_res
     `isdir()` 是真的, 于是记账器以为自己拿到了绝对路径, 一次合法删除被判成越界变更。
     真机行为没法在 Windows 上复现, 所以这里把两件事换成替身: realpath 原样返回(模拟 macOS
     那种“解不开但不报错”的路径)与一个只认 `F_GETPATH` 的假 fcntl。
+
+    2026-10-03 的 macOS CI 又在同一个地方红了(那次是 `/dev/fd/27/slot.dat`), 所以缓冲区
+    改成可变的那种并用本用例把它的契约钉住: 内核往我们这块内存里写, 只读缓冲区拿不回来。
     """
     folder = tmp_path / "root"
     folder.mkdir()
@@ -390,7 +450,8 @@ def test_the_directory_fd_falls_back_to_the_kernel_when_the_templates_do_not_res
 
     def fake_fcntl(fd: int, command: int, buffer: Any) -> int:
         assert command == fake.F_GETPATH, "不是 F_GETPATH 就问不出真实路径"
-        buffer.value = os.fsencode(folder)
+        assert isinstance(buffer, bytearray), "缓冲区必须是可变的, 否则写不回来"
+        buffer[:] = os.fsencode(folder) + b"\0"
         return 0
 
     fake = SimpleNamespace(F_GETPATH=50, fcntl=fake_fcntl)
@@ -417,6 +478,39 @@ def test_installing_the_recorder_does_not_change_the_platform_capability(
     assert _dir_fd_is_available() is before, "记账器改变了平台能力判定"
 
 
+def test_an_fd_path_is_never_accepted_as_a_real_location() -> None:
+    """“指回 fd”的路径不能当答案 —— macOS 的 `/dev/fd/<fd>` 就是这一种.
+
+    它在 macOS 上 `isdir()` 为真(所以只查“是不是目录”挡不住), 而记下来会把一次合法删除
+    判成越界(2026-09-30 / 2026-10-03 的 macOS CI 现场)。这条判形状。
+    """
+    assert _looks_like_an_fd_path("/dev/fd/13")
+    assert _looks_like_an_fd_path("/proc/self/fd/13")
+    assert not _looks_like_an_fd_path("/private/var/folders/36/root")
+    assert not _looks_like_an_fd_path("/home/user/dev/fd/13"), "只是个名字像"
+
+
+def test_a_candidate_that_only_points_back_to_the_fd_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模板给出“指回 fd”的路径时继续往下问, 全都问不到就返回 None(不准记成 fd 路径)."""
+    folder = tmp_path / "root"
+    (folder / "fd-3").mkdir(parents=True)
+    # 只留模板这一条路: 另外两条会去问**当前进程**里那个编号的 fd(与用例无关)。
+    monkeypatch.setattr(sys.modules[__name__], "_fcntl", None)
+    monkeypatch.setattr(sys.modules[__name__], "_fd_path_from_cwd", lambda _fd: None)
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_FD_PATH_TEMPLATES",
+        ("/dev/fd/{fd}", str(folder / "fd-{fd}")),
+    )
+    assert _fd_directory(3) == str(folder / "fd-3"), "应跳过 fd 路径, 用下一条模板"
+
+    monkeypatch.setattr(sys.modules[__name__], "_FD_PATH_TEMPLATES", ("/dev/fd/{fd}",))
+    assert _fd_directory(3) is None, "问不到真实位置时必须是 None(响亮地判越界)"
+
+
 def test_resolve_dir_fd_joins_the_directory_when_it_can_be_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -426,12 +520,13 @@ def test_resolve_dir_fd_joins_the_directory_when_it_can_be_read(
     可控的“fd → 目录”映射把还原逻辑本身钉住 —— 读不到时**必须**原样返回, 否则一次
     认不出来的相对删除会被当成合法操作而静默放行。
     """
-    import sys
-
     folder = tmp_path / "root"
     folder.mkdir()
     fake = folder / "fd-3"
     fake.mkdir()
+    # 只留模板这一条路(见上一条用例的同一句说明)。
+    monkeypatch.setattr(sys.modules[__name__], "_fcntl", None)
+    monkeypatch.setattr(sys.modules[__name__], "_fd_path_from_cwd", lambda _fd: None)
     monkeypatch.setattr(
         sys.modules[__name__], "_FD_PATH_TEMPLATES", (str(folder / "fd-{fd}"),)
     )

@@ -10,12 +10,16 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from functools import partial
+from pathlib import Path
 
 import customtkinter as ctk
+from PIL import Image
 
-from archive_management.domain import GameAction, PathKind, action_allowed
-from archive_management.exceptions import ArchiveManagementError
+from archive_management.domain import ArtworkKind, GameAction, PathKind, action_allowed
+from archive_management.exceptions import ArchiveManagementError, ArtworkImageError
 from archive_management.i18n import tr
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import (
@@ -42,6 +46,8 @@ from archive_management.ui.widgets import (
 )
 
 _ChangeCallback = Callable[[], None]
+
+logger = logging.getLogger(__name__)
 
 
 def _kind_text(kind: PathKind) -> str:
@@ -75,10 +81,25 @@ _ROW_TEXT_INSET = 56 + 10 + 8 + 8
 # 窗口打开时的初始高度: 实际高度随后按内容算(见 _fit_window_height), 所以它只是一个
 # 合理的起点 —— 不再当内容的下限用(否则位置少的时候底部会空出一大块)。
 _WINDOW_MIN_HEIGHT = 440
+# 屏幕安全边距与页脚间距: 与设置窗口同一套口径(窗口绝不能比屏幕还高, 见 _fit_window_height).
+_SCREEN_MARGIN = 120
+_FOOTER_GAP = 6
+# 正文滚动区的高度下限(逻辑像素): 再矮也得留出能滚动的一块。
+_BODY_MIN_HEIGHT = 200
 # 位置列表的高度跟着内容走: 一条位置时只占一行的高度(不在卡片里空出一大块,
 # 15 号评审), 超过上限则由列表自己滚动。
 _LIST_MIN_HEIGHT = 88
 _LIST_MAX_HEIGHT = 200
+
+# 外观那一节里两个预览的固定尺寸(逻辑像素): 封面给竖版比例, 图标给方形。
+_ARTWORK_KINDS: tuple[ArtworkKind, ...] = ("cover", "icon")
+_ARTWORK_PREVIEW_SIZE: dict[ArtworkKind, tuple[int, int]] = {
+    "cover": (48, 72),
+    "icon": (24, 24),
+}
+_ARTWORK_LABEL_WIDTH = 44
+_ARTWORK_BUTTON_WIDTH = 96
+_ARTWORK_RESET_WIDTH = 88
 
 
 class ManageGameWindow:
@@ -114,6 +135,14 @@ class ManageGameWindow:
         self._hover: str | None = None
         # 本窗口按钮与它们的样式: 归档置灰(以及恢复可用)时要按 state 重绘配色。
         self._buttons: dict[ctk.CTkButton, ButtonStyle] = {}
+        # 外观一节: 两个预览 + 状态文字 + 各自的“选择/恢复默认”按钮(按 kind 索引).
+        self._artwork_preview: dict[ArtworkKind, ctk.CTkLabel] = {}
+        self._artwork_state: dict[ArtworkKind, ctk.CTkLabel] = {}
+        self._artwork_buttons: dict[
+            ArtworkKind, tuple[ctk.CTkButton, ctk.CTkButton]
+        ] = {}
+        # 预览图缓存: 每次改图/恢复默认就清掉(键是路径, 换了图自然换键).
+        self._artwork_images: dict[str, ctk.CTkImage | None] = {}
         self._build()
 
     # -- 布局 ---------------------------------------------------------------
@@ -130,9 +159,12 @@ class ManageGameWindow:
         window.configure(fg_color=palette.background)
         _present(self._parent, window)
 
-        container = ctk.CTkFrame(window, fg_color=palette.background)
-        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container = ctk.CTkScrollableFrame(window, fg_color=palette.background)
+        self._body = container
+        container.pack(fill="both", expand=True, padx=16, pady=(16, 0))
         container.grid_columnconfigure(0, weight=1)
+        # 内容装得下就不立滚动条(与主页列表/设置窗口同一条规则).
+        auto_scrollbar(container)
 
         header = ctk.CTkFrame(container, fg_color=palette.panel, corner_radius=10)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -189,6 +221,9 @@ class ManageGameWindow:
         )
         self._delete_btn.pack(side="left")
 
+        # 外观一节放在页头之后: 它管的是“这款游戏长什么样”, 在定时备份与位置之前。
+        self._build_artwork_section(container, row=1)
+
         # 「定时备份」是一节小标题, 值单独一行用次要色: 它与"原始存档位置"不能
         # 长得一模一样, 否则整窗自上而下没有层级(15 号评审)。
         self._schedule_heading = ctk.CTkLabel(
@@ -198,7 +233,7 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_body,
         )
-        self._schedule_heading.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self._schedule_heading.grid(row=2, column=0, sticky="w", pady=(10, 0))
         self._schedule_state = ctk.CTkLabel(
             container,
             text="",
@@ -206,7 +241,7 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_muted,
         )
-        self._schedule_state.grid(row=2, column=0, sticky="w", pady=(2, 6))
+        self._schedule_state.grid(row=3, column=0, sticky="w", pady=(2, 6))
 
         locations_title = ctk.CTkLabel(
             container,
@@ -215,7 +250,7 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_body,
         )
-        locations_title.grid(row=3, column=0, sticky="w", pady=(0, 6))
+        locations_title.grid(row=4, column=0, sticky="w", pady=(0, 6))
 
         self._list_scroll = ctk.CTkScrollableFrame(
             container,
@@ -223,7 +258,7 @@ class ManageGameWindow:
             corner_radius=10,
             height=_LIST_MIN_HEIGHT,
         )
-        self._list_scroll.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self._list_scroll.grid(row=5, column=0, sticky="ew", pady=(0, 8))
         self._list_scroll.grid_columnconfigure(0, weight=1)
         auto_scrollbar(self._list_scroll)
 
@@ -238,11 +273,11 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        note.grid(row=5, column=0, sticky="w", pady=(0, 8))
+        note.grid(row=6, column=0, sticky="w", pady=(0, 8))
         attach_tooltip(note, tr("manage.backup_note_tip", path=self._backup_location))
 
         action_bar = ctk.CTkFrame(container, fg_color="transparent")
-        action_bar.grid(row=6, column=0, sticky="w")
+        action_bar.grid(row=7, column=0, sticky="w")
         self._location_buttons: list[ctk.CTkButton] = []
         # 两行两组: 第一行是"新增(主操作, 强调色) + 管理现有位置", 第二行只放破坏性的
         # "删除"。六个按钮挤一行时总宽(96+96+108+92+92+80 = 564)已经等于容器可用宽度,
@@ -270,7 +305,7 @@ class ManageGameWindow:
         self._location_buttons.append(remove)
 
         danger_bar = ctk.CTkFrame(container, fg_color="transparent")
-        danger_bar.grid(row=7, column=0, sticky="w", pady=(8, 0))
+        danger_bar.grid(row=8, column=0, sticky="w", pady=(8, 0))
         self._delete_origin_btn = self._make_button(
             danger_bar,
             tr("loc.delete_origin"),
@@ -280,19 +315,212 @@ class ManageGameWindow:
         )
         self._delete_origin_btn.pack(side="left")
 
-        # 「关闭」是中性动作: 不穿危险色(15 号评审)。
+        # 「关闭」是中性动作: 不穿危险色(15 号评审)。它放在**固定页脚**里: 正文装不下要
+        # 滚动时, 它既不该跟着跑, 也不该被屏幕下沿切掉(与设置窗口同一套)。
+        footer = ctk.CTkFrame(window, fg_color=palette.background)
+        self._footer = footer
+        footer.pack(fill="x", padx=16, pady=(_FOOTER_GAP, 16))
         self._close_btn = self._make_button(
-            container, tr("dialog.close"), self.close, width=96
+            footer, tr("dialog.close"), self.close, width=96
         )
-        self._close_btn.grid(row=8, column=0, sticky="e", pady=(10, 0))
+        self._close_btn.pack(side="right")
 
         self._apply_archived_rules()
         self._render_state()
         self._render_schedule_state()
+        self._render_artwork()
         self.refresh()
         # 建窗阶段窗口还没映射: 要完整跑一轮事件循环, 位置列表的新高度才会传播到
         # 窗口的请求尺寸上(只跑 idle 时量到的还是画布的默认高度)。
         self._fit_window_height(settle=True)
+
+    def _build_artwork_section(self, container: ctk.CTkFrame, *, row: int) -> None:
+        """建出"外观"那一节: 封面与图标各一行(预览 + 状态 + 选择/恢复默认).
+
+        为什么放在这里而不是别处: 平台取图由适配器与 CDN 决定, **手动添加的游戏压根
+        没有平台图** —— 用户想给自己加的游戏贴一张图, 只能从界面上给一个入口(用户
+        2026-10-03 的要求)。用户挑的图存在数据目录(在缓存之外), 所以清理缓存不会把它
+        带走(见 ``services.artwork.UserArtworkStore``)。
+        """
+        palette = self._palette
+        section = ctk.CTkFrame(container, fg_color=palette.panel, corner_radius=10)
+        section.grid(row=row, column=0, sticky="ew", pady=(0, 10))
+        section.grid_columnconfigure(2, weight=1)
+        heading = ctk.CTkLabel(
+            section,
+            text=tr("manage.appearance_title"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_body,
+        )
+        heading.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 6))
+        for index, kind in enumerate(_ARTWORK_KINDS, start=1):
+            self._build_artwork_row(section, kind, row=index)
+
+    def _build_artwork_row(
+        self, section: ctk.CTkFrame, kind: ArtworkKind, *, row: int
+    ) -> None:
+        """一行的外观控件: 名称 + 预览 + 状态文字 + 选择 + 恢复默认."""
+        palette = self._palette
+        name = ctk.CTkLabel(
+            section,
+            text=tr(
+                "manage.artwork_cover" if kind == "cover" else "manage.artwork_icon"
+            ),
+            anchor="w",
+            width=_ARTWORK_LABEL_WIDTH,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        name.grid(row=row, column=0, sticky="w", padx=(12, 8), pady=(0, 10))
+        preview = ctk.CTkLabel(section, text="", width=_ARTWORK_PREVIEW_SIZE[kind][0])
+        preview.grid(row=row, column=1, sticky="w", pady=(0, 10))
+        self._artwork_preview[kind] = preview
+        state = ctk.CTkLabel(
+            section,
+            text="",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_muted,
+        )
+        state.grid(row=row, column=2, sticky="w", padx=(10, 8), pady=(0, 10))
+        self._artwork_state[kind] = state
+        choose = self._make_button(
+            section,
+            tr("manage.choose_cover" if kind == "cover" else "manage.choose_icon"),
+            partial(self._choose_artwork, kind),
+            width=_ARTWORK_BUTTON_WIDTH,
+        )
+        choose.grid(row=row, column=3, sticky="e", padx=(0, 6), pady=(0, 10))
+        reset = self._make_button(
+            section,
+            tr("manage.artwork_reset"),
+            partial(self._reset_artwork, kind),
+            width=_ARTWORK_RESET_WIDTH,
+        )
+        reset.grid(row=row, column=4, sticky="e", padx=(0, 12), pady=(0, 10))
+        self._artwork_buttons[kind] = (choose, reset)
+
+    def _render_artwork(self) -> None:
+        """按后端当前状态重画两行: 预览、状态文字与"恢复默认"的可用性.
+
+        状态文字区分"自定义"与"内置": 用户改过图之后得能看出来当前用的是哪一份, 否则
+        想换回平台图时只能靠猜。
+        """
+        for kind in _ARTWORK_KINDS:
+            custom = self._backend_text(self._backend.user_artwork_path, kind)
+            try:
+                effective = self._backend.artwork_path(self._game_id, kind)
+            except ArchiveManagementError:  # 缺图不影响管理功能
+                effective = ""
+            preview = self._artwork_preview[kind]
+            picture = self._load_artwork(effective, kind)
+            if picture is None:
+                # 没有图: 显示名称首字占位(与主页海报卡片同一套做法: 别留一块空白).
+                preview.configure(
+                    text=self._name[:1]
+                    if kind == "icon"
+                    else tr("manage.artwork_none"),
+                    image=None,
+                    font=ctk.CTkFont(size=12),
+                    text_color=self._palette.text_muted,
+                )
+            else:
+                preview.configure(text="", image=picture)
+            self._artwork_state[kind].configure(
+                text=tr(
+                    "manage.artwork_custom" if custom else "manage.artwork_builtin"
+                ),
+                text_color=(
+                    self._palette.accent if custom else self._palette.text_muted
+                ),
+            )
+            _choose, reset = self._artwork_buttons[kind]
+            reset.configure(state="normal" if custom else "disabled")
+        self._paint_buttons()
+
+    def _backend_text(
+        self, reader: Callable[[str, ArtworkKind], str], kind: ArtworkKind
+    ) -> str:
+        """读一次后端状态; 失败(游戏已删/参数不对)按"没有"处理."""
+        try:
+            return reader(self._game_id, kind)
+        except ArchiveManagementError as exc:  # pragma: no cover - 渲染期不该抛
+            logger.debug("读取图片状态失败: %s", exc)
+            return ""
+
+    def _load_artwork(self, path: str, kind: ArtworkKind) -> ctk.CTkImage | None:
+        """把本地图片读成预览图(读不到/解码失败时返回 None 走文字占位).
+
+        与主页海报卡片同一条约定: 渲染是同步的, 这里**不联网**; 图坏了只记一行日志,
+        绝不让窗口建不出来。
+
+        缓存**只增不减**(键里带 mtime 与大小, 换了图自然是新键): Tk 的图片被 Python
+        回收之后控件里还留着那个名字, 下一次 ``configure(image=None)`` 会以
+        ``image "pyimage1" doesn't exist`` 直接抛下来 —— 恢复默认走的正是那一条(实测)。
+        一个窗口里换不了几次图, 多留几个对象无所谓。
+        """
+        if not path:
+            return None
+        try:
+            info = Path(path).stat()
+        except OSError:  # 图被移走了: 当"没有图"
+            return None
+        key = f"{path}:{info.st_mtime_ns}:{info.st_size}:{kind}"
+        if key in self._artwork_images:
+            return self._artwork_images[key]
+        picture: ctk.CTkImage | None = None
+        try:
+            with Image.open(path) as image:
+                loaded = image.copy()
+        except (OSError, ValueError) as exc:
+            logger.warning("预览图无法解码(%s): %s", path, exc)
+        else:
+            picture = ctk.CTkImage(light_image=loaded, size=_ARTWORK_PREVIEW_SIZE[kind])
+        self._artwork_images[key] = picture
+        return picture
+
+    def _choose_artwork(self, kind: ArtworkKind) -> None:
+        """选一张本地图片并设成这款游戏的封面/图标.
+
+        归档后不允许改: 与重命名/启停同一档(归档只留删除/导出/取消归档/打开详情),
+        所以这里借 ``rename`` 那条归档规则。
+        """
+        if self._blocked("rename"):
+            return
+        title = tr(
+            "manage.choose_cover_title"
+            if kind == "cover"
+            else "manage.choose_icon_title"
+        )
+        chosen = pick_file(title=title)
+        if not chosen:  # 用户取消
+            return
+        try:
+            self._backend.set_game_artwork(self._game_id, kind, chosen)
+        except ArtworkImageError as exc:
+            # 图片不可用: 按原因代码取文案(服务层只给代码与原始细节, 见 ArtworkImageError)。
+            info_dialog(
+                self._window,
+                self._palette,
+                title=tr("manage.artwork_problem"),
+                message=tr(f"artwork.error.{exc.code}"),
+            )
+            return
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
+        self._render_artwork()
+        self._fit_window_height()
+        self._on_change()
+
+    def _reset_artwork(self, kind: ArtworkKind) -> None:
+        """恢复默认: 删掉用户指定的那份图(没有就什么都不做)."""
+        if not self._backend.clear_game_artwork(self._game_id, kind):
+            return
+        self._render_artwork()
+        self._fit_window_height()
+        self._on_change()
 
     def _make_button(
         self,
@@ -368,6 +596,9 @@ class ManageGameWindow:
             button.configure(state="disabled")
         for button in (self._rename_btn, self._schedule_btn, self._toggle_btn):
             button.configure(state="disabled")
+        # 「外观」那一节也归在“改游戏信息”里: 归档后与重命名/启停同一档置灰。
+        for choose, _reset in self._artwork_buttons.values():
+            choose.configure(state="disabled")
         self._paint_buttons()
 
     def _blocked(self, action: GameAction) -> bool:
@@ -417,22 +648,51 @@ class ManageGameWindow:
         )
 
     def _fit_window_height(self, *, settle: bool = False) -> None:
-        """窗口高度按内容算: 位置列表定高之后, 多余的空白不再留在窗口里.
+        """窗口高度按内容算, 但**绝不出屏**: 装不下就把正文交给滚动条.
 
-        出处(2026-10-02 用户反馈): 底部按钮与窗口下沿之间空出一大块。两个原因叠加:
-        ① 这里又对内容高度取了一次 ``_WINDOW_MIN_HEIGHT`` 的下限; ② ``winfo_reqheight()``
-        是**物理**像素, 而 ``CTk.geometry()`` 吃**逻辑**像素(会乘窗口缩放, 125% 的屏上就是
-        1.25 倍) —— 直接拿物理值去定高, 窗口永远比内容高一截。所以现在**只按内容**, 而且
-        除回窗口缩放(见 ``widgets.window_scaling``)。
+        出处(2026-10-02 用户反馈): 底部按钮与窗口下沿之间空出一大块。原因是这里又对内容
+        高度取了一次 ``_WINDOW_MIN_HEIGHT`` 的下限, 而且 ``winfo_reqheight()`` 是**物理**
+        像素而 ``CTk.geometry()`` 吃**逻辑**像素(125% 的屏上就是 1.25 倍)—— 现在只按内容,
+        且除回窗口缩放(见 ``widgets.window_scaling``)。
+
+        2026-10-03 加"外观"一节之后多一条: 内容高过屏幕时窗口不能比屏幕还高(矮屏用例
+        ``test_workspace_windows_fit_the_screen`` 实测报过 676 > 576)。所以先把正文区的高度
+        定成"内容想要的高度", 再夹到"屏高 - 安全边距 - 页脚": 夹住的那部分由正文自己滚,
+        页脚与"关闭"始终看得见。
         """
         if settle:
             self._window.update()
         else:
             self._window.update_idletasks()
         scale = window_scaling(self._window)
-        height = round(int(self._window.winfo_reqheight()) / scale)
+        chrome = (
+            int(self._footer.winfo_reqheight())
+            + round(_FOOTER_GAP * scale)
+            + round(_WINDOW_PAD_Y * 2 * scale)
+        )
+        available = round(
+            (int(self._window.winfo_screenheight()) - _SCREEN_MARGIN) / scale
+        )
+        room = max(_BODY_MIN_HEIGHT, available - round(chrome / scale))
+        wanted = max(_BODY_MIN_HEIGHT, round(self._body_content_height() / scale))
+        self._body.configure(height=min(wanted, room))
+        self._window.update_idletasks()
+        height = max(
+            _WINDOW_MIN_HEIGHT,
+            min(round(int(self._window.winfo_reqheight()) / scale), available),
+        )
         self._window.geometry(f"{_WINDOW_WIDTH}x{height}")
         _present(self._parent, self._window)
+
+    def _body_content_height(self) -> int:
+        """正文内容想要多高(**物理**像素): 数滚动区画布里排出来的那一块.
+
+        不能读正文自己的 ``winfo_reqheight()``: 滚动区的高度是**我们配置**的值(默认 200),
+        与内容无关 —— 拿它定高等于把窗口钉死在 200 像素上。
+        """
+        canvas = getattr(self._body, "_parent_canvas", None)
+        box = None if canvas is None else canvas.bbox("all")
+        return 0 if box is None else int(box[3]) - int(box[1])
 
     def _rebuild_rows(self) -> None:
         for child in self._list_scroll.winfo_children():

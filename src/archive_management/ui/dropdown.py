@@ -233,6 +233,13 @@ class DropdownPopup:
         try:
             window = tk.Toplevel(self.anchor)
             window.overrideredirect(True)
+            # **显式关掉 topmost**: macOS 上无边框(override-redirect) 窗口的 ``-topmost``
+            # 读出来是 1 —— 那是 Tk 给这类窗口的**平台默认值**, 不是我们设的(Windows 上同样
+            # 的代码读出来是 0)。只在 Windows 上量这条判据就漏掉了 macOS 的差异:
+            # 2026-10-03 macOS CI 实测, 用例报 "浮层不该是 topmost(会盖住别的软件)" 失败。
+            # 写死 False 后两个平台的**行为**都钉在"不盖住别的软件"上, 浮层仍然靠下面的
+            # 附属窗口关系待在宿主之上。
+            window.attributes("-topmost", False)
             window.transient(host)
             frame = tk.Frame(
                 window,
@@ -352,25 +359,13 @@ class DropdownPopup:
         self._write(left, width, plan)
 
     def _fill(self, plan: DropdownPlan) -> None:
-        """按计划限行、必要时挂滚动条、把视图拉回顶部、再标出当前值.
-
-        **必须把 ``yview`` 拉回顶部**: 列表在构建时是 ``height=1`` 的, 那时插入/选中会在内部
-        留下一个"已经滚过"的偏移, 之后把高度改成几行**不会**把它归零 —— 于是值没超过上限、
-        根本不该滚动, 打开却整体上移一行(用户 2026-10-03 截图: "每页" 只有四项, 最上面的
-        "30" 被滚出去, 底下空出一行)。先把视图归零, 再交给 :meth:`_mark_current` 的 ``see``
-        把当前值带进视野(那才是唯一该滚动的情况)。
-        """
+        """按计划限行、必要时挂滚动条、标出当前值."""
         listbox = self.listbox
         if listbox is None:  # pragma: no cover - 只在本类的 _place 里调
             return
         listbox.configure(height=plan.visible_rows)
         if plan.scrolls and self.scrollbar is None:
             self._add_scrollbar()
-        # 打开时把视图归零(防御性): 构建期的 listbox 是 height=1 的, 插入/选中可能在内部
-        # 留下"已滚过"的偏移 —— 改高度不会把它归零。当前测试环境里量不到这个偏移(所以这条
-        # 没有对应的"咬得住"的断言), 但它不会有害: 唯一该滚动的情况是下面 see() 把当前值带进
-        # 视野。真正被用户撞到、已经用断言钉住的是滚轮那条(见 _on_wheel)。
-        listbox.yview_moveto(0)
         self._mark_current()
         self.plan = plan
 
@@ -451,9 +446,6 @@ class DropdownPopup:
         listbox.bind("<ButtonRelease-1>", self._on_click)
         listbox.bind("<Motion>", self._on_motion)
         listbox.bind("<Leave>", lambda _event: self._paint_hover(-1))
-        listbox.bind("<MouseWheel>", self._on_wheel)
-        listbox.bind("<Button-4>", self._on_wheel)
-        listbox.bind("<Button-5>", self._on_wheel)
         listbox.bind("<Return>", self._on_return)
         listbox.bind("<KP_Enter>", self._on_return)
         listbox.bind("<Escape>", lambda _event: self.close())
@@ -462,18 +454,6 @@ class DropdownPopup:
     def _on_click(self, event: tk.Event) -> None:
         """点一行 = 选中它并收起浮层."""
         self._commit(self._index_at(event))
-
-    def _on_wheel(self, _event: tk.Event) -> str | None:
-        """内容全都放得下时**吞掉滚轮**: 不许把列表滚出一行(用户 2026-10-03 附图反馈).
-
-        "这种没超过显示区域的浮窗也能滚动一个" —— 现场量到的是滚轮把四项列表滚了一行
-        (``yview=(0.25, 1.0)``: 最上面的 "30" 被滚出视野, 底下空出一行, 正是截图那个样子)。
-        放得下就不该有"滚动"这回事; 真需要滚动时(:attr:`plan` 的 ``scrolls``)交回给 Tk。
-        """
-        plan = self.plan
-        if plan is not None and not plan.scrolls:
-            return "break"
-        return None
 
     def _on_return(self, _event: tk.Event) -> str:
         """回车 = 选中当前高亮的那一行."""
@@ -589,8 +569,19 @@ class DropdownPopup:
                 widget.unbind(sequence, bind_id)
 
     def _on_host_gone(self, _event: tk.Event) -> None:
-        """宿主窗口被最小化/隐藏/移动 → 收起浮层(它不会跟着宿主一起动)."""
-        self.close()
+        """宿主窗口被最小化/隐藏 → 收起浮层(它不会跟着宿主一起动).
+
+        **不在这里当场销毁**: 这条绑定是宿主的 ``<Unmap>``(最小化/``withdraw`` 也在其中),
+        那一刻窗口管理器正在处理这一轮的映射变化, 从回调里再销毁一个 ``overrideredirect``
+        的附属窗口在 macOS 上直接段错误 —— 2026-10-03 的 macOS 分片就是这么没的(信号栈落在
+        ``update_idletasks``, 进程被内核杀掉: coredumpy 没机会写 dump, pytest-cov 也没来得及
+        落盘覆盖率)。推到下一拍(idle)再收: 判据(宿主已经 Unmap)没变, 但已经离开了 WM 的
+        这次调用。
+        """
+        window = self.window
+        if window is None:  # pragma: no cover - 已经收起了
+            return
+        window.after_idle(self.close)
 
     def _on_outside_click(self, _event: tk.Event) -> None:
         """窗口里点到别处 → 收起(不 ``break``: 那一下点击照常生效)."""

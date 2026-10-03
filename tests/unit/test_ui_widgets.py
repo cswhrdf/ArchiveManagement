@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import customtkinter as ctk
 import pytest
@@ -25,6 +25,58 @@ pytestmark = [
     pytest.mark.story("控件主题重绘"),
     pytest.mark.layer("unit"),
 ]
+
+
+# 度量包装只用到窗口的**缩放系数**(用例把它钉死), 所以这里给个类型正确、不会被碰的替身.
+_NO_WINDOW = cast("tk.Misc", None)
+
+
+class _FakeFont:
+    """假字体: 未缩放的字号量出来的尺寸(用于验证度量要过窗口缩放)."""
+
+    def __init__(self, width: int, linespace: int) -> None:
+        self._width = width
+        self._linespace = linespace
+
+    def measure(self, _text: str) -> int:
+        """未缩放的文字宽度."""
+        return self._width
+
+    def metrics(self, option: str) -> int:
+        """未缩放的行高(只支持 linespace, 与真实契约一致)."""
+        assert option == "linespace"
+        return self._linespace
+
+
+def _scaled(monkeypatch: pytest.MonkeyPatch, scale: float) -> Any:
+    """把窗口缩放钉成 ``scale`` 后的度量包装(用假字体, 不建窗口)."""
+    monkeypatch.setattr(widgets, "window_scaling", lambda _window: scale)
+    return widgets.measured_font(_FakeFont(width=231, linespace=14), _NO_WINDOW)
+
+
+def test_measured_font_scales_both_width_and_line_height(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """渲染字号下的**宽度与行高**都要过缩放.
+
+    125% 实测: ``CTkFont(size=12)`` 量一条 231px、linespace 14, 而控件里真正用的字体
+    量同一条 288px、linespace 18。只缩放 ``measure`` 是不够的 —— 海报卡片"一行名也占
+    两行高"靠的就是 ``metrics("linespace")``, 少缩放 1.25 倍就会把两行的高度算成一行。
+    """
+    scaled = _scaled(monkeypatch, 1.25)
+
+    assert scaled.measure("任意") == 289, "宽度没按缩放换算"
+    assert scaled.metrics("linespace") == 18, "行高没按缩放换算"
+
+
+def test_measured_font_is_a_no_op_when_the_window_is_unscaled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缩放为 1 时原样返回: 包装一层只会白白多一次四舍五入."""
+    font = _FakeFont(width=231, linespace=14)
+    monkeypatch.setattr(widgets, "window_scaling", lambda _window: 1.0)
+
+    assert widgets.measured_font(font, _NO_WINDOW) is font
 
 
 class _FakeCtkWidget:

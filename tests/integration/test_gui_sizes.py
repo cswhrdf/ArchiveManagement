@@ -711,6 +711,28 @@ def _geometry_app(paths: ApplicationPaths) -> Callable[[Any], ArchiveApp]:
     return build
 
 
+def _geometry_inside_the_desktop(
+    app: ctk.CTk, geometry: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """把一套几何收进**真桌面**(留出标题栏/任务栏余量), 位置尽量保留.
+
+    为什么需要它: 用例想验的是"写进去的逻辑尺寸能原样读回来", 而桌面装不下那个尺寸时
+    窗口管理器会把它压回屏幕内 —— 那时读到的是 WM 的决定, 不是我们的换算(2026-10-03 的
+    Windows CI 实测: 写 1500x820 读回 1200x749, 因为 runner 桌面小, 而窗口最小宽度
+    1200 又顶住了)。尺寸按**逻辑**像素给, 所以能放下的尺寸要拿缩放把屏幕换算回来。
+    """
+    width, height, x, y = geometry
+    scale = window_scaling(app)
+    room_width = int(app.winfo_screenwidth()) - x
+    room_height = int(app.winfo_screenheight()) - y - TITLE_MARGIN
+    return (
+        min(width, max(1, round(room_width / scale))),
+        min(height, max(1, round(room_height / scale))),
+        x,
+        y,
+    )
+
+
 def _desktop_holds(app: ctk.CTk, geometry: tuple[int, int, int, int]) -> bool:
     """真桌面(留出任务栏余量)装得下这套几何吗.
 
@@ -790,18 +812,25 @@ def test_the_main_window_returns_to_the_remembered_geometry(tmp_path: Any) -> No
     # 用户拖到别处并改了尺寸 → 读出来必须还是同一套单位(写进去 1500x820, 读回来就得是
     # 1500x820)。这一条就是 2026-10-02 用户报的"记住的几何没生效"的上游: 读成物理值
     # 之后再被乘一次缩放, 于是每重启一次窗口大一圈。
-    app.geometry("1500x820+240+150")
+    #
+    # 先把最小尺寸放开: 这条判据只关心单位换算(写逻辑值 → 读逻辑值), 而窗口最小尺寸
+    # 1200x720 在 CI 的桌面上会把请求尺寸顶回去 —— 那样量的就是 WM 了。放开之后用
+    # "真桌面装得下"的尺寸来验, 判据在任何机器上都成立。
+    app.minsize(1, 1)
+    wanted = _geometry_inside_the_desktop(app, (1500, 820, 240, 150))
+    app.geometry("{}x{}+{}+{}".format(*wanted))
     _pump(app)
     moved = current_window_geometry(app, scale=window_scaling(app))
     assert moved is not None
-    assert (moved.width, moved.height) == (1500, 820), (
-        f"读到的是逻辑像素(与写进去的同一套), 实测 {moved.geometry()}"
+    assert (moved.width, moved.height) == (wanted[0], wanted[1]), (
+        f"读到的是逻辑像素(与写进去的同一套), 实测 {moved.geometry()} "
+        f"(写进去 {wanted[0]}x{wanted[1]})"
     )
     app._on_close()
 
     written = load_config(paths.config_path)
     assert written.window.geometry() == moved.geometry(), (
-        "关窗要写回窗口**当时**的几何(桌面装不下 1500x820 时写回的应当是被夹过的那套)"
+        "关窗要写回窗口**当时**的几何(桌面装不下请求尺寸时写回的应当是被夹过的那套)"
     )
     assert (written.theme, written.language) == ("dark", "en"), (
         "写回几何不能把别的字段冲掉(读-改-写)"
@@ -874,6 +903,9 @@ def test_the_manage_window_hugs_its_content() -> None:
     出处(2026-10-02 用户反馈): 原来内容高度有个 440 的下限, 位置少的时候窗口比内容高一截,
     底部按钮下面空出一大块。现在只按内容定高 —— 判据是"窗口高度 ≈ 内容请求高度"且
     "关闭按钮下面剩的空白很小", 两条一起看才拦得住"把下限调小一点"这种糊法。
+
+    2026-10-03 起正文是**滚动区**、关闭按钮在**固定页脚**里(外观一节让内容可能高过屏幕),
+    所以关闭按钮的 y 是相对页脚的: 量它离窗口下沿多远要先把页脚自己的位置加上。
     """
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     try:
@@ -900,8 +932,104 @@ def test_the_manage_window_hugs_its_content() -> None:
             assert abs(height - requested) <= 8, (
                 f"窗口高度应当就是内容高度: 实测 {height}, 内容请求 {requested}"
             )
-            below = height - (int(close_btn.winfo_y()) + int(close_btn.winfo_height()))
+            button_bottom = int(manage._footer.winfo_y()) + int(
+                close_btn.winfo_y() + close_btn.winfo_height()
+            )
+            below = height - button_bottom
             assert 0 <= below <= 40, f"关闭按钮下面留了 {below}px 的空白"
+        finally:
+            manage.close()
+            _pump(app)
+    finally:
+        app._on_close()
+
+
+def _wait_settled_parent(app: Any, *, seconds: float = 2.0) -> None:
+    """等主窗口落地且几何不再变, 再留一拍给弹窗自己的重校落地.
+
+    判据与 ``dialogs._settle_centering`` 的收工条件一致(已映射 + 几何不再变): 测试里固定
+    睡一小段会在慢机器上量到"还没稳定"的中间态 —— 那条用例就变成先红后绿的抖动(实测
+    整组跑时量到过 -407px, 单独跑却是 0)。
+    """
+    deadline = time.monotonic() + seconds
+    seen = dialogs._parent_box(app)
+    stable = 0
+    while time.monotonic() < deadline:
+        _pump(app)
+        current = dialogs._parent_box(app)
+        stable = stable + 1 if current == seen else 0
+        seen = current
+        if app.winfo_ismapped() and stable >= 2:
+            break
+        time.sleep(0.01)
+    # 重校是 after(...) 排定的: 再放几拍事件循环(跨过实现的检查间隔)让它落地。
+    for _ in range(8):
+        _pump(app)
+        time.sleep(dialogs._CENTER_DELAY_MS / 1000)
+
+
+def _assert_centered(parent: Any, window: Any, *, tolerance: int = 12) -> None:
+    """弹窗客户区中心要落在父窗口中心上(容差留给窗口管理器的取整)."""
+    dx = (window.winfo_rootx() + window.winfo_width() / 2) - (
+        parent.winfo_rootx() + parent.winfo_width() / 2
+    )
+    dy = (window.winfo_rooty() + window.winfo_height() / 2) - (
+        parent.winfo_rooty() + parent.winfo_height() / 2
+    )
+    hint = (
+        f"弹窗偏离父窗口中心 {dx:+.0f}px / {dy:+.0f}px; "
+        f"弹窗 {window.winfo_width()}x{window.winfo_height()} "
+        f"@{window.winfo_rootx()},{window.winfo_rooty()}; "
+        f"父窗口 {parent.winfo_width()}x{parent.winfo_height()} "
+        f"@{parent.winfo_rootx()},{parent.winfo_rooty()}"
+    )
+    assert abs(dx) <= tolerance, f"横向{hint}"
+    assert abs(dy) <= tolerance, f"纵向{hint}"
+
+
+def test_the_first_dialog_of_a_cold_start_is_centered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """冷启动第一次开弹窗也要居中: 那一刻父窗口还没落地(见 dialogs._settle_centering).
+
+    出处(用户 2026-10-03): 软件启动后第一次打开"游戏详情 → 游戏设置", 窗口不在软件
+    中间而偏右。现场实测: 那一刻父窗口**还没映射**, ``winfo_width()`` 只有布局前的 200
+    (恢复后的 1700 要等映射之后), 按 200 算居中就偏出几百像素 —— 而弹窗自己的尺寸是
+    对的, 所以单看弹窗量不出任何异常。
+
+    前置断言(未映射)是这一幕的**定义**: 建完主窗口后不进事件循环直接开弹窗。如果哪天
+    CTk 改成构造里就映射, 这里会红 —— 那是"这一幕已经不存在了"的提示, 那时这条用例要
+    按新的现场重写, 而不是把断言删掉。
+
+    bite 口径: 把 ``dialogs._settle_centering`` 的调用去掉(即"按未映射的父窗口居中
+    一次就算完"), 这一幕实测偏 500+ 像素, 12px 的容差拦得住。
+    """
+    monkeypatch.setattr(
+        tkinter.Misc, "winfo_screenheight", lambda _self, *a: SCREEN["height"]
+    )
+    monkeypatch.setattr(
+        tkinter.Misc, "winfo_screenwidth", lambda _self, *a: SCREEN["width"]
+    )
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        app.update_idletasks()  # 只算布局, 不进事件循环(映射照旧没发生)
+        assert not app.winfo_ismapped(), "前提: 主窗口在弹窗打开时尚未映射"
+        games = list(app.backend.list_games())
+        assert games, "演示后端应该至少有一款游戏"
+        manage = ManageGameWindow(
+            app,
+            backend=app.backend,
+            palette=app.p,
+            game_id=games[0].game_id,
+            name=games[0].name,
+            enabled=True,
+            backup_location="D:\\Backups",
+            on_change=lambda: None,
+        )
+        try:
+            assert not app.winfo_ismapped(), "前提: 弹窗是在主窗口落地之前建的"
+            _wait_settled_parent(app)  # 主窗口到这里才真正落地并恢复尺寸
+            _assert_centered(app, manage._window)
         finally:
             manage.close()
             _pump(app)
