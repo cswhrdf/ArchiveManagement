@@ -98,6 +98,16 @@ def test_parse_rejects_invalid_theme(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- 快捷键
 
 
+def test_the_window_geometry_switch_defaults_to_on() -> None:
+    """记住窗口大小与位置**默认开启**, 且默认没记过任何几何(2026-10-02 用户要求).
+
+    默认值是被顺手改掉之后最难发现的一处: 关掉之后用户得自己去设置里再打开。
+    """
+    config = AppConfig()
+    assert config.ui.remember_window is True
+    assert config.window.geometry() is None
+
+
 def test_default_hotkeys_are_shipped_defaults() -> None:
     config = AppConfig()
     assert config.hotkeys == HotkeySettings()

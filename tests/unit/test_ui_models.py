@@ -55,7 +55,6 @@ from archive_management.ui.models import (
     batch_row_choice,
     branch_order,
     can_backup,
-    chips_lines,
     export_batch_prompt,
     exportable_games,
     filter_by_source,
@@ -69,6 +68,7 @@ from archive_management.ui.models import (
     listable_candidates,
     poster_columns,
     size_label,
+    status_lines,
     target_game_id,
     target_label_for,
     timeline_order,
@@ -765,10 +765,15 @@ def test_home_board_summary_detail_and_options() -> None:
         ]
     )
 
-    assert board.summary == tr("home.summary", total=2, recent=2, pending=1, archived=0)
+    # 统计行**不含已归档**: 归档的游戏不常看, 单独再报一个数只是噪声(2026-10-02 用户反馈)。
+    assert board.summary == tr("home.summary", total=2, recent=2, pending=1)
     assert board.detail == tr("home.detail", backed_up=2, risky=0)
     assert [option.key for option in board.views] == [view.value for view in HomeView]
     assert board.view_text == f"{tr('home.view_all')} (2)"
+    # 已归档页签**不显示数量**(见 HomeOption.count 的说明), 其余页签照旧。
+    archived = next(item for item in board.views if item.key == HomeView.ARCHIVED.value)
+    assert archived.text == archived.label
+    assert "(" not in archived.text
     assert board.origin_text == tr("home.origin_all")
     assert board.category_text == tr("home.category_all")
     assert board.narrowing is False
@@ -919,67 +924,85 @@ _CHIP_WIDTH = _CHIP_FONT.WIDTH
 
 
 def _assert_no_half_chip(line: str, chips: tuple[str, ...]) -> None:
-    """断言行内除"被末尾省略号标注的那一段前缀"之外, 都是完整标签.
+    """断言行内只剩完整标签(末尾那个孤零零的省略号不算标签).
 
-    :func:`chips_lines` 允许最后一段被裁短(它由省略号标注), 但不许在行中间出现
-    半个标签 —— "手动添加" 被裁成 "手动…" 之后, 用户读到的是一句没有主语的话。
+    :func:`status_lines` 放不下时是**整块让位**给省略号(最后显示的仍是完整标签), 不把
+    标签裁短 —— "手动添加" 被裁成 "手动…" 之后, 用户读到的是一句没有主语的话。
     """
-    body = line.removesuffix("…")
+    body = line.rsplit(" …", 1)[0]
     parts = [part for part in body.split(" · ") if part]
-    if line.endswith("…"):
-        parts = parts[:-1]
     halves = [part for part in parts if part not in chips]
     assert not halves, f"标签被拦腰截断: {halves} (整行 {line!r})"
 
 
-def test_chips_lines_wraps_at_a_chip_boundary_before_truncating() -> None:
-    """状态列放不下时先换行, 且每一行都停在一个完整标签之后(第 6 号评审).
+def test_status_lines_puts_state_and_tags_on_their_own_lines() -> None:
+    """状态一行、标签一行: 状态那几个永远在第一行, 自定义标签从第二行开始(用户口径).
 
-    "手动添加 · 已备份 · 未启用 · 测试1 · 测…" 这种一行到底再裁掉半个标签的写法,
-    读起来像一句没说完的话; 两行装得下就不该只排一行。
+    出处(2026-10-02 用户反馈): 标签多的时候原来排成了三行 —— "状态相关内容显示一行,
+    标签显示一行, 超出的部分用省略号"。
     """
-    chips = ("手动添加", "已备份", "未启用", "测试1", "测试2")
-    text = chips_lines(chips, _CHIP_FONT, 12 * _CHIP_WIDTH)
+    state = ("Steam", "已备份")
+    tags = ("测试1", "测试2", "测试3", "测试6")
+    text = status_lines(state, tags, _CHIP_FONT, 16 * _CHIP_WIDTH)
 
     lines = text.split("\n")
-    assert len(lines) == 2, f"两行放得下, 不该只排一行: {text!r}"
-    assert not lines[0].endswith("…"), f"第一行不该被截断: {text!r}"
-    assert lines[1].endswith("…"), f"第二行还放不下时要补省略号: {text!r}"
+    assert len(lines) == 2, f"标签再多也只有两行: {text!r}"
+    assert lines[0] == " · ".join(state), f"状态那几个要在同一行: {text!r}"
+    assert lines[1].startswith("测试1 · 测试2"), f"标签从第二行开始: {text!r}"
+    assert lines[1].endswith(" …"), f"标签放不下时要补省略号: {text!r}"
     for line in lines:
-        _assert_no_half_chip(line, chips)
+        _assert_no_half_chip(line, state + tags)
 
 
-def test_chips_lines_never_truncates_before_using_the_second_line() -> None:
-    """只要还有第二行可用, 截断就只能发生在换行之后."""
-    chips = ("手动添加", "已备份", "未启用", "测试1", "测试2")
-    text = chips_lines(chips, _CHIP_FONT, 6 * _CHIP_WIDTH)
+def test_status_lines_never_truncates_a_chip_in_half() -> None:
+    """放不下的标签**整块让位**: 只显示完整的, 后面跟一个省略号."""
+    state = ("手动添加", "已备份")
+    tags = ("很长的标签名字", "另一个很长的标签")
+    text = status_lines(state, tags, _CHIP_FONT, 8 * _CHIP_WIDTH)
 
-    assert "\n" in text, f"必须先换行再截断: {text!r}"
-    assert text.endswith("…")
+    lines = text.split("\n")
+    assert len(lines) == 2
+    assert lines[1].endswith(" …")
+    for line in lines:
+        _assert_no_half_chip(line, state + tags)
+
+
+def test_status_lines_uses_one_line_when_there_are_no_tags() -> None:
+    """没有自定义标签时只有一行, 且放得下就原样排、不加省略号."""
+    state = ("Steam", "已备份")
+
+    assert status_lines(state, (), _CHIP_FONT, 40 * _CHIP_WIDTH) == " · ".join(state)
+    assert status_lines((), (), _CHIP_FONT, 40 * _CHIP_WIDTH) == ""
+
+
+def test_status_lines_keeps_every_line_inside_the_width() -> None:
+    """两行都不得超宽 —— 超宽 Tk 会在标签边界处再折一次, 又变成三行."""
+    state = ("手动添加", "已备份", "未启用")
+    tags = ("测试1", "测试2", "测试3", "测试6", "测试4", "测试5")
+    width = 20 * _CHIP_WIDTH
+
+    text = status_lines(state, tags, _CHIP_FONT, width)
+
+    assert text.split("\n")[0] == " · ".join(state), text
     for line in text.split("\n"):
-        _assert_no_half_chip(line, chips)
+        assert _CHIP_FONT.measure(line) <= width, f"这一行超宽: {line!r}"
+    assert text.count("\n") + 1 <= 2
 
 
-def test_chips_lines_uses_one_line_when_everything_fits() -> None:
-    """放得下就原样排一行, 不换行也不加省略号."""
-    chips = ("Steam", "已备份")
-
-    assert chips_lines(chips, _CHIP_FONT, 40 * _CHIP_WIDTH) == " · ".join(chips)
-
-
-def test_chips_lines_handles_empty_and_single_line_budgets() -> None:
-    """没有标签时返回空串; 只允许一行时不留换行, 截断仍带省略号."""
-    assert chips_lines((), _CHIP_FONT, 100) == ""
-
-    text = chips_lines(
-        ("Steam", "已备份", "未启用"),
+def test_status_lines_truncates_a_single_too_long_chip() -> None:
+    """连第一个标签都放不下时按字符裁(否则那一行会是空的), 仍然带省略号."""
+    text = status_lines(
+        ("一个非常长的状态文案",),
+        ("一个很长的标签",),
         _CHIP_FONT,
-        8 * _CHIP_WIDTH,
-        max_lines=1,
+        4 * _CHIP_WIDTH,
     )
 
-    assert "\n" not in text
-    assert text.endswith("…")
+    lines = text.split("\n")
+    assert len(lines) == 2, text
+    for line in lines:
+        assert line.endswith("…"), text
+        assert _CHIP_FONT.measure(line) <= 4 * _CHIP_WIDTH, text
 
 
 def test_home_board_flags_a_completely_empty_library() -> None:

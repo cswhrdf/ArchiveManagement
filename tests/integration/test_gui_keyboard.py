@@ -531,7 +531,7 @@ def _ring_problems(label: str, widget: Any, sink: Any) -> list[str]:
             f"{label}: {_label(widget)} 的焦点环({ring})在底色({focused_fill})上只有 "
             f"{ratio:.2f}:1 (< {keyboard.FOCUS_RING_MINIMUM})"
         ]
-    palette = keyboard._palette_for(widget)
+    palette = keyboard.palette_for(widget)
     if (
         palette is not None
         and before_fill in (palette.accent, palette.danger)
@@ -630,12 +630,14 @@ def _settings_window(app: Any) -> Any:
         base_font_px=app._base_font_px,
         debug=app._debug,
         activation=app._activation,
+        remember_window=app._remember_window,
         shortcuts=app._shortcuts,
         on_toggle_theme=app._on_toggle_theme,
         on_apply_language=app._on_language_change,
         on_apply_font_size=app._on_font_size_change,
         on_apply_debug=app._on_debug_change,
         on_apply_activation=app._on_activation_change,
+        on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda _action, _accelerator: None,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,

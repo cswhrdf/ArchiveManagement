@@ -146,12 +146,15 @@ def remember_palette(widget: tk.Misc, palette: object) -> None:
         toplevel._palette = palette  # type: ignore[attr-defined]
 
 
-def _palette_for(widget: object) -> Palette | None:
+def palette_for(widget: object) -> Palette | None:
     """取该控件所在窗口的调色板; 窗口上没记过就按当前外观模式取一套.
 
     "这个窗口用哪套色"是准确的来源(按钮上色时会一起记下来); ``ctk.get_appearance_mode()``
     是退路 —— 主窗口切主题时会同步设置外观模式, 因此退路与实际主题一致, 不会出现
     "深色界面上画个浅色焦点环"。
+
+    **公开**: 焦点环之外还有别的"运行时才画"的东西要取色(下拉浮层, 见
+    :mod:`archive_management.ui.dropdown`), 它们不该各自再写一遍"窗口 → 调色板"。
     """
     with suppress(tk.TclError):
         toplevel = _toplevel_of(widget)
@@ -182,7 +185,7 @@ def ring_color(widget: object, *, fill: str | None = None) -> str | None:
     测试的替身控件也能问这句话(取色是纯算术, 穷举两套主题、五种按钮样式、五个界面
     底色的那批用例就是这么跑起来的)。
     """
-    palette = _palette_for(widget)
+    palette = palette_for(widget)
     if palette is None:
         return None
     candidates = [
@@ -229,7 +232,7 @@ def _ring_on(widget: ctk.CTkBaseClass, saved: dict[str, object]) -> None:
     **读不齐就不写**: 只存下 ``border_color`` 而没存 ``border_width`` 时, 失焦会去
     pop 一个不存在的键(实测单选按钮报 ``KeyError: 'border_width'``)。
     """
-    palette = _palette_for(widget)
+    palette = palette_for(widget)
     if palette is None or _is_disabled(widget):
         return
     paint = _focused_paint(widget)
@@ -441,7 +444,7 @@ def _focus_style(widget: object) -> str | None:
     style = getattr(widget, "_button_style", "")
     if isinstance(style, str) and style:
         return style
-    palette = _palette_for(widget)
+    palette = palette_for(widget)
     if palette is None:
         return None
     fill = resting_fill(widget).lower()
@@ -454,7 +457,7 @@ def _focus_style(widget: object) -> str | None:
 
 def _focused_paint(widget: object) -> dict[str, str]:
     """聚焦时该把控件换成哪套颜色(只有实底按钮会换)."""
-    palette = _palette_for(widget)
+    palette = palette_for(widget)
     if palette is None or _FOCUS_PAINT is None:
         return {}
     style = _focus_style(widget)

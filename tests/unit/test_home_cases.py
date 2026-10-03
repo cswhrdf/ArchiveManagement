@@ -132,18 +132,34 @@ def test_game_without_locations_needs_attention(tmp_path: Path) -> None:
     assert facts[0].pending is True
 
 
-def test_filter_state_round_trip(tmp_path: Path) -> None:
+def test_startup_keeps_only_the_display_preferences(tmp_path: Path) -> None:
+    """启动时**不**继承筛选条件(视图/平台/分类/搜索词), 只继承展示偏好.
+
+    出处(2026-10-02 用户反馈): "我在首页的待处理分页关的软件下次启动还在这个页面
+    打开了, 这点不符合预期" —— 落库那一侧照旧写整行(表结构不变), 读回来时筛选条件
+    一律回默认。展示偏好那半边见 :func:`test_display_preferences_round_trip`。
+    """
     database = _database(tmp_path)
     _game(database, "星际拓荒")
 
     saved = save_filter(
-        database, HomeFilter(view=HomeView.PENDING, origin="steam", search=" 拓荒 ")
+        database,
+        HomeFilter(
+            view=HomeView.PENDING,
+            origin="steam",
+            search=" 拓荒 ",
+            layout=HomeLayout.POSTER,
+            page_size=60,
+        ),
     )
-    assert saved.search == "拓荒"
+    assert saved.search == "拓荒", "落库前仍然要规范化"
+
     report = load_home(database)
-    assert report.filter.view is HomeView.PENDING
-    assert report.filter.origin == "steam"
-    assert report.filter.search == "拓荒"
+    assert report.filter.view is HomeView.ALL
+    assert report.filter.origin == ""
+    assert report.filter.search == ""
+    assert report.filter.layout is HomeLayout.POSTER, "展示偏好要继承"
+    assert report.filter.page_size == 60
 
 
 def test_display_preferences_round_trip(tmp_path: Path) -> None:

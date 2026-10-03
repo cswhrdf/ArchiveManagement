@@ -46,6 +46,7 @@ from archive_management.ui.widgets import (
     paint_button_state,
     paint_button_style,
     track_wraplength,
+    window_scaling,
 )
 
 # 文本类对话框的正文宽度: 提示、输入框与按钮行都按这个宽度左对齐, 三块不再各宽各的
@@ -236,7 +237,16 @@ def _clamp_to_comfort_line(
         current_height = int(body.cget("height"))
         if current_height <= _DIALOG_BODY_MIN:
             return
-        body.configure(height=max(_DIALOG_BODY_MIN, current_height - overflow))
+        # ``overflow`` 是**物理**像素(整窗实测/请求高度与屏幕替身同源), 而正文区的
+        # ``height`` 与写进 geometry 的一样是**逻辑**像素: 直接相减会在高 DPI 下多收
+        # 1/scale 的量(125% 的屏上收 94 物理会写成 94 逻辑 = 117 物理), 于是矮屏上
+        # 的弹窗被多压一截、正文字体大一点就真被裁。这里先把要多收的量换到逻辑像素。
+        body.configure(
+            height=max(
+                _DIALOG_BODY_MIN,
+                current_height - round(overflow / window_scaling(window)),
+            )
+        )
 
 
 def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) -> None:
@@ -362,8 +372,11 @@ def confirm_dialog(
         result.append(value)
         window.destroy()
 
+    # 按钮行**居中**: 贴着左边排看起来像“漏了排版”, 而且各对话框不一致
+    # (2026-10-02 用户反馈)。不写 ``fill``/``anchor`` 时, 这行框就按内容宽度居中
+    # —— 行里的按钮都是 ``side="left"``, 所以整组就落在中间。
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(10, 20), anchor="w")
+    buttons.pack(padx=24, pady=(10, 20))
     cancel = ctk.CTkButton(
         buttons,
         text=no_text,
@@ -921,7 +934,7 @@ def ask_text(
     entry.bind("<Return>", lambda _event: submit())
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(0, 16), anchor="w")
+    buttons.pack(padx=24, pady=(0, 16))
     cancel = ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1091,7 +1104,7 @@ def edit_backup_dialog(
     refresh_counter()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(padx=24, pady=(0, 20), anchor="e")
+    buttons.pack(padx=24, pady=(0, 20))
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1222,7 +1235,7 @@ def schedule_dialog(
     keep_entry.bind("<Return>", lambda _event: submit())
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
+    buttons.pack(padx=24, pady=(0, 20))
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1338,7 +1351,7 @@ def restore_dialog(
         window.destroy()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
+    buttons.pack(padx=24, pady=(0, 20))
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1513,7 +1526,7 @@ def import_package_dialog(
         window.destroy()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
+    buttons.pack(padx=24, pady=(0, 20))
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),
@@ -1838,7 +1851,7 @@ def export_batch_dialog(
         window.destroy()
 
     ok_button.pack(side="left")
-    buttons.pack(fill="x", padx=24, pady=(0, 20), anchor="w")
+    buttons.pack(padx=24, pady=(0, 20))
 
     _present(parent, window)
     parent.wait_window(window)
@@ -2016,7 +2029,7 @@ def batch_import_dialog(
         window.destroy()
 
     buttons = ctk.CTkFrame(window, fg_color="transparent")
-    buttons.pack(padx=24, pady=(0, 20), anchor="e")
+    buttons.pack(padx=24, pady=(0, 20))
     ctk.CTkButton(
         buttons,
         text=tr("dialog.cancel"),

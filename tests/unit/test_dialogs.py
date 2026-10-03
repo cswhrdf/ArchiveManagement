@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import tkinter as tk
 from collections.abc import Callable
-from typing import Any, TypedDict
+from pathlib import Path
+from typing import Any, TypedDict, cast
 
 import customtkinter as ctk
 import pytest
@@ -495,6 +496,43 @@ def test_present_gives_window_keys_only_to_modal_windows(
     sequences = [sequence for sequence, *_ in modal.binds]
     assert "<Escape>" in sequences
     assert "<Return>" in sequences
+
+
+def test_dialog_button_rows_are_centered(harness: _FakeParent) -> None:
+    """对话框底部的按钮行要**居中**(2026-10-02 用户反馈: 贴着左边看着像漏了排版).
+
+    判据落在行的 ``pack`` 参数上: 行里每个按钮都是 ``side="left"``, 所以只要这行自己不写
+    ``fill``/``anchor``, Tk 就把它按内容宽度摆在窗口中间; 写了任何一个都会贴到某一边。
+    这里钉住两个代表性的对话框(各行最后创建的那个按钮的上级就是这行), 其余对话框由下面
+    那条源码扫描覆盖 —— 逐个打开太贵, 而"新加的对话框又贴左"正是最容易复发的回归。
+    """
+    dialogs.confirm_dialog(harness, DARK, title="删除", message="确定删除?")
+    confirm_row = cast("_FakeWidget", harness.buttons[-1].master)
+    assert "fill" not in confirm_row.pack_kwargs, "确认框的按钮行贴到边上了"
+    assert "anchor" not in confirm_row.pack_kwargs, "确认框的按钮行贴到边上了"
+
+    harness.buttons.clear()
+    dialogs.ask_text(harness, DARK, title="重命名", text=_PROMPT)
+    text_row = cast("_FakeWidget", harness.buttons[-1].master)
+    assert "fill" not in text_row.pack_kwargs, "输入框的按钮行贴到边上了"
+    assert "anchor" not in text_row.pack_kwargs, "输入框的按钮行贴到边上了"
+
+
+def test_every_dialog_button_row_in_the_source_is_centered() -> None:
+    """整仓扫描: ``dialogs.py`` 里每一处 ``buttons.pack(...)`` 都不许带 ``fill``/``anchor``.
+
+    逐条点名而不是只报个数: 以后新增对话框时, 报错信息要能直接指到那一行。
+    """
+    source = Path(dialogs.__file__).read_text(encoding="utf-8")
+    offenders = [
+        f"dialogs.py:{number}: {line.strip()}"
+        for number, line in enumerate(source.splitlines(), start=1)
+        if "buttons.pack(" in line and ("fill=" in line or "anchor=" in line)
+    ]
+
+    assert offenders == [], "对话框按钮行要居中(去掉 fill/anchor): " + "; ".join(
+        offenders
+    )
 
 
 def test_confirm_ok_returns_true(harness: _FakeParent) -> None:

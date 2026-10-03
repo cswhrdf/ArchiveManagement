@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "theme": "dark",
+  "language": "zh-CN",
+  "logging": {
+    "debug": false,
+    "max_bytes": 104857600,
+    "backup_count": 5,
+    "console": true
+  },
+  "hotkeys": {
+    "save": "<win>+<alt>+s",
+    "branch": "<win>+<alt>+z"
+  },
+  "activation": {
+    "auto": false
+  },
+  "ui": {
+    "base_font_px": 18,
+    "remember_window": true
+  },
+  "window": {
+    "width": null,
+    "height": null,
+    "x": null,
+    "y": null
+  }
+}

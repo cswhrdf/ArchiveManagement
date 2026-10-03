@@ -20,17 +20,19 @@
 
 ## 前提: 画面得先画得出汉字
 
-每一步的结果里都挂着 `fonts.txt`, 内容是**字体探针**(平台 / Python / Tk 版本、选中与实际的
-字体族、汉字与拉丁的量宽、判定)。判定不通过时:
+每一步的结果里都挂着 `fonts.txt`, 内容是**字体探针**(平台 / Python / Tk 版本、`_tkinter`
+模块与 Tcl/Tk 库的路径、选中与实际的字体族、汉字与拉丁的量宽、判定)。判定不通过时:
 
 - 结论标红、退出码 2;
 - **不产出候选基线** —— 宁可这一轮没有基线, 也不拿一张看不清的图当"正确"。
 
 2026-10-02 就是这么踩的: 候选基线里整排按钮是空的(汉字一个都没画出来)、拉丁字形也是位图
-字体(锯齿), 而那一轮在报告里是**通过**。根因是那一步用的 Tk(uv 管的那份 CPython 自带
+字体(锯齿), 而那一轮在报告里是**通过**。根因是那一步用的 Tk(uv 托管的 CPython 自带
 `libtcl9tk9.0.so`)在 X11 上只走**核心位图字体**(没有 fontconfig/FreeType, 看不到任何 TTF),
-`fonts-noto-cjk` 装多少都没用。现在那一步用发行版 `python3-tk` 的 Tk 8.6(走 Xft/fontconfig),
-由 `ci.yml` 的 `--python-preference only-system` + `UV_PROJECT_ENVIRONMENT` 固定在独立环境里。
+`fonts-noto-cjk` 装多少都没用。现在那一步只**换 Tk 不换解释器**: 解释器仍是 uv 托管的那份
+(与其余作业同版本, 所以报告里"平台 / Python / Tk"那行是真的), `_tkinter` 换成发行版
+`python3-tk` 的那一个(链发行版 libtk8.6, 走 Xft/fontconfig), 由 `ci.yml` 的 `PYTHONPATH`
+与 `UV_PROJECT_ENVIRONMENT` 固定住。
 
 ## 为什么入库
 

@@ -112,6 +112,10 @@ class UiSettings(BaseModel):
     # 基准字号(px 口径, 1rem): 界面里所有字号都按它等比缩放(见 ui.typography)。
     # 下限 11 保证正文仍然可读, 上限 28 避免固定宽度的行被撑破。
     base_font_px: int = Field(default=DEFAULT_BASE_FONT_PX, ge=11, le=28)
+    # 记住主窗口关闭时的尺寸与位置(默认开启)。关掉后下次启动用设计尺寸, 并且**把已经
+    # 记下的那一套从配置里删掉** —— 留着它会让"我明明关了"与配置里还写着位置互相矛盾
+    # (见 ui.main_window._save_remember_window)。
+    remember_window: bool = True
 
 
 # 记住的窗口几何的取值上限: 真机上的多屏虚拟桌面也不会超出它(坐标还可以是负的),

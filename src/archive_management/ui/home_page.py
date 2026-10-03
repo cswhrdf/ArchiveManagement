@@ -55,8 +55,8 @@ from archive_management.ui.models import (
     HomeBoard,
     HomeGameItem,
     HomeSection,
-    chips_lines,
     poster_columns,
+    status_lines,
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
@@ -66,11 +66,14 @@ from archive_management.ui.widgets import (
     auto_scrollbar,
     card_surface_colors,
     fit_label,
+    measured_font,
     paint_button_disabled,
     paint_button_enabled,
+    scaled_px,
     sync_scrollbar,
     sync_tooltip,
     track_wraplength,
+    window_scaling,
 )
 
 _ChangeCallback = Callable[[], None]
@@ -104,8 +107,13 @@ _TABLE_SIDE_PAD = 10
 _SCROLL_INSET = 6
 # 表头的上下留白(见 _build_table 的 ``pady=(10, 6)``)。
 _HEAD_ROW_PAD = 16
-# 状态列最多折几行: 能换行就换行, 换行还放不下才补省略号(见 models.chips_lines).
+# 状态列最多折几行: **状态一行 + 自定义标签一行**(见 models.status_lines)。
 _STATE_MAX_LINES = 2
+# 海报卡片各行的上下间距: 与 ``_build_poster`` 里的 grid 共用一套 —— 卡片高度按内容算
+# (见 _fit_poster_height), 这些间距是算式的一部分, 不许在两处各写一遍。
+_POSTER_COVER_PAD_Y = (8, 6)
+_POSTER_META_PAD_Y = (2, 0)
+_POSTER_ACTIVITY_PAD_Y = (2, 10)
 # 名称块与固定列块之间的最小空隙.
 _TABLE_BLOCK_GAP = 12
 # 表头左边距 = 滚动区 10 + 数据行自己的 4(pack padx): 表头与数据行落在同一条竖线上.
@@ -592,15 +600,20 @@ class HomePage:
         )
         self._next_btn.pack(side="left")
 
-    @staticmethod
-    def _configure_columns(block: ctk.CTkFrame) -> None:
+    def _configure_columns(self, block: ctk.CTkFrame) -> None:
         """给"固定列块"设置列宽: 表头与数据行共用同一套, 因此各列一定上下对齐.
 
         列宽固定且**不分配权重**: 整块贴右, 宽度由这些列求和而来; 文本再用 fit_text
         封在自己的列宽以内, 于是内容长短也不会把列推动一下。
+
+        ``_COLUMNS`` 里写的是**设计**尺寸(逻辑像素), 而 ``grid`` 的 ``minsize`` 是物理
+        像素: 这里先换算。不换算的话 125% 的屏上每一列都比设计窄 25%, 而状态列的
+        ``wraplength`` 是逻辑的(=物理 x1.25)——内容比列宽多出 46px, 那一行的整块列因此
+        被推左 46px, 与其他行和表头错开(2026-10-02 用户实测: 标签多的那款游戏"没对齐
+        内容")。
         """
         for index, (_key, width, _anchor) in enumerate(_COLUMNS):
-            block.grid_columnconfigure(index, minsize=width)
+            block.grid_columnconfigure(index, minsize=scaled_px(block, width))
 
     def _button(
         self,
@@ -1119,6 +1132,24 @@ class HomePage:
         self._align_table_header()
         self._refit_row_names()
 
+    def _header_offset(self) -> tuple[int, int] | None:
+        """量表头内容与数据行的偏移(正数 = 表头偏右); 量不到时返回 None.
+
+        两个地方共用这一个量法: :meth:`_align_table_header` 拿它算新内边距,
+        :meth:`_on_name_resize` 拿它判断"可用宽度变了, 表头是不是真的错开了" —— 只有真的
+        错开才值得再排一轮(见那里的说明)。
+        """
+        parts = next(iter(self._row_parts.values()), None)
+        if parts is None or not parts.columns.winfo_ismapped():
+            return None
+        if not self._head_columns.winfo_ismapped():
+            return None
+        off_left = self._head_name.winfo_rootx() - parts.name_block.winfo_rootx()
+        off_right = (
+            self._head_columns.winfo_rootx() + self._head_columns.winfo_width()
+        ) - (parts.columns.winfo_rootx() + parts.columns.winfo_width())
+        return off_left, off_right
+
     def _align_table_header(self) -> None:
         """把表头的内容对齐到数据行.
 
@@ -1126,16 +1157,10 @@ class HomePage:
         并不相等; 不补的话左边"名称"列头与右边"贴右"的固定列都会错开。量出两边的
         偏移后**一次算准**新的左右内边距(几何对两边都是线性的), 不会来回抖。
         """
-        parts = next(iter(self._row_parts.values()), None)
-        if parts is None or not parts.columns.winfo_ismapped():
+        offset = self._header_offset()
+        if offset is None:
             return
-        if not self._head_columns.winfo_ismapped():
-            return
-        # 正数表示表头的内容偏右, 要往左挪.
-        off_left = self._head_name.winfo_rootx() - parts.name_block.winfo_rootx()
-        off_right = (
-            self._head_columns.winfo_rootx() + self._head_columns.winfo_width()
-        ) - (parts.columns.winfo_rootx() + parts.columns.winfo_width())
+        off_left, off_right = offset
         if off_left == 0 and off_right == 0:
             self._align_attempts = 0
             return
@@ -1153,10 +1178,12 @@ class HomePage:
         self._schedule_list_sync()
 
     def _refit_row_names(self) -> None:
-        """按名称标签的实际宽度重新裁剪名称: 窗口变宽就能多显示几个字.
+        """按名称的**稳定预算**重新裁剪名称: 窗口变宽就能多显示几个字.
 
-        名称是唯一长度无法预期的内容, 所以它的可用宽度就是"剩下多少算多少"; 每次
-        宽度变化都按真实宽度重裁一次, 长名称才会随窗口变宽而多显示。
+        名称是唯一长度无法预期的内容, 所以它的可用宽度就是"剩下多少算多少"; 每次宽度变化都
+        按可用宽度重裁一次, 长名称才会随窗口变宽而多显示。可用宽度取
+        :meth:`_name_available`(从视口推算), **不读**名称标签自己的实测宽度 —— 后者会被
+        裁剪结果反过来影响, 是 2026-10-03 那个无限重裁的闭环。
 
         宽度还没量出来(``winfo_width()`` 是 1: 首帧布局尚未完成)时**安排下一轮重试**,
         而不是直接跳过 —— 各平台的布局时序不同, 有环境下首帧量不到宽度且之后不再有
@@ -1164,7 +1191,7 @@ class HomePage:
         """
         retry = False
         for parts in self._row_parts.values():
-            width = int(parts.label.winfo_width())
+            width = self._name_available(parts)
             if width <= 1:
                 retry = True
                 continue
@@ -1172,11 +1199,36 @@ class HomePage:
         if retry:
             self._retry_refit()
 
+    def _row_viewport(self) -> int:
+        """滚动区里**数据行真正能用**的宽度(内层画布; 拿不到时退回滚动区自己的宽度)."""
+        canvas = getattr(self._list_box, "_parent_canvas", None)
+        if canvas is not None:
+            return int(canvas.winfo_width())
+        return int(self._list_box.winfo_width())
+
+    def _name_available(self, parts: _RowParts) -> int:
+        """名称这一行**稳定的**可用宽度(物理像素).
+
+        不能直接读名称标签的 ``winfo_width()``: 标签的请求宽度会决定滚动区**内层画布**的
+        宽度(那里的宽度是 ``max(视口, 最宽子控件)``), 于是"按当前宽度裁一次"又改变了
+        "当前宽度" —— 2026-10-03 探针抓到的闭环: 标签宽度 529 ↔ 327 来回翻, 每翻一次都
+        重裁一次、又各排一个延后任务, 整个界面卡在 ``update()`` 里出不来。
+
+        取法是"标签宽度再扣掉这一行**超出视口**的那部分": 行比视口宽, 说明内层画布是被
+        内容撑出来的(这次裁剪的结果又变成了下一次的输入); 扣掉之后预算只由**视口**决定,
+        内容再长也不会把预算带偏 —— 行因此会自己收回到视口宽度, 下一轮预算与标签宽度
+        相等, 什么都不用做(闭环断开)。正常(行不比视口宽)时就是标签自己的宽度。
+        """
+        row = parts.name_block.master
+        overflow = max(0, int(row.winfo_width()) - self._row_viewport())
+        return max(1, int(parts.label.winfo_width()) - overflow)
+
     def _fit_row_name(self, parts: _RowParts, width: int) -> None:
         """按给定宽度裁一行名称; 宽度未知或没变就不动.
 
-        "没变就不动"有两层作用: 省掉一次无谓的文本重设, 也不会出现"改文本 → 新的
-        Configure → 再裁一次"这种来回追。
+        "没变就不动"是这条闭环的闸: 同一个宽度不再重写文本, 也就不会再去引出新的
+        ``<Configure>``。宽度由 :meth:`_name_available` 从**视口**推算(而不是名称标签的
+        实测宽度) —— 名称的裁剪结果不会再反过来影响下一次的输入。
         """
         if width <= 1 or parts.fitted_width == width:
             return
@@ -1184,22 +1236,27 @@ class HomePage:
         fit_label(parts.label, parts.full_name, self._name_font, width)
 
     def _on_name_resize(self, game_id: str, event: tk.Event) -> None:
-        """名称标签自己的宽度变了 → **立刻**裁这一行.
+        """名称标签自己的宽度变了 → 按**稳定预算**重裁这一行.
 
         滚动区的 ``<Configure>`` 只在**它自己**的尺寸变化时来: 内宽变了而外宽没变
         (滚动条出现/消失、表头内边距被重算)不会触发它, 行刚重建、标签刚量到真实宽度
-        时也未必等到下一轮。所以这里直接盯标签自己: 宽度一量出来就按它裁好, 不用等
-        延后的那一轮(与容器事件互补)。只裁这一行, 拖窗口时的开销是一行一次。
+        时也未必等到下一轮。所以这里直接盯标签自己(与容器事件互补)。
+
+        重裁用的是 :meth:`_name_available` 而不是事件里的宽度: 事件里的那个宽度正是被
+        裁剪结果影响的量(见 ``_name_available`` 的说明)。事件只是"该再看一眼"的提示,
+        预算没变就什么都不做(实测闭环正是靠这一条断掉的)。
         """
         parts = self._row_parts.get(game_id)
         if parts is None:
             return
-        width = int(event.width)
-        if parts.fitted_width == width:
-            return  # 宽度没变: 不动文本, 也不重排(否则会与延后的那一轮互相追)
-        self._fit_row_name(parts, width)
-        # 名称块的宽度变了 = 这一行的可用宽度变了(滚动条出现/消失、内边距被重算):
-        # 表头也要跟着重新对齐。滚动区的 `<Configure>` 只在自己尺寸变化时来, 这条是补充。
+        del event
+        width = self._name_available(parts)
+        if parts.fitted_width != width:
+            self._fit_row_name(parts, width)
+        # 表头也许得跟着重新对齐, 而滚动区的 `<Configure>` 只在自己尺寸变化时来 —— 所以
+        # 这里每次都排一轮(延后合并成一次)。这与裁剪结果**无关**, 不会回到那个闭环:
+        # 预算是稳定的(`_name_available`), 名称被裁短就不再改变它自己与行的宽度, 于是
+        # 既不会一直发新的 `<Configure>`, 也不会一再排任务。对齐本身另有次数上限。
         self._schedule_list_sync()
 
     def _retry_refit(self) -> None:
@@ -1226,7 +1283,7 @@ class HomePage:
             corner_radius=6,
             fg_color=palette.item_hover,
         )
-        cover.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 6))
+        cover.grid(row=0, column=0, sticky="nsew", padx=8, pady=_POSTER_COVER_PAD_Y)
         cover.grid_propagate(False)
         cover.grid_columnconfigure(0, weight=1)
         cover.grid_rowconfigure(0, weight=1)
@@ -1257,8 +1314,21 @@ class HomePage:
             text_color=palette.text_body,
         )
         fit_label(
-            name, item.name, name_font, _POSTER_TEXT_WIDTH, max_lines=_POSTER_NAME_LINES
+            name,
+            item.name,
+            name_font,
+            # 预算是**设计**值(逻辑像素), 而 fit_label 里的字体度量是**物理**像素.
+            scaled_px(name, _POSTER_TEXT_WIDTH),
+            max_lines=_POSTER_NAME_LINES,
         )
+        shown = str(name.cget("text"))
+        if "\n" not in shown:
+            # 名称占**两行**的高度: 一行名也补一个空行, 于是它在卡片里占的高度与两行名
+            # 一样 —— 一行名与两行名的卡片因此完全同高, 下面的元信息与"最近活动"位置也
+            # 一致(用户 2026-10-02: "两行名时最下方的最近活动时间位置不同, 导致整个游戏
+            # 的下边框被盖住")。不能靠固定像素: 行高随"界面字号"变, 写死 2 行的高度在
+            # 字号调大后又会溢出。
+            name.configure(text=f"{shown}\n")
         # 名称与下面的元信息之间留白: 两者只差字号时, 读起来像同一段被截断的文字。
         name.grid(row=1, column=0, sticky="ew", padx=10, pady=(_POSTER_TITLE_GAP, 0))
         # 备份数(或"无有效存档路径")排在名称下方而不是压在封面上: 压在封面上的角标
@@ -1275,8 +1345,13 @@ class HomePage:
                 else palette.text_muted
             ),
         )
-        badge.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 0))
-        fit_label(badge, self._poster_meta(item), meta_font, _POSTER_TEXT_WIDTH)
+        badge.grid(row=2, column=0, sticky="ew", padx=10, pady=_POSTER_META_PAD_Y)
+        fit_label(
+            badge,
+            self._poster_meta(item),
+            meta_font,
+            scaled_px(badge, _POSTER_TEXT_WIDTH),
+        )
         activity = ctk.CTkLabel(
             card,
             text=(
@@ -1288,7 +1363,18 @@ class HomePage:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        activity.grid(row=3, column=0, sticky="ew", padx=10, pady=(2, 10))
+        activity.grid(
+            row=3, column=0, sticky="ew", padx=10, pady=_POSTER_ACTIVITY_PAD_Y
+        )
+        self._fit_poster_height(
+            card,
+            (
+                (cover, _POSTER_COVER_PAD_Y),
+                (name, (_POSTER_TITLE_GAP, 0)),
+                (badge, _POSTER_META_PAD_Y),
+                (activity, _POSTER_ACTIVITY_PAD_Y),
+            ),
+        )
         widgets: list[ctk.CTkBaseClass] = [
             card,
             cover,
@@ -1315,6 +1401,27 @@ class HomePage:
             )
             widget.bind("<Leave>", lambda _event: self._set_hover(None))
         return card
+
+    @staticmethod
+    def _fit_poster_height(
+        card: ctk.CTkFrame,
+        rows: tuple[tuple[ctk.CTkBaseClass, tuple[int, int]], ...],
+    ) -> None:
+        """把海报卡片定成**内容需要的高度**(不低于设计值 ``_POSTER_HEIGHT``).
+
+        卡片原来是写死的 ``_POSTER_HEIGHT``, 而里面每一样都随"界面字号"变大 —— 字号调大
+        之后名称那两行会把"最近活动"挤出卡片下沿, 看着就是下边框被文字盖住(用户
+        2026-10-02 实测)。
+
+        ``rows`` 给的是 (控件, 上下间距): 间距是**设计**值(逻辑像素), 控件请求高度是
+        **物理**像素 —— 先换算再相加, 最后再换回逻辑写回 ``height``(CTk 的尺寸单位)。
+        """
+        scale = window_scaling(card)
+        needed = sum(
+            int(widget.winfo_reqheight()) + scaled_px(card, sum(pads))
+            for widget, pads in rows
+        )
+        card.configure(height=max(_POSTER_HEIGHT, round(needed / scale)))
 
     @staticmethod
     def _poster_meta(item: HomeGameItem) -> str:
@@ -1448,8 +1555,13 @@ class HomePage:
             left,
             # 先用兜底宽度裁一次: 直接放完整名称会让标签请求出上千像素, 把整张表
             # 撑到窗口之外(布局算出来的宽度跟着变, 会来回抖)。真实宽度由
-            # _refit_row_names() 在首帧之后补上。
-            text=fit_text(item.name, self._name_font, _NAME_FALLBACK_WIDTH),
+            # _refit_row_names() 在首帧之后补上。兜底宽度是**设计**值(逻辑像素),
+            # 而裁剪用的字体度量是**物理**像素。
+            text=fit_text(
+                item.name,
+                self._name_font,
+                scaled_px(self._list_box, _NAME_FALLBACK_WIDTH),
+            ),
             anchor="w",
             justify="left",
             font=self._name_font,
@@ -1485,12 +1597,22 @@ class HomePage:
     ) -> list[ctk.CTkBaseClass]:
         """填右侧固定列块, 返回新加的单元格标签.
 
-        状态列是**唯一长度不受控**的列(标签数量可变): 能换行就换行, 换行还放不下
-        才补省略号, 而且绝不在标签中间断开(否则会读成"测…"这种半句话)。
+        状态列是**唯一长度不受控**的列(标签数量可变): 状态一行、自定义标签一行,
+        两行都放不下的部分补省略号(见 :func:`models.status_lines`)。
         """
         palette = self._palette
-        status = chips_lines(
-            item.chips, self._value_font, _COLUMNS[-1][1], max_lines=_STATE_MAX_LINES
+        # 折行预算要从设计尺寸换成**物理**像素(字体度量就是物理的), 与上面给列宽设的
+        # ``minsize`` 用同一个值 —— 两边一致, 状态列才不会被内容顶宽。
+        status_room = scaled_px(columns, _COLUMNS[-1][1])
+        status = status_lines(
+            item.state_chips,
+            item.tags,
+            # CTk 控件渲染的是**缩放后**的字体: 量文字必须跟着缩放, 否则每行都少算
+            # 1.25 倍, Tk 会把它们再折一次(用户 2026-10-02: 状态列变成三行)。
+            # 状态列不会因此引发重裁闭环: 它的宽度是列宽给的硬值(minsize), 内容不会
+            # 反过来改变列宽 —— 与名称那一列的区别就在这里(见 `_name_available`)。
+            measured_font(self._value_font, columns),
+            status_room,
         )
         values = (
             (item.platform_label, 0),
@@ -1503,6 +1625,9 @@ class HomePage:
         labels: list[ctk.CTkBaseClass] = []
         for text, index in values:
             _key, width, anchor = _COLUMNS[index]
+            # 文本要按**物理**列宽裁(fit_label / font.measure 都是物理的); 只有
+            # ``wraplength`` 是逻辑像素(CTk 自己乘缩放, 正好等于设计里的列宽)。
+            room = scaled_px(columns, width)
             label = ctk.CTkLabel(
                 columns,
                 text="",
@@ -1515,14 +1640,14 @@ class HomePage:
             )
             if index == 5:
                 # 状态列回到同一行时仍然不许溢出: wraplength 是硬上限, 换行由
-                # chips_lines 自己算好(每行都停在完整标签之后)。
+                # status_lines 自己算好(状态一行、标签一行, 不切半个标签)。
                 label.configure(wraplength=width, text=text)
-                # chips_lines 会把放不下的标签换到第二行、再放不下才补省略号;
+                # status_lines 已经把两行排好(状态一行、标签一行);
                 # " · ".join 是完整内容 —— 挂上悬停提示, 省掉的尾巴才看得到(这里
-                # 不能再用 fit_label: 那会把已经折好的状态列重新压回一行)。
+                # 不能再用 fit_label: 那会把已经排好的状态列重新压回一行)。
                 sync_tooltip(label, full=" · ".join(item.chips), shown=text)
             else:
-                fit_label(label, text, self._value_font, width)
+                fit_label(label, text, self._value_font, room)
             label.grid(row=0, column=index, sticky="ew", padx=_cell_pad(index))
             labels.append(label)
         return labels

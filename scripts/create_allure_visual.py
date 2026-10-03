@@ -49,9 +49,13 @@
   结论标红、**不产出候选基线**, 以退出码 2 结束(与"Tk 起不来"同一类环境问题)。
 - 出处: 2026-10-02 的 CI 画面上整排按钮是空的(汉字一个都没画出来), 拉丁字形也是位图
   字体(锯齿), 而这一轮在报告里是**通过** —— 判据只比"这轮与基线像不像", 基线本身是坏的
-  时候它看不出来。uv 装的那份 Linux CPython 里的 Tk **只走 X11 核心字体**(没有 fontconfig/
-  FreeType, 实测它的 ``libtcl9tk9.0.so`` 只有 ``XLoadQueryFont`` 那套符号), 装多少 TTF
-  都用不上; 发行版的 ``python3-tk`` 才走 fontconfig(见 ``ci.yml`` 视觉回归那一步)。
+  时候它看不出来。uv 装的那份 Linux CPython 里的 Tcl/Tk 是 python-build-standalone 自己
+  编的(实测 ``python/lib/libtcl9tk9.0.so`` 的符号里只有 ``XLoadQueryFont`` 那套, 没有
+  fontconfig/FreeType), 装多少 TTF 都用不上; 发行版的 ``python3-tk`` 才走 Xft/fontconfig。
+- 做法(见 ``ci.yml`` 的视觉回归那一步): **解释器不变**(还是 uv 托管的那份, 与其余作业
+  同一个版本), 只把 ``_tkinter`` 这个扩展模块换成发行版的 —— 它自己会去加载发行版
+  libtk8.6/libfontconfig。探针把这一步的结果写进 ``fonts.txt``(模块与库的路径), 所以
+  "到底用的哪一份 Tk"在报告里是可见的, 不用猜。
 
 用法::
     # CI(质量作业, Linux + xvfb)
@@ -71,6 +75,7 @@ import contextlib
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 import time
@@ -539,11 +544,43 @@ def platform_name() -> str:
     )
 
 
+def tk_module_path() -> str:
+    """装着 Tk 的那个扩展模块(``_tkinter``)来自哪个文件: 换了它就是换了 Tk 的来源.
+
+    用 ``sys.modules`` 而不是自己 import: 到跑探针时应用已经建了窗口, 谁加载的就是谁 ——
+    这里只是把它记下来(实测路径是"发行版模块有没有真的换上去"的唯一证据)。
+    """
+    module = sys.modules.get("_tkinter")
+    return str(getattr(module, "__file__", None) or "<built-in>")
+
+
+def loaded_tk_libraries() -> list[str]:
+    """当前进程真正加载到的 Tcl/Tk 动态库(Linux 读 ``/proc/self/maps``, 其它平台给空表).
+
+    为什么值得记下来: "用哪个 Tk"正是这道门禁的关键输入, 而**版本号不够** —— 同一个
+    Tk 8.6 既可能来自发行版(走 Xft/fontconfig, 看得见 TTF 与汉字), 也可能来自解释器自带的
+    副本(只认 X11 核心位图字体)。把库路径写进探针, 下一次出问题时不用再靠猜。
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    try:
+        maps = Path("/proc/self/maps").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    found = set()
+    for line in maps.splitlines():
+        matched = re.search(r"(/\S*(?:libtcl|libtk)[\w.+-]*\.so[\w.]*)", line)
+        if matched:
+            found.add(matched.group(1))
+    return sorted(found)
+
+
 def probe_fonts(app: ArchiveApp) -> dict[str, Any]:
     """问清楚"这一轮到底用什么字体画的", 返回一份可核对的事实.
 
     它是这道门禁的**前提**, 而不是日志里的装饰: 同一份代码在"能画出汉字"与"画不出汉字"
     的字体环境下会得到两张完全不同的图 —— 而后者看上去像"界面坏了", 实际是环境问题。
+    后面三项(模块与库的路径)是"这份环境从那来的": 解释器版本对了不代表 Tk 也对了。
     """
     from archive_management.ui import typography
 
@@ -553,6 +590,8 @@ def probe_fonts(app: ArchiveApp) -> dict[str, Any]:
         "platform": platform_name(),
         "python": platform.python_version(),
         "tk": str(app.tk.call("info", "patchlevel")),
+        "tk_module": tk_module_path(),
+        "tk_libraries": loaded_tk_libraries(),
         "requested": typography.current_family() or "(Tk 默认)",
         "actual": str(sample.actual("family")),
         "families": len(families),
@@ -566,27 +605,31 @@ def probe_fonts(app: ArchiveApp) -> dict[str, Any]:
 
 def font_problem(probe: Mapping[str, Any]) -> str:
     """字体环境能不能画出这张图; 能就返回空串, 不能就返回一句"照着做就能好"的话."""
+    fix = (
+        "请把发行版的 Tk 换进来(``ci.yml`` 视觉回归那一步用 PYTHONPATH 把发行版 python3-tk "
+        f"的 ``_tkinter`` 换上去); 本轮实际用的是: {probe.get('tk_module', '<未知>')}"
+        f" + {probe.get('tk_libraries') or '<未知>'}"
+    )
     if int(probe["cjk_width"]) <= 0:
         return (
             "汉字量出来是 0 宽(画面里汉字一个都不会画出来): 这一轮用的 Tk 只看得到 X11 "
-            "核心位图字体, 装多少 TTF(如 fonts-noto-cjk)也用不上 —— 请用发行版 python3-tk "
-            "的 Tk 跑这一步(见 ci.yml 的视觉回归)。"
+            f"核心位图字体, 装多少 TTF(如 fonts-noto-cjk)也用不上 —— {fix}。"
         )
     if str(probe["actual"]).casefold() in BITMAP_FAMILIES:
-        return (
-            f'字体落到了核心位图字体 {probe["actual"]!r}(没有抗锯齿, 画面会"锯齿"): '
-            "请用发行版 python3-tk 的 Tk 跑这一步(见 ci.yml 的视觉回归)。"
-        )
+        return f'字体落到了核心位图字体 {probe["actual"]!r}(没有抗锯齿, 画面会"锯齿"): {fix}。'
     return ""
 
 
 def format_probe(probe: Mapping[str, Any]) -> str:
     """把探针结果排成一段文本(控制台与报告附件共用同一份)."""
     candidates = "、".join(probe["cjk_candidates"]) or "无"
+    libraries = ", ".join(probe["tk_libraries"]) or "(非 Linux: 不适用)"
     lines = [
         "## 字体环境(画面能不能信, 先看这里)",
         "",
         f"- 平台 / Python / Tk: {probe['platform']} / {probe['python']} / {probe['tk']}",
+        f"- Tk 模块(`_tkinter`): {probe['tk_module']}",
+        f"- Tcl/Tk 动态库: {libraries}",
         f"- 选中字体族: {probe['requested']}; 实际解析到: {probe['actual']}",
         f"- 系统报告的字体族数: {probe['families']}(含中日韩关键字的前几个: {candidates})",
         f"- 汉字量宽: {probe['cjk_width']}px; 拉丁量宽: {probe['ascii_width']}px",

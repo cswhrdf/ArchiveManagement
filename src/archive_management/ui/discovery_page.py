@@ -56,6 +56,7 @@ from archive_management.ui.typography import FONT_STRONG
 from archive_management.ui.widgets import (
     ButtonStyle,
     auto_scrollbar,
+    measured_font,
     paint_button_disabled,
     paint_button_style,
     track_fit,
@@ -702,7 +703,7 @@ class DiscoveryPanel:
 
         尾部是目录名(最有用的一段), 因此不能用从头截断的 :func:`fit_text`。
         """
-        return fit_path(text, self._path_font, width)
+        return fit_path(text, measured_font(self._path_font, self.frame), width)
 
     def _clip_lines(self, lines: tuple[str, ...], width: int) -> str:
         """多行文本逐行裁剪后拼起来(每行都不许溢出)."""

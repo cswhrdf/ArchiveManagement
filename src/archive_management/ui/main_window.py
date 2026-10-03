@@ -121,7 +121,10 @@ from archive_management.ui.widgets import (
     attach_tooltip,
     card_surface_colors,
     fit_label,
+    scaled_px,
     track_fit,
+    window_scaling,
+    wrap_budget,
 )
 
 logger = logging.getLogger(__name__)
@@ -160,36 +163,53 @@ def fit_window_size(size: tuple[int, int], screen: tuple[int, int]) -> tuple[int
     )
 
 
-def initial_window_size(window: tk.Misc) -> tuple[int, int]:
-    """主窗口打开时的默认尺寸: 设计尺寸, 但不超出屏幕.
+def initial_window_size(window: tk.Misc, *, scale: float = 1.0) -> tuple[int, int]:
+    """主窗口打开时的默认尺寸: 设计尺寸, 但不超出屏幕(逻辑像素).
 
     固定 1360x860 在 1366x768 / 1920x900 这类屏幕上比屏幕还高, 窗口下沿(底部状态
     条)会落到屏幕外面去(与 16 号评审的"设置窗口比屏幕高"同一类问题)。宽度同理:
     1366 宽的屏幕上 1360 会把窗口右沿顶到屏幕边上。
 
     尺寸的夹法是 :func:`fit_window_size`(记住的几何也走同一条)。
+
+    ``scale`` 是窗口缩放(见 ``widgets.window_scaling``): 屏幕尺寸是**物理**的、设计尺寸与
+    ``CTk.geometry()`` 是**逻辑**的, 所以先把屏幕换到逻辑像素再夹 —— 不换算的话 125% 的屏上
+    "不超出屏幕"这条根本不成立(窗口实际会比夹出来的值再大 1.25 倍)。
     """
+    factor = scale if scale > 0 else 1.0
     return fit_window_size(
         WINDOW_DEFAULT_SIZE,
-        (int(window.winfo_screenwidth()), int(window.winfo_screenheight())),
+        (
+            round(int(window.winfo_screenwidth()) / factor),
+            round(int(window.winfo_screenheight()) / factor),
+        ),
     )
 
 
-def open_window_geometry(saved: WindowSettings, *, screen: tuple[int, int]) -> str:
+def open_window_geometry(
+    saved: WindowSettings, *, screen: tuple[int, int], scale: float = 1.0
+) -> str:
     """算出主窗口打开时的 geometry 串: 有记住的整套几何就用它, 否则用设计尺寸.
 
     尺寸走 :func:`fit_window_size`(换了更小的屏幕也不会出屏); 位置**夹回屏幕内** ——
     上次摆在另一台显示器上、这次那台屏幕不在了(或分辨率变小)时, 记下来的 x/y 会落在
     屏幕外, 直接把窗口摆到屏幕外等于"打开就找不到窗口"。
+
+    ``scale`` 是窗口缩放(见 ``widgets.window_scaling``): 屏幕尺寸是物理的, 而记住的尺寸与
+    ``CTk.geometry()`` 都是**逻辑**的 —— 所以先把屏幕换到逻辑像素再夹取, 位置则用**物理**尺寸
+    去夹(位置本身是屏幕坐标, CTk 不动它)。
     """
+    factor = scale if scale > 0 else 1.0
     geometry = saved.geometry()
+    logical_size = geometry[:2] if geometry is not None else WINDOW_DEFAULT_SIZE
+    logical_screen = (round(screen[0] / factor), round(screen[1] / factor))
+    width, height = fit_window_size(logical_size, logical_screen)
+    size = f"{width}x{height}"
     if geometry is None:
-        width, height = fit_window_size(WINDOW_DEFAULT_SIZE, screen)
-        return f"{width}x{height}"
-    width, height = fit_window_size(geometry[:2], screen)
-    x = min(max(0, geometry[2]), max(0, screen[0] - width))
-    y = min(max(0, geometry[3]), max(0, screen[1] - height))
-    return f"{width}x{height}+{x}+{y}"
+        return size
+    x = min(max(0, geometry[2]), max(0, screen[0] - round(width * factor)))
+    y = min(max(0, geometry[3]), max(0, screen[1] - round(height * factor)))
+    return f"{size}+{x}+{y}"
 
 
 def _window_state(window: tk.Wm) -> str:
@@ -208,7 +228,9 @@ def _window_flag(window: tk.Wm, name: str) -> bool:
         return False
 
 
-def current_window_geometry(window: tk.Tk) -> WindowSettings | None:
+def current_window_geometry(
+    window: tk.Tk, *, scale: float = 1.0
+) -> WindowSettings | None:
     """读窗口当前的尺寸与位置; 最大化/最小化/全屏时返回 ``None``(这次跳过这一项).
 
     三种状态都不是"用户摆出来的那一套", 所以都不记(跳过 = 保留上一次记下的值):
@@ -224,14 +246,18 @@ def current_window_geometry(window: tk.Tk) -> WindowSettings | None:
     位置读的是 ``winfo_x/y`` 而不是 ``winfo_rootx/rooty``: 前者与 ``geometry("+x+y")``
     是**同一套坐标**(实测在这台 Windows 上 ``root`` 比 ``x`` 大 8/31 —— 那是窗口边框
     与标题栏), 拿 root 坐标去复原会让窗口每开一次就往下右漂一格。
+
+    ``scale`` 是窗口缩放(见 :func:`window_scaling`): 尺寸要**除回逻辑像素**再记
+    (与 ``CTk.geometry()`` 同一套单位), 位置是屏幕坐标, 不参与换算。
     """
     if _window_state(window) != "normal":
         return None
     if _window_flag(window, "-zoomed") or _window_flag(window, "-fullscreen"):
         return None
+    factor = scale if scale > 0 else 1.0
     return WindowSettings(
-        width=int(window.winfo_width()),
-        height=int(window.winfo_height()),
+        width=round(int(window.winfo_width()) / factor),
+        height=round(int(window.winfo_height()) / factor),
         x=int(window.winfo_x()),
         y=int(window.winfo_y()),
     )
@@ -387,6 +413,8 @@ class ArchiveApp(ctk.CTk):
         # 装到 CTkFont 上 —— 之后所有字体都按它换算。
         install_font_scaling()
         self._base_font_px = set_base_font_px(loaded.config.ui.base_font_px).base_px
+        # 记住窗口几何的开关(默认开): 关掉时关窗不写, 且把已经记下的那套删掉。
+        self._remember_window = loaded.config.ui.remember_window
         # 自动启停开关同样取自这份配置(默认关闭); 轮询结果、"是否忙"、队列是否非空
         # 与已经连续跑了几档(自适应间隔)都在下面维护。
         self._activation = loaded.config.activation.auto
@@ -425,7 +453,9 @@ class ArchiveApp(ctk.CTk):
     def _apply_window_geometry(self, saved: WindowSettings) -> None:
         """按记住的尺寸与位置打开窗口(没记住就用设计尺寸, 见 :func:`open_window_geometry`)."""
         screen = (int(self.winfo_screenwidth()), int(self.winfo_screenheight()))
-        self.geometry(open_window_geometry(saved, screen=screen))
+        self.geometry(
+            open_window_geometry(saved, screen=screen, scale=window_scaling(self))
+        )
 
     # ---------------------------------------------------------------- 快捷键
 
@@ -547,6 +577,39 @@ class ArchiveApp(ctk.CTk):
         self._feedback(
             FeedbackKind.INFO,
             tr("settings.language_switched", language=tr(f"locale.{locale}")),
+        )
+        return None
+
+    def _save_remember_window(self, enabled: bool) -> None:
+        """把"记住窗口大小与位置"写回配置; 关掉时顺手清掉已记下的几何.
+
+        清掉是用户 2026-10-02 明确要求的一半: "关闭该功能时如果配置中有记录了位置大小
+        信息要一并删除"。留着它既与开关的说法矛盾, 也会在重新打开开关时突然生效一个
+        很久以前的位置。
+        """
+        if self._paths is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        config.ui.remember_window = enabled
+        if not enabled:
+            config.window = WindowSettings()
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存窗口几何开关失败: %s", exc)
+
+    def _on_remember_window_change(self, enabled: bool) -> str | None:
+        """开关"记住窗口大小与位置": 立即生效 + 写回配置; 返回 None 表示成功."""
+        self._remember_window = enabled
+        self._save_remember_window(enabled)
+        log_action("ui.switch_remember_window", enabled=enabled)
+        self._feedback(
+            FeedbackKind.INFO,
+            tr(
+                "settings.remember_switched_on"
+                if enabled
+                else "settings.remember_switched_off"
+            ),
         )
         return None
 
@@ -1507,9 +1570,13 @@ class ArchiveApp(ctk.CTk):
         self._set_detail_names()
 
     def _name_budget(self, label: ctk.CTkLabel, fallback: int) -> int:
-        """控件当前的可用宽度(还没测量出来时用设计预算兜底)."""
+        """控件当前的可用宽度(还没测量出来时用设计预算兜底).
+
+        ``fallback`` 是**设计**值(逻辑像素), 而这里返回的宽度要拿给 ``fit_label`` 当
+        **物理**预算用: 两者差一个窗口缩放(见 ``widgets.scaled_px``)。
+        """
         width = label.winfo_width()
-        return width if width > 1 else fallback
+        return width if width > 1 else scaled_px(label, fallback)
 
     def _set_selected_texts(self, name: str, meta: str, files: str) -> None:
         """写下右侧面板三行的**完整**文本, 再按当前宽度裁一次."""
@@ -1524,17 +1591,23 @@ class ArchiveApp(ctk.CTk):
         现在裁掉的部分补省略号, 完整内容挂在悬停提示上(``fit_label`` 一并做了)。
         """
         name, meta, files = self._selected_texts
-        budget = (
-            self._name_budget(self._selected_panel, _SELECTED_PANEL_WIDTH)
-            - _SELECTED_TEXT_INSET
-        )
         rows = (
             (self._selected_name, name, 1),
             (self._selected_meta, meta, 1),
             (self._selected_files, files, _SELECTED_FILES_LINES),
         )
         for label, text, lines in rows:
-            label.configure(wraplength=budget)
+            # 预算取**标签自己**的宽度(与详情页头部 :meth:`_set_detail_names` 同一条纪律):
+            # 拿"面板宽度 - 一个写死的内衬"去裁总是差那么几像素 —— 2026-10-03 实测右侧
+            # 面板差 **4px**(标题与说明都被 Tk 硬裁掉一点, 且不补省略号): 面板内宽比卡片里
+            # 那个标签还宽一点。标签的宽度就是它真正能写的宽度。
+            # 宽度还没量出来时(首帧)才退回设计值。
+            budget = self._name_budget(
+                label, _SELECTED_PANEL_WIDTH - _SELECTED_TEXT_INSET
+            )
+            # ``budget`` 是物理像素(fit_label / font.measure 用的就是它), 而 wraplength
+            # 是逻辑像素: 过一层 wrap_budget, 否则 125% 的屏上标签按 1.25 倍的宽度折行.
+            label.configure(wraplength=wrap_budget(label, budget))
             fit_label(label, text, label.cget("font"), budget, max_lines=lines)
 
     def _set_detail_names(self) -> None:
@@ -1545,7 +1618,9 @@ class ArchiveApp(ctk.CTk):
         if not self._detail_name:
             return
         title_budget = self._name_budget(self._title_label, _HEADER_TEXT_WIDTH)
-        self._title_label.configure(wraplength=title_budget)
+        self._title_label.configure(
+            wraplength=wrap_budget(self._title_label, title_budget)
+        )
         fit_label(
             self._title_label,
             self._detail_name,
@@ -1555,7 +1630,9 @@ class ArchiveApp(ctk.CTk):
         )
         # 副标题里带存档位置(可能是很长的路径): 同样封顶两行, 头部高度有上限.
         subtitle_budget = self._name_budget(self._subtitle_label, _HEADER_TEXT_WIDTH)
-        self._subtitle_label.configure(wraplength=subtitle_budget)
+        self._subtitle_label.configure(
+            wraplength=wrap_budget(self._subtitle_label, subtitle_budget)
+        )
         fit_label(
             self._subtitle_label,
             self._detail_subtitle,
@@ -1564,7 +1641,9 @@ class ArchiveApp(ctk.CTk):
             max_lines=_HEADER_NAME_LINES,
         )
         hero_budget = self._name_budget(self._hero_name_label, _HERO_TEXT_WIDTH)
-        self._hero_name_label.configure(wraplength=hero_budget)
+        self._hero_name_label.configure(
+            wraplength=wrap_budget(self._hero_name_label, hero_budget)
+        )
         fit_label(
             self._hero_name_label,
             self._detail_name,
@@ -2842,12 +2921,14 @@ class ArchiveApp(ctk.CTk):
             base_font_px=self._base_font_px,
             debug=self._debug,
             activation=self._activation,
+            remember_window=self._remember_window,
             shortcuts=self._shortcuts,
             on_toggle_theme=self._on_toggle_theme,
             on_apply_language=self._on_language_change,
             on_apply_font_size=self._on_font_size_change,
             on_apply_debug=self._on_debug_change,
             on_apply_activation=self._on_activation_change,
+            on_apply_remember_window=self._on_remember_window_change,
             on_apply_shortcut=self._apply_shortcut,
             on_capture_start=self._hotkeys.suspend,
             on_capture_end=self._hotkeys.resume,
@@ -2894,9 +2975,9 @@ class ArchiveApp(ctk.CTk):
         摆的那个大小(见 :func:`current_window_geometry`)。写不进去(没有配置路径、
         磁盘不可写)只记日志: 退出流程不能被这件事拦住。
         """
-        if self._paths is None:
+        if self._paths is None or not self._remember_window:
             return
-        saved = current_window_geometry(self)
+        saved = current_window_geometry(self, scale=window_scaling(self))
         if saved is None:
             return
         config = load_or_repair_config(self._paths.config_path).config

@@ -15,15 +15,22 @@
 
 "窗口 + 标题栏"里的标题栏按 :data:`TITLE_MARGIN` 折算: ``winfo_height`` 量到的是
 客户区, 不含窗口管理器画的标题栏。
+
+**单位约定(2026-10-02)**: 屏高/屏宽替身是**物理**像素, 而窗口尺寸单位是**逻辑**像素
+(CTk 写 ``geometry`` 时会乘上窗口缩放, 本机 125% 的屏上物理 = 逻辑 x 1.25)。因此这里
+所有上限都在**逻辑**像素这一侧算(:func:`_hard_limit` / :func:`_comfort_limit`)、量到的
+窗口尺寸也在 :func:`_assert_fits` 里换成逻辑再比 —— 两边不换到同一套, 125% 的开发机上
+会报出一批"窗口出屏"的假红(实测过: 648 逻辑的窗口被当成 810 > 768)。
 """
 
 from __future__ import annotations
 
 import dataclasses
+import re
 import time
 import tkinter
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -58,7 +65,9 @@ from archive_management.ui.main_window import (
     WINDOW_DEFAULT_SIZE,
     WINDOW_MIN_SIZE,
     ArchiveApp,
+    current_window_geometry,
     initial_window_size,
+    open_window_geometry,
 )
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
@@ -71,6 +80,7 @@ from archive_management.ui.models import (
     exportable_games,
     import_strategies,
 )
+from archive_management.ui.widgets import window_scaling
 
 pytestmark = [
     pytest.mark.integration,
@@ -99,14 +109,21 @@ SCREEN: dict[str, int] = {"height": 1080, "width": SCREEN_WIDTH}
 _DialogCase = Callable[[ArchiveApp, Any], Any]
 
 
-def _hard_limit() -> int:
-    """硬线: 窗口 + 标题栏不出屏幕."""
-    return SCREEN["height"] - TITLE_MARGIN
+def _hard_limit(window: Any) -> int:
+    """硬线: 窗口 + 标题栏不出屏幕(**逻辑**像素).
+
+    屏高替身是物理像素、窗口尺寸是逻辑像素(见模块开头的单位约定): 拿物理屏高去比逻辑
+    窗口高, 在 125% 的开发机上会把本该合格的窗口全判成出屏。上限一律换成逻辑像素再比。
+    """
+    return round((SCREEN["height"] - TITLE_MARGIN) / window_scaling(window))
 
 
-def _comfort_limit() -> int:
-    """模态对话框的舒适线."""
-    return min(_hard_limit(), int(SCREEN["height"] * DIALOG_COMFORT))
+def _comfort_limit(window: Any) -> int:
+    """模态对话框的舒适线(**逻辑**像素)."""
+    scale = window_scaling(window)
+    return min(
+        _hard_limit(window), round(int(SCREEN["height"]) * DIALOG_COMFORT / scale)
+    )
 
 
 def _pump(app: ctk.CTk) -> None:
@@ -180,6 +197,13 @@ def _descendants(widget: Any) -> int:
         total += 1
         queue.extend(node.winfo_children())
     return total
+
+
+def _walk(widget: Any) -> Iterator[Any]:
+    """深度优先遍历控件树(含自己)."""
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk(child)
 
 
 def _content_area(window: Any) -> Any:
@@ -288,25 +312,70 @@ def _settle(window: Any, *, seconds: float = 0.5) -> None:
         time.sleep(0.02)
 
 
-def _assert_fits(window: Any, label: str, *, limit: int) -> None:
+def _assert_fits(window: Any, label: str, *, limit: int, settle: bool = True) -> None:
     """断言窗口高度不超上限、且没有直接子控件被窗口自己切掉、说明文字都排好了.
 
-    先 ``update()`` 把窗口真正布局出来再量: 模态钩子刚触发时窗口只是"请求尺寸"已经算好,
-    内部的子控件还停在初始值(实测正文容器仍是 canvas 默认的 200、按钮行 h=1), 那时量
-    越界会变成空断言。
+    ``limit`` 与量到的窗口高度都是**逻辑**像素(见 :func:`_hard_limit`)。先 ``update()``
+    把窗口真正布局出来再量: 模态钩子刚触发时窗口只是"请求尺寸"已经算好, 内部的子控件还
+    停在初始值(实测正文容器仍是 canvas 默认的 200、按钮行 h=1), 那时量越界会变成空断言。
     """
-    _settle(window)
+    if settle:
+        _settle(window)
     window.update()
-    height = int(window.winfo_height())
+    scale = window_scaling(window)
+    height = round(int(window.winfo_height()) / scale)
     cut = _cut_children(window)
     hint = (
-        f"{label}: 屏高 {SCREEN['height']} 下窗口高 {height}, 上限 {limit}; "
+        f"{label}: 屏高 {SCREEN['height']}(缩放 {scale})下窗口高 {height} 逻辑像素"
+        f"(= {window.winfo_height()} 物理), 上限 {limit}; "
         f"请求高度 {window.winfo_reqheight()}; 被切掉的子控件: {cut or '无'}"
     )
     assert height <= limit, hint
     assert not cut, hint
     problems = _label_problems(window)
     assert not problems, f"{label}: 说明文字没排好\n" + "\n".join(problems)
+
+
+def _body_of(window: Any) -> Any:
+    """弹窗里那个可滚动的正文区(**递归**找: 有的套在卡片容器里)."""
+    return next(
+        (child for child in _walk(window) if isinstance(child, ctk.CTkScrollableFrame)),
+        None,
+    )
+
+
+def _assert_dialog_fits(window: Any, label: str) -> None:
+    """模态弹窗的尺寸约定: 先守舒适线, 够不着时才退守"已经尽力 + 不出屏".
+
+    舒适线(屏高的 80%)不是总能达到的: 屏幕矮 + 高 DPI 时, 正文区已经压到
+    ``_DIALOG_BODY_MIN`` 也仍然超线(2026-10-02 实测: 700 高的屏、125% 缩放下批量导入
+    的每个部件都已在最小尺寸, 合计仍是 523 逻辑 = 654 物理 > 舒适线 448 逻辑)。那时可
+    断言的最强口径是两条: ① 正文区已经在**下限**(夹取使完了全部手段), ② 整窗不超过
+    屏幕本身。少了①, "夹取被删掉"就能蒙过去 —— 那时正文区停在内容高度、整窗也在屏内。
+    """
+    comfort = _comfort_limit(window)
+    scale = window_scaling(window)
+    _settle(window)
+    height = round(int(window.winfo_height()) / scale)
+    if height <= comfort:
+        _assert_fits(window, label, limit=comfort, settle=False)
+        return
+    body = _body_of(window)
+    floor = None if body is None else float(body.cget("height"))
+    screen = round(int(SCREEN["height"]) / scale)
+    hint = (
+        f"{label}: 屏高 {SCREEN['height']}(缩放 {scale})下窗口高 {height} 逻辑像素, "
+        f"舒适线 {comfort}、屏幕 {screen}; 正文区高度 {floor}, "
+        f"下限 {dialogs._DIALOG_BODY_MIN}"
+    )
+    assert body is not None, (
+        "超了舒适线却没有可滚动的正文区 —— 没有可收紧的地方\n" + hint
+    )
+    assert floor is not None, hint
+    assert floor <= dialogs._DIALOG_BODY_MIN, (
+        f"超了舒适线, 但正文区还没收到下限(夹取没起作用)\n{hint}"
+    )
+    assert height <= screen, "超了舒适线, 而且窗口比屏幕还高\n" + hint
 
 
 @pytest.fixture
@@ -323,8 +392,12 @@ def app(monkeypatch: pytest.MonkeyPatch) -> ArchiveApp:
     SCREEN["height"] = SCREENS[0]
     application: ArchiveApp = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(application)
-    # 打开尺寸 = 构造里设完 geometry 后的实际宽高(见夹具上面那段: 屏高按 768 给)。
-    _OPENED["size"] = (int(application.winfo_width()), int(application.winfo_height()))
+    # 打开尺寸 = 构造里设完 geometry 后**读回的**尺寸(逻辑像素, 见 open_window_geometry)。
+    opened = current_window_geometry(application, scale=window_scaling(application))
+    assert opened is not None
+    assert opened.width is not None
+    assert opened.height is not None
+    _OPENED["size"] = (opened.width, opened.height)
     assert int(application.winfo_screenheight()) == SCREEN["height"], "屏高替身没生效"
     assert int(application.winfo_screenwidth()) == SCREEN["width"], "屏宽替身没生效"
     return application
@@ -337,9 +410,7 @@ def _measure_dialog(app: ArchiveApp, label: str, spec: _DialogCase) -> None:
     刚被居中并 update 过, 正是可以量的时刻。量完把新开的窗口销毁, 免得残留影响下一例。
     """
     before = set(app.winfo_children())
-    app.wait_window = lambda window, *a, **kw: _assert_fits(
-        window, label, limit=_comfort_limit()
-    )
+    app.wait_window = lambda window, *a, **kw: _assert_dialog_fits(window, label)
     spec(app, app.p)
     for child in set(app.winfo_children()) - before:
         child.destroy()
@@ -566,36 +637,60 @@ def test_main_window_opens_within_the_screen(app: ArchiveApp) -> None:
     # 尺寸不该还是设计尺寸。少了这条, "策略函数写了、构造里却还用常量 1360x860" 就能
     # 绕过整个守卫(实测这么做时其余断言全绿)。
     opened_width, opened_height = _OPENED["size"]
+    # 打开尺寸是**逻辑**像素(CTk 的 geometry 单位), 屏高替身是**物理**像素: 两边先换到
+    # 同一套再比 —— 125% 的屏上物理 = 逻辑 x 1.25, 直接比会得出"窗口超出屏幕"的假结论
+    # (真正的约束是最小尺寸: 它在高 DPI 下本来就装不进矮屏, 那无解)。
+    scale = window_scaling(app)
     opened_hint = (
-        f"屏高 {SCREENS[0]} 下主窗口的打开尺寸是 {opened_width}x{opened_height}, "
-        f"设计尺寸是 {WINDOW_DEFAULT_SIZE}: 构造里要用 initial_window_size 而不是常量"
+        f"屏高 {SCREENS[0]}(缩放 {scale})下主窗口的打开尺寸是 "
+        f"{opened_width}x{opened_height}, 设计尺寸是 {WINDOW_DEFAULT_SIZE}: "
+        f"构造里要用 initial_window_size 而不是常量"
     )
-    assert opened_height <= SCREENS[0] - TITLE_MARGIN, opened_hint
-    assert opened_width <= SCREEN["width"] - TITLE_MARGIN, opened_hint
+    logical_limit = round((SCREENS[0] - TITLE_MARGIN) / scale)
+    logical_width_limit = round((SCREEN["width"] - TITLE_MARGIN) / scale)
+    assert opened_height >= WINDOW_MIN_SIZE[1], opened_hint
+    assert opened_height <= max(WINDOW_MIN_SIZE[1], logical_limit), opened_hint
+    assert opened_width >= WINDOW_MIN_SIZE[0], opened_hint
+    assert opened_width <= max(WINDOW_MIN_SIZE[0], logical_width_limit), opened_hint
 
     for screen in SCREENS:
         SCREEN["height"] = screen
-        width, height = initial_window_size(app)
+        scale = window_scaling(app)
+        # 屏高替身是**物理**像素, 而窗口尺寸是逻辑像素: 先换到同一套(见模块开头的单位约定)。
+        # ``fit_window_size`` 用的是 ``屏幕 - SCREEN_MARGIN``, 与 _hard_limit 的
+        # ``TITLE_MARGIN`` 是两个口径, 所以两条分开算。
+        screen_height = round(screen / scale)
+        screen_width = round(SCREEN["width"] / scale)
+        height_budget = screen_height - SCREEN_MARGIN
+        width_budget = screen_width - SCREEN_MARGIN
+        width, height = initial_window_size(app, scale=scale)
         app.geometry(f"{width}x{height}")
         _pump(app)
 
         hint = (
-            f"屏高 {screen} 下主窗口被算成 {width}x{height}: "
-            f"设计尺寸 {WINDOW_DEFAULT_SIZE}、最小尺寸 {WINDOW_MIN_SIZE}"
+            f"屏高 {screen}(缩放 {scale}, 可用 {screen_height})下主窗口被算成 "
+            f"{width}x{height}: 设计尺寸 {WINDOW_DEFAULT_SIZE}、最小尺寸 "
+            f"{WINDOW_MIN_SIZE}、安全边距 {SCREEN_MARGIN}"
         )
-        # 装不下就得夹(这是本用例存在的理由: 1360x860 在 768/900 高的屏幕上会出屏)。
-        assert height <= _hard_limit(), hint
-        assert width <= SCREEN["width"] - TITLE_MARGIN, hint
-        # 但不许夹过头: 最小尺寸是布局的硬下限。
-        assert height >= WINDOW_MIN_SIZE[1], hint
-        assert width >= WINDOW_MIN_SIZE[0], hint
-        # 屏幕够大时保持设计高度 —— 防止"把默认尺寸改小"当成修好了。
-        if SCREEN["height"] - 96 >= WINDOW_DEFAULT_SIZE[1]:
+        # 尺寸策略: 装得下就用设计尺寸, 装不下就夹到"屏幕 - 安全边距", 但都**不低于最小
+        # 尺寸**。高 DPI 的矮屏上"窗口比屏幕还高"就是这条策略允许的结果(最小尺寸是布局
+        # 硬下限), 所以这里逐条查策略, 而不是拿窗口去比屏幕(那在 125% 上必假红)。
+        if height_budget >= WINDOW_DEFAULT_SIZE[1]:
+            # 屏幕够大时保持设计高度 —— 防止"把默认尺寸改小"当成修好了。
             assert height == WINDOW_DEFAULT_SIZE[1], hint
         else:
-            assert height < WINDOW_DEFAULT_SIZE[1], hint
+            assert height == max(WINDOW_MIN_SIZE[1], height_budget), hint
+        if width_budget >= WINDOW_DEFAULT_SIZE[0]:
+            assert width == WINDOW_DEFAULT_SIZE[0], hint
+        else:
+            assert width == max(WINDOW_MIN_SIZE[0], width_budget), hint
 
-        _assert_fits(app, "00-主窗口", limit=_hard_limit())
+        # 窗口本体: 不超过"硬线或最小尺寸里更大的那个", 且没有控件被切、说明文字都排好了。
+        _assert_fits(
+            app,
+            "00-主窗口",
+            limit=max(_hard_limit(app), WINDOW_MIN_SIZE[1]),
+        )
 
 
 # 记住的窗口几何(1920x1080 的屏、1400x900 摆在中偏左上).
@@ -630,6 +725,12 @@ def _desktop_holds(app: ctk.CTk, geometry: tuple[int, int, int, int]) -> bool:
     return x + width <= screen_w and y + height <= screen_h - TITLE_MARGIN
 
 
+def _geometry_numbers(text: str) -> tuple[int, int, int, int]:
+    """把 ``"1400x900+160+120"`` 拆成四个数(用例自己解析, 不依赖被测函数的内部格式)."""
+    width, height, x, y = (int(item) for item in re.findall(r"-?\d+", text))
+    return width, height, x, y
+
+
 def test_the_main_window_returns_to_the_remembered_geometry(tmp_path: Any) -> None:
     """上次关窗时记下的尺寸与位置, 下次打开照它摆; 关窗时再写回一份新的.
 
@@ -653,51 +754,159 @@ def test_the_main_window_returns_to_the_remembered_geometry(tmp_path: Any) -> No
 
     saved = _REMEMBERED.geometry()
     assert saved is not None, "夹具必须给整套几何(少一项就测不到位置)"
-    saved_width, saved_height, saved_x, saved_y = saved
     screen = (int(app.winfo_screenwidth()), int(app.winfo_screenheight()))
-    size = (
-        max(WINDOW_MIN_SIZE[0], min(saved_width, screen[0] - SCREEN_MARGIN)),
-        max(WINDOW_MIN_SIZE[1], min(saved_height, screen[1] - SCREEN_MARGIN)),
+    # 尺寸按**应用自己的单位(逻辑像素)**比: CTk 写 ``geometry`` 时会乘上窗口缩放
+    # (125% 的屏上物理宽 = 逻辑宽 x 1.25), 所以物理像素与配置里存的本来就不是一个数。
+    scale = window_scaling(app)
+    expected_text = open_window_geometry(_REMEMBERED, screen=screen, scale=scale)
+    expected_width, expected_height, expected_x, expected_y = _geometry_numbers(
+        expected_text
     )
-    position = (
-        min(saved_x, max(0, screen[0] - size[0])),
-        min(saved_y, max(0, screen[1] - size[1])),
-    )
-    actual = (
-        int(app.winfo_width()),
-        int(app.winfo_height()),
-        int(app.winfo_x()),
-        int(app.winfo_y()),
-    )
+    current = current_window_geometry(app, scale=scale)
+    assert current is not None, "窗口是 normal 状态, 应当读到一整套几何"
     hint = (
-        f"桌面 {screen[0]}x{screen[1]} 下, 记住的几何 {saved} 应当被夹成 "
-        f"{size}@{position}, 实测 {actual[:2]}@{actual[2:]}"
+        f"桌面 {screen[0]}x{screen[1]}(缩放 {scale})下, 记住的几何 {saved} 应当被夹成 "
+        f"{expected_text}, 实际读到 {current.geometry()}"
     )
-    expected_widths = {size[0], screen[0]} if screen[0] < size[0] else {size[0]}
-    expected_heights = {size[1], screen[1]} if screen[1] < size[1] else {size[1]}
-    assert actual[0] in expected_widths, hint
-    assert actual[1] in expected_heights, hint
-    if _desktop_holds(app, (*size, *position)):
-        assert actual[2:] == position, hint
+    expected_widths = (
+        {expected_width, screen[0]} if screen[0] < expected_width else {expected_width}
+    )
+    expected_heights = (
+        {expected_height, screen[1]}
+        if screen[1] < expected_height
+        else {expected_height}
+    )
+    assert current.width in expected_widths, hint
+    assert current.height in expected_heights, hint
+    physical = (
+        round(expected_width * scale),
+        round(expected_height * scale),
+        expected_x,
+        expected_y,
+    )
+    if _desktop_holds(app, physical):
+        assert (current.x, current.y) == (expected_x, expected_y), hint
 
-    # 用户拖到别处并改了尺寸 → 关窗时把**实际**几何写回配置, 其余字段一个不丢。
+    # 用户拖到别处并改了尺寸 → 读出来必须还是同一套单位(写进去 1500x820, 读回来就得是
+    # 1500x820)。这一条就是 2026-10-02 用户报的"记住的几何没生效"的上游: 读成物理值
+    # 之后再被乘一次缩放, 于是每重启一次窗口大一圈。
     app.geometry("1500x820+240+150")
     _pump(app)
-    moved = (
-        int(app.winfo_width()),
-        int(app.winfo_height()),
-        int(app.winfo_x()),
-        int(app.winfo_y()),
+    moved = current_window_geometry(app, scale=window_scaling(app))
+    assert moved is not None
+    assert (moved.width, moved.height) == (1500, 820), (
+        f"读到的是逻辑像素(与写进去的同一套), 实测 {moved.geometry()}"
     )
     app._on_close()
 
     written = load_config(paths.config_path)
-    assert written.window.geometry() == moved, (
+    assert written.window.geometry() == moved.geometry(), (
         "关窗要写回窗口**当时**的几何(桌面装不下 1500x820 时写回的应当是被夹过的那套)"
     )
     assert (written.theme, written.language) == ("dark", "en"), (
         "写回几何不能把别的字段冲掉(读-改-写)"
     )
+
+    # 拿刚写回的配置再开一次: 尺寸必须一模一样 —— 记下的几何与打开的几何是同一套单位,
+    # 所以"记住 → 打开 → 再记住"是恒等变换(改坏成物理像素会在这里逐轮变大)。
+    again = gui_app(_geometry_app(paths), DemoArchiveService(delay=0))
+    assert _wait_mapped(again), "窗口未映射, 位置读数没有意义"
+    reopened = current_window_geometry(again, scale=window_scaling(again))
+    assert reopened is not None
+    after = _geometry_numbers(
+        open_window_geometry(written.window, screen=screen, scale=window_scaling(again))
+    )
+    assert (reopened.width, reopened.height) == after[:2], (
+        f"重开一次尺寸就变了: {reopened.geometry()} != {after}"
+    )
+    again._on_close()
+
+
+def test_the_geometry_switch_stops_remembering_and_clears_the_saved_value(
+    tmp_path: Any,
+) -> None:
+    """设置里的"记住窗口大小与位置"关掉后: 关窗不写, 并且把已记下的几何删掉.
+
+    用户 2026-10-02 的两条要求: 加一个开关(默认开), 关掉时"如果配置中有记录了位置大小
+    信息要一并删除"。两条都要能验: ① 开关关着时关窗**不动**配置里的几何; ② 从设置窗口
+    关掉开关时, 已记下的那一套当场消失(而不是留着等下次打开又生效)。
+    """
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    config = AppConfig(theme="dark", language="en")
+    config.window = _REMEMBERED
+    config.ui.remember_window = False
+    save_config(config, paths.config_path)
+
+    app = gui_app(_geometry_app(paths), DemoArchiveService(delay=0))
+    assert _wait_mapped(app)
+    app.geometry("1500x820+240+150")
+    _pump(app)
+    app._on_close()
+
+    written = load_config(paths.config_path)
+    assert written.window.geometry() == _REMEMBERED.geometry(), (
+        "开关关着时关窗不该改写记住的几何"
+    )
+
+    # 反过来: 开着关窗会写, 而把开关关掉时那份几何要当场被清掉。
+    reloaded = load_config(paths.config_path)
+    reloaded.window = _REMEMBERED
+    reloaded.ui.remember_window = True
+    save_config(reloaded, paths.config_path)
+    app = gui_app(_geometry_app(paths), DemoArchiveService(delay=0))
+    assert _wait_mapped(app)
+    assert app._on_remember_window_change(False) is None, "关掉开关应当成功"
+    cleared = load_config(paths.config_path)
+    assert cleared.window.geometry() is None, "关掉开关要把已记下的位置与大小一并删除"
+    assert cleared.ui.remember_window is False, "开关本身上要落盘"
+
+    app.geometry("1200x760+40+40")
+    _pump(app)
+    app._on_close()
+    assert load_config(paths.config_path).window.geometry() is None, (
+        "关掉开关之后关窗也不许再写"
+    )
+
+
+def test_the_manage_window_hugs_its_content() -> None:
+    """游戏设置窗口的高度按内容算: 底部按钮与窗口下沿之间不留大片空白.
+
+    出处(2026-10-02 用户反馈): 原来内容高度有个 440 的下限, 位置少的时候窗口比内容高一截,
+    底部按钮下面空出一大块。现在只按内容定高 —— 判据是"窗口高度 ≈ 内容请求高度"且
+    "关闭按钮下面剩的空白很小", 两条一起看才拦得住"把下限调小一点"这种糊法。
+    """
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        games = list(app.backend.list_games())
+        assert games, "演示后端应该至少有一款游戏"
+        manage = ManageGameWindow(
+            app,
+            backend=app.backend,
+            palette=app.p,
+            game_id=games[0].game_id,
+            name=games[0].name,
+            enabled=True,
+            backup_location="D:\\Backups",
+            on_change=lambda: None,
+        )
+        try:
+            manage.refresh()
+            _pump(app)
+            window = manage._window
+            close_btn = manage._close_btn
+            height = int(window.winfo_height())
+            requested = int(window.winfo_reqheight())
+            assert abs(height - requested) <= 8, (
+                f"窗口高度应当就是内容高度: 实测 {height}, 内容请求 {requested}"
+            )
+            below = height - (int(close_btn.winfo_y()) + int(close_btn.winfo_height()))
+            assert 0 <= below <= 40, f"关闭按钮下面留了 {below}px 的空白"
+        finally:
+            manage.close()
+            _pump(app)
+    finally:
+        app._on_close()
 
 
 def test_a_maximized_window_is_not_remembered(
@@ -801,7 +1010,7 @@ def test_import_dialog_scrolls_instead_of_getting_squashed(app: ArchiveApp) -> N
         captured["visible"] = _body_visible_fraction(body)
         captured["content"] = content
         captured["viewport"] = viewport
-        _assert_fits(window, "28-导入归档包", limit=_comfort_limit())
+        _assert_dialog_fits(window, "28-导入归档包")
 
     before = set(app.winfo_children())
     app.wait_window = capture
@@ -827,14 +1036,18 @@ def test_workspace_windows_fit_the_screen(app: ArchiveApp) -> None:
         settings = app._open_settings()
         _pump(app)
         assert settings is not None, "设置窗口没打开"
-        _assert_fits(settings._window, "16-设置窗口", limit=_hard_limit())
+        _assert_fits(
+            settings._window, "16-设置窗口", limit=_hard_limit(settings._window)
+        )
         settings.close()
         _pump(app)
 
         schedule = app._open_schedule_window()
         _pump(app)
         assert schedule is not None, "定时任务窗口没打开"
-        _assert_fits(schedule._window, "18-定时任务窗口", limit=_hard_limit())
+        _assert_fits(
+            schedule._window, "18-定时任务窗口", limit=_hard_limit(schedule._window)
+        )
         schedule.close()
         _pump(app)
 
@@ -853,7 +1066,9 @@ def test_workspace_windows_fit_the_screen(app: ArchiveApp) -> None:
         try:
             manage.refresh()
             _pump(app)
-            _assert_fits(manage._window, "15-游戏管理窗口", limit=_hard_limit())
+            _assert_fits(
+                manage._window, "15-游戏管理窗口", limit=_hard_limit(manage._window)
+            )
         finally:
             manage.close()
             _pump(app)

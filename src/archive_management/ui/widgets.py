@@ -20,17 +20,27 @@ from typing import Literal
 
 import customtkinter as ctk
 
+from archive_management.ui.dropdown import apply_combo_dropdown_fix
 from archive_management.ui.keyboard import (
     install_keyboard_support,
     remember_palette,
     set_focus_paint,
 )
 from archive_management.ui.palette import Palette
-from archive_management.ui.rendering import apply_border_rendering_fix
+from archive_management.ui.rendering import (
+    apply_border_rendering_fix,
+    apply_combo_border_fix,
+)
 from archive_management.ui.textfit import MeasurableFont, fit_path, fit_text
 from archive_management.ui.textundo import apply_input_undo_support
 
 apply_border_rendering_fix()
+# 下拉框右侧那半段边框被 CTk 涂成了箭头区底色, 看着像被箭头盖住 —— 补丁把它描回
+# 边框色(见 rendering.apply_combo_border_fix 的说明)。
+apply_combo_border_fix()
+# 下拉的列表换成自建浮层: 限高 + 滚动条 + 按位置决定往下还是往上展开
+# (见 dropdown.apply_combo_dropdown_fix 的说明)。
+apply_combo_dropdown_fix()
 apply_input_undo_support()
 # 键盘可用性(Tab 可达 / 焦点环 / 空格回车激活)也在类上打一次补丁: 控件是就地创建的
 # 还是走 UiKit 都自动接上, 调用点不需要记得做任何事(见 ui.keyboard)。
@@ -85,6 +95,92 @@ _KIND_FOR_STYLE: dict[ButtonStyle, ActionKind] = {
 def style_for(kind: ActionKind) -> ButtonStyle:
     """把动作性质翻译成样式名(业务代码只该写性质)."""
     return ACTION_STYLES[kind]
+
+
+def window_scaling(window: tk.Misc) -> float:
+    """这个窗口的**窗口缩放**(CustomTkinter 按显示器 DPI 装的系数).
+
+    为什么要拿它: ``winfo_width()`` / ``winfo_reqheight()`` 给的是**物理**像素, 而
+    ``CTk.geometry()`` 吃的是**逻辑**像素(它写下去时会乘上这个系数, 见
+    ``CTkScalingBaseClass._apply_geometry_scaling``)。两边混着用就是 2026-10-02 那两起
+    用户反馈的同一个根因:
+
+    * 主窗口: 把物理值当逻辑值**记进配置**, 下次打开又被乘一遍 —— 125% 的屏上每重启一次
+      窗口大 1.25 倍, 直到顶到屏幕(用户配置里留下的 ``2024x1147`` 就是这么来的);
+    * 游戏设置/设置窗口: 拿物理的 ``winfo_reqheight()`` 去**定高**, 于是窗口比内容高出一截
+      (1.25 倍), 底部按钮下面空出一大块。
+
+    所以约定是: **物理读、逻辑写** —— 存/设几何前先除一下, 记尺寸前先除一下; 位置是屏幕
+    坐标, CTk 不动它。读不到(替身窗口、已销毁)时当 1.0: 那种情况下两者本来就是同一套。
+    """
+    try:
+        return float(ctk.ScalingTracker.get_window_scaling(window))
+    except Exception:  # pragma: no cover - 非 CTk 窗口 / 已销毁
+        return 1.0
+
+
+def wrap_budget(window: tk.Misc, width: int) -> int:
+    """把量到的**物理**宽度换成 ``wraplength`` 用的**逻辑**预算.
+
+    ``CTkLabel`` 的 ``wraplength`` 是**逻辑**像素 —— CTk 自己会乘上窗口缩放(实测: 写
+    284, 内层 Tk 标签拿到 355 = 284 x 1.25), 而 ``winfo_width()`` / ``winfo_reqwidth()``
+    给的是**物理**像素。把物理宽度直接当 wraplength 用, 标签就会按 1.25 倍的宽度折行:
+    文字行比标签本身还宽, Tk 直接硬裁且不补省略号。
+
+    2026-10-02 实测(设置窗口, 125% 的屏): 两条说明标签宽 284、折出来的行宽 345/375 ——
+    正确写法下标签的请求宽度必定 ≤ 它分到的宽度, 那两条说明正是被这条约定破掉的。
+
+    注意: ``inset`` / ``minimum`` / ``initial`` 这类**设计**尺寸本来就是逻辑像素,
+    不要经过这里。
+    """
+    return round(width / window_scaling(window))
+
+
+def scaled_px(window: tk.Misc, value: int) -> int:
+    """把**设计**尺寸(逻辑像素)换成布局与字体度量要用的**物理**像素.
+
+    与 :func:`wrap_budget` 互为反向: CTk 的控件尺寸与 ``CTkFont`` 是逻辑像素, 而 Tk 的
+    ``grid`` 列宽、``winfo_*`` 与 ``font.measure`` 都是物理像素。凡是拿"设计里写的那个
+    数"去配(Tk 布局或字体宽度)的地方都要过这一层, 否则高 DPI 下会多出 1.25 倍的差:
+
+    * 固定列比设计窄 25%(实测平台列 108 逻辑被当成 108 物理 = 86 逻辑);
+    * 状态列的 ``wraplength`` 是逻辑的 200(=250 物理), 而列宽只给了 200 物理 —— 内容
+      比列宽多 46px, 那一行的整块列被推左 46px, 与其他行和表头错开(用户实测:
+      "标签多的那款游戏没对齐内容", 见 ``home_page._configure_columns``)。
+    """
+    return round(value * window_scaling(window))
+
+
+@dataclass(frozen=True)
+class _ScaledFont:
+    """按窗口缩放换算过的字体度量(见 :func:`measured_font`)."""
+
+    font: MeasurableFont
+    scale: float
+
+    def measure(self, text: str) -> int:
+        """这条文字**实际渲染**出来的宽度(物理像素)."""
+        return round(self.font.measure(text) * self.scale)
+
+
+def measured_font(font: MeasurableFont, window: tk.Misc) -> MeasurableFont:
+    """把字体包成"**渲染字号**下的度量"; 窗口缩放为 1 时原样返回.
+
+    为什么必须包一层: ``CTkFont.measure()`` 量的是**未缩放**的字号, 而 CTk 控件渲染文字
+    用的是按窗口缩放现场换算出来的字体 —— CTk 内部走
+    ``CTkBaseClass._apply_font_scaling``, 它按窗口缩放造一份**新的**字体给内层控件
+    (``CTkFont.create_scaled_tuple``)。实测(125%, ``CTkFont(size=12)``): 量一条标签
+    231px、``metrics("linespace")`` 14, 而控件里真正用的字体是 ``Roboto -15``、同一条
+    288px、linespace 18。
+
+    拿未缩放的字号去裁文字就少算 1.25 倍: 裁出来的文本仍然比控件宽, Tk 于是把它折行
+    (主页状态列因此变成三行)或直接硬裁(备份列表/位置列表那些"文字被硬裁"的红)。
+
+    只用于**渲染在 CTk 控件上**的文字: 画在普通 ``tk.Canvas`` 上的文字(分支图)不做缩放,
+    那里 ``measure`` 与渲染本来就一致, 不要包。
+    """
+    scale = window_scaling(window)
+    return font if scale == 1.0 else _ScaledFont(font, scale)
 
 
 # **聚焦时的换色规则**(用户实测: "聚焦框在实底按钮上看起来只是按钮缩小了一圈"):
@@ -715,7 +811,7 @@ def track_fit(
         return int(container.winfo_width()) - gap
 
     def clip(text: str, width: int) -> str:
-        font = label.cget("font")
+        font = measured_font(label.cget("font"), label)
         if path:
             return fit_path(text, font, width)
         return fit_text(text, font, width, max_lines=max_lines)
@@ -843,9 +939,13 @@ def track_wraplength(
         _write_wraplength(label, budget, on_change)
 
     def measure() -> None:
-        """按**同一瞬间**量到的容器宽度与标签宽度定 wraplength."""
-        own = _measured_width(label)
-        room = _measured_width(container) - inset
+        """按**同一瞬间**量到的容器宽度与标签宽度定 wraplength.
+
+        读数要换成**逻辑**像素(见 :func:`wrap_budget`): ``wraplength`` 与 ``minimum``
+        都是逻辑像素, 而两个 ``winfo_width()`` 是物理像素。
+        """
+        own = wrap_budget(label, _measured_width(label))
+        room = wrap_budget(container, _measured_width(container)) - inset
         if own > 1 and room > 1:
             room = min(room, own)
         apply(room if room > 1 else minimum)
@@ -976,8 +1076,11 @@ def fit_label(
     一次性裁剪(不跟随宽度变化)的场合用它, 与 :func:`track_fit` 同一条纪律:
     **裁剪与提示绑在一起**, 不留给调用方"记得再挂一次"。中间省略的路径形态走
     :func:`track_fit` 的 ``path=True``(那里才需要按容器宽度反复重裁)。
+
+    度量用 :func:`measured_font`: CTk 控件渲染的是**缩放后**的字体, 拿未缩放的
+    ``CTkFont.measure()`` 去裁会少算 1.25 倍(高 DPI 下文字因此被折行或硬裁)。
     """
-    shown = fit_text(text, font, width, max_lines=max_lines)
+    shown = fit_text(text, measured_font(font, label), width, max_lines=max_lines)
     label.configure(text=shown)
     sync_tooltip(label, full=text, shown=shown)
 

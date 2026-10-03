@@ -1985,7 +1985,9 @@ def test_the_visual_gate_refuses_a_frame_that_cannot_draw_cjk(tmp_path: Path) ->
             "families": 3,
             "platform": "Linux",
             "python": "3.12.0",
-            "tk": "9.0",
+            "tk": "8.6.14",
+            "tk_module": "/usr/lib/python3.12/lib-dynload/_tkinter.cpython-312-x86_64-linux-gnu.so",
+            "tk_libraries": ["/usr/lib/x86_64-linux-gnu/libtk8.6.so.0"],
             "requested": "Noto Sans CJK SC",
             "ascii_width": 20,
         },
@@ -2002,6 +2004,49 @@ def test_the_visual_gate_refuses_a_frame_that_cannot_draw_cjk(tmp_path: Path) ->
     names = [attachment["name"] for attachment in payload["attachments"]]
     assert "fonts.txt" in names, "探针要作为附件进报告(不然下一次还得猜)"
     assert "actual.png" in names, "坏图也要留着: 人要看它坏成什么样"
+    # 修法与现场一起写进证据: "用哪个 Tk"是这道门禁的关键输入, 光有版本号说明不了它是哪一份。
+    assert "_tkinter" in payload["statusDetails"]["message"], (
+        "判不可用时要把当前用的是哪个 `_tkinter` 一起写出来"
+    )
+
+
+def test_the_probe_records_which_tk_is_in_use() -> None:
+    """探针要记下 `_tkinter` 模块与 Tcl/Tk 库的**路径**, 而不只是版本号.
+
+    出处(2026-10-02): 报告里写着"Linux / 3.12.3 / 8.6.14", 而 3.12.3 是**发行版解释器**的版本
+    —— 那一步当时为了拿发行版的 Tk 把解释器也换掉了, 于是报告里出现一个项目里哪里都不用的
+    Python 版本。教训是"解释器版本对了不代表 Tk 也对了": 同一个 Tk 8.6 可能来自发行版(走
+    Xft/fontconfig, 看得见 TTF 与汉字), 也可能来自解释器自带的副本(只认 X11 核心位图字体)。
+    所以探针把两条路径都写下来, 下一次出问题时不用再猜。
+    """
+    module = _load_script("create_allure_visual")
+    libraries = module.loaded_tk_libraries()
+    assert isinstance(libraries, list)
+    if not sys.platform.startswith("linux"):
+        assert libraries == [], "非 Linux 没有 /proc/self/maps: 给空表, 不要编一份出来"
+
+    module_path = "/usr/lib/python3.12/lib-dynload/_tkinter.cpython-312.so"
+    library = "/usr/lib/x86_64-linux-gnu/libtk8.6.so.0"
+    probe = {
+        "platform": "Linux",
+        "python": "3.12.11",
+        "tk": "8.6.14",
+        "tk_module": module_path,
+        "tk_libraries": [library],
+        "requested": "Noto Sans CJK SC",
+        "actual": "Noto Sans CJK SC",
+        "families": 12,
+        "cjk_candidates": ["Noto Sans CJK SC"],
+        "cjk_width": 40,
+        "ascii_width": 20,
+    }
+    text = module.format_probe(probe)
+
+    assert "Tk 模块" in text, "要写出 `_tkinter` 的来路"
+    assert module_path in text
+    assert "Tcl/Tk 动态库" in text, "要写出真正加载到的库"
+    assert library in text
+    assert not module.font_problem(probe), "这一份探针就是「可用」的样子"
 
 
 def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> None:
@@ -2039,16 +2084,30 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
     )
     assert "matrix" not in job, "视觉回归不按平台展开: 基线只按一种渲染采"
     assert "font" in job, "要装 CJK 字体: 否则汉字被量成零宽, 画面与基线对不上"
-    # 但"装了字体"还不够: 用的那个 Tk 必须看得到 fontconfig/FreeType。uv 管的那份 Linux
-    # CPython 里带的 Tk 在 X11 上只走**核心位图字体**(实测它的 libtcl9tk9.0.so 只有
-    # XLoadQueryFont/XCreateFontSet 那套符号), 汉字一个都画不出来 —— 2026-10-02 的候选基线
-    # 就是这么空的。所以这一步要用发行版的 python3-tk, 并且装进独立环境(别动作业共用的 .venv)。
-    assert "python3-tk" in job, "要装发行版的 Tk: uv 管的那份在 X11 上画不出汉字"
+    # 但"装了字体"还不够: 用的那个 Tk 必须看得到 fontconfig/FreeType。uv 托管的 CPython 里
+    # 带的 Tcl/Tk 是 python-build-standalone 自己编的, 在 X11 上只走**核心位图字体**(实测它的
+    # libtcl9tk9.0.so 只有 XLoadQueryFont 那套符号), 汉字一个都画不出来 —— 2026-10-02 的候选
+    # 基线就是这么空的。修法是**换 Tk 而不换解释器**: 把发行版 python3-tk 的 `_tkinter` 模块
+    # (它链发行版 libtk8.6/Xft) 放在 PYTHONPATH 最前面。
+    assert "python3-tk" in job, "要装发行版的 Tk: uv 托管那份在 X11 上画不出汉字"
+    assert "tcl8.6" in job, "发行版 Tk 的库包也要装"
+    assert "tk8.6" in job, "发行版 Tk 的脚本包也要装"
+    assert "tk-xft" in job, "发行版那份 `_tkinter` 要留一份给这一步用"
     visual_step = job.split("name: Run the visual regression", 1)[1].split(
         "\n      - name:", 1
     )[0]
-    assert "--python-preference only-system" in visual_step, (
-        "视觉回归要用系统的解释器(发行版 Tk), 不是 uv 管的那份"
+    # 解释器必须是**项目版**: 之前这一步用 /usr/bin/python3.12 去拿发行版的 Tk, 而 Ubuntu
+    # 24.04 的系统 Python 是 3.12.3 —— 报告里"平台 / Python / Tk"那行因此写着一个项目里哪里
+    # 都不用的版本。现在只换 `_tkinter` 模块, 解释器仍归 uv 管(与其余作业同版本)。
+    assert "--python-preference" not in visual_step, (
+        "视觉回归不许把解释器换成发行版的: 报告里的 Python 一栏要是这一轮真正的解释器"
+    )
+    assert "--python /usr" not in visual_step, "同上: 解释器归 uv 管, 换的只是 Tk"
+    assert 'PYTHONPATH="$RUNNER_TEMP/tk-xft' in visual_step, (
+        "发行版的 `_tkinter` 要排在 sys.path 最前面, 否则换不上"
+    )
+    assert "_tkinter.__file__" in visual_step, (
+        "换没换上要当场自检: 不然会拿着一张位图字体的图去比基线"
     )
     assert "UV_PROJECT_ENVIRONMENT" in visual_step, (
         "那一份装进独立环境, 别动本作业其余步骤共用的 .venv"

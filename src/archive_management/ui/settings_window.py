@@ -39,7 +39,11 @@ from archive_management.services.hotkeys import (
 from archive_management.ui.dialogs import _present
 from archive_management.ui.palette import Palette
 from archive_management.ui.typography import FONT_CHOICES
-from archive_management.ui.widgets import auto_scrollbar, track_wraplength
+from archive_management.ui.widgets import (
+    auto_scrollbar,
+    track_wraplength,
+    window_scaling,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,16 +128,18 @@ class SettingsWindow:
         on_apply_font_size: _ApplyFontSize,
         debug: bool,
         activation: bool,
+        remember_window: bool,
         shortcuts: Mapping[str, str],
         on_toggle_theme: _ToggleTheme,
         on_apply_language: _ApplyLanguage,
         on_apply_debug: _ApplyToggle,
         on_apply_activation: _ApplyToggle,
+        on_apply_remember_window: _ApplyToggle,
         on_apply_shortcut: _ApplyShortcut,
         on_capture_start: _CaptureHook,
         on_capture_end: _CaptureHook,
     ) -> None:
-        """构造设置窗口并绑定主题、语言、两个开关与快捷键回调."""
+        """构造设置窗口并绑定主题、语言、三个开关与快捷键回调."""
         self._parent = parent
         self._palette = palette
         self._theme = theme
@@ -142,11 +148,13 @@ class SettingsWindow:
         self._on_apply_font_size = on_apply_font_size
         self._debug = debug
         self._activation = activation
+        self._remember_window = remember_window
         self._shortcuts: dict[str, str] = dict(shortcuts)
         self._on_toggle_theme = on_toggle_theme
         self._on_apply_language = on_apply_language
         self._on_apply_debug = on_apply_debug
         self._on_apply_activation = on_apply_activation
+        self._on_apply_remember_window = on_apply_remember_window
         self._on_apply_shortcut = on_apply_shortcut
         self._on_capture_start = on_capture_start
         self._on_capture_end = on_capture_end
@@ -286,6 +294,39 @@ class SettingsWindow:
         )
         self._font_box.set(self._font_label_of(self._base_font_px))
         self._font_box.grid(row=3, column=1, padx=16, pady=(0, 16))
+
+        # 记住窗口大小与位置(默认开): 与调试开关同一套写法 —— 只改控件的值不触发
+        # command, 所以失败回滚不会递归回调。
+        self._remember_switch = ctk.CTkSwitch(
+            self._appearance_panel,
+            text=tr("settings.remember_window"),
+            command=self._on_remember_toggled,
+            width=180,
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+            progress_color=palette.accent,
+            button_color=palette.text_muted,
+            button_hover_color=palette.item_hover,
+            fg_color=palette.input_bg,
+        )
+        self._set_remember_switch(self._remember_window)
+        self._remember_switch.grid(row=4, column=0, columnspan=2, padx=16, sticky="w")
+        self._remember_hint = ctk.CTkLabel(
+            self._appearance_panel,
+            text=tr("settings.remember_window_hint"),
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._remember_hint.grid(
+            row=5, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
+        )
+        self._track_hint(
+            self._appearance_panel,
+            self._remember_hint,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
 
         self._language_panel = ctk.CTkFrame(
             self._body,
@@ -687,7 +728,20 @@ class SettingsWindow:
                 + _FOOTER_GAP
                 + _WINDOW_PAD_Y * 2
             )
-            available = int(self._parent.winfo_screenheight()) - _SCREEN_MARGIN
+            # ``available`` 是"屏高 - 安全边距": 它来自 ``winfo_screenheight()``(**物理**
+            # 像素), 而 ``content_height`` 与写进 geometry 的都是**逻辑**像素(125% 的屏上
+            # 物理 = 逻辑 x 1.25)—— 两边必须换到同一套, 否则高 DPI 的矮屏上窗口会比屏幕
+            # 还高(2026-10-02 实测: 768 高的屏上 648 逻辑 = 810 物理 > 768, 底部按钮被屏幕
+            # 下沿切掉)。
+            #
+            # 但**不**据此把窗口压到"刚好等于内容高度": 主体是 ``sticky="nsew"`` 的滚动区,
+            # 比内容略高的那点全被它吸收(底部说明与关闭按钮照旧贴在窗口下沿), 而"刚好等高"
+            # 会让滚动条在临界点上闪进闪出, 进而把说明文字的换行宽度推来推去(2026-10-02
+            # 实测: 刚好等高的那版让两条说明被判成"被硬裁")。
+            available = round(
+                (int(self._parent.winfo_screenheight()) - _SCREEN_MARGIN)
+                / window_scaling(self._window)
+            )
             self._window.geometry(
                 f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, min(content_height, available))}"
             )
@@ -799,6 +853,32 @@ class SettingsWindow:
         self._activation = wanted
         self._activation_label.configure(text=self._activation_state_text())
 
+    def _set_remember_switch(self, enabled: bool) -> None:
+        """把"记住窗口大小与位置"拨到指定状态(不触发 ``command``)."""
+        if enabled:
+            self._remember_switch.select()
+        else:
+            self._remember_switch.deselect()
+
+    def _on_remember_toggled(self) -> None:
+        """切换"记住窗口大小与位置": 交给主窗口应用与落盘; 失败时拨回去.
+
+        关掉时主窗口顺手把已经记下的几何从配置里删掉(它自己那侧负责), 界面上只用一下
+        开关的状态表达成功与否 —— 不需要再单独一行状态文字。
+        """
+        wanted = bool(self._remember_switch.get())
+        if wanted == self._remember_window:
+            return
+        error = self._on_apply_remember_window(wanted)
+        if error is not None:
+            self._remember_hint.configure(
+                text=tr("settings.remember_failed", reason=error)
+            )
+            self._set_remember_switch(self._remember_window)
+            return
+        self._remember_window = wanted
+        self._remember_hint.configure(text=tr("settings.remember_window_hint"))
+
     # -- 交互 ---------------------------------------------------------------
 
     def _toggle_theme(self) -> None:
@@ -849,7 +929,11 @@ class SettingsWindow:
             hover_color=palette.accent,
             text_color=palette.accent_text,
         )
-        for switch in (self._debug_switch, self._activation_switch):
+        for switch in (
+            self._debug_switch,
+            self._activation_switch,
+            self._remember_switch,
+        ):
             switch.configure(
                 text_color=palette.text_body,
                 progress_color=palette.accent,
@@ -857,6 +941,9 @@ class SettingsWindow:
                 button_hover_color=palette.item_hover,
                 fg_color=palette.input_bg,
             )
+        # 开关下面那行说明也是文字控件: 漏在重绘表外时它会留着旧主题的次要色
+        # (实测: 切主题后它的 text_color 仍属于上一套调色板)。
+        self._remember_hint.configure(text_color=palette.text_muted)
         # 两个下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
         for box in (self._font_box, self._language_box):
             _paint_combo(box, palette)

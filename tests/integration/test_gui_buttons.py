@@ -61,7 +61,7 @@ from archive_management.ui.models import (
     FeedbackKind,
     ImportChoice,
 )
-from archive_management.ui.widgets import scrollbar_needed
+from archive_management.ui.widgets import scaled_px, scrollbar_needed
 
 pytestmark = [
     pytest.mark.integration,
@@ -1514,7 +1514,8 @@ def test_home_page_supports_poster_mode_and_paging(
     assert page._head.grid_info() == {}
     card_texts = _label_texts(page._rows["outer-wilds"])
     assert "星际" in card_texts
-    assert "星际拓荒" in card_texts
+    # 名称占两行高度: 一行名也带一个换行(见 home_page._build_poster), 所以比的是 strip 后的文案.
+    assert any(text.strip() == "星际拓荒" for text in card_texts)
     assert any(text.startswith("最近活动") for text in card_texts)
     assert tr("home.poster_backups", count=5) in card_texts
 
@@ -1525,8 +1526,11 @@ def test_home_page_supports_poster_mode_and_paging(
     # 海报网格左对齐: 网格从滚动区左上角开始铺(列不分配权重, 卡片不会被
     # 挤到行中间), 因此所有卡片里最靠左/最靠上的那张偏移就是内边距 4.
     cards = list(page._rows.values())
-    assert min(item.winfo_x() for item in cards) == 4
-    assert min(item.winfo_y() for item in cards) == 4
+    # 内边距 4 是**设计**值: CTk 控件自己的 grid padx/pady 会乘窗口缩放(125% 下读回
+    # 5), 所以期望值要过 scaled_px, 不能写死 4.
+    pad = scaled_px(cards[0], 4)
+    assert min(item.winfo_x() for item in cards) == pad
+    assert min(item.winfo_y() for item in cards) == pad
     badge = next(
         label
         for label in _card_labels(card)
@@ -1543,11 +1547,13 @@ def test_home_page_supports_poster_mode_and_paging(
 
 
 def _assert_no_half_chip(line: str, chips: Sequence[str]) -> None:
-    """断言行内除"被末尾省略号标注的那一段前缀"之外都是完整标签(第 6 号评审)."""
-    body = line.removesuffix("…")
+    """断言行内只剩完整标签: 放不下时**整块让位**给末尾那个孤零零的省略号(第 6 号评审).
+
+    口径 2026-10-02 调整(用户): 状态一行、标签一行, 超出部分用省略号 —— 省略号是独立
+    的一项(前面带空格), 而不是把最后一个标签裁短成 "测…"。
+    """
+    body = line.rsplit(" …", 1)[0]
     parts = [part for part in body.split(" · ") if part]
-    if line.endswith("…"):
-        parts = parts[:-1]
     halves = [part for part in parts if part not in chips]
     assert not halves, f"状态列把标签拦腰截断: {halves} (整行 {line!r})"
 
@@ -1765,7 +1771,6 @@ def test_poster_card_keeps_its_meta_below_the_title(
     from archive_management.domain import HomeLayout
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.home_page import (
-        _POSTER_HEIGHT,
         _POSTER_PLACEHOLDER_SIZE,
     )
 
@@ -1787,7 +1792,9 @@ def test_poster_card_keeps_its_meta_below_the_title(
     cover_bottom = cover.winfo_y() + cover.winfo_height()
     assert badge.winfo_y() >= cover_bottom, "角标要排在封面下面"
     name = next(
-        label for label in _card_labels(card) if str(label.cget("text")) == "星际拓荒"
+        label
+        for label in _card_labels(card)
+        if str(label.cget("text")).strip() == "星际拓荒"
     )
     name_bottom = name.winfo_y() + name.winfo_height()
     assert name_bottom <= badge.winfo_y(), "名称与元信息之间要分开, 不能挤在一起"
@@ -1798,24 +1805,26 @@ def test_poster_card_keeps_its_meta_below_the_title(
     assert size == _POSTER_PLACEHOLDER_SIZE
     assert size < 34, "占位字不该比卡片标题大一倍"
     # 卡片内所有直接子控件都不许越出卡片: 越界就会盖住下边框.
+    # 卡片高度是按内容算的(见 home_page._fit_poster_height), 所以比的是**它自己**的高度。
     bottom = max(
         child.winfo_y() + child.winfo_height() for child in card.winfo_children()
     )
-    assert bottom <= _POSTER_HEIGHT
+    assert bottom <= card.winfo_height()
 
 
 def test_state_column_never_shows_half_a_chip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """状态列放不下时先换行再补省略号, 不许出现"测…"这种半句话(第 6 号评审).
+    """状态列放不下时整块让位给省略号, 不许出现"测…"这种半句话(第 6 号评审).
 
+    口径 2026-10-02 调整(用户): **状态一行、自定义标签一行**, 标签再多也只有两行。
     "放不下"由夹具里的**拉丁字符**保证: 裸 Linux runner 上缺中日韩字体时汉字近乎
     零宽(2026-09-27 实测就在那里假红), 而 16 字的拉丁标签在任何字体下都远超 200px,
-    所以下面三条强制断言在每个平台都真的会执行。
+    所以下面几条强制断言在每个平台都真的会执行。
     """
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.home_page import _COLUMNS, _STATE_MAX_LINES
-    from archive_management.ui.models import chips_lines
+    from archive_management.ui.models import status_lines
 
     _patch_dialogs(monkeypatch)
     app = gui_app(_new_app, DemoArchiveService(delay=0))
@@ -1842,14 +1851,22 @@ def test_state_column_never_shows_half_a_chip(
     lines = text.split("\n")
     column = _COLUMNS[-1][1]
     font = page._value_font
-    assert text == chips_lines(item.chips, font, column, max_lines=_STATE_MAX_LINES), (
+    # 页面算折行用的预算已经换成**物理**像素(见 home_page._fill_row_columns): 列宽在
+    # 设计里是逻辑像素, 而字体度量是物理像素 —— 不换算的话 125% 的屏上两边差 25%,
+    # 文字比列宽多出来那截会把整块固定列推歪(2026-10-02 的实测)。
+    room = scaled_px(label, column)
+    assert text == status_lines(item.state_chips, item.tags, font, room), (
         "状态列显示的应当是排布函数在当前字体/列宽下的结果"
     )
     assert 1 <= len(lines) <= _STATE_MAX_LINES
-    full = " · ".join(item.chips)
-    assert font.measure(full) > column, f"夹具要长到 200px 放不下: {full!r}"
-    assert "\n" in text, f"两行放得下就不该只排一行: {text!r}"
-    assert text.endswith("…"), f"第二行还放不下时要补省略号: {text!r}"
+    state_line, tags_line = lines[0], lines[-1]
+    assert state_line == " · ".join(item.state_chips), (
+        f"状态那几个要在同一行: {state_line!r}"
+    )
+    full = " · ".join(item.tags)
+    assert font.measure(full) > room, f"夹具要长到 {room}px 放不下: {full!r}"
+    assert len(lines) == 2, f"状态一行 + 标签一行: {text!r}"
+    assert tags_line.endswith(" …"), f"标签放不下时要补省略号: {text!r}"
     for line in lines:
         _assert_no_half_chip(line, item.chips)
 
@@ -3839,12 +3856,14 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         base_font_px=app._base_font_px,
         debug=app._debug,
         activation=app._activation,
+        remember_window=app._remember_window,
         shortcuts=app._shortcuts,
         on_toggle_theme=app._on_toggle_theme,
         on_apply_language=app._on_language_change,
         on_apply_font_size=app._on_font_size_change,
         on_apply_debug=app._on_debug_change,
         on_apply_activation=app._on_activation_change,
+        on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=apply,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
@@ -4002,7 +4021,10 @@ def test_settings_window_hints_follow_a_narrow_column(
     # 界面语言的说明文案在 240 宽度下正好要 240px —— 报错里那 12px 就是从这里来的,
     # 所以它这一格一窄过 240 就是"按 240 排、右边被裁"的现场。
     language = window._language_hint
-    assert _wait_for(app, lambda: 1 < language.winfo_width() < 240), (
+    # 240 是**设计**值(逻辑像素), 而 ``winfo_width`` 是物理像素: 125% 的屏上窄列
+    # 实测 285(=228 逻辑), 拿逻辑值直接比就是假红。
+    narrow_limit = scaled_px(language, 240)
+    assert _wait_for(app, lambda: 1 < language.winfo_width() < narrow_limit), (
         f"界面语言说明这一格没被挤窄: {language.winfo_width()}"
     )
     # 窄列已经成立, 现在等说明按这一格重排完(延后到 idle 才量宽)。
@@ -6157,12 +6179,14 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         base_font_px=16,
         debug=True,
         activation=True,
+        remember_window=True,
         shortcuts=app._shortcuts,
         on_toggle_theme=lambda: app._theme,
         on_apply_language=fail_language,
         on_apply_font_size=fail_font,
         on_apply_debug=fail_debug,
         on_apply_activation=fail_activation,
+        on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda action, accelerator: None,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
@@ -7142,12 +7166,14 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         base_font_px=16,
         debug=False,
         activation=False,
+        remember_window=True,
         shortcuts=app._shortcuts,
         on_toggle_theme=lambda: app._theme,
         on_apply_language=lambda _locale: None,
         on_apply_font_size=lambda _size: None,
         on_apply_debug=lambda _enabled: None,
         on_apply_activation=lambda _enabled: None,
+        on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda _action, _accelerator: "快捷键被占用",
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,

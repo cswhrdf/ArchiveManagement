@@ -175,8 +175,7 @@ activemq-data/
 .env
 .envrc
 .venv
-# 视觉回归那一步用的**第二份环境**(见 ci.yml: 它要用发行版 python3-tk 的 Tk),
-# 本地照着跑时也会生成同名目录。
+# 视觉回归步骤使用的**第二份环境**
 .venv-visual
 env/
 venv/

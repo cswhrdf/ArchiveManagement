@@ -141,15 +141,17 @@ jobs:
           path: allure-results-performance/
           if-no-files-found: ignore
 
-      - name: Install Xvfb and a CJK font (quality job)
+      - name: Install Xvfb, a CJK font, and the distro Tk 8.6
         # 视觉回归要一个真实显示: Tk 在无头环境里起不来, 而"起不来"不该被记成"画面没问题"。
         # 与 pytest 作业里那一步同一个配方(连 Chrome 源失效的绕行也一样): 界面是中文的,
         # 而 Tk 的量宽全靠字形度量 —— 没有 CJK 字体时汉字会被量成近乎零宽, 截出来的画面
         # 与基线对不上, 而且会以"文字没换行/没省略"的形态出现(2026-09-27 在分片里踩过)。
         #
-        # ``python3-tk`` (发行版的 Tk 8.6) 是给**视觉回归那一步**装的, 详见它下面的说明:
-        # uv 管的那份 Python 里带的 Tk 在 X11 上只会用核心位图字体, 而核心字体看不到任何
-        # TTF —— 装再多字体也画不出汉字。
+        # 后面三行是给**视觉回归那一步**准备的(详见那一步的说明): 它的解释器仍然是 uv 托管的
+        # 那份(与其余作业同一个版本), 但 ``_tkinter`` 这个扩展模块要换成发行版的 —— uv 托管
+        # 的 CPython 自带的 Tcl/Tk 是 python-build-standalone 自己编的, 在 X11 上只走**核心
+        # 位图字体**(符号表里只有 XLoadQueryFont 那套, 没有 fontconfig/FreeType), 装多少 TTF
+        # 都画不出汉字。发行版的 Tk 8.6 走 Xft/fontconfig, 与 fonts-noto-cjk 配套。
         shell: bash
         run: |
           while IFS= read -r -d '' source; do
@@ -158,7 +160,12 @@ jobs:
             fi
           done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
           sudo apt-get update
-          sudo apt-get install -y xvfb fonts-noto-cjk python3-tk
+          sudo apt-get install -y xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6
+          # 把发行版 python3-tk 的 ``_tkinter`` 留一份: 它链的是发行版 libtk8.6(Xft/fontconfig),
+          # 而那几个库由 tcl8.6/tk8.6 两个包提供。
+          mkdir -p "$RUNNER_TEMP/tk-xft"
+          cp "$(/usr/bin/python3 -c 'import _tkinter; print(_tkinter.__file__)')" "$RUNNER_TEMP/tk-xft/"
+          /usr/bin/python3 -c "import _tkinter, tkinter; print('发行版 Tk:', _tkinter.__file__, tkinter.TkVersion)"
 
       - name: Run the visual regression
         # 起一个真实窗口、拍两套画面(演示数据 + 空库)、与入库的基线图比(感知哈希距离 + SSIM)。
@@ -179,17 +186,24 @@ jobs:
         # 上直接以"找不到复用脚本"退出 2。现在建窗口/切状态都在脚本里, 只复用 tests/ 下
         # 已被 Linux 分片验证的抓图原语。
         #
-        # **这一步用发行版的 Tk, 不是 uv 管的那份 Python**(实测 2026-10-02): uv 装的
-        # CPython 里带的 ``libtcl9tk9.0.so`` 在 X11 上只走**核心位图字体** —— 符号表里只有
-        # ``XLoadQueryFont`` / ``XCreateFontSet`` 那一套, 没有 fontconfig/FreeType, 于是它
-        # 看不到任何 TTF: 截出来的画面里汉字一个都没画出来(整排按钮是空的), 拉丁字形也是
-        # 位图字体(锯齿), 而这与装了多少字体无关。发行版 ``python3-tk`` 的 Tk 8.6 走
-        # Xft/fontconfig, 才是与 ``fonts-noto-cjk`` 配套的那一个; ``UV_PROJECT_ENVIRONMENT``
-        # 让它装进独立环境, 不动本作业其余步骤共用的 .venv。
+        # **这一步用项目版解释器 + 发行版 Tk**(2026-10-02 调整): 解释器必须是 uv 托管的那份 ——
+        # 与其余作业同一个版本, 报告里"平台 / Python / Tk"那行的 Python 才是这一轮的真相
+        # (之前这一步用 ``/usr/bin/python3.12`` 去拿发行版的 Tk, 而 Ubuntu 24.04 的系统
+        # Python 是 3.12.3 —— 报告里因此写着一个项目里哪里都不用的版本)。
+        #
+        # 实测(2026-10-02): uv 装的 CPython 里带的 ``libtcl9tk9.0.so`` 在 X11 上只走**核心位图
+        # 字体** —— 符号表里只有 ``XLoadQueryFont`` / ``XCreateFontSet`` 那一套, 没有
+        # fontconfig/FreeType, 于是它看不到任何 TTF: 截出来的画面里汉字一个都没画出来(整排
+        # 按钮是空的), 拉丁字形也是位图字体(锯齿), 而这与装了多少字体无关。
+        #
+        # 做法: 把发行版 ``python3-tk`` 的 ``_tkinter`` 模块放在 PYTHONPATH 最前面, 它自己会
+        # 加载发行版的 libtk8.6/libtcl8.6(走 Xft/fontconfig, 与 ``fonts-noto-cjk`` 配套) ——
+        # 模块同名、CPython 同一个小版本 ABI 兼容, 所以换的只是"Tk 从哪来", 解释器没变。
+        # ``UV_PROJECT_ENVIRONMENT`` 让它装进独立环境, 不动本作业其余步骤共用的 .venv。
         #
         # 脚本自己也会拦: 汉字量不出宽度时它标红**且不产出候选基线**(见 tests/unit/
-        # test_report_verification.py 的守卫) —— 宁可这一轮没有基线, 也不拿一张看不清的
-        # 图当"正确"。
+        # test_report_verification.py 的守卫), 并把探针(模块与库的实际路径)写进 fonts.txt ——
+        # 宁可这一轮没有基线, 也不拿一张看不清的图当"正确"。
         env:
           UV_PROJECT_ENVIRONMENT: .venv-visual
         run: |
@@ -197,7 +211,14 @@ jobs:
           # ``tests/crash_capture.py`` 的抓图原语, 而那个模块 import allure(附件 API);
           # 少装 test 组时会在运行的一瞬间以 "No module named 'allure'" 退出 2
           # (2026-10-02 实测: 34 个包装完, 脚本第一步就挂)。
-          uv sync --locked --no-default-groups --group test --group visual --python /usr/bin/python3.12 --python-preference only-system
+          uv sync --locked --no-default-groups --group test --group visual
+          # 发行版的 `_tkinter` 放最前面: PYTHONPATH 在 sys.path 里排在标准库之前, 所以它顶掉的
+          # 是解释器自带的那一个(那个目录里只有这一个文件, 不会影响其它导入)。
+          export PYTHONPATH="$RUNNER_TEMP/tk-xft${PYTHONPATH:+:$PYTHONPATH}"
+          # 先自检一次再拍图: 换没换上必须当场知道(发行版模块不生效时探针也会拦, 但那要等
+          # 建完窗口; 这里一秒就能判定)。若将来探针仍报位图字体, 说明发行版模块绑到了解释器
+          # 自带的同名库上 —— 那时再用 ``LD_PRELOAD`` 把发行版那两个 .so 压上去。
+          uv run --no-sync python -c "import _tkinter, sys; print('解释器', sys.version.split()[0], '/ _tkinter', _tkinter.__file__); assert '$RUNNER_TEMP/tk-xft' in (_tkinter.__file__ or ''), '发行版的 _tkinter 没被用上(PYTHONPATH 被忽略了?)'"
           xvfb-run -a -s "-screen 0 1600x1000x24" uv run --no-sync python scripts/create_allure_visual.py --results-dir allure-results-visual --baselines tests/visual-baselines --candidates visual-baselines-candidates
 
       - name: Upload visual Allure results
@@ -830,7 +851,7 @@ jobs:
 
       - name: Install Allure 3 CLI
         # 与 pytest 作业同一个钉住的版本(质量门在这里跑, 版本不对会静默放行)。
-        run: npm install --global allure@3.18.0
+        run: npm install --global allure@3.19.1
 
       - name: Download Allure resources
         if: always()

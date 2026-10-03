@@ -2418,7 +2418,7 @@ def test_backend_rejects_unknown_discovery_ids(tmp_path: Path) -> None:
 
 
 def test_home_board_lists_games_and_persists_filter(tmp_path: Path) -> None:
-    """主页列表与筛选条件都要持久化: 重新打开仍是上次的视图."""
+    """主页列表: 筛选当场生效; 筛选条件落库, 但**启动时只继承展示偏好**."""
     service = _service(tmp_path)
     service.add_game("星际拓荒")
     service.add_game("空洞骑士")
@@ -2427,14 +2427,19 @@ def test_home_board_lists_games_and_persists_filter(tmp_path: Path) -> None:
     assert {item.name for item in board.games} == {"星际拓荒", "空洞骑士"}
     assert board.filter.view is HomeView.ALL
     # 刚录入的游戏算“最近活跃”, 但都还没有存档位置, 因此都是待处理.
-    assert board.summary == tr("home.summary", total=2, recent=2, pending=2, archived=0)
+    assert board.summary == tr("home.summary", total=2, recent=2, pending=2)
 
-    service.apply_home_filter(HomeFilter(view=HomeView.PENDING, search="拓荒"))
+    applied = service.apply_home_filter(
+        HomeFilter(view=HomeView.PENDING, search="拓荒")
+    )
+    assert [item.name for item in applied.games] == ["星际拓荒"]
 
+    # 重新打开: 视图/搜索词不跟着回来(用户 2026-10-02: 关在“待处理”页签上, 下次不该
+    # 还在那一页); 展示偏好那半边由 test_home_cases 的展示偏好用例守着.
     reloaded = service.load_home()
-    assert reloaded.filter.view is HomeView.PENDING
-    assert reloaded.filter.search == "拓荒"
-    assert [item.name for item in reloaded.games] == ["星际拓荒"]
+    assert reloaded.filter.view is HomeView.ALL
+    assert reloaded.filter.search == ""
+    assert {item.name for item in reloaded.games} == {"星际拓荒", "空洞骑士"}
     assert reloaded.origin_text == tr("home.origin_all")
     assert reloaded.category_text == tr("home.category_all")
 

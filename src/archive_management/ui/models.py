@@ -121,33 +121,46 @@ def format_stamp(value: str, *, fallback: str = "—") -> str:
         return value.replace("T", " ")
 
 
-def chips_lines(
-    chips: Sequence[str],
+def status_lines(
+    state_chips: Sequence[str],
+    tags: Sequence[str],
     font: MeasurableFont,
     width: int,
-    *,
-    max_lines: int = 2,
 ) -> str:
-    """把状态标签排成状态列的文案: 能换行就换行, 放不下才补省略号.
+    """状态列的文案(**最多两行**): 状态一行、标签一行, 放不下的补省略号.
 
-    规则(与 06 号评审一致):
+    用户 2026-10-02 调整的口径(原来把两类混在一起贪心塞, 标签一多就排成三行):
 
-    * **不在标签中间断开** —— 每行都停在一个完整标签之后(贪心塞满第一行, 换行只
-      发生在 ``" · "`` 处), 所以不会出现把 "测试1" 裁成 "测…" 这种半句话;
-    * 换行后仍放不下的部分交给 :func:`fit_text` 补省略号, 由它保证每行都不超宽。
+    * **状态那几个**(平台/备份/风险/归档或停用)永远在第一行;
+    * **自定义标签**从第二行开始, 再多也只有这一行, 放不下的整块让位给省略号
+      (与 06 号评审同一条规矩: 不把 "测试1" 切成 "测…" 这种半句话)。
+
+    没有标签时只有一行。两行文案都保证不超宽(省略号的位置也先扣出来), 否则 Tk 会在
+    标签边界处再折一次、变成三行。
     """
+    lines = [_chip_line(state_chips, font, width)]
+    if tags:
+        lines.append(_chip_line(tags, font, width))
+    return "\n".join(line for line in lines if line)
+
+
+def _chip_line(chips: Sequence[str], font: MeasurableFont, width: int) -> str:
+    """一行里塞得下的**完整**标签; 塞不下就整块让位给省略号(不切半个标签)."""
     if not chips:
         return ""
-    first: list[str] = []
+    tail = " …"
+    # 先把省略号的位置扣出来: 拼上去之后这一行才真的不超宽(Tk 才不会再折一次)。
+    room = width - font.measure(tail)
+    fitted: list[str] = []
     for chip in chips:
-        candidate = " · ".join([*first, chip])
-        if first and font.measure(candidate) > width:
+        if fitted and font.measure(" · ".join([*fitted, chip])) > room:
             break
-        first.append(chip)
-    rest = list(chips[len(first) :])
-    if not rest or max_lines <= 1:
-        return fit_text(" · ".join([*first, *rest]), font, width)
-    return "\n".join((" · ".join(first), fit_text(" · ".join(rest), font, width)))
+        fitted.append(chip)
+    text = " · ".join(fitted)
+    if len(fitted) == len(chips):
+        # 全部塞得下: 单个标签本身就超宽时交给 fit_text 按字符裁(否则会是空行)。
+        return text if font.measure(text) <= width else fit_text(text, font, width)
+    return f"{text}{tail}"
 
 
 class FeedbackKind(StrEnum):
@@ -858,11 +871,15 @@ class HomeOption:
 
     key: str
     label: str
-    count: int
+    #: 数量; ``None`` 表示**这个选项不显示数量**(已归档视图就是这样 —— 归档的游戏
+    #: 用户不常看, 页签上那个数字只是噪声, 2026-10-02 用户反馈)。
+    count: int | None
 
     @property
     def text(self) -> str:
-        """带数量的展示文案(页签与下拉框共用)."""
+        """带数量的展示文案(页签与下拉框共用); 数量为 ``None`` 时只有名称."""
+        if self.count is None:
+            return self.label
         return f"{self.label} ({self.count})"
 
 
@@ -937,8 +954,11 @@ class HomeGameItem:
         return " · ".join(parts)
 
     @property
-    def chips(self) -> tuple[str, ...]:
-        """列表行的分类标签: 平台、备份、风险、归档/停用与自定义标签."""
+    def state_chips(self) -> tuple[str, ...]:
+        """状态标签(不含自定义标签): 平台、备份、风险、归档或停用.
+
+        与 :attr:`tags` 分开是因为它们在列表里占**两行**(见 :func:`status_lines`)。
+        """
         parts = [
             self.platform_label,
             self.backup_label,
@@ -949,8 +969,12 @@ class HomeGameItem:
             parts.append(tr("home.chip_archived"))
         elif not self.enabled:
             parts.append(tr("home.chip_disabled"))
-        parts.extend(self.tags)
         return tuple(parts)
+
+    @property
+    def chips(self) -> tuple[str, ...]:
+        """列表行的全部分类标签: 状态标签 + 自定义标签(悬停提示用完整内容)."""
+        return (*self.state_chips, *self.tags)
 
     @property
     def backup_enabled(self) -> bool:
@@ -999,13 +1023,16 @@ class HomeBoard:
 
     @property
     def summary(self) -> str:
-        """底部第一行: 各视图的计数."""
+        """底部第一行: 各视图的计数(**不含已归档**).
+
+        反正已归档的不在"全部"里(见 :func:`archive_management.domain.home.home_stats`),
+        单独再报一个数只是噪声(2026-10-02 用户反馈)。
+        """
         return tr(
             "home.summary",
             total=self.stats.total,
             recent=self.stats.recent,
             pending=self.stats.pending,
-            archived=self.stats.archived,
         )
 
     @property
@@ -1069,7 +1096,11 @@ def home_board(report: HomeReport, *, stamp: Callable[[datetime], str]) -> HomeB
             HomeOption(
                 key=view.value,
                 label=view.label,
-                count=report.stats.count_for(view),
+                # 已归档视图不显示数量: 归档的游戏不常看, 页签上那个数没人会拿它做
+                # 决策(2026-10-02 用户反馈), 其余视图照旧。
+                count=(
+                    None if view is HomeView.ARCHIVED else report.stats.count_for(view)
+                ),
             )
             for view in HomeView
         ),

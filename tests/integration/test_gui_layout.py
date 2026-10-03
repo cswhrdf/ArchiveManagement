@@ -66,6 +66,7 @@ from archive_management.ui.models import (
     poster_columns,
 )
 from archive_management.ui.textfit import fit_text
+from archive_management.ui.widgets import measured_font, scaled_px
 
 pytestmark = [
     pytest.mark.integration,
@@ -228,9 +229,13 @@ def _supported_content_width(app: ArchiveApp, current_width: int) -> int:
     不能直接用当前内容宽度: macOS/小屏上的窗口管理器会把窗口压到比设计尺寸更窄,
     那时"当前宽度"也跟着变小, 拿它当预算就永远看不出"控件堆得太宽"。侧栏与页边距
     是固定的, 所以用 最小窗口宽 - (窗口宽 - 内容宽) 得到设计上保证能放下的宽度。
+
+    ``WINDOW_MIN_SIZE`` 是**逻辑**像素, 而 ``winfo_width/reqwidth`` 是**物理**像素:
+    预算先换成物理再跟请求宽度比, 否则 125% 的屏上会算出一个偏小 25% 的预算(实测
+    1200 逻辑被当成 1200 物理, 而卡片请求 1326)。
     """
     chrome = max(0, int(app.winfo_width()) - current_width)
-    return WINDOW_MIN_SIZE[0] - chrome
+    return scaled_px(app, WINDOW_MIN_SIZE[0]) - chrome
 
 
 def test_home_widgets_fit_the_supported_minimum_window() -> None:
@@ -340,7 +345,10 @@ def test_poster_view_gives_the_games_area_equal_margins() -> None:
     assert not page._head.winfo_ismapped()
     poster_info = page._list_box.grid_info()
     poster_pady = _padding(poster_info["pady"])
-    assert poster_pady == (10, 10), f"上下边距不一致: {poster_pady}"
+    # 判据是"四边边距相同"; 具体数值不能写死 10 —— CTk 会把 CTk 控件的 padx/pady
+    # 按窗口缩放换算(125% 的屏上 10 -> 12, 见 widgets.scaled_px 的同一套约定)。
+    expected = scaled_px(page._list_box, 10)
+    assert poster_pady == (expected, expected), f"上下边距不一致: {poster_pady}"
     assert poster_pady[0] == _padding(poster_info["padx"])[0], (
         f"上下与左右边距不一致: {poster_info}"
     )
@@ -440,6 +448,55 @@ def test_detail_page_and_manage_window_borders_are_visible() -> None:
         app.destroy()
 
 
+def test_the_manage_header_text_block_is_vertically_centered() -> None:
+    """页头里"游戏名 + 启停状态"这一块要居中: 标题上面的留白 == 状态行下面的留白.
+
+    出处(2026-10-02 用户反馈): "标记启停状态的文字没有上下居中, 而是在区域中居下" ——
+    那时标题上面留 16、状态行下面只留 4, 整块文字因此在页头里偏下(实测差 12 像素, 状态
+    那行看着贴在页头下沿)。判据用**两端留白相等**而不是写死像素: 标题换行成两行、字体
+    变大、换语言之后同样成立, "把某一端的 padding 加一点"这种糊法也骗不过去。
+    """
+    from archive_management.ui.manage_window import ManageGameWindow
+
+    try:
+        app = _new_app()
+    except TclError as exc:  # pragma: no cover - 无显示环境
+        pytest.skip(f"tk 环境不可用: {exc}")
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        game_id = next(iter(page._rows))
+        window = ManageGameWindow(
+            app,
+            backend=app.backend,
+            palette=app.p,
+            game_id=game_id,
+            name=_game_name(page, game_id),
+            enabled=True,
+            backup_location=app.backend.task_status(game_id).target_label,
+            on_change=lambda: None,
+        )
+        try:
+            assert _wait_mapped(window._window)
+            _settle_layout(window._window)
+            header = window._title_label.master
+            above = int(window._title_label.winfo_y())
+            below = int(header.winfo_height()) - (
+                int(window._state_label.winfo_y())
+                + int(window._state_label.winfo_height())
+            )
+            hint = (
+                f"页头高 {header.winfo_height()}: 标题上面留 {above}px、状态行下面留 "
+                f"{below}px —— 两端留白要一样, 否则整块文字在页头里偏上或偏下"
+            )
+            assert abs(above - below) <= 2, hint
+        finally:
+            window.close()
+            _pump(app)
+    finally:
+        app.destroy()
+
+
 def test_discovery_uses_same_page_margin_as_library() -> None:
     """回归: "游戏发现"的内容内缩不能比"游戏库"更宽(卡片不能往里挤).
 
@@ -493,11 +550,20 @@ class _LongNameService(DemoArchiveService):
     """
 
     name_text: str = _LONG_NAME
+    # 只给其中一行加长状态列(标签多), 其它行保持短状态: 两边都看才比得出对齐.
+    tags: tuple[str, ...] = ()
 
-    def __init__(self, *, delay: float = 0, name_text: str = _LONG_NAME) -> None:
+    def __init__(
+        self,
+        *,
+        delay: float = 0,
+        name_text: str = _LONG_NAME,
+        tags: tuple[str, ...] = (),
+    ) -> None:
         """``delay`` 与演示后端一致, ``name_text`` 是要替换成的长名称."""
         super().__init__(delay=delay)
         self.name_text = name_text
+        self.tags = tags
 
     def list_games(self) -> list[GameSummary]:
         return [replace(game, name=self.name_text) for game in super().list_games()]
@@ -513,21 +579,57 @@ class _LongNameService(DemoArchiveService):
 
     def _rename(self, board: HomeBoard) -> HomeBoard:
         """把主页里的每款游戏都换成长名称(``games`` 是元组)."""
-        return replace(
-            board,
-            games=tuple(replace(game, name=self.name_text) for game in board.games),
-        )
+        games = [replace(game, name=self.name_text) for game in board.games]
+        if self.tags and games:
+            # 只给最后一行加长状态: 一行长、其余短, 才比得出"长的有没有把列推歪".
+            games[-1] = replace(games[-1], tags=self.tags)
+        return replace(board, games=tuple(games))
 
 
-def _long_name_app(name: str = _LONG_NAME) -> ArchiveApp:
+def _long_name_app(name: str = _LONG_NAME, tags: tuple[str, ...] = ()) -> ArchiveApp:
     """构造使用长名称的主窗口(尺寸与其它布局用例一致)."""
     app = ArchiveApp(
-        _LongNameService(delay=0, name_text=name),
+        _LongNameService(delay=0, name_text=name, tags=tags),
         title="长名称测试",
         hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
     )
     app.geometry(_WINDOW_SIZE)
     return app
+
+
+# 一行的状态列要塞很多标签(用户实测: 标签多的那一行整块固定列比别的行左移 46px).
+_MANY_TAGS = ("测试1", "测试2", "测试3", "测试6")
+
+
+def test_a_long_state_column_does_not_push_the_fixed_columns() -> None:
+    """状态列内容再长也不许把固定列推歪: 列宽是硬的, 多了自己换行/省略.
+
+    出处(2026-10-02 用户实测截图): 列表里标签最多的那一行, 整块固定列比其它行(和表头)
+    左移 46px。根因是 ``_COLUMNS`` 的设计宽度(**逻辑**像素)被当成物理像素用, 而状态列的
+    ``wraplength`` 是 CTk 的**逻辑**像素(=物理 x1.25): 内容比列宽多 46px → 那一列被顶宽
+    46px → 整块被往左推。
+
+    判据与长名称那条同一套(``_place`` 连**宽度**一起比, 所以"状态列变宽"也跑不掉): 要求
+    每一行的每个固定列都与表头落在同一个 (屏幕 x, 宽度) 上。
+
+    **它咬的是高 DPI 现场**: 100% 缩放下物理=逻辑, 改前改后的行为本来就一样(CI 因此一直
+    绿); 本机 125% 下改前必红 —— 咬合验证的做法是把 ``home_page`` 的改动单独撤掉(见
+    PLAN 25.2), 那一行的固定列会跟表头差 46px、状态列宽也超出设计值。
+    """
+    app = gui_app(_long_name_app, tags=_MANY_TAGS)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+
+    places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
+    assert places, "列表没建好"
+    assert len(places) > 1, "需要至少两行才能比较行间对齐"
+    for index, row_place in enumerate(places):
+        assert row_place == header, (
+            f"第 {index + 1} 行的固定列与表头不一致(状态列一长就把它推歪了): "
+            f"{row_place} != {header}"
+        )
+    assert name_aligned, "名称列头与名称文本不在同一个 x 上"
 
 
 def _visible_text(widget: Any) -> str:
@@ -601,9 +703,19 @@ def _wait_until_the_name_fits(
         app.update()
         parts = page._row_parts.get(game_id)
         if parts is not None:
-            width = int(parts.label.winfo_width())
+            # 期望值与实现同源: 可用宽度走 ``HomePage._name_available``(从滚动区视口推算,
+            # 不是名称标签的实测宽度 —— 后者会被裁剪结果反过来影响), 字体过
+            # ``measured_font``(CTk 控件渲染的是缩放后的字体)。看门狗那条用例喂的是替身
+            # 页面(没有这个辅助方法), 那种情况下退回标签自己的宽度。
+            font = measured_font(page._name_font, parts.label)
+            read_width = getattr(page, "_name_available", None)
+            width = (
+                read_width(parts)
+                if callable(read_width)
+                else int(parts.label.winfo_width())
+            )
             shown = _visible_text(parts.label)
-            if width > 1 and shown == fit_text(full, page._name_font, width):
+            if width > 1 and shown == fit_text(full, font, width):
                 return parts
         time.sleep(0.02)
     pytest.fail(f"名称一直没按当前宽度裁好: 显示 {shown[:40]!r}")
@@ -631,10 +743,16 @@ def _assert_name_fills(label: Any, full: str, font: Any) -> None:
     第二道原来写的是 ``slack <= font.measure("测")``, CI 上因此误报(不是布局出错):
     Windows runner 上缝隙 14px > 13px; Linux 镜像没有中文字体, ``measure("测")``
     直接是 0 —— 容忍度退化成 0, 缝隙 3px 也算失败。
+
+    预算与实现同源(``name_fit_budget``): 可用宽度再扣掉一条滚动条余量, 所以这里的
+    "该裁到哪"跟着实现走, 不在用例里另写一个数。
     """
     shown = _visible_text(label)
     if len(shown) >= len(full) or not shown.endswith("…"):
         return
+    # 字体与实现同源: ``fit_label`` 按**渲染字号**量文字(CTk 控件渲染的就是缩放后的字体),
+    # 拿未缩放的 ``CTkFont.measure`` 比会在高 DPI 下差 1.25 倍。
+    font = measured_font(font, label)
     width = label.winfo_width()
     expected = fit_text(full, font, width)
     stale = (
@@ -878,10 +996,16 @@ def test_long_game_name_wraps_inside_the_poster_card() -> None:
     assert page._rows, "演示数据应当有游戏"
 
     for card in page._rows.values():
-        assert (card.winfo_reqwidth(), card.winfo_reqheight()) == (
-            _POSTER_WIDTH,
-            _POSTER_HEIGHT,
-        ), "卡片尺寸由常量固定, 长名称不应该把它撑大"
+        # 卡片宽度由常量固定(长名称不能把它撑宽); 高度则是**按内容算**的(封面 + 两行名
+        # + 元信息 + 最近活动), 只保证不低于设计值 —— 里面每一样都随
+        # "界面字号"变, 写死高度在字号调大后会被内容顶出下边框。常量是**逻辑**像素
+        # (CTk 写 width/height 时会乘窗口缩放), 而 winfo_req* 是**物理**像素。
+        assert abs(card.winfo_reqwidth() - scaled_px(card, _POSTER_WIDTH)) <= 1, (
+            "卡片宽度由常量固定, 长名称不应该把它撑大"
+        )
+        assert card.winfo_reqheight() >= scaled_px(card, _POSTER_HEIGHT) - 1, (
+            "卡片高度不该比设计值还矮"
+        )
         label = next(
             child
             for child in card.winfo_children()
@@ -890,11 +1014,155 @@ def test_long_game_name_wraps_inside_the_poster_card() -> None:
         text = _visible_text(label)
         assert text.count("\n") + 1 <= _POSTER_NAME_LINES, f"名称超过两行: {text!r}"
         assert "…" in text, f"两行放不下时应当截断: {text!r}"
-        assert label.winfo_reqwidth() <= _POSTER_TEXT_WIDTH
+        # 名称的 wraplength 是逻辑的 ``_POSTER_TEXT_WIDTH``(CTk 自己乘缩放), 所以
+        # 请求宽度要跟换算后的物理值比。
+        assert label.winfo_reqwidth() <= scaled_px(label, _POSTER_TEXT_WIDTH)
         # 名称必须落在卡片内: 越界就会盖住卡片下边框(或直接看不到).
         bottom = label.winfo_y() + label.winfo_height()
-        overflow = f"名称溢出卡片: {bottom} > {_POSTER_HEIGHT}"
-        assert bottom <= _POSTER_HEIGHT, overflow
+        card_bottom = scaled_px(label, _POSTER_HEIGHT)
+        overflow = f"名称溢出卡片: {bottom} > {card_bottom}"
+        assert bottom <= card_bottom, overflow
+
+
+def test_poster_rows_line_up_for_one_and_two_line_names() -> None:
+    """海报卡片里"元信息 / 最近活动"那一行的位置**不随名称行数变**, 而且都在卡片内.
+
+    出处(用户 2026-10-02): "海报模式下当游戏名称为两行时和一行时最下方的最近活动时间
+    显示位置不同, 导致整个游戏的下边框被盖住了"。做法是让名称标签**永远占两行**
+    (一行名也补一个空行), 卡片高度再按内容算 —— 这里就是那条不变量的守卫: 一行名与
+    两行名的卡片里, 同一个控件的 y 与卡片高度都要一样。
+    """
+
+    def measure(app: ArchiveApp) -> tuple[int, int, int, int]:
+        """(卡片高, 元信息 y, 最近活动 y, 最近活动底) —— 相对卡片左上的坐标系."""
+        assert _wait_mapped(app)
+        page = app._home_page
+        page._on_layout_change(HomeLayout.POSTER.label)
+        _settle_layout(app)
+        card = _live_row(page)
+        labels = [
+            child for child in card.winfo_children() if isinstance(child, ctk.CTkLabel)
+        ]
+        badge, activity = labels[-2], labels[-1]
+        return (
+            int(card.winfo_height()),
+            int(badge.winfo_y()),
+            int(activity.winfo_y()),
+            int(activity.winfo_y()) + int(activity.winfo_height()),
+        )
+
+    short = gui_app(_new_app)  # 演示数据的名称都是一行
+    try:
+        one_line = measure(short)
+    finally:
+        short.destroy()
+    long = gui_app(_long_name_app)  # 每款都换成两行的长名称
+    try:
+        two_lines = measure(long)
+    finally:
+        long.destroy()
+
+    hint = f"一行名 {one_line} 与两行名 {two_lines} 的行位置不一致"
+    assert len({one_line[0], two_lines[0]}) == 1, f"卡片高度应该一样: {hint}"
+    assert abs(one_line[1] - two_lines[1]) <= 2, f"元信息那一行: {hint}"
+    assert abs(one_line[2] - two_lines[2]) <= 2, f"最近活动那一行: {hint}"
+    # 最近活动不许越出卡片(越界就会盖住下边框).
+    assert one_line[3] <= one_line[0], f"一行名时越界: {one_line}"
+    assert two_lines[3] <= two_lines[0], f"两行名时越界: {two_lines}"
+
+
+# 高 DPI 现场的强制缩放: 本机是 125%、CI 是 100% —— 把缩放强设成 1.25 让这条判据在**任何**
+# 机器上都真的跑得到(2026-10-02 的几起"只有高 DPI 才出现"的 bug 就是这么漏过 CI 的).
+_FORCED_DPI_SCALE = 1.25
+
+
+def test_high_dpi_keeps_the_status_column_to_two_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """把窗口缩放强设成 125% 再量列表: 状态列仍是两行、文字不超列宽、固定列仍对齐.
+
+    为什么单开一条: ``CTkFont.measure()`` 量的是**未缩放**的字号, 而 CTk 控件渲染的是按窗口
+    缩放现场换算出来的字体(实测 125%: ``CTkFont(size=12)`` 量 231px, 控件里真正用的
+    ``Roboto -15`` 量同一条 288px)。于是"拿量出来的宽度裁文字"在 100% 的机器上永远正确,
+    只有高 DPI 才暴露 —— 标签一多就折成三行, 或者文字比控件还宽被硬裁。修法是量文字时过
+    `widgets.measured_font`; 这条把缩放钉成 1.25 再跑一遍同样的不变量。
+    """
+    monkeypatch.setattr(
+        ctk.ScalingTracker, "get_window_scaling", lambda _window: _FORCED_DPI_SCALE
+    )
+    monkeypatch.setattr(
+        ctk.ScalingTracker, "get_widget_scaling", lambda _window: _FORCED_DPI_SCALE
+    )
+    app = gui_app(_long_name_app, tags=_MANY_TAGS)
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        _settle_layout(app)
+        row = _live_row(page)
+        status = _fixed_cells(row)[-1]
+        room = int(status.winfo_width())
+        assert room > 1, "状态列还没布局"
+
+        lines = _visible_text(status).split("\n")
+        assert len(lines) <= 2, f"状态列最多两行: {lines!r}"
+        for line in lines:
+            # 行宽要按**渲染**字号算(控件的字体被 CTk 缩放过了).
+            rendered = measured_font(page._value_font, status).measure(line)
+            assert rendered <= room, f"这一行比列宽还宽: {rendered} > {room} | {line!r}"
+
+        clipped = [
+            _visible_text(label)
+            for label in _walk(row)
+            if isinstance(label, ctk.CTkLabel)
+            and label.winfo_ismapped()
+            and label.winfo_reqwidth() > label.winfo_width()
+        ]
+        assert not clipped, f"有文字被硬裁(高 DPI 下应当先折行/补省略号): {clipped}"
+
+        places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
+        assert places, "列表没建好"
+        assert header == places[0], f"表头与数据行没对齐: {header} != {places[0]}"
+        assert all(place == places[0] for place in places), (
+            f"各行列位置不一致: {places}"
+        )
+        assert name_aligned, "名称列头与名称文本不在同一个 x 上"
+    finally:
+        app.destroy()
+
+
+def test_dropdown_boxes_draw_their_right_border() -> None:
+    """下拉框的整圈边框都要画出来: 右侧那半段不许被箭头区底色盖掉.
+
+    出处(用户 2026-10-02): "所有的下拉框右侧边框均被下拉符号盖住了, 我希望将这个符号
+    包裹进边框中"。CTk 画的是"左右分段边框", 画完又把 ``border_parts_right`` 改成了
+    箭头区底色(看着就没有右边框), 所以补丁(见 ``ui.rendering.apply_combo_border_fix``)
+    在每次绘制后把它描回边框色 —— 这里直接读画布上的颜色来 pin 住这条。
+    """
+    app = gui_app(_new_app)
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        _settle_layout(app)
+        combos = [
+            page._origin_box,
+            page._category_box,
+            page._page_size_box,
+        ]
+        for combo in combos:
+            combo._draw()
+        app.update_idletasks()
+        for combo in combos:
+            expected = combo._apply_appearance_mode(combo._border_color)
+            canvas = combo._canvas
+            drawn = canvas.itemcget("border_parts_right", "fill")
+            assert drawn == expected, (
+                f"下拉框右侧边框被盖住了: 实测 {drawn!r}, 应当是边框色 {expected!r}"
+            )
+            # 箭头仍画在箭头区上(底色不变), 所以它落在边框**里面**。
+            arrow = canvas.itemcget("inner_parts_right", "fill")
+            assert arrow == combo._apply_appearance_mode(combo._button_color)
+    finally:
+        app.destroy()
 
 
 def test_long_game_name_is_capped_in_the_detail_header() -> None:

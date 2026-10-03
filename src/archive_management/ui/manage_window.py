@@ -38,6 +38,7 @@ from archive_management.ui.widgets import (
     paint_button_state,
     paint_button_style,
     track_fit,
+    window_scaling,
 )
 
 _ChangeCallback = Callable[[], None]
@@ -46,6 +47,18 @@ _ChangeCallback = Callable[[], None]
 def _kind_text(kind: PathKind) -> str:
     """返回目录/文件的展示文案."""
     return tr("loc.kind_dir") if kind == "directory" else tr("loc.kind_file")
+
+
+def _chip_text(kind: PathKind, *, primary: bool) -> str:
+    r"""位置行左侧那枚标签: 主位置写"主目录/主文件", 其余只写类型.
+
+    出处(2026-10-02 用户反馈): 主位置原来是在**路径前面加一个字**("主  C:\..."), 看起来
+    像路径自己的一部分(容易被读成别的字), 所以改成由这枚标签表达 —— 路径原样显示。
+    标签宽 56px 装得下最长的英文标签(实测 11 号字下 "Main file" = 44px)。
+    """
+    if not primary:
+        return _kind_text(kind)
+    return tr("loc.primary_dir" if kind == "directory" else "loc.primary_file")
 
 
 # 窗口是固定的 600x600, 标题左边只腾得下 150px(右边四个动作按钮占 414px): 长名称
@@ -59,7 +72,8 @@ _WINDOW_WIDTH = 600
 _WINDOW_PAD_Y = 16
 # 位置行里“路径那一列”要让开的宽度: 类型标签 56 + 左侧 10 + 右侧 8 + 路径自己的右内边距 8.
 _ROW_TEXT_INSET = 56 + 10 + 8 + 8
-# 窗口高度下限(内容更矮时也至少这么高, 免得窗口像一条缝).
+# 窗口打开时的初始高度: 实际高度随后按内容算(见 _fit_window_height), 所以它只是一个
+# 合理的起点 —— 不再当内容的下限用(否则位置少的时候底部会空出一大块)。
 _WINDOW_MIN_HEIGHT = 440
 # 位置列表的高度跟着内容走: 一条位置时只占一行的高度(不在卡片里空出一大块,
 # 15 号评审), 超过上限则由列表自己滚动。
@@ -141,7 +155,12 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_muted,
         )
-        self._state_label.grid(row=1, column=0, padx=16, pady=(2, 4), sticky="w")
+        # 标题与状态两行是**一块**文字: 两端留白要一样, 否则整块在页头里偏下 ——
+        # 2026-10-02 用户实测"标记启停状态的文字没有上下居中, 而是在区域中居下":
+        # 那时标题上面留 16、状态行下面只留 4, 于是状态那行看着贴在页头下沿。
+        # 右边那组按钮是 ``rowspan=2`` 且自己居中(实测 y=30、高 37, 正好落在页头中线),
+        # 所以只要这两行对称, 三者在页头里的中线就一致了。
+        self._state_label.grid(row=1, column=0, padx=16, pady=(2, 16), sticky="w")
 
         header_actions = ctk.CTkFrame(header, fg_color="transparent")
         header_actions.grid(row=0, column=1, rowspan=2, padx=12)
@@ -398,15 +417,21 @@ class ManageGameWindow:
         )
 
     def _fit_window_height(self, *, settle: bool = False) -> None:
-        """窗口高度按内容算: 位置列表定高之后, 多余的空白不再留在窗口里."""
+        """窗口高度按内容算: 位置列表定高之后, 多余的空白不再留在窗口里.
+
+        出处(2026-10-02 用户反馈): 底部按钮与窗口下沿之间空出一大块。两个原因叠加:
+        ① 这里又对内容高度取了一次 ``_WINDOW_MIN_HEIGHT`` 的下限; ② ``winfo_reqheight()``
+        是**物理**像素, 而 ``CTk.geometry()`` 吃**逻辑**像素(会乘窗口缩放, 125% 的屏上就是
+        1.25 倍) —— 直接拿物理值去定高, 窗口永远比内容高一截。所以现在**只按内容**, 而且
+        除回窗口缩放(见 ``widgets.window_scaling``)。
+        """
         if settle:
             self._window.update()
         else:
             self._window.update_idletasks()
-        self._window.geometry(
-            f"{_WINDOW_WIDTH}x"
-            f"{max(_WINDOW_MIN_HEIGHT, int(self._window.winfo_reqheight()))}"
-        )
+        scale = window_scaling(self._window)
+        height = round(int(self._window.winfo_reqheight()) / scale)
+        self._window.geometry(f"{_WINDOW_WIDTH}x{height}")
         _present(self._parent, self._window)
 
     def _rebuild_rows(self) -> None:
@@ -441,7 +466,7 @@ class ManageGameWindow:
 
         chip = ctk.CTkLabel(
             row,
-            text=_kind_text(item.path_kind),
+            text=_chip_text(item.path_kind, primary=item.is_primary),
             width=56,
             corner_radius=RADIUS_LG,
             font=ctk.CTkFont(size=11),
@@ -451,8 +476,6 @@ class ManageGameWindow:
         chip.grid(row=0, column=0, rowspan=2, padx=(10, 8), pady=8)
 
         title_text = item.path
-        if item.is_primary:
-            title_text = f"{tr('loc.primary')}  {title_text}"
         title = ctk.CTkLabel(
             row,
             text=title_text,

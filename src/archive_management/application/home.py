@@ -102,9 +102,23 @@ def build_report(
 
 
 def load_home(database: Database, *, now: datetime | None = None) -> HomeReport:
-    """读取持久化的筛选条件并返回主页数据."""
+    """读取持久化的**展示偏好**并返回主页数据.
+
+    启动时只继承"海报/列表"与"每页条数"(见 :class:`HomeFilter` 里展示偏好与筛选条件
+    的划分): 视图页签(全部/最近/待处理/已归档)、平台、分类、搜索词都属于"我上次在看
+    什么", 跨启动带回来不符合预期 —— 用户 2026-10-02 反馈: "我在首页的待处理分页关的
+    软件下次启动还在这个页面打开了, 这点不符合预期, 我认为只需要记住用户上次选择的是
+    海报页面还是列表页面即可"。
+
+    落库那一侧(:func:`save_filter`)仍然写整行 —— 表结构不变, 也就没有迁移; 这里只
+    决定**启动时读哪些字段**, 以后要改口径就是这一处。
+    """
     saved = HomeRepository(database).load_state()
-    return build_report(load_facts(database), saved or HomeFilter(), now=now)
+    facts = load_facts(database)
+    if saved is None:
+        return build_report(facts, HomeFilter(), now=now)
+    display = HomeFilter(layout=saved.layout, page_size=saved.page_size)
+    return build_report(facts, display, now=now)
 
 
 def filter_home(
