@@ -142,8 +142,9 @@ def test_branch_graph_layout_within_budget(
     """分支图的布局与 item 账目(渲染基线的确定那一半).
 
     **item 数是确定性数字**, 比计时稳, 所以它当主判据"画不出来"这类事故 —— 一条
-    400 节点的链应该正好是 400 个框、399 条连线、800 条文字。计时量的是**全部 400 个
-    节点**(不经剪枝): 退化成 O(n x n) 的布局在这里会被拦下。
+    400 节点的链应该正好是 400 个框、399 条连线、800 条文字、399 个折叠标记(有孩子的
+    节点才有标记)。计时量的是**全部 400 个节点**(不经剪枝): 退化成 O(n x n) 的布局在这
+    里会被拦下。
 
     剪枝后的形状由 :func:`~archive_management.ui.models.branch_tree` 决定(自动备份只
     留最新一份), 那是另一条判据, 见下面的 ``test_pruned_branch_tree_drops_old_autos``。
@@ -157,8 +158,39 @@ def test_branch_graph_layout_within_budget(
 
     assert len(layout.boxes) == NODE_COUNT
     assert len(layout.edges) == NODE_COUNT - 1
-    # 画布上的 item 数 = 框 + 线 + 文字(每框两条), 与 ui/tree_view 的账目同源。
+    # 画布上的 item 数 = 框 + 线 + 文字(每框两条) + 折叠标记(每个有孩子的框一个),
+    # 与 ui/tree_view 的账目同源。
+    assert len(layout.branches) == NODE_COUNT - 1
     assert len(layout.boxes) + len(layout.edges) + len(layout.boxes) * 2 == 1599
+    assert (
+        len(layout.boxes)
+        + len(layout.edges)
+        + len(layout.boxes) * 2
+        + len(layout.branches)
+        == 1998
+    )
+
+
+def test_branch_graph_collapsed_root_is_a_single_box(
+    chain_database: tuple[Database, int], perf_recorder: PerformanceRecorder
+) -> None:
+    """折叠态也有一条确定性数字: 400 节点折叠根 → 1 框 + 0 线 + 2 文字 + 1 标记 = 4.
+
+    它同时守住两件事: 折叠真的把整棵子树从**布局**里拿掉(而不是画出来再藏), 以及在大树上
+    再折一次不会退化成 O(n x n)(每次折叠都会重算一遍布局)。
+    """
+    database, game_id = chain_database
+    nodes = BackupRepository(database).list_for_game(game_id)
+    tree = build_tree(tree_inputs(nodes))
+    root = next(node.node_id for node in tree if node.depth == 0)
+
+    with perf_recorder.duration("ui.tree_layout", scale=NODE_SCALE, budget_seconds=1.0):
+        layout = tree_layout(tree, collapsed=(root,))
+
+    assert len(layout.boxes) == 1
+    assert layout.edges == ()
+    assert len(layout.boxes) + len(layout.boxes) * 2 + 1 == 4
+    assert layout.descendants == {root: NODE_COUNT - 1}, "藏起来的后代数要数对"
 
 
 def test_pruned_branch_tree_drops_old_autos(

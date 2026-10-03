@@ -25,6 +25,7 @@ try:
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
+from archive_management.i18n import tr
 from archive_management.ui import keyboard
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.contrast import contrast_ratio
@@ -153,7 +154,7 @@ def _fan(root: str, leaves: int) -> list[BackupItem]:
 
 
 def test_canvas_item_count_matches_the_accounting(graph: Any) -> None:
-    """item 账目: 画布上的 item 数 == 框 + 线 + 文字(每框两条)."""
+    """item 账目: 画布上的 item 数 == 框 + 线 + 文字(每框两条) + 折叠标记."""
     app, view, _hooks = graph
     view.set_items(_fan("root", 3))
     view.redraw(DARK)
@@ -163,6 +164,7 @@ def test_canvas_item_count_matches_the_accounting(graph: Any) -> None:
     assert counts.boxes == 4
     assert counts.edges == 3
     assert counts.texts == 8
+    assert counts.markers == 1, "只有根有孩子, 所以只有一个折叠标记"
     assert len(view.canvas.find_all()) == counts.total
 
 
@@ -626,14 +628,302 @@ def test_selecting_on_the_graph_updates_the_right_panel() -> None:
     assert str(app._restore_btn.cget("state")) == "normal"
 
 
+# -- 折叠/展开(I-9.5.2 的绘制那一半) -----------------------------------------
+#
+# 一块小树: root 下面 a / b, 而 a 自己有三个孩子。折叠的**入口**与命中优先级是 9.5.3
+# 的内容, 这里量的是"收起来之后画布上是什么样": 账目、痕迹、以及选中一点没动。
+
+
+def _traces(view: TreeView, node_id: str) -> str:
+    """一个框上"看得见的说明行 + 被裁时的全文"合起来的痕迹文本.
+
+    说明行放不下时 :func:`fit_text` 会裁掉尾巴, 而被裁的部分**挂在悬停提示里**(I-3 的
+    "截断必须能回看") —— 所以判据把两处合起来看, 否则"字够不够宽"会混进判据里。
+    """
+    texts = view._texts[node_id]
+    return f"{texts.meta}\n{texts.full}"
+
+
+def _fold_items(*, current: str | None = None) -> list[BackupItem]:
+    """折叠用例的夹具: root → a → (a1, a2, a3) 与 root → b."""
+    return [
+        _item("root"),
+        _item("a", "root"),
+        _item("a1", "a", minute=1, current=current == "a1"),
+        _item("a2", "a", minute=2, current=current == "a2"),
+        _item("a3", "a", minute=3, current=current == "a3"),
+        _item("b", "root", minute=4, current=current == "b"),
+    ]
+
+
+def test_every_branch_box_gets_a_fold_marker(graph: Any) -> None:
+    """有孩子的框各有一个折叠标记, 叶子没有(点了也没东西可藏)."""
+    app, view, _hooks = graph
+    view.set_items(_fold_items())
+    view.redraw(DARK)
+    _pump(app)
+
+    assert set(view._marker_items) == {"root", "a"}
+    assert len(view._marker_items) == view.item_counts().markers
+    assert len(view.canvas.find_all()) == view.item_counts().total
+
+    # 标记就在框的右下角: 画出来的坐标与纯函数算的矩形对得上。
+    rect = view.layout.marker_rect("a")
+    assert rect is not None
+    coords = view.canvas.coords(view._marker_items["a"])
+    assert coords[0] == pytest.approx(rect[0] + rect[2] / 2)
+    assert coords[1] == pytest.approx(rect[1] + rect[3] / 2)
+
+
+def test_folding_hides_the_subtree_and_writes_down_what_it_hid(graph: Any) -> None:
+    """折叠: 子树从**布局**里拿掉(不是画出来再藏), 说明行写明藏了几个后代."""
+    app, view, _hooks = graph
+    view.set_items(_fold_items())
+    view.redraw(DARK)
+    _pump(app)
+
+    assert view.toggle("a", DARK) is True
+    _pump(app)
+    assert view.node_ids == ("root", "a", "b")
+    assert view.collapsed == frozenset({"a"})
+    counts = view.item_counts()
+    assert (counts.boxes, counts.edges, counts.markers) == (3, 2, 2)
+    assert len(view.canvas.find_all()) == counts.total, (
+        "收起来之后画布上不该留着旧 item"
+    )
+
+    assert "3 个后代" in view._texts["a"].meta, "藏了什么要写出来"
+    assert view.canvas.itemcget(view._marker_items["a"], "text") == "+", (
+        "收起状态该显示加号(点一下展开)"
+    )
+
+    assert view.toggle("a", DARK) is False
+    _pump(app)
+    assert view.node_ids == ("root", "a", "a1", "a2", "a3", "b")
+    assert view.collapsed == frozenset()
+    assert "3 个后代" not in view._texts["a"].meta
+    assert view.canvas.itemcget(view._marker_items["a"], "text") == "-", (
+        "展开状态该显示减号(点一下收起)"
+    )
+
+
+def test_folding_never_changes_the_selection_and_says_when_it_hides_it(
+    graph: Any,
+) -> None:
+    """折叠**不改**选中(反向守卫), 但藏着选中项/当前节点时必须在框上说出来.
+
+    偷偷改选是这一整套里最危险的一类语义漂移: 右侧面板与"恢复/建分支"都会跟着换目标。
+    所以这条用例量两头 —— 选中一动不动, 而"藏了谁"由说明行与标记色当场告诉用户。
+    """
+    app, view, _hooks = graph
+    view.set_items(_fold_items(current="a2"))
+    view.redraw(DARK)
+    _pump(app)
+    view.select("a1", DARK)
+    _pump(app)
+
+    view.toggle("a", DARK)
+    _pump(app)
+    assert view.selected == "a1", "折叠不许改选中"
+    meta = view._texts["a"].meta
+    assert meta.startswith(tr("graph.contains_selected")), (
+        f"藏着选中项时必须写在最前面(被裁也要先保住它): 实测 {meta!r}"
+    )
+    assert tr("graph.contains_current") in _traces(view, "a"), (
+        "当前节点也被藏起来了, 必须写出来(说明行放不下时挂在悬停提示里)"
+    )
+    assert view.canvas.itemcget(view._marker_items["a"], "fill") == DARK.accent
+
+    view.select("b", DARK)  # 选中挪到折叠框之外
+    _pump(app)
+    assert not view._texts["a"].meta.startswith(tr("graph.contains_selected"))
+    assert view._texts["a"].meta.startswith(tr("graph.contains_current")), (
+        "当前节点还在里面"
+    )
+    assert view.canvas.itemcget(view._marker_items["a"], "fill") == DARK.accent
+
+    view.toggle("a", DARK)  # 展开: 两个痕迹都该消失
+    _pump(app)
+    assert tr("graph.contains_selected") not in view._texts["a"].meta
+    assert tr("graph.contains_current") not in view._texts["a"].meta
+    assert view._texts["a"].full == "", (
+        f"展开之后没有要回看的东西了: {view._texts['a']!r}"
+    )
+    assert view.canvas.itemcget(view._marker_items["a"], "fill") == DARK.text_muted
+
+
+def test_switching_data_drops_the_stale_folds(graph: Any) -> None:
+    """折叠集合与现有节点**取交集**: 换一批数据之后旧 id 不该继续压着图."""
+    app, view, _hooks = graph
+    view.set_items(_fold_items())
+    view.redraw(DARK)
+    _pump(app)
+    view.toggle("a", DARK)
+    _pump(app)
+    assert view.collapsed == frozenset({"a"})
+
+    view.set_items(_fan("other", 2))
+    view.redraw(DARK)
+    _pump(app)
+
+    assert view.collapsed == frozenset()
+    assert view.node_ids == ("other", "other-0", "other-1")
+
+
+# -- 折叠/展开的交互(I-9.5.3) ------------------------------------------------
+#
+# 三条命中各干一件事: 标记 = 折叠/展开, 框 = 选中, 空白 = 平移。入口就在框右下角,
+# 键盘只做"空格/回车折叠当前选中项"(方向键/WASD 已经绑给漫游了)。
+
+
+def _marker_spot(view: TreeView, node_id: str) -> tuple[int, int]:
+    """某个框的折叠标记中心在**控件坐标**里的位置."""
+    rect = view.layout.marker_rect(node_id)
+    assert rect is not None, f"{node_id} 应该有折叠标记"
+    return _widget_spot(view, rect[0] + rect[2] / 2, rect[1] + rect[3] / 2)
+
+
+def test_clicking_the_marker_folds_and_expands_that_subtree(graph: Any) -> None:
+    """入口就在框的右下角: 点标记 = 折叠, 再点 = 展开(框本身上不做这件事)."""
+    app, view, hooks = graph
+    view.set_items(_fold_items())
+    view.redraw(DARK)
+    _pump(app)
+
+    _press(view, _marker_spot(view, "a"))
+    _release(view, _marker_spot(view, "a"))
+    _pump(app)
+    assert view.collapsed == frozenset({"a"})
+    assert view.node_ids == ("root", "a", "b")
+    assert hooks.selected == [], "点标记不该顺手选中那个节点"
+
+    _press(view, _marker_spot(view, "a"))  # 折叠后标记还在, 位置已经重算
+    _release(view, _marker_spot(view, "a"))
+    _pump(app)
+    assert view.collapsed == frozenset()
+    assert view.node_ids == ("root", "a", "a1", "a2", "a3", "b")
+
+
+def test_pressing_the_marker_does_not_pan_or_select(graph: Any) -> None:
+    """按在标记上拖动: 既不平移也不选中, 而且拖走就不算点击(不会顺手折叠)."""
+    app, view, hooks = graph
+    app.geometry("900x600")
+    _pump(app)
+    view.set_items(_fan("root", 12))  # 宽扇: 横向本来拖得动
+    view.redraw(DARK)
+    _pump(app)
+
+    before = view.canvas.xview()
+    spot = _marker_spot(view, "root")
+    _press(view, spot)
+    _drag(view, spot[0] - 120, spot[1])
+    _release(view, (spot[0] - 120, spot[1]))
+    _pump(app)
+
+    assert view.canvas.xview() == before, "按在标记上不该把画面拖走"
+    assert hooks.selected == []
+    assert view.selected is None
+    assert view.collapsed == frozenset(), "拖走之后松手不算点击标记"
+
+
+def test_space_and_enter_fold_the_selected_node(graph: Any) -> None:
+    """键盘: Tab 到画布之后, 空格/回车收起或展开**当前选中项**(方向键照旧是漫游).
+
+    选中项由**宿主**决定(画布只把点击告诉它): 所以这里先真点一下框(应拿到回调),
+    再让宿主把选中定下来 —— 与 main_window 里那条路径一致。
+    """
+    app, view, hooks = graph
+    view.set_items(_fold_items())
+    view.redraw(DARK)
+    _pump(app)
+    view.canvas.focus_set()
+    _pump(app)
+
+    _press(view, _box_spot(view, "a"))
+    _release(view, _box_spot(view, "a"))
+    _pump(app)
+    assert [item.backup_id for item in hooks.selected] == ["a"]
+    view.select("a", DARK)
+    _pump(app)
+
+    view.canvas.event_generate("<space>", when="now")
+    _pump(app)
+    assert view.collapsed == frozenset({"a"}), "空格没有收起选中项的子树"
+
+    view.canvas.event_generate("<Return>", when="now")
+    _pump(app)
+    assert view.collapsed == frozenset(), "回车没有把子树放回来"
+
+
+def test_folding_keeps_the_clicked_box_in_view(graph: Any) -> None:
+    """折叠之后那个框仍在视野里("scrollregion 变小 → 偏移被夹回"会让图看着跑掉)."""
+    app, view, _hooks = graph
+    app.geometry("900x600")
+    _pump(app)
+    view.set_items(_fan("root", 12))
+    view.redraw(DARK)
+    _pump(app)
+    view.scroll("right")  # 先滚到右边: 折叠前的偏移是"越界"的
+    _pump(app)
+
+    spot = _marker_spot(view, "root")
+    _press(view, spot)
+    _release(view, spot)
+    _pump(app)
+    assert view.collapsed == frozenset({"root"})
+
+    box = view.layout.box("root")
+    assert box is not None
+    left = view.canvas.canvasx(0)
+    top = view.canvas.canvasy(0)
+    assert left <= box.center_x <= left + view.canvas.winfo_width(), (
+        "折叠后刚点的那个框横向不在视野里"
+    )
+    assert top <= box.y + box.height / 2 <= top + view.canvas.winfo_height(), (
+        "折叠后刚点的那个框纵向不在视野里"
+    )
+
+
+def test_switching_views_keeps_the_folds() -> None:
+    """切到时间线再切回来, 折叠还在(它活在这个视图的内存里, 切视图不重建视图)."""
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._open_game_detail("outer-wilds")
+    _pump(app)
+    view = app._tree_view
+    parent = next(iter(view.layout.branches))
+
+    view.toggle(parent, app.p)
+    _pump(app)
+    assert view.collapsed == frozenset({parent})
+
+    app._switch_view(ViewKind.TIMELINE)
+    _pump(app)
+    app._switch_view(ViewKind.BRANCH)
+    _pump(app)
+
+    assert app._tree_view.collapsed == frozenset({parent}), "切视图不该把折叠清掉"
+    assert parent in app._tree_view.node_ids
+
+
+def _widget_spot(view: TreeView, canvas_x: float, canvas_y: float) -> tuple[int, int]:
+    """画面坐标 -> 画布**控件坐标**(减掉滚动偏移).
+
+    不能拿 ``canvasx(画面坐标)`` 去凑: 那个方向是"控件 -> 画面"(名字里的 canvas 指的是
+    **画面**那一侧), 没滚动时两者恰好相等, 一旦拖过/滚过就整片错位 —— 实测"点标记折叠"
+    就是这么点空的(点到的位置与标记差了一个滚动偏移)。
+    """
+    return (
+        int(canvas_x - view.canvas.canvasx(0)),
+        int(canvas_y - view.canvas.canvasy(0)),
+    )
+
+
 def _box_spot(view: TreeView, node_id: str) -> tuple[int, int]:
-    """某个框中心在**控件坐标**里的位置(用 Tk 自己的换算, 免得手算滚动偏移)."""
+    """某个框中心在**控件坐标**里的位置."""
     box = view.layout.box(node_id)
     assert box is not None
-    return (
-        int(view.canvas.canvasx(box.center_x)),
-        int(view.canvas.canvasy(box.y + box.height / 2)),
-    )
+    return _widget_spot(view, box.center_x, box.y + box.height / 2)
 
 
 def _blank_spot(view: TreeView) -> tuple[int, int]:

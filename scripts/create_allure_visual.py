@@ -41,6 +41,11 @@
 覆盖到 —— 而视觉回归要拦的正是它们。最后一张仍然是**空库**(删光演示数据), 保留"一条
 数据都没有时界面长什么样"这条。
 
+**画面名带着 `NN-` 编号, 而报告里的列表顺序就是它**: 处理顺序是 ``sorted(produced)``
+(即字母序), 而每张结果的开始时间由"基准 + 序号"给出(见 :func:`write_result`) —— 两件事
+合起来保证"报告里的先后 = 编号大小"。所以**新加一张画面时编号要接在末尾**, 或者重排
+编号时一并改 ``tests/visual-baselines/README.md`` 里的表(两者必须一致)。
+
 ## 前提: 画面得先画得出汉字
 
 这一轮用的 Tk 决定了画面可不可信, 所以先跑一个**字体探针**, 并且拿它当门禁:
@@ -326,6 +331,43 @@ def _record(
     print(f"[截图] {file_name} ({note})")
 
 
+#: 找可折叠分支时最多试几款游戏(演示数据里第一款可能只有一条链或只有一个备份)。
+_FOLD_SEARCH_LIMIT = 6
+
+
+def record_a_folded_subtree(
+    app: ArchiveApp,
+    page: HomePage,
+    screens_dir: Path,
+    grab: ModuleType,
+    produced: list[str],
+    skipped: list[str],
+) -> None:
+    """再拍一张**折叠态**: 挨个打开游戏, 拿第一款"图里真有分支可折"的拍.
+
+    演示数据里第一款游戏可能只有一条链、甚至只有一个备份 —— 那时拍出来的"折叠态"与没折
+    一样(实测 2026-10-03: 直接拿 ``next(iter(page._rows))`` 拍时结果里少了一张, `skipped`
+    里写着"图里没有可折叠的分支")。拍完把折叠还原, 后面的画面都要看展开态。
+    """
+    name = "04-详情页-分支图折叠态-演示数据"
+    for game_id in list(page._rows)[:_FOLD_SEARCH_LIMIT]:
+        page._open(game_id)
+        pump(app, SETTLE_SECONDS)
+        graph = app._tree_view
+        foldable = next(
+            (node_id for node_id in graph.node_ids if graph.can_toggle(node_id)), None
+        )
+        if foldable is None:
+            continue
+        graph.toggle(foldable, app.p)
+        pump(app, SETTLE_SECONDS)
+        _record(app, screens_dir, name, grab, produced, skipped)
+        graph.toggle(foldable, app.p)  # 还原: 后面几张要看展开态
+        pump(app)
+        return
+    skipped.append(f"{name}: 演示数据里没有可折叠的分支")
+
+
 def capture_screens(
     screens_dir: Path, grab: ModuleType
 ) -> tuple[list[str], list[str], dict[str, Any]]:
@@ -351,20 +393,24 @@ def capture_screens(
         page._open(next(iter(page._rows)))
         pump(app, SETTLE_SECONDS)
         _record(app, screens_dir, "03-详情页-演示数据", grab, produced, skipped)
+        # 折叠态是新画面(I-9.5): 右下角的标记、说明行里的"N 个后代"与收起来之后的形状
+        # 都只能在这里看到 —— 它保住的是"折叠没把别的框挤歪"。编号紧随 03(处理顺序是
+        # 字母序, 见 main), 所以报告里的先后与编号一致。
+        record_a_folded_subtree(app, page, screens_dir, grab, produced, skipped)
         app._show_page(AppPage.HOME)
 
         page._show_section(HomeSection.DISCOVERY)
         page._discovery._show_page(DiscoveryPage.CANDIDATES)
         pump(app, SETTLE_SECONDS)
-        _record(app, screens_dir, "04-主页-游戏发现-演示数据", grab, produced, skipped)
+        _record(app, screens_dir, "05-主页-游戏发现-演示数据", grab, produced, skipped)
 
         page._show_section(HomeSection.ACTIVATION)
         pump(app, SETTLE_SECONDS)
-        _record(app, screens_dir, "05-主页-游戏启停-演示数据", grab, produced, skipped)
+        _record(app, screens_dir, "06-主页-游戏启停-演示数据", grab, produced, skipped)
 
         # 最后一张: "一条数据都没有"时界面长什么样(空状态文案 + 连表头一起收起来)。
         empty_the_library(app, page)
-        _record(app, screens_dir, "06-主页-列表视图-空库", grab, produced, skipped)
+        _record(app, screens_dir, "07-主页-列表视图-空库", grab, produced, skipped)
         probe = probe_fonts(app)
     finally:
         with contextlib.suppress(Exception):
@@ -469,17 +515,31 @@ def describe(
     return "\n".join(lines) + "\n"
 
 
+#: 本次运行的基准时间戳(毫秒)。每张画面的开始时间 = 它 + **序号** —— 见 :func:`write_result`
+#: 里那句"为什么要加序号"(2026-10-03 报告里视觉结论的顺序与编号对不上就是它引起的)。
+_RUN_STARTED_AT = time.time_ns() // 1_000_000
+
+
 def write_result(
     results_dir: Path,
     comparison: Comparison,
     *,
+    order: int,
     result_id: str,
     platform: str,
     skipped: Sequence[str],
     probe: Mapping[str, Any] | None = None,
 ) -> None:
-    """写入一条视觉回归结果(状态跟随比对结论)."""
-    timestamp = time.time_ns() // 1_000_000
+    """写入一条视觉回归结果(状态跟随比对结论).
+
+    ``order`` 是这张画面在**本轮**里的序号(从 0 开始), 它决定结果的开始时间。
+
+    为什么要它: 报告里的列表按开始时间排, 而“每张各取一次 ``time.time_ns()``”会让相邻
+    两张落在**同一毫秒**里(实测 2026-10-03: 02 与 03、04 与 05 的时间戳完全相同) —— 同值
+    在 Allure 里没有稳定的先后, 用户看到的列表于是成了 `01, 03, 02, 05, 04, 06`, 与画面
+    编号对不上。改成"同一个基准 + 序号"之后每张的 start 严格递增, 列表顺序就是编号顺序。
+    """
+    timestamp = _RUN_STARTED_AT + order
     attachments = [
         write_attachment(
             results_dir, result_id, "actual", comparison.actual.read_bytes()
@@ -702,6 +762,7 @@ def capture_or_error(
 def process_screen(
     file_name: str,
     *,
+    order: int,
     work_dir: Path,
     baselines: Path,
     candidates: Path,
@@ -712,6 +773,8 @@ def process_screen(
     blocked: str = "",
 ) -> Comparison:
     """处理一张画面: 存候选基线 + 写 Allure 结果, 返回比对结论.
+
+    ``order`` 是它在**本轮**里的序号(报告里的列表顺序靠它, 见 :func:`write_result`)。
 
     ``blocked`` 非空表示"这一轮的画面不可信"(如字体画不出汉字): 仍然写结论(带上探针,
     让人看得到图坏成什么样), 但**不比较、不写候选基线** —— 一张画不出汉字的图被当成
@@ -729,6 +792,7 @@ def process_screen(
     write_result(
         results_dir,
         comparison,
+        order=order,
         result_id=str(uuid.uuid4()),
         platform=host,
         skipped=skipped,
@@ -786,6 +850,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     comparisons = [
         process_screen(
             file_name,
+            order=order,
             work_dir=WORK_DIRECTORY,
             baselines=args.baselines,
             candidates=args.candidates,
@@ -795,7 +860,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe=probe,
             blocked=blocked,
         )
-        for file_name in sorted(produced)
+        for order, file_name in enumerate(sorted(produced))
     ]
     if blocked:
         print(f"::error::视觉回归不可信 —— {blocked}", file=sys.stderr)

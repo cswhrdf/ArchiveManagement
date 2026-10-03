@@ -1973,6 +1973,7 @@ def test_the_visual_gate_refuses_a_frame_that_cannot_draw_cjk(tmp_path: Path) ->
 
     comparison = module.process_screen(
         "01-画面.png",
+        order=0,
         work_dir=work,
         baselines=tmp_path / "baselines",
         candidates=candidates,
@@ -2007,6 +2008,57 @@ def test_the_visual_gate_refuses_a_frame_that_cannot_draw_cjk(tmp_path: Path) ->
     # 修法与现场一起写进证据: "用哪个 Tk"是这道门禁的关键输入, 光有版本号说明不了它是哪一份。
     assert "_tkinter" in payload["statusDetails"]["message"], (
         "判不可用时要把当前用的是哪个 `_tkinter` 一起写出来"
+    )
+
+
+def test_each_visual_result_gets_its_own_start_time(tmp_path: Path) -> None:
+    """同一轮里每张画面的开始时间必须**各不相同**: 报告里的列表顺序就是它.
+
+    出处(用户 2026-10-03 实测): 报告里视觉回归那一节的顺序是 `01, 03, 02, 05, 04, 06` —— 两两
+    成对交换。现场是结果数据里的 `start`: 02 与 03、04 与 05 **完全相同**, 因为每写一条结论都
+    现取一次毫秒时间戳, 而相邻两张撞在同一毫秒里 —— 同值在 Allure 里没有稳定的先后。修法是
+    "基准 + 序号"(见 :func:`write_result`), 这条用例把那个不变量钉住: 改回"各取一次时间"就红。
+    """
+    module = _load_script("create_allure_visual")
+    work = tmp_path / "work"
+    work.mkdir()
+    results = tmp_path / "results"
+    results.mkdir()
+    candidates = tmp_path / "candidates"
+    candidates.mkdir()
+    for index in range(3):
+        (work / f"{index:02d}-画面.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        module.process_screen(
+            f"{index:02d}-画面.png",
+            order=index,
+            work_dir=work,
+            baselines=tmp_path / "baselines",
+            candidates=candidates,
+            results_dir=results,
+            host="Linux",
+            skipped=(),
+            probe=None,
+        )
+
+    rows = sorted(
+        (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in results.glob("*-result.json")
+        ),
+        key=lambda payload: str(payload["name"]),
+    )
+    assert [row["name"] for row in rows] == [
+        "视觉回归 · 00-画面",
+        "视觉回归 · 01-画面",
+        "视觉回归 · 02-画面",
+    ]
+    starts = [int(row["start"]) for row in rows]
+    # 白盒口径: 钉住"每张的开始时间 = 基准 + 序号"这个不变量本身 —— 只看"互不相同"不够,
+    # 写三张结果之间的文件 IO 本来就可能跨过一毫秒, 那样改回"各取一次时间"照样是绿的
+    # (咬合验证时实测到过)。
+    base = int(module._RUN_STARTED_AT)  # pyright: ignore[reportPrivateUsage]
+    assert starts == [base, base + 1, base + 2], (
+        f"每张的开始时间应当等于基准 + 序号, 实测 {starts}(基准 {base})"
     )
 
 

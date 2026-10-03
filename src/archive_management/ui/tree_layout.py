@@ -19,11 +19,16 @@
 "剪枝之后重挂"不用在这里处理: 调用方(:func:`~archive_management.ui.models.branch_tree`)
 已经用既有的 ``keep_surviving`` 把被过滤节点的子节点挂到了最近存活祖先上, 所以喂进来的一定
 是一棵**连续的**树 —— 这也是本模块的一条判据(见 ``tests/unit/test_ui_tree_layout.py``)。
+
+**折叠(I-9.5.1)**: ``collapsed`` 给出"收起子树"的节点 id 集合。折叠一个节点 = 它的整棵子树
+**不参与布局**(宽度只算一个框、不产出它的出边), 但它自己留在原位 —— 因此布局只需要先算出
+"哪些节点还看得见", 后面每一步都在那个集合上算。口径见 PLAN 的 I-9.5: 画面可以藏,
+语义不许动(折叠不改选中), 藏起来的东西必须在框上留下可发现的痕迹(后代数 + 标记)。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from archive_management.domain.tree import TreeNode
@@ -47,6 +52,12 @@ TREE_V_GAP = 34
 TREE_PADDING = 12
 #: 文字距离框边的内边距(与 ``metrics.SPACE_8`` 同值, 但它是**图的坐标**而不是控件间距)。
 TREE_TEXT_INSET = 8
+#: 折叠标记的边长(`+`/`-` 那个小方块)。按字号缩放 —— 它要跟着框一起变大。
+#: 2026-10-03 用户反馈"符号有点小", 14 → 18: 它同时是**命中区**, 放大之后不仅看得清,
+#: 也更好点(符号本身的视觉大小由 ``tree_view`` 那边的字号决定, 两个一起调)。
+TREE_MARKER_SIZE = 18
+#: 折叠标记距框右下角的内边距。
+TREE_MARKER_INSET = 4
 
 
 @dataclass(frozen=True)
@@ -59,6 +70,9 @@ class TreeMetrics:
     v_gap: float
     padding: float
     text_inset: float
+    #: 折叠标记的边长与它距框右下角的内边距(I-9.5.1)。
+    marker_size: float
+    marker_inset: float
 
     @property
     def row_height(self) -> float:
@@ -79,6 +93,8 @@ def default_metrics() -> TreeMetrics:
         v_gap=float(scaled(TREE_V_GAP)),
         padding=float(scaled(TREE_PADDING)),
         text_inset=float(scaled(TREE_TEXT_INSET)),
+        marker_size=float(scaled(TREE_MARKER_SIZE)),
+        marker_inset=float(scaled(TREE_MARKER_INSET)),
     )
 
 
@@ -102,6 +118,11 @@ class NodeBox:
     def bottom(self) -> float:
         """底边的 y(父节点连线的起点)."""
         return self.y + self.height
+
+    @property
+    def right(self) -> float:
+        """右边的 x(折叠标记从它往左排)."""
+        return self.x + self.width
 
     @property
     def top(self) -> float:
@@ -136,10 +157,50 @@ class TreeLayout:
     metrics: TreeMetrics
     #: 按 id 找框(悬停与选中是高频交互, 不做线性扫描)。
     index: Mapping[str, NodeBox] = field(default_factory=dict, repr=False)
+    #: 真的生效的折叠节点(与传入集合取过交集: 树里没有的 id 与叶子都不算)。
+    collapsed: frozenset[str] = frozenset()
+    #: 每个折叠节点被藏起来的后代总数(说明行上的 "· N 个后代")。
+    descendants: Mapping[str, int] = field(default_factory=dict, repr=False)
+    #: 有孩子的节点(只有它们才会有折叠标记 —— 没孩子就没什么可折叠的)。
+    branches: frozenset[str] = frozenset()
 
     def box(self, node_id: str | None) -> NodeBox | None:
         """取某个节点的框(没有就返回 ``None``)."""
         return None if node_id is None else self.index.get(node_id)
+
+    def is_collapsed(self, node_id: str | None) -> bool:
+        """这个节点当前是不是折叠着的(它的子树没画出来)."""
+        return node_id is not None and node_id in self.collapsed
+
+    def can_collapse(self, node_id: str | None) -> bool:
+        """这个节点有没有孩子 —— 没有就不给标记(点了也没东西可藏)."""
+        return node_id is not None and node_id in self.branches
+
+    def marker_rect(self, node_id: str) -> tuple[float, float, float, float] | None:
+        """折叠标记的矩形 ``(x, y, 宽, 高)``, 没孩子的节点没有标记.
+
+        纯函数(只用到框与度量), 因此无头用例可以直接断言"标记在框的右下角、不越出框"。
+        """
+        box = self.box(node_id)
+        if box is None or not self.can_collapse(node_id):
+            return None
+        size = self.metrics.marker_size
+        inset = self.metrics.marker_inset
+        return (box.right - size - inset, box.bottom - size - inset, size, size)
+
+    def marker_at(self, x: float, y: float) -> str | None:
+        """点落在哪个节点的折叠标记里(倒序找: 后画的在上, 与 ``node_at`` 同一套).
+
+        命中优先级里标记排在框**前面**(见 PLAN I-9.5 的口径): 否则"想折叠却选中了它"。
+        """
+        for box in reversed(self.boxes):
+            rect = self.marker_rect(box.node_id)
+            if rect is None:
+                continue
+            mx, my, width, height = rect
+            if mx <= x <= mx + width and my <= y <= my + height:
+                return box.node_id
+        return None
 
     def node_at(self, x: float, y: float) -> NodeBox | None:
         """点在哪个框里(倒序找: 后画的在上, 与画布同一套顺序)."""
@@ -149,19 +210,61 @@ class TreeLayout:
         return None
 
 
-def _subtree_widths(
+def _visible_ids(
     order: Sequence[str],
     children: Mapping[str, tuple[str, ...]],
+    collapsed: Collection[str],
+) -> list[str]:
+    """哪些节点还看得见: 从根往下走, 碰到折叠节点就不再进它的子树.
+
+    ``order`` 是深度优先序(**父一定在子前面**), 所以一趟就够; 被跳过的节点要把它的
+    孩子也收进 ``hidden``—— 只跳过那一个的话孙辈会被当成可见的。
+    """
+    visible: list[str] = []
+    hidden: set[str] = set()
+    for node_id in order:
+        kids = children.get(node_id, ())
+        if node_id in hidden:
+            hidden.update(kids)
+            continue
+        visible.append(node_id)
+        if node_id in collapsed:
+            hidden.update(kids)
+    return visible
+
+
+def _descendant_counts(
+    order: Sequence[str], children: Mapping[str, tuple[str, ...]]
+) -> dict[str, int]:
+    """每个节点的后代总数(含间接后代, 不含自己).
+
+    倒着扫一遍深度优先序: 父在子前, 所以轮到某个节点时它的孩子已经数好了。
+    """
+    counts: dict[str, int] = {}
+    for node_id in reversed(order):
+        counts[node_id] = sum(
+            counts[kid] + 1 for kid in children.get(node_id, ()) if kid in counts
+        )
+    return counts
+
+
+def _subtree_widths(
+    visible: Sequence[str],
+    children: Mapping[str, tuple[str, ...]],
     size: TreeMetrics,
+    shown: Collection[str],
 ) -> dict[str, float]:
     """自底向上算每棵子树要占多宽.
 
     倒着扫一遍深度优先序就够了 —— ``build_tree`` 保证**父节点一定排在它的孩子前面**,
     所以反过来处理时孩子的宽度总是已经算好了(不必递归, 也不会撞上深度上限)。
+
+    ``shown`` 是还看得见的节点: 折叠节点的孩子被藏起来了, 于是它的子树宽度就是**一个框宽**
+    —— 这正是"折叠后同级兄弟往前排"的来源。
     """
     widths: dict[str, float] = {}
-    for node_id in reversed(order):
-        kids = [kid for kid in children.get(node_id, ()) if kid in widths]
+    for node_id in reversed(visible):
+        kids = [kid for kid in children.get(node_id, ()) if kid in shown]
         span = size.box_width
         if kids:
             span = sum(widths[kid] for kid in kids) + size.h_gap * (len(kids) - 1)
@@ -176,11 +279,12 @@ def _place_subtree(
     children: Mapping[str, tuple[str, ...]],
     widths: Mapping[str, float],
     depth_of: Mapping[str, int],
+    shown: Collection[str],
     size: TreeMetrics,
     boxes: dict[str, NodeBox],
 ) -> float:
     """把这棵子树摆在从 ``left`` 开始的那一段里, 返回它的框中心 x."""
-    kids = [kid for kid in children.get(node_id, ()) if kid in depth_of]
+    kids = [kid for kid in children.get(node_id, ()) if kid in shown]
     width = widths[node_id]
     if kids:
         cursor = left
@@ -193,6 +297,7 @@ def _place_subtree(
                     children=children,
                     widths=widths,
                     depth_of=depth_of,
+                    shown=shown,
                     size=size,
                     boxes=boxes,
                 )
@@ -227,10 +332,11 @@ def _node_maps(
 
 
 def _place_forest(
-    order: Sequence[str],
+    visible: Sequence[str],
     children: Mapping[str, tuple[str, ...]],
     widths: Mapping[str, float],
     depth_of: Mapping[str, int],
+    shown: Collection[str],
     size: TreeMetrics,
 ) -> tuple[dict[str, NodeBox], float]:
     """把整片林子从左到右摆好, 返回框表与总宽度.
@@ -240,7 +346,7 @@ def _place_forest(
     """
     boxes: dict[str, NodeBox] = {}
     cursor = size.padding
-    for node_id in order:
+    for node_id in visible:
         if depth_of[node_id] != 0:
             continue
         _place_subtree(
@@ -249,6 +355,7 @@ def _place_forest(
             children=children,
             widths=widths,
             depth_of=depth_of,
+            shown=shown,
             size=size,
             boxes=boxes,
         )
@@ -259,7 +366,11 @@ def _place_forest(
 
 
 def _tree_edges(nodes: Sequence[TreeNode], boxes: Mapping[str, NodeBox]) -> list[Edge]:
-    """每一对父子的连线端点(父框底边中点 → 子框顶边中点)."""
+    """每一对父子的连线端点(父框底边中点 → 子框顶边中点).
+
+    折叠节点的出边不用另外判断: 它的孩子根本没被摆到 ``boxes`` 里, 下面那道
+    ``child is None`` 就把它们滤掉了 —— "不产出折叠节点的出边"由此自动成立。
+    """
     edges: list[Edge] = []
     for node in nodes:
         parent = boxes.get(node.node_id)
@@ -281,13 +392,20 @@ def _tree_edges(nodes: Sequence[TreeNode], boxes: Mapping[str, NodeBox]) -> list
 
 
 def tree_layout(
-    nodes: Sequence[TreeNode], *, metrics: TreeMetrics | None = None
+    nodes: Sequence[TreeNode],
+    *,
+    metrics: TreeMetrics | None = None,
+    collapsed: Collection[str] = (),
 ) -> TreeLayout:
     """把一棵(已剪枝的)树铺成图.
 
     ``nodes`` 是 :func:`~archive_management.domain.tree.build_tree` 给出的深度优先序,
     每个节点带着 ``children`` 与 ``depth`` —— 因此这里直接就知道"谁是谁的孩子、同层第几个",
     不必再按 ``parent_id`` 分一次组(那正是本轮要补上的出口)。
+
+    ``collapsed`` 是"收起子树"的节点 id 集合(I-9.5): 折叠一个节点 = 它的整棵子树不参与
+    布局, 但它自己留在原位。集合会被**取交集**: 树里不存在的 id、以及**叶子**(没孩子)
+    都不算折叠 —— 否则调用方多留一个旧 id 就会让图莫名少一层。
 
     空输入返回一张空图(尺寸为 0), 调用方据此显示空状态。
     """
@@ -296,16 +414,29 @@ def tree_layout(
         return TreeLayout((), (), 0.0, 0.0, size, {})
 
     order, children, depth_of = _node_maps(nodes)
-    widths = _subtree_widths(order, children, size)
-    boxes, forest_width = _place_forest(order, children, widths, depth_of, size)
+    branches = frozenset(node_id for node_id in order if children.get(node_id))
+    folded = frozenset(node_id for node_id in collapsed if node_id in branches)
+    visible = _visible_ids(order, children, folded)
+    shown = set(visible)
+    widths = _subtree_widths(visible, children, size, shown)
+    boxes, forest_width = _place_forest(
+        visible, children, widths, depth_of, shown, size
+    )
     edges = _tree_edges(nodes, boxes)
 
-    deepest = max(depth_of.values())
+    # 只有**看得见且真的被折叠**的节点才报后代数: 藏在另一个折叠节点肚子里的那些, 连
+    # 标记都不会画出来(它们不在 ``visible`` 里), 报出来也没有展示的地方。
+    counts = _descendant_counts(order, children)
+    descendants = {node_id: counts[node_id] for node_id in visible if node_id in folded}
+    deepest = max(depth_of[node_id] for node_id in visible)
     return TreeLayout(
-        boxes=tuple(boxes[node_id] for node_id in order if node_id in boxes),
+        boxes=tuple(boxes[node_id] for node_id in visible if node_id in boxes),
         edges=tuple(edges),
         width=max(forest_width + size.padding, size.box_width + size.padding * 2),
         height=deepest * size.row_height + size.box_height + size.padding * 2,
         metrics=size,
         index=boxes,
+        collapsed=folded.intersection(visible),
+        descendants=descendants,
+        branches=branches.intersection(shown),
     )

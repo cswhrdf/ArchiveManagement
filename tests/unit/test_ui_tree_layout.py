@@ -1,4 +1,4 @@
-"""分支图布局纯函数的单元测试(I-9.1 的判据).
+"""分支图布局纯函数的单元测试(I-9.1 / I-9.5.1 的判据).
 
 判据全部是**数字**(不启动窗口):
 
@@ -7,7 +7,9 @@
 * 一条链的宽度 = 一个框宽(分叉才变宽);
 * 剪枝后仍是一棵连续的树(没有指向不存在节点的线);
 * 连线端点正好落在父框底边中点与子框顶边中点;
-* 字号变大时框跟着变大(布局是像素, 字号是缩放过的)。
+* 字号变大时框跟着变大(布局是像素, 字号是缩放过的);
+* **折叠**(I-9.5.1): 不折叠时与旧结果逐字段相同、折叠后仍不重叠且父仍居中、宽度按
+  单框算、后代数数得对且只报看得见的那些。
 """
 
 from __future__ import annotations
@@ -44,6 +46,8 @@ METRICS = TreeMetrics(
     v_gap=20.0,
     padding=5.0,
     text_inset=4.0,
+    marker_size=12.0,
+    marker_inset=3.0,
 )
 
 
@@ -55,9 +59,11 @@ def _tree(*pairs: tuple[str, str | None]) -> list[TreeInput]:
     ]
 
 
-def _layout(*pairs: tuple[str, str | None]) -> TreeLayout:
-    """按 (节点, 父节点) 铺一张图(固定尺寸)."""
-    return tree_layout(build_tree(_tree(*pairs)), metrics=METRICS)
+def _layout(
+    *pairs: tuple[str, str | None], collapsed: tuple[str, ...] = ()
+) -> TreeLayout:
+    """按 (节点, 父节点) 铺一张图(固定尺寸; ``collapsed`` 给出收起的节点)."""
+    return tree_layout(build_tree(_tree(*pairs)), metrics=METRICS, collapsed=collapsed)
 
 
 def test_a_single_child_sits_directly_under_its_parent() -> None:
@@ -210,3 +216,157 @@ def test_node_at_hits_the_box_that_was_drawn_last() -> None:
     assert box is not None
     assert layout.node_at(box.center_x, box.y + 1) is not None
     assert layout.node_at(-1.0, -1.0) is None
+
+
+# -- 折叠(I-9.5.1) -----------------------------------------------------------
+#
+# 夹具: ``root`` 有两个孩子 ``a`` / ``b``, 而 ``a`` 自己有三个孩子。
+# 固定尺寸下(框 100 / 水平间距 10 / 外边距 5)这些数字全是手算得出来的:
+#
+#   * 不折叠: ``a`` 子树 3x100 + 2x10 = 320, ``root`` 子树 320 + 10 + 100 = 430, 总宽 440;
+#   * 折叠 ``a``: 它只占一个框, 于是 100 + 10 + 100 = 210, 总宽 220;
+#   * 折叠 ``root``: 只剩它自己, 总宽 110。
+_FOLD_TREE: tuple[tuple[str, str | None], ...] = (
+    ("root", None),
+    ("a", "root"),
+    ("a1", "a"),
+    ("a2", "a"),
+    ("a3", "a"),
+    ("b", "root"),
+)
+#: 折叠 ``a`` 时它藏起来的后代(a1/a2/a3)。
+_FOLDED_DESCENDANTS = 3
+#: 折叠 ``root`` 时藏起来的后代(a/b/a1/a2/a3)。
+_ROOT_DESCENDANTS = 5
+
+
+def _fingerprint(layout: TreeLayout) -> tuple[object, ...]:
+    """一张图里所有能被"折叠集合为空"影响的字段(逐字段对照用)."""
+    return (
+        layout.boxes,
+        layout.edges,
+        layout.width,
+        layout.height,
+        sorted(layout.index),
+        layout.collapsed,
+        layout.branches,
+    )
+
+
+def test_an_empty_fold_set_lays_out_exactly_like_before() -> None:
+    """**最重要的一条**: 不折叠(空集合)时必须与旧行为逐字段相同.
+
+    既有 10 条几何判据与 6 张视觉基线都建在"现在这套铺法"上 —— 折叠若改变了空集合的
+    结果, 它们会一起重标。所以这里把三种"等于没折叠"的输入放在一起对照: 不传、
+    传空元组、传一个既不存在也不可能有孩子的 id(树里没有的 id 与**叶子**)。
+    """
+    nodes = build_tree(_tree(*_FOLD_TREE))
+    plain = tree_layout(nodes, metrics=METRICS)
+    empty = tree_layout(nodes, metrics=METRICS, collapsed=())
+    unknown = tree_layout(nodes, metrics=METRICS, collapsed=("没有这个节点",))
+    leaf = tree_layout(nodes, metrics=METRICS, collapsed=("a1",))
+
+    assert _fingerprint(empty) == _fingerprint(plain)
+    assert _fingerprint(unknown) == _fingerprint(plain)
+    assert _fingerprint(leaf) == _fingerprint(plain), "折叠叶子本来就没什么可藏"
+    assert plain.collapsed == frozenset()
+    assert plain.descendants == {}
+    assert plain.width == pytest.approx(440.0), "前提: 这是那棵树的旧宽度"
+
+
+def test_folding_a_subtree_leaves_its_parent_one_box_wide() -> None:
+    """折叠 ``a``: 它的子树不参与布局, 它自己留在原位, 出边一条都不产出."""
+    layout = _layout(*_FOLD_TREE, collapsed=("a",))
+
+    assert [box.node_id for box in layout.boxes] == ["root", "a", "b"]
+    assert layout.width == pytest.approx(220.0), "折叠后宽度应当只算一个框"
+    assert [(edge.parent_id, edge.child_id) for edge in layout.edges] == [
+        ("root", "a"),
+        ("root", "b"),
+    ]
+    assert layout.descendants == {"a": _FOLDED_DESCENDANTS}
+    assert layout.is_collapsed("a")
+    assert layout.can_collapse("a")
+    assert not layout.can_collapse("a1"), "没孩子的节点没什么可折叠的"
+
+
+def test_folding_keeps_the_visible_nodes_centered_and_apart() -> None:
+    """折叠之后父节点仍然居中、同级仍然不重叠(折叠只是少了一层, 不是换了铺法)."""
+    layout = _layout(*_FOLD_TREE, collapsed=("a",))
+
+    root = layout.box("root")
+    left = layout.box("a")
+    right = layout.box("b")
+    assert root is not None
+    assert left is not None
+    assert right is not None
+    assert root.center_x == pytest.approx((left.center_x + right.center_x) / 2)
+    assert left.x + left.width <= right.x
+    assert left.y == pytest.approx(root.bottom + METRICS.v_gap)
+
+
+def test_folding_the_root_leaves_one_box_and_no_edges() -> None:
+    """折叠根: 只剩一个框、一条线都没有, 后代数把整棵子树都数进去."""
+    layout = _layout(*_FOLD_TREE, collapsed=("root",))
+
+    assert [box.node_id for box in layout.boxes] == ["root"]
+    assert layout.edges == ()
+    assert layout.descendants == {"root": _ROOT_DESCENDANTS}
+    assert layout.width == pytest.approx(110.0)
+    assert layout.height == pytest.approx(50.0), "高度只看还剩几层"
+
+
+def test_the_height_follows_the_visible_rows_only() -> None:
+    """高度按**看得见**的最深一层算: 藏起来的那些层不能继续占着可滚高度."""
+    deep = _layout(*_FOLD_TREE)
+    folded = _layout(*_FOLD_TREE, collapsed=("a",))
+
+    assert deep.height == pytest.approx(170.0), "前提: 不折叠时有 3 层"
+    assert deep.height - folded.height == pytest.approx(METRICS.row_height)
+
+
+def test_a_fold_inside_a_fold_is_ignored() -> None:
+    """藏在另一个折叠节点里的折叠不算数: 它连标记都画不出来, 不该报后代数."""
+    layout = _layout(*_FOLD_TREE, collapsed=("root", "a"))
+
+    assert layout.descendants == {"root": _ROOT_DESCENDANTS}
+    assert not layout.is_collapsed("a")
+    assert not layout.can_collapse("a"), "看不见的节点没有折叠入口"
+
+
+def test_a_branch_has_a_marker_in_the_bottom_right_corner() -> None:
+    """折叠标记是**纯函数算出来的**矩形: 在框的右下角、不越出框; 叶子没有标记."""
+    layout = _layout(*_FOLD_TREE)
+
+    box = layout.box("a")
+    assert box is not None
+    rect = layout.marker_rect("a")
+    assert rect is not None
+    x, y, width, height = rect
+    assert (width, height) == (METRICS.marker_size, METRICS.marker_size)
+    assert x + width == pytest.approx(box.right - METRICS.marker_inset)
+    assert y + height == pytest.approx(box.bottom - METRICS.marker_inset)
+    assert box.contains(x, y), "标记的左上角越出了框"
+    assert box.contains(x + width, y + height), "标记的右下角越出了框"
+
+    assert layout.marker_rect("a1") is None, "没孩子的节点不该有标记"
+    assert layout.marker_rect("没有这个节点") is None
+
+
+def test_the_marker_wins_the_hit_test_against_its_own_box() -> None:
+    """命中的优先级判据: 标记上的点归标记, 框别处归框(免得"想折叠却选中了它")。"""
+    layout = _layout(*_FOLD_TREE)
+
+    rect = layout.marker_rect("a")
+    box = layout.box("a")
+    assert rect is not None
+    assert box is not None
+    centre = (rect[0] + rect[2] / 2, rect[1] + rect[3] / 2)
+
+    assert layout.marker_at(*centre) == "a"
+    assert layout.node_at(*centre) is not None, "标记本来就落在框里"
+
+    elsewhere = (box.x + 2, box.y + 2)
+    assert layout.marker_at(*elsewhere) is None
+    assert layout.node_at(*elsewhere) is not None
+    assert layout.marker_at(-1.0, -1.0) is None

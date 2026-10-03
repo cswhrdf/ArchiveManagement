@@ -36,6 +36,7 @@ from typing import Any, Literal
 
 import customtkinter as ctk
 
+from archive_management.i18n import tr
 from archive_management.ui import typography
 from archive_management.ui.metrics import RADIUS_MD, RADIUS_NONE
 from archive_management.ui.models import BackupItem, branch_tree
@@ -46,6 +47,12 @@ from archive_management.ui.widgets import HoverTip
 
 #: 当前节点的标记(与主窗口 ``_CURRENT_MARK`` 同一个符号, 画在小字那一行里)。
 CURRENT_MARK = "●"
+
+#: 折叠标记的两个符号(纯符号, 不进 i18n —— 与 ``●``/箭头符号同一类)。
+#: ``-`` = 已经展开着(再点就收起), ``+`` = 收起状态(点一下展开)。
+#: 用户 2026-10-03 明确要求换成这两个: 三角箭头(`▾`/`▸`)在这么小的标记里看不出"能不能点",
+#: 而加减号是文件树里几十年的一贯表达 —— 配色不变。
+_FOLD_GLYPHS: dict[bool, str] = {False: "-", True: "+"}
 
 #: 连线的平滑程度: Tk 自己在两个控制点之间插值, 数字越大越圆(也越像"没拐弯")。
 _EDGE_SPLINE_STEPS = 12
@@ -118,11 +125,13 @@ class ItemCounts:
     boxes: int
     edges: int
     texts: int
+    #: 折叠标记: 每个有孩子的框一个(I-9.5.2)。
+    markers: int
 
     @property
     def total(self) -> int:
         """画布上应有的 item 总数."""
-        return self.boxes + self.edges + self.texts
+        return self.boxes + self.edges + self.texts + self.markers
 
 
 def _rounded_points(
@@ -195,16 +204,27 @@ class TreeView:
         self._on_hover = on_hover
         self._items: list[BackupItem] = []
         self._by_id: dict[str, BackupItem] = {}
+        self._nodes: list[Any] = []
+        self._parent_of: dict[str, str] = {}
+        #: 当前收起的节点(**不持久化**: 折叠是看图时的临时收拢, 见 PLAN I-9.5 的口径)。
+        self._collapsed: set[str] = set()
         self._texts: dict[str, NodeTexts] = {}
         self._layout: TreeLayout = tree_layout([])
         self._selected: str | None = None
         self._hovered: str | None = None
         self._press_node: str | None = None
+        self._press_fold = False
         self._press_at: tuple[int, int] = (0, 0)
         self._box_items: dict[str, int] = {}
         self._text_items: dict[str, tuple[int, int]] = {}
+        self._marker_items: dict[str, int] = {}
         self._title_font = typography.font(typography.FONT_STRONG, weight="bold")
         self._meta_font = typography.font(typography.FONT_HINT)
+        # 折叠标记的符号字号与框里的小字**分开**: `+`/`-` 是唯一靠字形大小表达状态的图形,
+        # 借说明行的 11px 会偏小(用户 2026-10-03 反馈), 用"字形档"13px。
+        self._marker_font = typography.font(typography.FONT_GLYPH)
+        #: 最近一次重画用的调色板: 鼠标/键盘事件里没有调用方可以问, 而折叠需要重画。
+        self._palette: Palette | None = None
 
         self.frame = ctk.CTkFrame(
             parent, fg_color="transparent", corner_radius=RADIUS_NONE
@@ -228,16 +248,29 @@ class TreeView:
     def set_items(
         self, items: Sequence[BackupItem], *, include_safety: bool = False
     ) -> None:
-        """换一批节点: 重新剪枝、重算几何、重裁文字(下一次重绘生效)."""
+        """换一批节点: 重新剪枝、重算几何、重裁文字(下一次重绘生效).
+
+        折叠集合在这里与现有节点**取交集** —— 换游戏/换筛选之后旧 id 不该继续压着图
+        (那些节点已经不在这批数据里了)。
+        """
         self._items = list(items)
         self._by_id = {item.backup_id: item for item in self._items}
-        nodes = branch_tree(self._items, include_safety=include_safety)
-        self._layout = tree_layout(nodes)
-        self._texts = self._build_texts(nodes)
+        self._nodes = list(branch_tree(self._items, include_safety=include_safety))
+        self._parent_of = {}
+        for node in self._nodes:
+            for kid in node.children:
+                self._parent_of[kid] = node.node_id
+        self._collapsed &= {node.node_id for node in self._nodes}
+        self._relayout()
         self._selected = None
         self._hovered = None
         # 数据换了: 悬停提示指向的旧节点可能已经不存在, 直接收起.
         self._tip.hide()
+
+    def _relayout(self) -> None:
+        """按当前的折叠集合重算几何与文字(换数据/收起/展开都走这里)."""
+        self._layout = tree_layout(self._nodes, collapsed=frozenset(self._collapsed))
+        self._texts = self._build_texts(self._nodes)
 
     def _build_texts(self, nodes: Sequence[Any]) -> dict[str, NodeTexts]:
         """把每个节点的两行字裁进框里(用与列表/海报同一套 ``fit_text``).
@@ -246,34 +279,139 @@ class TreeView:
         而"截断必须能回看"是 I-3 的硬规则, 所以悬停提示的文案在这里就备好了(每框两行都
         放得下时 ``full`` 是空串, 那时不弹提示).
         """
-        metrics = self._layout.metrics
-        width = max(1, int(metrics.box_width - metrics.text_inset * 2))
         texts: dict[str, NodeTexts] = {}
         for node in nodes:
-            item = self._by_id.get(node.node_id)
-            if item is None:  # pragma: no cover - 布局只喂剪枝后的节点
+            if node.node_id not in self._by_id:  # pragma: no cover - 只喂剪枝后的节点
                 continue
-            marker = f"{CURRENT_MARK} " if item.is_current else ""
-            title = item.display_title
-            meta = f"{marker}{item.created_label} · {item.kind_label}"
-            shown_title = fit_text(title, self._title_font, width, max_lines=2)
-            shown_meta = fit_text(meta, self._meta_font, width)
-            clipped = [
-                full
-                for full, shown in ((title, shown_title), (meta, shown_meta))
-                if full != shown
-            ]
-            texts[node.node_id] = NodeTexts(
-                title=shown_title,
-                meta=shown_meta,
-                full="\n".join(clipped),
-            )
+            texts[node.node_id] = self._texts_for(node.node_id)
         return texts
+
+    def _meta_for(self, node_id: str) -> str:
+        """说明行的全文(创建时间 · 类型; 折叠时换成"藏了什么").
+
+        折叠口径的落点(PLAN I-9.5): **画面可以藏, 但藏起来的东西必须在框上留下可发现的
+        痕迹**。实测框只放得下一件事(框宽 168 - 两侧内衬 = 152px), 而时间/类型在右侧面板
+        里还有一份、"藏了谁"只有这里能说 —— 所以折叠时**只讲藏了什么**, 并把最要紧的
+        "藏了选中项/当前节点"排在最前面(被裁也要先保住它)。
+        """
+        item = self._by_id[node_id]
+        head = f"{CURRENT_MARK} " if item.is_current else ""
+        folded = self._layout.descendants.get(node_id)
+        if folded is None:
+            return f"{head}{item.created_label} · {item.kind_label}"
+        notes: list[str] = []
+        if self._hides_something(node_id):
+            if self._hidden_under(node_id, self._selected):
+                notes.append(tr("graph.contains_selected"))
+            if self._hidden_under(node_id, self._current_id()):
+                notes.append(tr("graph.contains_current"))
+        notes.append(tr("graph.descendants", count=folded))
+        return f"{head}{' · '.join(notes)}"
+
+    def _current_id(self) -> str | None:
+        """当前节点的 id(画着 ``●`` 的那个; 没有就 ``None``)."""
+        for node_id, item in self._by_id.items():
+            if item.is_current:
+                return node_id
+        return None
+
+    def _hidden_under(self, root_id: str, node_id: str | None) -> bool:
+        """``node_id`` 是不是藏在 ``root_id`` 的子树里(**不含它自己**).
+
+        沿剪枝**之后**的父子表往上走 —— ``TreeNode.parent_id`` 是剪枝前的原始父节点,
+        被剪掉的中间层会让它指向一个不在图上的 id(那正是本函数不能用它当据的原因)。
+        """
+        if node_id is None:
+            return False
+        cursor = self._parent_of.get(node_id)
+        for _ in range(len(self._nodes) + 1):
+            if cursor is None:
+                return False
+            if cursor == root_id:
+                return True
+            cursor = self._parent_of.get(cursor)
+        return False  # pragma: no cover - 环已在 build_tree 里被截断
+
+    def _texts_for(self, node_id: str) -> NodeTexts:
+        """某一个节点现在该显示的两行字(裁过), 以及被裁时的全文."""
+        item = self._by_id[node_id]
+        metrics = self._layout.metrics
+        width = max(1, int(metrics.box_width - metrics.text_inset * 2))
+        title = item.display_title
+        meta = self._meta_for(node_id)
+        shown_title = fit_text(title, self._title_font, width, max_lines=2)
+        shown_meta = fit_text(meta, self._meta_font, width)
+        clipped = [
+            full
+            for full, shown in ((title, shown_title), (meta, shown_meta))
+            if full != shown
+        ]
+        return NodeTexts(title=shown_title, meta=shown_meta, full="\n".join(clipped))
+
+    def _refresh_meta(self, node_id: str) -> None:
+        """只重算一个框的说明行(选中/折叠变化时用: 别的行没变, 不必整幅重画)."""
+        items = self._text_items.get(node_id)
+        if items is None:  # pragma: no cover - 只有画过的框会来
+            return
+        texts = self._texts_for(node_id)
+        self._texts[node_id] = texts
+        self.canvas.itemconfigure(items[1], text=texts.meta)
 
     @property
     def layout(self) -> TreeLayout:
         """当前这张图(用例据此断言几何)."""
         return self._layout
+
+    @property
+    def collapsed(self) -> frozenset[str]:
+        """当前收起的节点(**不持久化**: 只活在这个视图的内存里, 见 PLAN I-9.5)."""
+        return frozenset(self._collapsed)
+
+    def can_toggle(self, node_id: str | None) -> bool:
+        """这个节点能不能收起/展开(有孩子才有标记, 没孩子就没什么可藏的)."""
+        return self._layout.can_collapse(node_id)
+
+    def toggle(self, node_id: str, palette: Palette) -> bool:
+        """收起/展开一个节点的子树, 返回"现在是不是收起的".
+
+        两条硬口径(PLAN I-9.5): **折叠不改选中**(偷偷改选会让"恢复/建分支"作用到另一个
+        节点上), 以及重算几何之后把视口**对回刚点的那个框**(``scrollregion`` 变小后 Tk
+        会把偏移夹回, 不管的话用户会突然看到别处)。
+        """
+        if self._layout.box(node_id) is None or not self._layout.can_collapse(node_id):
+            return False
+        if node_id in self._collapsed:
+            self._collapsed.discard(node_id)
+        else:
+            self._collapsed.add(node_id)
+        self._relayout()
+        self.redraw(palette)
+        self._align_to(node_id)
+        return node_id in self._collapsed
+
+    def _align_to(self, node_id: str) -> None:
+        """把视口挪到刚点的那个框上(它必须仍然看得见, 否则用户会看到"图跑了").
+
+        直接居中到它(再夹进可滚范围): 折叠会把 ``scrollregion`` 改小, Tk 对已越界的偏移
+        的处理是"夹回"—— 夹回之后用户看到的是图的另一头, 而刚才点的框不见了。
+        """
+        box = self._layout.box(node_id)
+        if box is None:  # pragma: no cover - 刚点过的节点一定在图上
+            return
+        self.canvas.update_idletasks()
+        width = float(self.canvas.winfo_width())
+        height = float(self.canvas.winfo_height())
+        total_x = max(1.0, float(self._layout.width))
+        total_y = max(1.0, float(self._layout.height))
+        offset_x = min(
+            max(box.x - (width - box.width) / 2, 0.0), max(0.0, total_x - width)
+        )
+        offset_y = min(
+            max(box.y - (height - box.height) / 2, 0.0), max(0.0, total_y - height)
+        )
+        self.canvas.xview_moveto(offset_x / total_x)
+        self.canvas.yview_moveto(offset_y / total_y)
+        self._refresh_arrows()
 
     @property
     def node_ids(self) -> tuple[str, ...]:
@@ -298,15 +436,23 @@ class TreeView:
     def item_counts(self) -> ItemCounts:
         """这次重绘画出来的 item 数(确定性数字, 用来当渲染基准)."""
         boxes = len(self._layout.boxes)
-        return ItemCounts(boxes=boxes, edges=len(self._layout.edges), texts=boxes * 2)
+        return ItemCounts(
+            boxes=boxes,
+            edges=len(self._layout.edges),
+            texts=boxes * 2,
+            # 折叠标记: 有孩子的框各一个(它们才有收起/展开这个动作)。
+            markers=len(self._layout.branches),
+        )
 
     # -- 画 ---------------------------------------------------------------
 
     def redraw(self, palette: Palette) -> None:
         """用给定调色板整幅重画(主题切换、换字号、换数据都走这里)."""
+        self._palette = palette
         self.canvas.delete("all")
         self._box_items.clear()
         self._text_items.clear()
+        self._marker_items.clear()
         self.canvas.configure(
             background=palette.well,
             scrollregion=(0, 0, self._layout.width, self._layout.height),
@@ -332,7 +478,7 @@ class TreeView:
         self._refresh_arrows()
 
     def _draw_box(self, node_id: str, palette: Palette) -> None:
-        """画一个框(一个 item)与它的两行字(两个 item)."""
+        """画一个框(一个 item) + 两行字(两个) + 折叠标记(有孩子时一个)."""
         box = self._layout.box(node_id)
         texts = self._texts.get(node_id)
         if box is None or texts is None:  # pragma: no cover - 两者都由同一份节点建出来
@@ -368,6 +514,49 @@ class TreeView:
             anchor="center",
         )
         self._text_items[node_id] = (title_item, meta_item)
+        self._draw_marker(node_id, palette)
+
+    def _draw_marker(self, node_id: str, palette: Palette) -> None:
+        """框右下角的折叠标记(有孩子才有): 折起朝右、展开朝下.
+
+        它是**一个 item**(与框/文字同一套账目), 形状与颜色都在这里定 —— 颜色按"里面藏着
+        选中项/当前节点"提亮, 这是"藏起来必须留痕"在视觉上的那一半(另一半是说明行)。
+        命中测试在 :meth:`TreeLayout.marker_at` 里(纯函数), 与这里用的是同一个矩形。
+        """
+        rect = self._layout.marker_rect(node_id)
+        if rect is None:
+            return
+        self._marker_items[node_id] = self.canvas.create_text(
+            rect[0] + rect[2] / 2,
+            rect[1] + rect[3] / 2,
+            text=_FOLD_GLYPHS[self._layout.is_collapsed(node_id)],
+            font=self._marker_font,
+            fill=self._marker_color(node_id, palette),
+            anchor="center",
+        )
+
+    def _hides_something(self, node_id: str) -> bool:
+        """这个框里藏着选中项或当前节点吗(只有**折叠着**的框才叫藏 —— 展开的什么都看得见).
+
+        少了前半句会把**所有**有后代的框都当成"藏着东西": 子树里总有节点是选中项或当前
+        节点, 于是展开状态下每个分支框的标记都提亮 —— 实测就是这么红的。
+        """
+        if node_id not in self._layout.descendants:
+            return False
+        return self._hidden_under(node_id, self._selected) or self._hidden_under(
+            node_id, self._current_id()
+        )
+
+    def _marker_color(self, node_id: str, palette: Palette) -> str:
+        """标记的颜色: 藏着选中项/当前节点时用强调色, 否则与说明行同一档弱色.
+
+        选中框自己的底色是 ``accent_soft`` —— 在那上面描强调色只会糊成一块, 所以选中框的
+        标记与它的文字一样用 ``accent_soft_text``。
+        """
+        selected = node_id == self._selected
+        if self._hides_something(node_id):
+            return palette.accent_soft_text if selected else palette.accent
+        return palette.accent_soft_text if selected else palette.text_muted
 
     def _box_colors(self, node_id: str, palette: Palette) -> tuple[str, str, str]:
         """一个框的(底色, 描边, 标题色): 选中 > 悬停 > 常规(与卡片同一条优先级)."""
@@ -391,16 +580,36 @@ class TreeView:
         fill, border, title_color = self._box_colors(node_id, palette)
         self.canvas.itemconfigure(item, fill=fill, outline=border, width=2)
         self.canvas.itemconfigure(texts[0], fill=title_color)
+        self._refresh_marker(node_id, palette)
+
+    def _refresh_marker(self, node_id: str, palette: Palette) -> None:
+        """只改一个标记的颜色(没标记的框直接跳过)."""
+        marker = self._marker_items.get(node_id)
+        if marker is not None:
+            self.canvas.itemconfigure(marker, fill=self._marker_color(node_id, palette))
+
+    def _refresh_fold_traces(self, palette: Palette) -> None:
+        """折叠痕迹(说明行文字 + 标记色)跟着选中/当前节点变.
+
+        只扫折叠框: 只有它们会写"N 个后代", 也只有它们可能藏着选中项/当前节点。
+        """
+        for node_id in self._layout.descendants:
+            self._refresh_meta(node_id)
+            self._refresh_marker(node_id, palette)
 
     # -- 选中与悬停 ---------------------------------------------------------
 
     def select(self, node_id: str | None, palette: Palette) -> None:
-        """换选中项并只重画受影响的框."""
+        """换选中项并只重画受影响的框.
+
+        顺带刷新折叠框的痕迹: "藏着选中项"这句话要当场变(下一拍再说就已经是误导了)。
+        """
         if self._selected == node_id:
             return
         previous, self._selected = self._selected, node_id
         self.repaint_node(previous, palette)
         self.repaint_node(node_id, palette)
+        self._refresh_fold_traces(palette)
 
     def set_hovered(self, node_id: str | None, palette: Palette) -> None:
         """换悬停项并只重画受影响的框(要回看的全文没被裁就直接不弹提示)."""
@@ -443,6 +652,12 @@ class TreeView:
             float(self.canvas.canvasx(x)), float(self.canvas.canvasy(y))
         )
         return None if box is None else box.node_id
+
+    def marker_at(self, x: int, y: int) -> str | None:
+        """画布**控件坐标**落在哪个折叠标记里(与 :meth:`node_at` 同一套换算)."""
+        return self._layout.marker_at(
+            float(self.canvas.canvasx(x)), float(self.canvas.canvasy(y))
+        )
 
     # -- 漫游 ---------------------------------------------------------------
 
@@ -494,6 +709,10 @@ class TreeView:
         self.canvas.bind("<Leave>", lambda _e: self._hover(None))
         for key, arrow in _KEY_BINDINGS:
             self.canvas.bind(key, partial(self._on_key, arrow))
+        # 空格/回车 = 收起/展开**当前选中项**(方向键与 WASD 已经绑给漫游, 节点间导航是
+        # 另一件事, 见 PLAN I-9.5 的口径)。
+        self.canvas.bind("<space>", self._on_fold_key)
+        self.canvas.bind("<Return>", self._on_fold_key)
         # 滚轮: 默认纵向、Shift 横向(触控板用户); Windows 用 MouseWheel, X11 用 Button-4/5。
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
@@ -510,21 +729,35 @@ class TreeView:
         self._refresh_arrows()
 
     def _on_press(self, event: tkinter.Event) -> None:
-        """按住空白处 = 准备平移; 按在框上 = 准备选中(拖走就不算选中)."""
+        """命中优先级: 标记 → 框 → 空白(PLAN I-9.5 的口径).
+
+        按在**标记**上时既不平移也不选中 —— 否则会出现"想折叠却选中了它", 或者
+        "想折叠却把图画拖走了"。
+        """
         self.focus_canvas()
         self._press_at = (event.x, event.y)
-        self._press_node = self.node_at(event.x, event.y)
-        if self._press_node is None:
+        self._press_fold = self.marker_at(event.x, event.y) is not None
+        self._press_node = None if self._press_fold else self.node_at(event.x, event.y)
+        if self._press_node is None and not self._press_fold:
             self.canvas.scan_mark(event.x, event.y)
 
     def _on_motion(self, event: tkinter.Event) -> None:
         """拖动: 只有"从空白处开始"的拖动才平移画面."""
-        if self._press_node is None:
+        if self._press_node is None and not self._press_fold:
             self.canvas.scan_dragto(event.x, event.y, gain=1)
             self._refresh_arrows()
 
     def _on_release(self, event: tkinter.Event) -> None:
-        """松开: 位移小于阈值才算点击(从框上拖走不会顺手把它选中)."""
+        """松开: 位移小于阈值才算点击(从框上/标记上拖走都不算).
+
+        三种命中各自干一件事: 标记 = 折叠/展开, 框 = 选中, 空白 = 刚才已经平移过了。
+        """
+        if self._press_fold:
+            self._press_fold = False
+            node_id = self.marker_at(event.x, event.y)
+            if node_id is not None and self._palette is not None:
+                self.toggle(node_id, self._palette)
+            return
         node_id, self._press_node = self._press_node, None
         if node_id is None:
             return
@@ -558,6 +791,15 @@ class TreeView:
         界面上只是"按了没反应"。
         """
         self.scroll(arrow)
+        return "break"
+
+    def _on_fold_key(self, _event: tkinter.Event | None = None) -> str:
+        """空格/回车: 收起/展开**当前选中项**(没选中或没孩子时什么也不做).
+
+        键盘入口只做这一件事 —— 方向键/WASD 已经绑给漫游了(见类的文档)。
+        """
+        if self._selected is not None and self._palette is not None:
+            self.toggle(self._selected, self._palette)
         return "break"
 
     def _on_wheel(self, event: tkinter.Event) -> str:
