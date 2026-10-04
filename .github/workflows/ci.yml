@@ -1207,8 +1207,10 @@ jobs:
         # 各作业只在**失败时**上传诊断(见各自的 Collect/Upload failure diagnostics)。
         # 用 pattern 一次收全; **不** merge 到同一目录: 各 artifact 都含同名的 summary.md,
         # 合并会互相覆盖, 而这里正需要看得出"哪一份来自哪个作业"(每份都有自己的作业标签)。
-        # 汇总脚本再把它们拼成报告首页的一份附件(allure-failure-diagnostics.md)。
-        # 没有失败作业时这一步什么也不下载, 脚本会为附件写一行"本轮没有作业失败"。
+        # 落盘后是 `failure-diagnostics/<artifact 名>/summary.md` —— 只有一层: 各作业上传
+        # 的是 `path: job-diagnostics/`, artifact 里装的就是那个目录的**内容**(2026-10-05
+        # 才发现: 汇总脚本原来按多一层的路径找, 于是崩溃现场永远没进报告)。
+        # 没有失败作业时这一步什么也不下载, 脚本也就不写附件、不写结论项。
         if: always()
         uses: actions/download-artifact@v7
         with:
@@ -1220,6 +1222,8 @@ jobs:
         # 为什么会单独成一步(2026-10-04): 汇总脚本的另一半(性能/安全结论)写在更早的
         # "Summarize performance and security into Allure" 里, 那时还没下载, 顺手把这份
         # 附件也写了 —— 结果它永远显示"本轮没有作业失败", 与作业红不红无关。
+        # 有兜底现场时还会给每个崩溃作业写一条 broken 结论项(可统计、可按环境筛, 用户
+        # 2026-10-05); 没有现场时附件清掉、结论项一条不写。
         if: always()
         shell: bash
         run: uv run python scripts/create_allure_summary.py --write-failure-diagnostics

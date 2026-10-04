@@ -23,7 +23,8 @@
 
 每条结论只由**一个**角色判定, 职责不重叠: ``GATE_SUMMARY`` 由本清单 + 运行总账判定(缺了就写
 broken 结论项); ``GATE_VERIFY`` 交给 ``scripts/verify_allure_report.py`` 的报告自检(平台用例
-那条 —— 它已经在 CI 里按 ``--expect-platforms`` 逐平台对数了, 这里只负责把它**列出来**)。
+那条 —— 它已经在 CI 里按 ``--expect-platforms`` 逐平台对数了, 这里只负责把它**列出来**);
+``GATE_ON_DEMAND`` 是"发生了才有"的那一类(作业崩溃现场), 只登记、不参与"应有/实有"比对。
 """
 
 from __future__ import annotations
@@ -60,6 +61,9 @@ PER_PLATFORM = "platform"
 GATE_SUMMARY = "summary"
 #: 交给 scripts/verify_allure_report.py 的自检判定(它已经在 CI 里按平台对数).
 GATE_VERIFY = "verify"
+#: **按需产出**: 只有真的发生了那件事(作业进程级崩溃)才会有这一条 —— 所以它不进"应有"清单,
+#: 缺了不算缺失; 但仍然登记在 CATALOG 里: 同步守卫据此认识这个身份, 也看得出它是谁写的。
+GATE_ON_DEMAND = "on-demand"
 
 #: 身份怎么认.
 #: - ``exact``: 结果的 ``fullName`` 与身份相等(覆盖率/性能/安全这类一条一项的);
@@ -162,6 +166,18 @@ CATALOG: tuple[Producer, ...] = (
         job="pytest",
         match=MATCH_PREFIX,
         detail="mypy --platform win32 / darwin, 在各自的平台上执行",
+    ),
+    Producer(
+        key="crash",
+        title="作业崩溃现场",
+        identity=f"{IDENTITY_PREFIX}crash.",
+        scope=COMMON,
+        artifact="job-diagnostics-<作业>",
+        script="scripts/create_allure_summary.py",
+        job="allure-summary",
+        match=MATCH_PREFIX,
+        gate=GATE_ON_DEMAND,
+        detail="只在作业进程级崩溃/证据缺失时才写(结论项 + 报告首页附件; 没有现场时两样都不写)",
     ),
 )
 
@@ -342,6 +358,8 @@ def expected_items(platforms: list[str], scripts_directory: Path) -> list[Expect
     environments = platform_environments(scripts_directory)
     items: list[Expected] = []
     for producer in CATALOG:
+        if producer.gate == GATE_ON_DEMAND:
+            continue  # 按需产出: 不是"应该有", 缺了也不算缺失(见 GATE_ON_DEMAND)
         if producer.key == "quality":
             items.extend(
                 Expected(

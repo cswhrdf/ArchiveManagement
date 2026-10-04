@@ -193,6 +193,60 @@ def test_a_failed_window_build_does_not_leave_its_root_behind() -> None:
     assert len(teardown_rescues()) == before, "它不是我们登记的窗口没拆干净, 不进补救账"
 
 
+def test_a_child_that_is_already_gone_does_not_break_the_teardown() -> None:
+    """回归: `children` 里留着一个"窗口已经没了"的控件时, 收尾不能断, 更不该判红.
+
+    这是 2026-10-04 CI 上 Linux 那 4 条"收尾断裂"的**机制**: `Tk.destroy()` 是
+    "先取快照, 再逐个 ``child.destroy()``"的一次性循环, 快照里的控件可能已经被前一次
+    销毁**连带**带走 —— CustomTkinter 6.0.0 的 ``CTkScrollableFrame.destroy()`` 就会顺手
+    拆掉自己的容器 ``_parent_frame``, 而那个容器是它在 ``children`` 里的**兄弟**。循环走到
+    已经没了的那个时抛 ``TclError("can't delete Tcl command")``, 整条循环中断, 根窗口留在
+    会话里(而它其实只是"没来得及拆", 补救一下就干净了)。
+
+    这里直接把那个局面摆出来: 绕过 Python 的 ``destroy()``、只对 Tcl 下手把某个子控件的
+    窗口拆掉, 于是它**留在 children 里但窗口已经没了**。收尾要先识别出这种条目(摘掉、跳过),
+    再走窗口自己的 ``destroy()`` —— 既不该抛异常, 也不该把用例判红。
+    """
+    before = len(teardown_rescues())
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    app.update_idletasks()
+    frame = next(iter(app.winfo_children()))
+    path = frame._w
+    frame.tk.call("destroy", path)  # 只拆窗口: Python 的账(children)不动
+
+    close_gui_apps()
+
+    assert len(teardown_rescues()) == before, "根没留下, 就不该进补救账(那是判红项)"
+    assert root_is_alive(app) is False, "收尾必须把根拆掉"
+    assert _default_root_is_usable()
+
+
+def test_a_widget_whose_command_ledger_is_stale_is_repaired() -> None:
+    """回归: 控件的 `_tclCommands` 里留着"已经删掉的命令"时, 收尾要修账并继续拆干净.
+
+    这是 Linux 那 4 条"收尾断裂"报的另一个可能来源(报的就是 ``TclError: can't delete Tcl
+    command``): 控件的账本(`_tclCommands`)与解释器里真实存在的命令**不一致**(命令先被删掉了,
+    账上还留着名字), 于是它自己的 ``destroy()`` 会在 ``deletecommand`` 那一步抛错, 而
+    ``Tk.destroy()`` 是"取快照 + 一次性循环", 一抛就把整条循环打断、根窗口留在会话里。
+
+    这里直接把那个局面摆出来: 绑一条命令(会记账)之后**绕过 Python 把命令删掉**。收尾要么
+    修好账继续拆, 要么把根留下 —— 后者会走补救账(判红), 所以这条用例本身就在盯这件事。
+    """
+    before = len(teardown_rescues())
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    app.update_idletasks()
+    frame = next(iter(app.winfo_children()))
+    frame.bind("<Button-1>", lambda _event: None)  # 注册命令 + 记账
+    stale = str(frame._tclCommands[-1])
+    frame.tk.deletecommand(stale)  # 命令没了, 账本还留着名字
+
+    close_gui_apps()
+
+    assert len(teardown_rescues()) == before, "修好账之后根不该被留下(那是判红项)"
+    assert root_is_alive(app) is False, "收尾必须把根拆掉"
+    assert stale not in (frame._tclCommands or []), "账上那条已经不存在的命令要划掉"
+
+
 def test_a_foreign_root_left_in_the_session_gets_collected() -> None:
     """收尾的最后一道兜底: 别人的根占着默认根位置时, 收尾也要把它收掉.
 

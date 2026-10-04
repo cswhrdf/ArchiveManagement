@@ -127,6 +127,24 @@ FAILURE_DIAGNOSTICS_REPORT = Path("allure-failure-diagnostics.md")
 # 兜底判定文件名(由 scripts/collect_job_diagnostics.py 写在每个诊断目录里): 附件按它把
 # "结果里已经写明白"的普通失败滤掉。
 FAILURE_DIAGNOSTICS_VERDICT = "verdict.json"
+# 作业崩溃(兜底现场)**除了**首页附件之外还要另写一条结论项: 只挂附件的话, "这个作业是崩掉的"
+# 既不进任何计数, 也没法按环境/等级筛 —— 而它恰恰是最该被统计的那一类(用户 2026-10-05)。
+# 身份前缀同样刻意与清单里的预期身份错开, 免得被当成"这一族已经收到了"。
+CRASH_IDENTITY = "archive-management.crash."
+CRASH_CATEGORY = "diagnostics"
+CRASH_SEVERITY = "critical"
+# 它不来自哪台机器, 而是"作业崩溃时留下的现场" —— 与缺失结论项同理, `os` 标签不能写平台,
+# 否则 tested_platforms() 会把那个平台当成"交过东西"。
+CRASH_OS_LABEL = "diagnostics"
+# 运行器镜像名/摘要里的字样 → 报告里的平台**显示名**(allurerc.mjs 的 matcher 认这个值).
+CRASH_PLATFORM_TOKENS = (
+    ("macos", "macOS"),
+    ("darwin", "macOS"),
+    ("windows", "Windows"),
+    ("linux", "Linux"),
+    ("ubuntu", "Linux"),
+)
+CRASH_PLATFORM_FALLBACK = "common"
 # 仓库根与源码树: 豁免清单的数据必须来自真实源码 + pyproject.toml, 不能是手工清单.
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_ROOT_NAME = "src"
@@ -1453,6 +1471,17 @@ def _write_coverage_exclusions() -> None:
     print(f"覆盖率豁免清单已写入 {COVERAGE_EXCLUSIONS_REPORT}")
 
 
+def _verdict_of(summary: Path) -> dict[str, Any] | None:
+    """读某份摘要旁边的 ``verdict.json``(没有、或解析不了都返回 None)."""
+    try:
+        payload = json.loads(
+            (summary.parent / FAILURE_DIAGNOSTICS_VERDICT).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _job_has_a_backstop_scene(summary: Path) -> bool:
     """这个作业的摘要是不是"有兜底现场"的.
 
@@ -1460,37 +1489,82 @@ def _job_has_a_backstop_scene(summary: Path) -> bool:
     太脆。没有这份 JSON(旧产物、或收集脚本自己挂了)时按"有现场"处理: 宁可多显示一段,
     也不要在最需要证据的时候把它藏起来。
     """
-    try:
-        payload = json.loads(
-            (summary.parent / FAILURE_DIAGNOSTICS_VERDICT).read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError):
+    payload = _verdict_of(summary)
+    if payload is None:
         return True
     return bool(payload.get("scene", True))
 
 
-def failure_diagnostics_report(directory: Path) -> str | None:
-    """把各作业**兜底现场**的 ``summary.md`` 拼成一份报告首页的附件; 没有现场时返回 None.
+@dataclass(frozen=True)
+class CrashScene:
+    """一个"有兜底现场"的作业(进程级崩溃 / 证据缺失)."""
 
-    只收判定为"有兜底现场"的那些(2026-10-04 按用户的要求收紧): 普通失败的证据(断言输出、
-    门禁不通过、步骤报错)已经在结果与运行日志里, 在全局附件里再讲一遍只是噪音。
+    #: artifact 目录名(如 ``job-diagnostics-macos-latest-0``): 报告里拿它当节标题.
+    owner: str
+    #: 作业标签(``verdict.json`` 里的 ``label``; 没有时退回 artifact 名).
+    label: str
+    #: 报告里的平台**显示名**(Windows / macOS / Linux; 认不出来时是 ``common``).
+    platform: str
+    #: 判定理由(``verdict.json`` 的 ``reasons``).
+    reasons: tuple[str, ...]
+    #: 那份 ``summary.md`` 的路径.
+    summary: Path
 
-    为什么拼成一份而不是逐个挂: 报告首页的「全局附件」是个平铺列表, 十几个作业各挂一条
-    会把这个页签埋掉; 而兜底现场本来就该连着看。摘要由 scripts/collect_job_diagnostics.py
-    生成 —— 本函数只做拼接与过滤, 不猜其中任何一个字段。
 
-    **没有现场时返回 None(调用方不写文件, 并把上一次留下的那份删掉)** —— 用户 2026-10-04:
-    一份永远存在的"失败现场"只会让人以为可能崩过, 而点开才发现是空的。
-    ``allurerc.mjs`` 那条 `globalAttachments` 因此按**文件在不在**自己决定收不收(配置是 JS,
-    一行 ``existsSync`` 就够了), 于是也不会留"附件找不到"的告警。
+def crash_platform(owner: str, summary: Path) -> str:
+    """崩溃的作业属于哪个平台(返回报告里的**显示名**).
+
+    报告的环境靠 ``env`` 标签 + ``allurerc.mjs`` 的 matcher, 而标签值必须是显示名
+    (Windows / macOS / Linux): 先看 artifact 名(``…-macos-latest-0``), 再看摘要内容的
+    ``平台:`` 一行; 都认不出来时归 ``common`` —— 宁可不进某个平台的环境, 也不给错平台。
     """
-    scenes = [
-        path
-        for path in sorted(directory.glob("*/job-diagnostics/summary.md"))
-        if _job_has_a_backstop_scene(path)
-    ]
-    if not scenes:
-        return None
+    text = ""
+    with contextlib.suppress(OSError):
+        text = summary.read_text(encoding="utf-8")
+    haystack = f"{owner} {text}".lower()
+    for token, name in CRASH_PLATFORM_TOKENS:
+        if token in haystack:
+            return name
+    return CRASH_PLATFORM_FALLBACK
+
+
+def crash_scenes(directory: Path) -> list[CrashScene]:
+    """找出"有兜底现场"的作业(目录不存在时返回空表).
+
+    **两种目录结构都要认**, 而不是只认一种:
+
+    - ``<artifact 名>/summary.md``: ``actions/upload-artifact`` 传 ``path: job-diagnostics/``
+      时, artifact 里装的是那个目录的**内容**(``summary.md`` 在根), 下载到
+      ``failure-diagnostics/<artifact 名>/`` 之后就还是这一层 —— **这是 CI 里真实的布局**;
+    - ``<artifact 名>/job-diagnostics/summary.md``: 上传时传的是父目录才会多出这一层。
+
+    为什么特意两种都收: 2026-10-04 的脚本只认后一种, 于是**永远匹配不到** —— 崩溃的作业
+    白上传, 报告里一条都没有, 而且一声不吭(用户 2026-10-05 报的正是这个); 而当时的守卫
+    也按同一种(错的)布局造的样本, 所以两边一起绿。两种都收 + 守卫按真实布局造样本, 就再
+    不会因为"上传路径换了一层"而静默失效。
+    """
+    candidates = sorted(directory.glob("*/summary.md"))
+    candidates += sorted(directory.glob("*/*/summary.md"))
+    scenes: list[CrashScene] = []
+    for path in candidates:
+        if not _job_has_a_backstop_scene(path):
+            continue
+        owner = path.relative_to(directory).parts[0]
+        verdict = _verdict_of(path) or {}
+        scenes.append(
+            CrashScene(
+                owner=owner,
+                label=str(verdict.get("label") or owner),
+                platform=crash_platform(owner, path),
+                reasons=tuple(str(item) for item in verdict.get("reasons") or ()),
+                summary=path,
+            )
+        )
+    return scenes
+
+
+def diagnostics_report_text(scenes: Sequence[CrashScene]) -> str:
+    """把各作业的 ``summary.md`` 拼成一份报告首页的附件."""
     parts = [
         "# 失败现场(兜底)",
         "",
@@ -1498,25 +1572,82 @@ def failure_diagnostics_report(directory: Path) -> str | None:
         "日志里, 不在这里重复。",
         "",
     ]
-    for path in scenes:
-        # 目录结构: failure-diagnostics/<artifact 名>/job-diagnostics/summary.md
-        owner = path.parts[-3]
-        parts.append(f"## {owner}")
+    for scene in scenes:
+        parts.append(f"## {scene.owner}")
         parts.append("")
-        parts.append(path.read_text(encoding="utf-8").strip())
+        parts.append(scene.summary.read_text(encoding="utf-8").strip())
         parts.append("")
     return "\n".join(parts)
 
 
+def failure_diagnostics_report(directory: Path) -> str | None:
+    """附件正文(没有兜底现场时返回 None).
+
+    细节见 :func:`crash_scenes`(怎么找)与 :func:`diagnostics_report_text`(怎么拼)。
+    """
+    scenes = crash_scenes(directory)
+    return diagnostics_report_text(scenes) if scenes else None
+
+
+def _write_crash_result(scene: CrashScene, results_dir: Path) -> None:
+    """给崩溃的作业写一条 ``broken`` 结论项 —— 让它进得了统计与筛选.
+
+    为什么要另写一条(用户 2026-10-05): 只挂首页附件的话, "这个作业是崩掉的"既不进任何
+    计数, 也没法按环境/等级筛, 而它恰恰是最该被统计的一类。这里做三件事: 环境用崩溃作业
+    所在的平台(切到那个平台就能看到它)、等级 ``critical``、``testCategory=diagnostics``。
+
+    ``testCategory`` 不是 ``quality`` 也不是用例: 原生质量门那条"每个平台都要有真实用例"
+    只认 ``framework=pytest``, 因此它不会被算成"这个平台测过了"(同一套判据见
+    ``scripts/verify_allure_report.py``)。
+    """
+    result_id = str(uuid.uuid4())
+    attachment = write_attachment(results_dir, scene.summary, result_id)
+    if attachment is not None:
+        attachment["type"] = "text/markdown"
+    message = "\n".join([f"作业崩溃(兜底现场): {scene.label}", *scene.reasons])
+    write_result(
+        results_dir,
+        result_id=result_id,
+        identity=f"{CRASH_IDENTITY}{scene.owner}",
+        category=CRASH_CATEGORY,
+        title=f"作业崩溃: {scene.label}",
+        description=(
+            "## 作业崩溃\n\n"
+            f"{message}\n\n"
+            "## 怎么办\n\n"
+            "- 先看摘要(附件)里的兜底判定与现场清单, 再按 `crash-dumps/*.ips` 的原生栈定位;\n"
+            "- 用例级的证据在那些作业自己的 `allure-results` 里 —— 这一条只说明**作业**没跑完。\n"
+        ),
+        attachments=[attachment] if attachment is not None else [],
+        platform=scene.platform,
+        status="broken",
+        status_message=message,
+        severity=CRASH_SEVERITY,
+        os_label=CRASH_OS_LABEL,
+    )
+    print(f"作业崩溃结论项已写入: {scene.label}(环境 {scene.platform})")
+
+
 def _write_failure_diagnostics() -> None:
-    """写"失败现场"附件; **没有兜底现场时不写, 并把上一次留下的那份删掉**."""
-    report = failure_diagnostics_report(FAILURE_DIAGNOSTICS_DIRECTORY)
-    if report is None:
+    """写"失败现场": 一份拼起来的附件 + 每个作业一条 ``broken`` 结论项.
+
+    **没有兜底现场时不写, 并把上一次留下的那份删掉**(用户 2026-10-04/05 的要求: 一份永远
+    存在的"失败现场"只会让人以为可能崩过, 点开才发现是空的), 也不写任何结论项。
+    """
+    scenes = crash_scenes(FAILURE_DIAGNOSTICS_DIRECTORY)
+    if not scenes:
         FAILURE_DIAGNOSTICS_REPORT.unlink(missing_ok=True)
-        print(f"没有兜底现场: 不生成 {FAILURE_DIAGNOSTICS_REPORT}(并清掉旧的)")
+        print(
+            f"没有兜底现场: 不生成 {FAILURE_DIAGNOSTICS_REPORT}(并清掉旧的), "
+            "也不写任何结论项"
+        )
         return
-    FAILURE_DIAGNOSTICS_REPORT.write_text(report, encoding="utf-8")
+    FAILURE_DIAGNOSTICS_REPORT.write_text(
+        diagnostics_report_text(scenes), encoding="utf-8"
+    )
     print(f"失败现场已写入 {FAILURE_DIAGNOSTICS_REPORT}")
+    for scene in scenes:
+        _write_crash_result(scene, RESULTS_DIRECTORY)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

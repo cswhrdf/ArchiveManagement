@@ -2959,6 +2959,11 @@ def test_every_expected_conclusion_names_a_live_script_and_an_upstream_job() -> 
         assert "actions/upload-artifact" in workflow_jobs[item.job], (
             f"{item.job} 已经不上传任何产物, {item.key} 的缺失会被误报"
         )
+        if item.gate == catalog.GATE_ON_DEMAND:
+            # 按需那一族(作业崩溃现场)的证据**不来自某个上游作业**: 任何作业(包括汇总作业
+            # 自己)崩了, 诊断都由那个作业自己上传、汇总作业就地收下来 —— 所以这里不要求
+            # "在 needs 链上"。别的检查(脚本存在/作业存在/真在传产物)照旧。
+            continue
         assert item.job in upstream, (
             f"{item.key} 的产物由 {item.job} 上传, 但汇总作业拿不到它"
             f"(不在 needs 链上: {sorted(upstream)})"
@@ -2977,8 +2982,14 @@ def test_expected_items_expand_every_family_and_every_quality_check() -> None:
     items = catalog.expected_items(platforms, scripts)
 
     families = {item.producer.key for item in items}
-    assert families == {item.key for item in catalog.CATALOG}, (
-        "每族结论都要在「应有」里"
+    always_expected = {
+        producer.key
+        for producer in catalog.CATALOG
+        if producer.gate != catalog.GATE_ON_DEMAND
+    }
+    assert families == always_expected, (
+        "每族结论都要在「应有」里 —— 按需的那一族(作业崩溃现场)例外: 它只在真的崩了时才"
+        "有, 缺了不算缺失(见 GATE_ON_DEMAND)"
     )
 
     checks = catalog.quality_checks(scripts)

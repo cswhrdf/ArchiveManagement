@@ -193,14 +193,20 @@ def test_no_backstop_scene_means_no_attachment(tmp_path: Path) -> None:
 
 
 def test_attachment_keeps_only_backstop_scenes(tmp_path: Path) -> None:
-    """只有判定为"有兜底现场"的作业进附件 —— 普通失败不进(用户 2026-10-04 的要求)."""
+    """只有判定为"有兜底现场"的作业进附件 —— 普通失败不进(用户 2026-10-04 的要求).
+
+    样本按 **CI 真实的目录布局**造: artifact 里装的是 `job-diagnostics/` 的**内容**
+    (`summary.md` 在根), 下载到 `failure-diagnostics/<artifact 名>/` 后只有一层 —— 原来
+    这里多造了一层 `job-diagnostics/`, 与脚本里那条同样多一层的 glob 一起把那次的 bug 盖
+    住了(2026-10-05 从报告里发现"崩溃的作业白上传")。
+    """
     module = _load_script("create_allure_summary")
-    ordinary = tmp_path / "job-diagnostics-linux-0" / "job-diagnostics"
-    scene = tmp_path / "job-diagnostics-macos-latest-0" / "job-diagnostics"
+    ordinary = tmp_path / "job-diagnostics-linux-0"
+    scene = tmp_path / "job-diagnostics-macos-latest-0"
     for owner, scene_flag in ((ordinary, False), (scene, True)):
         owner.mkdir(parents=True)
         (owner / "summary.md").write_text(
-            f"# 作业失败现场: {owner.parent.name}\n", encoding="utf-8"
+            f"# 作业失败现场: {owner.name}\n", encoding="utf-8"
         )
         (owner / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
             json.dumps({"scene": scene_flag}), encoding="utf-8"
@@ -216,11 +222,113 @@ def test_attachment_keeps_only_backstop_scenes(tmp_path: Path) -> None:
     assert "job-diagnostics-linux-0" in module.failure_diagnostics_report(tmp_path)
 
 
+def test_diagnostics_are_found_with_an_extra_level_too(tmp_path: Path) -> None:
+    """上传时若传的是**父目录**(artifact 里多一层 `job-diagnostics/`), 也要认得出来.
+
+    两种布局都收: 不是为了兼容, 而是因为这种"换一层目录"的改动我们真的做过
+    (见 test_attachment_keeps_only_backstop_scenes): 只认一种时, 换布局就会静默失效。
+    """
+    module = _load_script("create_allure_summary")
+    owner = tmp_path / "job-diagnostics-quality" / "job-diagnostics"
+    owner.mkdir(parents=True)
+    (owner / "summary.md").write_text("# 作业失败现场: quality\n", encoding="utf-8")
+
+    text = module.failure_diagnostics_report(tmp_path)
+
+    assert text is not None
+    assert "## job-diagnostics-quality" in text, (
+        "节标题仍然用 artifact 名, 不带中间那层"
+    )
+
+
+def test_a_crashed_job_becomes_a_countable_conclusion_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """有兜底现场时, 除了首页附件还要写一条 broken 结论项 —— 否则它进不了任何统计.
+
+    用户 2026-10-05: "有崩溃异常的时候要将异常记录到报告里便于统计"。附件是文档, 不进
+    计数也不能按环境/等级筛; 结论项才是可统计的那一份 —— 环境用崩溃作业所在的平台(切到
+    那个平台就能看到它), 等级 critical, `testCategory=diagnostics`(不是用例, 原生质量门
+    那条"每个平台都要有用例"因此不会把它当成"这个平台测过了")。
+    """
+    module = _load_script("create_allure_summary")
+    diagnostics = tmp_path / "failure-diagnostics"
+    owner = diagnostics / "job-diagnostics-macos-latest-0"
+    owner.mkdir(parents=True)
+    (owner / "summary.md").write_text(
+        "# 作业失败现场: pytest (macos-latest, 分片 0)\n", encoding="utf-8"
+    )
+    (owner / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+        json.dumps(
+            {
+                "label": "pytest (macos-latest, 分片 0)",
+                "scene": True,
+                "reasons": ["收到系统级崩溃报告 python3.12-….ips"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    attachment = tmp_path / "allure-failure-diagnostics.md"
+    monkeypatch.setattr(module, "FAILURE_DIAGNOSTICS_DIRECTORY", diagnostics)
+    monkeypatch.setattr(module, "FAILURE_DIAGNOSTICS_REPORT", attachment)
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+
+    assert module.main(["--write-failure-diagnostics"]) == 0
+
+    assert attachment.is_file(), "有现场时首页附件照旧要写"
+    items = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in results.glob("*-result.json")
+    ]
+    assert len(items) == 1
+    item = items[0]
+    labels = {entry["name"]: entry["value"] for entry in item["labels"]}
+    assert item["status"] == "broken"
+    assert item["name"] == "作业崩溃: pytest (macos-latest, 分片 0)"
+    assert labels["env"] == "macOS", "结论项要落在崩溃作业那个平台的环境里"
+    assert labels["testCategory"] == "diagnostics"
+    assert labels["severity"] == "critical"
+    assert item["statusDetails"]["message"].startswith("作业崩溃(兜底现场)")
+    assert item["attachments"], "现场摘要要挂在结论项上"
+    assert "失败现场已写入" in capsys.readouterr().out
+
+
+def test_no_scene_writes_neither_attachment_nor_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """没有兜底现场时: 附件清掉、结论项一条不写(用户的后半句要求: 避免误解)."""
+    module = _load_script("create_allure_summary")
+    attachment = tmp_path / "allure-failure-diagnostics.md"
+    attachment.write_text("上一次留下的", encoding="utf-8")
+    ordinary = tmp_path / "failure-diagnostics" / "job-diagnostics-linux-0"
+    ordinary.mkdir(parents=True)
+    (ordinary / "summary.md").write_text("# 普通失败\n", encoding="utf-8")
+    (ordinary / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+        json.dumps({"scene": False}), encoding="utf-8"
+    )
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    monkeypatch.setattr(
+        module, "FAILURE_DIAGNOSTICS_DIRECTORY", tmp_path / "failure-diagnostics"
+    )
+    monkeypatch.setattr(module, "FAILURE_DIAGNOSTICS_REPORT", attachment)
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+
+    assert module.main(["--write-failure-diagnostics"]) == 0
+
+    assert not attachment.exists(), "没有现场时那份附件不该留在报告里"
+    assert list(results.glob("*-result.json")) == [], "也不该写任何结论项"
+    assert "没有兜底现场" in capsys.readouterr().out
+
+
 def test_failure_diagnostics_are_concatenated_by_job(tmp_path: Path) -> None:
     """有兜底现场时按作业分节拼起来, 节标题用 artifact 名(能看出是哪台机器)."""
     module = _load_script("create_allure_summary")
     for name in ("job-diagnostics-macos-latest-0", "job-diagnostics-quality"):
-        owner = tmp_path / name / "job-diagnostics"
+        owner = tmp_path / name
         owner.mkdir(parents=True)
         (owner / "summary.md").write_text(f"# 作业失败现场: {name}\n", encoding="utf-8")
         (owner / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(

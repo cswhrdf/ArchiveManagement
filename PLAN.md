@@ -2661,6 +2661,55 @@ macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗�
   判红(CI 发布前必跑这个自检), 于是"将来有人把报告解包进工作区""CLI 换了输出布局"都会在发布前当场拦住, 而不是把一份
   "看起来正常、其实是旧的"报告发到站点上。守卫: `tests/unit/test_report_verification.py::test_a_nested_report_directory_is_reported`。
 
+### 48.8 附: 判红之后立刻暴露的 4 条 Linux"收尾断裂"(2026-10-04/05, 根因与修法)
+
+- **症状(照原样记下来, 这就是下一次的判据)**: 报告里 4 条 Linux 用例红, 名字是
+  `test_home_page_filters_games_and_runs_actions` / `test_visible_copy_is_complete_and_reachable` /
+  `test_windows_paint_buttons_by_palette_and_action_kind` / `test_a_stray_root_cannot_steal_our_images`, 消息都一样:
+  `收尾时窗口没被真正销毁(销毁链断在半路)… destroy() 抛的异常: TclError("can't delete Tcl command")`, 而
+  `补救后根还在吗: False` —— 也就是说**补救是有效的, 断的只是 Tk 自己那条循环**。
+- **根因(两层)**: ① `tkinter.Tk.destroy()` 是"**先取快照** `list(self.children.values())`, 再逐个 `c.destroy()`"的
+  一次性循环 —— 快照里的**任意一个**控件抛错, 整条循环就停在那里, 根窗口留在会话里(这正是 48.5 那条事故的机理, 只是这次
+  抛错的不是"用例自己动手脚的子控件", 而是一个**账实不符**的控件); ② 那个控件自己的 `Misc.destroy`
+  (`tkinter/__init__.py:689` 的 `deletecommand`)抛 `can't delete Tcl command`: 它的 `_tclCommands`(控件"我注册过
+  哪些 Tcl 命令"的账本)里留着**已经不存在**的命令名。本机实测(构造一个绑过 `<Configure>` 的 CTkFrame, 再把那条命令
+  删掉、账本不动): 连续三次 `destroy()` 全都抛同一个错, 账本一动不动 —— 所以它会**永远**卡住建个控件。
+- **为什么账实会不符**: 命令可能先被删掉(`after` 的回调触发后自己 `deletecommand`、控件被连带拆掉、别处先拆了同一条),
+  而账本记在控件自己身上。CustomTkinter 6.0.0 的 `CTkScrollableFrame.destroy()` 就属于这一类"连带拆除": 它除了拆自己,
+  还会 `self._parent_frame.destroy()` —— 而那个容器在 `children` 里是它的**兄弟**。
+- **修法(测试基础设施, `tests/gui_support.py`)**: 新增 `destroy_widget_tree()`, 收尾时**先自己按控件树自底向上拆**:
+  ① 动手前用 `winfo exists` 看窗口还在不在 —— 被连带带走的直接跳过, 并把它从 `children` 里摘掉(否则 `Tk.destroy` 的
+  快照还会撞上它); ② 每个控件各自兜异常; ③ 抛出时先核对账本(`info commands`)、把已经不存在的名字划掉再拆一次
+  (`_forget_deleted_tcl_commands`)。这三步之后才调窗口自己的 `destroy()` —— `after` 任务的撤销与 CTk 的解绑都在那里。
+  **判红判据不变**: 只看"根还在不在"; 修好账之后根就不该被留下, 留下才算真缺陷。
+- **守卫与咬合**: `tests/integration/test_gui_roots.py` 加到 7 条, 新增的两条就是这次 CI 现场的直译("children 里留着
+  一个已经没了的控件"、"账上留着已删命令"); 咬合验证: 去掉逐层拆 / 去掉修账 → 对应守卫变红, 且第二条在去掉修账时输出
+  的就是 CI 上那句 `!ctkframe (CTkFrame): TclError("can't delete Tcl command")`。
+- **还有一层"看得见"**: "收尾报了一声、但根已经拆干净"这件事**不判红**(会伤到后面用例的只有根被留下), 但要留证 ——
+  Allure 附件 + 参数 + stderr, 里面带着**控件名、异常原文、划掉了哪些命令**; 下次再出现就能直接点名, 不用再从头查。
+
+### 48.9 附: macOS 分片被内核杀掉, 而且那条崩溃从未进过报告(2026-10-04/05)
+
+- **症状**: macOS 分片 0 在 `tests/integration/test_gui_dropdown.py` 第一个用例之后被信号打死(`exit code 133` =
+  SIGTRAP; `.ips` 里 `EXC_BREAKPOINT`); `job-diagnostics-macos-latest-0` **上传了**, 但报告的全局附件里没有"失败现场"
+  (`allure-report/artifacts.json` 只有总账与覆盖豁免两份)。
+- **崩溃本身**: 原生栈在主线程 `CFRelease ← -[NSCGSContext dealloc] ← AutoreleasePoolPage::releaseUntil` ——
+  Tk/Cocoa 的图形上下文在自动释放池里被回收时撞上指针认证(没有 Python 帧)。`crash-dumps/faulthandler.log` **是空的**:
+  faulthandler 默认不接 SIGTRAP, 所以这类崩溃拿不到 Python 栈 —— 想拿到就得显式接上 SIGTRAP(会与调试器冲突, 要留意),
+  暂时只把 `.ips` 收全。
+- **报告里没有它的两个原因(都是缺陷, 都已修)**:
+  1. `scripts/create_allure_summary.py` 按 `*/job-diagnostics/summary.md` 找摘要, 而各作业上传的是
+     `path: job-diagnostics/` —— artifact 里装的是那个目录的**内容**, 下载到 `failure-diagnostics/<artifact 名>/`
+     之后只有一层(`<artifact 名>/summary.md`, 用户下载的 zip 里就是这两份文件)。glob **永远匹配不到**, 于是"有崩溃
+     现场"也没人知道, 而且一声不吭。当时的**守卫按同一种(错的)布局造样本**, 于是两边一起绿 —— 现在两种布局都收,
+     守卫按真实布局造样本(另一条守着"多一层"那种旧布局, 免得以后再改上传路径又静默失效)。
+  2. 崩溃只挂在首页附件里的话, 它**不进任何计数、也不能按环境筛**(用户 2026-10-05 的要求是"便于统计")。现在每个
+     崩溃作业**另写一条 `broken` 结论项**: 环境 = 崩溃作业所在的平台(切到那个平台就能看到它)、等级 `critical`、
+     `testCategory=diagnostics`(不是用例, 质量门那条"每个平台都要有用例"不会误判)、现场摘要作为它的附件。没有兜底现场时:
+     **附件清掉、结论项一条不写** —— 一份永远存在的"失败现场"只会让人以为崩过(用户 2026-10-04 的原话)。
+- **守卫**: `tests/unit/test_ci_diagnostics.py` 四条(真实布局 / 多一层布局 / 崩溃→broken 结论项 / 没现场→两者都不写)
+  - 原有的"写附件必须在下载之后"。
+
 ---
 
 # !这部分以下的内容识别时忽略，仅为个人记录灵感，输出的内容要写在上面不允许超过上面的分隔线

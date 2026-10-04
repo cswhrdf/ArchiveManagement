@@ -18,6 +18,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -169,6 +170,11 @@ def close_gui_apps() -> None:
     且永远只能看到受害者"继续下去。记录方式沿用 `tests/tk_guard.py` 那套"环境问题要看
     得见"(附件 + 参数 + stderr), 但结论相反: 那条是 skip, 这条是失败 —— 跳过的前提是
     "这条用例量不到东西", 而这里断言都真跑过了, 只是收尾留了个活根。
+
+    拆的顺序也是被实测教训过的: **先 `destroy_widget_tree` 把控件树逐层拆掉, 再调窗口
+    自己的 `destroy()`**。前者不可靠 —— 快照里的兄弟/子控件可能已被连带拆掉(见
+    :func:`destroy_widget_tree`, 4 条用例就是栽在这里); 后者必须跑, 因为 ``after`` 任务
+    的撤销与外观/缩放/字体的解绑都在它那里。两遍下来再判"根还在不在", 剩下的才是真缺陷。
     """
     from tkinter import TclError
 
@@ -176,6 +182,7 @@ def close_gui_apps() -> None:
     while _LIVE_APPS:
         app = _LIVE_APPS.pop()
         close_child_windows(app)
+        teardown = destroy_widget_tree(app)
         error: BaseException | None = None
         try:
             app.destroy()
@@ -184,12 +191,18 @@ def close_gui_apps() -> None:
         # 判据**只看根还在不在**, 不看 destroy() 有没有抛异常: 用例自己提前销毁过窗口时,
         # 这里的第二次 destroy() 必然抛 "bad window path name"(窗口已经没了), 而那正是上面
         # 写明的、要容忍的用法(实测 test_gui_buttons / test_gui_layout / test_gui_theme_repaint
-        # 里几十处都这么写)。反过来, destroy() 一声不响但根还在(子控件那一步断了链)才是
-        # 要判红的那种 —— 只看异常会把前一种全判成红。
+        # 里几十处都这么写); 同理 "can't delete Tcl command" 也可能只是"控件已被连带拆掉"或
+        # "账上留着已经删掉的命令"(后者会被 destroy_widget_tree 修掉)。
+        # 反过来, 两遍之后根还在才是真缺陷 —— 只看异常会把前一种全判成红。
         if not root_is_alive(app):
+            if error is not None or teardown.stuck or teardown.repaired:
+                # 根是干净的, 所以不判红; 但"收尾并不完全干净"这件事得看得见。
+                _record_teardown_note(app, error, teardown)
             continue
-        stuck = force_destroy(app)
-        broken.append(_record_teardown_rescue(app, error, stuck))
+        rescue_stuck = force_destroy(app)
+        broken.append(
+            _record_teardown_rescue(app, error, [*teardown.stuck, *rescue_stuck])
+        )
     # 最后一步: `tkinter._default_root` 这个全局位置也得是干净的 —— 哪怕那里挂着的是
     # **别人的**根。留着它, 后面每一条用例贴图都会报 `image "pyimageN" does not exist`
     # (2026-10-04 的事故), 所以这里是那件事的最后一道兜底。
@@ -322,6 +335,124 @@ def _clear_default_root(root: Any) -> None:
         tkinter._default_root = None  # type: ignore[attr-defined]
 
 
+@dataclass(frozen=True)
+class TreeTeardown:
+    """控件树拆除的结果(见 :func:`destroy_widget_tree`)."""
+
+    #: 没拆掉的控件(名字与异常原文) —— 这一条会让根窗口留下来, 是缺陷。
+    stuck: tuple[str, ...] = ()
+    #: "账上留着已经删掉的 Tcl 命令"、清账之后拆成功的控件 —— 修好了, 但要看得见。
+    repaired: tuple[str, ...] = ()
+
+
+def _widget_exists(widget: Any) -> bool:
+    """控件的窗口路径还在不在(被连带拆掉的控件返回 False)."""
+    try:
+        path = getattr(widget, "_w", None)
+        tk_obj = getattr(widget, "tk", None)
+        if path is None or tk_obj is None:
+            return False
+        return bool(tk_obj.call("winfo", "exists", path))
+    except Exception:  # 解释器没了 / 半成品控件: 都算"不在了"
+        return False
+
+
+def _forget_deleted_tcl_commands(widget: Any) -> list[str]:
+    """把控件 `_tclCommands` 里"其实已经不存在"的命令名划掉, 返回划掉的名单.
+
+    为什么会有"账实不符": ``_tclCommands`` 是控件"我注册过哪些 Tcl 命令"的账本, 而命令可能
+    先被删掉(``after`` 的回调触发后会自己 ``deletecommand``、控件被连带拆掉、别处先拆了
+    同一条), 账本上却还留着名字。于是这个控件**自己的** ``destroy()`` 会在
+    ``Misc.destroy`` 的 ``deletecommand`` 那一步抛::
+
+        TclError: can't delete Tcl command
+
+    而 ``Tk.destroy()`` 是"取快照 + 一次性循环", 这一抛就把循环打断, 根窗口留在会话里
+    (2026-10-04 CI: Linux 上 4 条用例的收尾报"断裂", 报的正是这个字符串)。这里按
+    "账实不符就修账"处理: 逐条拿 ``info commands`` 核对, 不存在的从账上划掉。
+    """
+    commands = getattr(widget, "_tclCommands", None)
+    if not commands:
+        return []
+    tk_obj = getattr(widget, "tk", None)
+    if tk_obj is None:
+        return []
+    kept: list[str] = []
+    removed: list[str] = []
+    for name in list(commands):
+        try:
+            alive = bool(tk_obj.call("info", "commands", name))
+        except Exception:  # 解释器都没了: 全部当"已经不存在"
+            alive = False
+        (kept if alive else removed).append(str(name))
+    if removed:
+        with contextlib.suppress(AttributeError):
+            widget._tclCommands = kept or None
+    return removed
+
+
+def destroy_widget_tree(root: Any) -> TreeTeardown:
+    """逐层拆掉 ``root`` 下的全部控件(**不含 root 自己**), 返回没拆掉的那些.
+
+    为什么不把这件事交给 ``Tk.destroy()``: 它是"**先取快照**, 再逐个 ``child.destroy()``"
+    的一次性循环, 而快照里的控件可能已经被前一次销毁**连带**带走 —— 于是循环走到它时窗口
+    已经没了, ``TclError("can't delete Tcl command")`` 把整条循环打断, 根窗口留在会话里
+    (2026-10-04 CI: Linux 上 4 条用例的收尾因此报"断裂")。出处是 CustomTkinter 6.0.0::
+
+        class CTkScrollableFrame(tkinter.Frame):
+            def destroy(self):
+                tkinter.Frame.destroy(self)
+                self._parent_frame.destroy()   # <- 顺手拆掉自己的容器
+
+    而那个容器正是它在 ``children`` 里的**兄弟**(滚动区自己的 master 是容器里的 canvas,
+    容器挂在页面上), 所以谁先被拆, 谁就把对方连带带走。
+
+    这里的三个做法各堵一种情况:
+
+    - **自底向上**: 父控件的循环不会再因为某个子控件出问题而中断;
+    - **动手前先看窗口还在不在**: 被连带带走的控件直接跳过(既不报错也不记一笔), 并把它从
+      ``children`` 里摘掉 —— 后面 ``Tk.destroy()`` 的快照就不会再撞上它;
+    - **每个控件各自兜异常, 抩不动就先修账再试一次**: 单个控件的 destroy 抛出时先查它
+      `_tclCommands` 里是不是留着已经删掉的命令(见 :func:`_forget_deleted_tcl_commands`),
+      清掉账再拆一次; 仍然不行才记进 ``stuck``(那才会把根留下来)。
+    """
+    stuck: list[str] = []
+    repaired: list[str] = []
+    children = getattr(root, "children", None)
+    if not isinstance(children, dict):
+        return TreeTeardown()  # 替身对象没有控件树
+    items = list(children.items())
+    for _name, child in items:
+        nested = destroy_widget_tree(child)
+        stuck.extend(nested.stuck)
+        repaired.extend(nested.repaired)
+    for name, child in items:
+        if not _widget_exists(child):
+            # 已经被连带拆掉了(见上): 不是缺陷, 也不该记一笔; 但**必须摘掉这个死条目**,
+            # 否则 Tk.destroy 的快照还会撞上它。
+            children.pop(name, None)
+            continue
+        try:
+            child.destroy()
+            continue
+        except Exception as exc:  # 单个控件出错只影响它自己
+            reason = repr(exc)
+            removed = _forget_deleted_tcl_commands(child)
+        if not removed:
+            stuck.append(f"{name} ({type(child).__name__}): {reason}")
+            continue
+        try:
+            child.destroy()
+        except Exception as exc2:
+            stuck.append(f"{name} ({type(child).__name__}): 清账后仍失败 {exc2!r}")
+            continue
+        repaired.append(
+            f"{name} ({type(child).__name__}): {reason} -> 划掉账上已删的命令 "
+            f"{removed} 后拆成功"
+        )
+    return TreeTeardown(stuck=tuple(stuck), repaired=tuple(repaired))
+
+
 def force_destroy(app: Any) -> list[str]:
     """把没被真正拆掉的窗口硬拆掉, 返回"把销毁链断掉"的子控件描述.
 
@@ -353,6 +484,39 @@ def force_destroy(app: Any) -> list[str]:
 def teardown_rescues() -> tuple[str, ...]:
     """本次会话里"靠补救才拆干净"的记录(守卫看它, 报告里也找得到)."""
     return tuple(_TEARDOWN_RESCUES)
+
+
+def _record_teardown_note(
+    app: Any, error: BaseException | None, teardown: TreeTeardown
+) -> str:
+    """把"收尾报了一声、但根已经拆干净"记进报告(附件 + 参数 + stderr), **不判红**.
+
+    为什么不判红: 会伤到后面用例的是"根留在会话里"(那一种由 :func:`close_gui_apps` 判红),
+    而这个分支里根已经没了 —— 报的那一声来自 Tk 自己的时序/记账问题(控件已被连带拆掉、
+    账上留着已删的命令, 见 :func:`destroy_widget_tree`)。但它必须看得见: 一旦它变成常态,
+    就说明收尾的方式又该改了; 而且**这条记录里带着控件名与异常原文** —— 下次再出现就能直接
+    点名是哪个控件、哪一条命令。
+    """
+    import allure
+
+    current = os.environ.get("PYTEST_CURRENT_TEST", "<不在用例里>")
+    detail = (
+        f"收尾报了一声, 但根已经拆干净(不判红)。\n"
+        f"用例: {current}\n"
+        f"窗口: {app!r}\n"
+        f"destroy() 抛的异常: {error!r}\n"
+        f"没拆掉的控件: {list(teardown.stuck) or '<没有>'}\n"
+        f"靠清账救回来的控件: {list(teardown.repaired) or '<没有>'}\n"
+        f"根还在吗: {root_is_alive(app)}"
+    )
+    allure.attach(
+        detail,
+        name="窗口收尾: 报了一声但已拆干净",
+        attachment_type=allure.attachment_type.TEXT,
+    )
+    allure.dynamic.parameter("窗口收尾", "destroy() 报错/有控件没拆, 但根已拆干净")
+    print(f"\n[gui_support] 窗口收尾(不判红): {detail}\n", file=sys.stderr)
+    return detail
 
 
 def _record_teardown_rescue(

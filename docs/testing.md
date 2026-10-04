@@ -569,6 +569,8 @@ uv run python scripts/verify_allure_report.py allure-report --results allure-res
 
 报告侧不需要额外配置：附件由 allure-pytest 写进 `allure-results`，随 `allure-resources-<平台>` artifact 上传，`scripts/verify_allure_report.py` 会把它们一并核对（缺附件即报告不完整）。**dump 里是真实的局部变量**（coredumpy 默认会遮掉像密钥的字符串与 `os.environ` 的值）—— 把报告或 artifact 发给仓库以外的人之前先看一眼附件。
 
+**作业级崩溃怎么进报告（与用例级留证是两条线）**：进程被信号打死时用例级附件根本没机会写，所以每个作业失败时还会跑一次 `scripts/collect_job_diagnostics.py`（`if: failure()`，判定写进 `$GITHUB_OUTPUT`）：只有**进程级崩溃 / 证据缺失**才上传 `job-diagnostics-<作业>` artifact（普通失败的证据已经在结果与运行日志里，再传一份只是噪音），汇总作业把它们收下来拼成报告首页的《失败现场(兜底)》附件。**列表里的东西必须真的能被找到**：各作业上传的是 `path: job-diagnostics/`，artifact 里装的就是那个目录的**内容**，下载到 `failure-diagnostics/<artifact 名>/` 之后**只有一层**（`<artifact 名>/summary.md`）—— 2026-10-04 的脚本按多一层去找，于是 macOS 分片被内核杀掉那次**白上传**、报告里一条都没有（2026-10-05 从下载的报告里发现；现在两种布局都收，守卫按**真实布局**造样本）。除此之外，每个崩溃作业还会**另写一条 `broken` 结论项**（标题 `作业崩溃: <作业标签>`、环境 = 该作业所在平台、等级 `critical`、`testCategory=diagnostics`）—— 只挂附件的话它不进任何计数、也不能按环境筛，而“这个作业崩过”恰恰是最该被统计的那一类。**没有兜底现场时两样都不写**（附件还会把上一轮留下的那份删掉）：一份永远存在的“失败现场”只会让人以为崩过。
+
 **一次真实的偶发就是靠它断的（2026-09-30）**：一条 GUI 用例在整轮全量里红过一次（单跑、整模块连跑两遍都不复现），当时手里只剩一个测试名。事后从 `crash-dumps/` 里那次失败留下的 dump 直接读出根因 —— dump 自带的现场摘要是
 
 ```text
