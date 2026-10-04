@@ -68,16 +68,47 @@ def _load_verifier() -> Any:
 verifier = _load_verifier()
 
 
-def required_platforms() -> tuple[str, ...]:
-    """读出 ``allurerc.mjs`` 里质量门要求的平台列表(漏一个平台会让门禁形同虚设).
+#: ``environments`` 里一项的开头: ``    windows: {`` 后面紧跟 ``      name: "Windows",``。
+_ENVIRONMENT_ENTRY = re.compile(
+    r"^\s{4}([a-z][\w-]*):\s*\{\s*name:\s*\"([^\"]+)\"", re.MULTILINE
+)
 
-    CI 里三处引用它: 配置里的 ``environmentsTested``、汇总作业的 ``--expect-platforms``
-    与各矩阵的平台列表 —— 由这里的守卫核对着一致。
+
+def required_environment_ids() -> tuple[str, ...]:
+    """读出 ``allurerc.mjs`` 里质量门 ``environmentsTested`` 要的那几个**环境 id**.
+
+    为什么盯的是 id: 质量门比的是每条结果的 ``environment``, 那是环境身份里的 **id**
+    (``environments`` 的键, 小写)。写成平台显示名("Windows")**一个都比不上** —— 症状是
+    门禁一次报全三个"未被测试", 而三条平台的用例其实都交齐了(2026-10-04 的汇总报告就是
+    这么红的; 本地用三平台最小结果复现过, 见 PLAN.md §48.6)。
     """
     gate = _ALLURE_CONFIG.read_text(encoding="utf-8").split("qualityGate:", 1)[1]
     matched = re.search(r"environmentsTested:\s*\[([^\]]+)\]", gate)
     assert matched is not None, "配置里要有 environmentsTested"
     return tuple(name.strip().strip('"') for name in matched.group(1).split(","))
+
+
+def declared_environment_names() -> dict[str, str]:
+    """``environments`` 里声明的 环境 id → 显示名(把门禁要的 id 翻成平台名用)."""
+    block = _ALLURE_CONFIG.read_text(encoding="utf-8").split("environments: {", 1)[1]
+    return dict(_ENVIRONMENT_ENTRY.findall(block))
+
+
+def required_platforms() -> tuple[str, ...]:
+    """质量门要求的平台**显示名**(与 CI 矩阵、汇总作业的 ``--expect-platforms`` 对照).
+
+    CI 里三处引用它: 配置里的 ``environmentsTested``、汇总作业的 ``--expect-platforms``
+    与各矩阵的平台列表 —— 由这里的守卫核对着一致。配置里写的是环境 id(见
+    :func:`required_environment_ids`), 这里按 ``environments`` 的声明翻成显示名 ——
+    顺带把"门禁要的 id 到底声明过没有"也钉住: 写错一个 id 就没得翻, 当场红。
+    """
+    names = declared_environment_names()
+    ids = required_environment_ids()
+    missing = [env_id for env_id in ids if env_id not in names]
+    assert missing == [], (
+        f"environmentsTested 里的 id 必须在 environments 里声明过: {missing}"
+    )
+    return tuple(names[env_id] for env_id in ids)
 
 
 @dataclass(frozen=True)
@@ -214,6 +245,24 @@ def test_dangling_group_reference_is_reported(layout: _Layout) -> None:
     _, problems = verifier.verify_report(layout.report)
 
     assert any("zzz999" in problem for problem in problems)
+
+
+def test_a_nested_report_directory_is_reported(layout: _Layout) -> None:
+    """报告目录里嵌套的另一份报告要报出来: 那是生成时目录已存在的痕迹.
+
+    实测(Allure 3.20.0): 输出目录里已经有报告时, 新报告被写进 ``awesome/``, 顶层
+    ``index.html`` 留成上一次那张 —— 发布出去的正是顶层这份, 于是报告"看起来正常、其实
+    是旧的": 本次运行不在里面, 历史趋势也停在上一次(用户报的"历史记录不可见"就是它,
+    Allure issue #691)。所以这里必须红, 而不是安静地发一份旧报告。
+    """
+    nested = layout.report / "awesome"
+    nested.mkdir()
+    (nested / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    _, problems = verifier.verify_report(layout.report)
+
+    assert any("awesome" in problem for problem in problems), problems
+    assert verifier.main([str(layout.report)]) == 1
 
 
 def test_single_default_environment_is_reported(layout: _Layout) -> None:
@@ -1261,6 +1310,12 @@ def test_native_quality_gate_is_configured_and_pinned() -> None:
     assert "Report quality gate verdict" in workflow, "门禁结论要能决定作业成败"
     # 先跑门禁(留日志给总账), 再生成报告: 顺序反了日志就进不了报告。
     assert workflow.index(gate) < workflow.index("Generate final Allure report")
+    # 还得**先于写运行总账那一步**: 总账在 "Summarize performance and security into Allure"
+    # 里拼, 它把门禁日志收进首页「全局附件」的「原生质量门」一节 —— 2026-10-04 之前
+    # 顺序是反的, 那一节永远写着"本次没有质量门输出"。
+    assert workflow.index(gate) < workflow.index(
+        "Summarize performance and security into Allure"
+    ), "门禁日志先落地, 运行总账才收得到它"
 
 
 def test_quality_gate_asks_every_platform_for_real_tests() -> None:
@@ -1288,7 +1343,17 @@ def test_quality_gate_asks_every_platform_for_real_tests() -> None:
     assert verifier.REAL_TEST_VALUE == "pytest"
     assert f'name === "{verifier.REAL_TEST_LABEL}"' in gate
     assert f'value === "{verifier.REAL_TEST_VALUE}"' in gate
-    assert 'environmentsTested: ["Windows", "macOS", "Linux"]' in gate
+    # 期望值必须是**环境 id**(小写): 门禁比的是结果的 `environment`(环境身份里的 id),
+    # 写平台显示名一个都比不上(2026-10-04: 那样会一次报全三个"未被测试", 而三条平台的
+    # 用例其实都在; 本地用三平台最小结果复现过, 见 PLAN.md §48.6)。
+    ids = required_environment_ids()
+    assert ids == ("windows", "macos", "linux"), (
+        "要求哪几个平台要有用例: 改这里要同步 CI 矩阵与 --expect-platforms(见同文件那条守卫)"
+    )
+    assert all(env_id == env_id.lower() for env_id in ids), (
+        "环境 id 是小写的; 写成显示名('Windows')会导致规则一个都比不上"
+    )
+    assert declared_environment_names()["windows"] == "Windows"
     # 规则集要有 id: 门禁失败时输出的是 `<规则集 id>/<规则名>`, 一眼看出是哪条不过。
     assert re.search(r'id:\s*"[\w-]+"', gate) is not None
 

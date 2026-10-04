@@ -169,8 +169,8 @@ pytest-report (每平台一份报告: 合并各片的 Allure 结果与覆盖率,
                **三个平台都在 ubuntu 上生成** → 生成并自检报告)
       ↓
 allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全/覆盖率汇总
-               结论 + 有意不统计的覆盖豁免清单 → 生成最终报告与质量门结论；
-               同一作业里再做发布：仅默认分支的 push 时解开 allure-report.zip → GitHub Pages)
+               结论 + 有意不统计的覆盖豁免清单 → **先跑原生质量门（输出交给总账）再生成
+               最终报告**；同一作业里再做发布：仅默认分支的 push 时解开 allure-report.zip → GitHub Pages)
 ```
 
 **作业数量也是额度**：一轮 CI 是 **14 个作业实例**（`quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1；原来独立的 `deploy-pages` 已于 2026-09-30 并进 `allure-summary`，代价是 `pages: write` / `id-token: write` 与 `github-pages` 环境只能声明在**作业级**，所以那个作业在 PR 上跑时也带着它们，而发布的那三步各自带 `continue-on-error`）。**这 14 个与事件、分支无关**：三个平台每个事件都跑（平台列表在 `allurerc.mjs` 的 `environmentsTested`、`--expect-platforms`、报告自检三处是同一个集合）。`security` 的 macOS 曾经只在 push 到默认分支时跑（矩阵 `exclude` 里的降频，省一个按 10 倍计价的实例），**2026-10-02 已撤销**：降频期间 PR 与 `dev` 上没有任何东西验 macOS 的路径/权限语义，而汇总报告会因此少一份 `Security findings(macOS)` —— 总账把它报成"缺失"，可读的人分不出那是设计还是事故（**假警报比不报更坏**）。现场与取代它的守卫记在 `PLAN.md` 第 15.2 节。每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”，见 `PLAN.md` 第 11.10 节）；`paths-ignore` 只加在 **push** 上 —— PR 被路径过滤跳过会让分支保护里的必需检查永远停在 pending，反而合不了 PR。完整的优化清单与取舍记在 `PLAN.md` 第 11 节。
@@ -185,9 +185,14 @@ allure-summary (合并全部 allure-results-* → 写入环境信息与质量/�
 
 质量门禁本身也由脚本执行：`scripts/create_allure_quality.py --group <组>` 依次跑该组的检查，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。它分三组：`core`（ruff check / ruff format --check / mypy 宿主平台那一次 → `env=common`）、`analysis`（deptry / bandit / pip-audit / radon / xenon → `env=common`）与 `platform`（mypy 的 `--platform win32` / `--platform darwin`）。**前两组与性能基准在同一个 Ubuntu 作业（`quality`）里依次跑**：它们都与平台无关（不涉及路径分隔符、显示或字体；性能基准也需要固定的运行环境，所以固定在这一个平台上采集），分成更多作业只是多付几套固定开销。`platform` 组**各自在那个平台上执行**，位置是 `pytest` 作业的**片 0**（Windows 与 macOS 两条，因此 `--platform win32` / `darwin` 都有真实执行证据；放在测试与上传之后，免得门禁失败让这次的测试结果拿不到）—— `--platform` 只是"检查哪支代码"，并不校验执行环境，在 Ubuntu 上跑出来的结论挂到 Windows 环境里就是假的归属。**结论归入哪个环境分两种**：与平台无关的检查带 `env=common`，归入 `allurerc.mjs` 里**显式声明**的 `Common` 环境（不是某个平台的环境，也不是隐式的 `default`）；两条平台专属 mypy 检查带对应平台的 `env`，归入报告里那个平台的 `Windows` / `macOS` 环境 —— 它们验的就是那个平台，**而且真的在那台机器上跑**（`Check.host_platform`），所以“标着 Windows 的结论一定产自 Windows”是结构上的事实：`--platform` 只是“检查哪支代码”，不代表执行环境，放在 Ubuntu 上跑虽然也能过，但环境归属就是假的。放在环境选择器里能与该平台的测试结果一起看（执行主机只写进描述，二者不混）。脚本会自己挑适用的一支：显式点名一个在当前平台跑不了的分组时以退出码 2 报错（默默跳过等于这道门禁不存在）。顺便说明为什么宿主平台那次 mypy 仍在 `Common`：公共检查的判据是“**结论本身与平台无关**”，不是“跑在哪台机器上” —— 除开两条平台专属分支（另有 `platform` 组专门验）之外，那次 mypy 在哪个平台上跑都是同一个结论，所以它归 `Common` 而不是 `Linux`；平台专属那两条则相反，它们表达的就是“某平台的代码路径类型对不对”。
 
-除此之外，汇总作业还会跑一次 **Allure 原生质量门**：`allure quality-gate --config allurerc.mjs allure-results`。规则写在 `allurerc.mjs` 的 `qualityGate.rules` 里，管的是整次运行，与逐项检查互补；它的退出码直接决定作业成败，输出写进 `allure-quality-gate.txt` 并由运行总账收进报告首页「全局附件」。规则分两条规则集：第一条不过滤（`maxFailures: 0` / `successRate: 0.98`），脚本生成的结论项也算在内 —— 否则“覆盖率项 broken”这类失败就没人管了；第二条**只看真实用例**，要求每个跑测试的平台都有用例（`filter` 选出带 `framework=pytest` 标签的结果再 `environmentsTested`；当前是 `Windows` / `macOS` / `Linux`，与 CI 矩阵、汇总作业的 `--expect-platforms` 三处一致，守卫会核对）。
+除此之外，汇总作业还会跑一次 **Allure 原生质量门**：`allure quality-gate --config allurerc.mjs allure-results`。规则写在 `allurerc.mjs` 的 `qualityGate.rules` 里，管的是整次运行，与逐项检查互补；它的退出码直接决定作业成败，输出写进 `allure-quality-gate.txt` 并由运行总账收进报告首页「全局附件」。规则分两条规则集：第一条不过滤（`maxFailures: 0` / `successRate: 0.98`），脚本生成的结论项也算在内 —— 否则“覆盖率项 broken”这类失败就没人管了；第二条**只看真实用例**，要求每个跑测试的平台都有用例（`filter` 选出带 `framework=pytest` 标签的结果再 `environmentsTested`；清单里写的是**环境 id** —— `["windows", "macos", "linux"]`，见下面那条“清单里必须写环境 id”；与 CI 矩阵、汇总作业的 `--expect-platforms`、报告自检三处是同一个集合，守卫会核对）。
 
-**为什么要用环境维度、不用 `minTestsCount: 3000`**：绝对计数会随用例规模往**更松**的方向漂 —— 实测签名是 `3P+154`（每平台 P 条用例），每平台涨到 1400 上下之后，即使缺一整个平台的产物也仍然高于 3000，规则静默失效且没有任何信号（“常量失效时没人知道”正是这类规则最难查的地方）。环境维度不随规模变化：只带汇总项的环境不算“测过”（实测 3.18.0 的规则集级 `filter` 对 `environmentsTested` 生效）。判据用的是 **`framework=pytest` 这类正向标记**而不是“不能带 `testCategory`”这类反向排除：正向判据漏判时**会红**，反向判据漏判时**会绿**（将来某个脚本忘了打标签，它的汇总项就会被当成真实用例）。同一道不变式在仓库自检脚本里也有一份（`--expect-platforms`，见上一节）。**它管不到"少一片"**：那条属于"部分漏收"，由产物清单负责（`--manifest`，见第 6 节的分片段与自检段）。**CLI 版本必须 ≥ 3.18.0**（2026-10-04 起 CI 用浮动标签 `allure@3`，下限改为在 `Check Allure version` 里**运行期**核对，实测当前是 3.20.0；运行总账里的「原生质量门（Allure CLI）」一节就是它这次跑出来的结论与原始输出）：3.13~3.17 在配了 `historyPath` 时会静默放行（退出 0 且不输出任何内容 —— 根因是本地历史流的句柄悬空，`AllureReport.done()` 永不返回，Node 在校验前就退出了，见 issue [#895](https://github.com/allure-framework/allure3/issues/895)，修于 3.18.0 的 PR #962），所以 CI 用浮动标签 `allure@3`（下限在 `Check Allure version` 里运行期核对）。本地复现：`npx allure@3 quality-gate --config allurerc.mjs allure-results`（单平台跑会因 `environmentsTested` 失败，属预期）。
+**为什么要用环境维度、不用 `minTestsCount: 3000`**：绝对计数会随用例规模往**更松**的方向漂 —— 实测签名是 `3P+154`（每平台 P 条用例），每平台涨到 1400 上下之后，即使缺一整个平台的产物也仍然高于 3000，规则静默失效且没有任何信号（“常量失效时没人知道”正是这类规则最难查的地方）。环境维度不随规模变化：只带汇总项的环境不算“测过”（实测 3.18.0 的规则集级 `filter` 对 `environmentsTested` 生效）。判据用的是 **`framework=pytest` 这类正向标记**而不是“不能带 `testCategory`”这类反向排除：正向判据漏判时**会红**，反向判据漏判时**会绿**（将来某个脚本忘了打标签，它的汇总项就会被当成真实用例）。同一道不变式在仓库自检脚本里也有一份（`--expect-platforms`，见上一节）。
+
+**清单里必须写环境 id，不能写显示名（2026-10-04 实测）**：`environmentsTested` 拿结果上的 `environment`（**环境 id**：`windows` / `macos` / `linux`）去比清单，而报告头里的 `environments` 是 `{id: {name: ...}}` —— `name` 只是环境选择器与总账上的显示名，从不参与这条比较。清单写显示名时，**每个平台都会被判“没测过”**，而用例明明都在报告里：下载的那份报告里 `quality-gate.json` 给的是 `actual: ["Windows", "macOS", "Linux"]`、`testResults: []`。本地两个方向都复现过：真实三平台结果集 + 显示名清单 → 三个平台全报缺；改成 id → `quality-gate` 与 3.20.0 的 `generate` 都 `exit 0`、`quality-gate.json` 全 success；再删掉 Linux 的结果（清单仍是 id）→ **只有** `linux` 报缺（规则确实在按环境筛，不是恒红/恒绿）。守卫 `tests/unit/test_report_verification.py::test_quality_gate_asks_every_platform_for_real_tests` 把这套对应关系钉住：清单里只允许小写 id、每个 id 都必须在报告头的 `id` 里出现、`windows` 的显示名是 `Windows`。
+
+**同一段接线里还有一处顺序**：汇总作业里“跑质量门”原本排在“写运行总账”**之后**，而总账读的就是那一步落盘的 `allure-quality-gate.txt` —— 文件还没生成，于是首页「原生质量门（Allure CLI）」一节永远写着“本次没有质量门输出”。现在门禁排在总账之前，由 `test_native_quality_gate_is_configured_and_pinned` 比对 `ci.yml` 里两个步骤的先后。
+**它管不到"少一片"**：那条属于"部分漏收"，由产物清单负责（`--manifest`，见第 6 节的分片段与自检段）。**CLI 版本必须 ≥ 3.18.0**（2026-10-04 起 CI 用浮动标签 `allure@3`，下限改为在 `Check Allure version` 里**运行期**核对，实测当前是 3.20.0；运行总账里的「原生质量门（Allure CLI）」一节就是它这次跑出来的结论与原始输出）：3.13~3.17 在配了 `historyPath` 时会静默放行（退出 0 且不输出任何内容 —— 根因是本地历史流的句柄悬空，`AllureReport.done()` 永不返回，Node 在校验前就退出了，见 issue [#895](https://github.com/allure-framework/allure3/issues/895)，修于 3.18.0 的 PR #962），所以 CI 用浮动标签 `allure@3`（下限在 `Check Allure version` 里运行期核对）。本地复现：`npx allure@3 quality-gate --config allurerc.mjs allure-results`（单平台跑会因 `environmentsTested` 失败，属预期）。
 
 ### 跳过只留给已知的环境问题
 
@@ -536,7 +541,7 @@ I-9 上线后回头核对"前面几轮的证据还成不成立"，图上多出�
 - `pytest-report` 作业传 `--expect-platforms "${{ matrix.platform }}"`（平台来自矩阵，不是 `runner.os` —— 两个平台的报告都跑在 Ubuntu 上），逐平台自查；
 - 汇总作业传 `--expect-platforms Windows,macOS,Linux`，在生成完最终报告之后运行（它不拦发布，结论由末尾的门禁结论步骤接手），输出里的 `按平台用例: Windows 1155 用例 + 2 汇总项, ...` 就是"哪个平台只剩汇总项"的直接证据。
 
-为什么它能发现质量门的 `environmentsTested` 发现不了的事：覆盖率/安全汇总项、平台专属的质量检查都带平台的 `env`，所以"环境存在"不等于"这个平台测过"。两道都在（Allure 规则 + 仓库自检）是有意的 —— 后者能逐平台报数，也不会因为 CLI 升级后 `filter` 语义变化而静默失效。已验证（2026-09-21，用真实报告重建的 3493 条结果）：删掉 Linux 的 1166 条用例后，自检报 `这些平台里没有用例结果: Linux (脚本生成的汇总项不算用例; 逐平台: ... Linux: 0 用例 / 3 汇总项)`，质量门报 `tests-on-every-platform/environmentsTested`。
+为什么它能发现质量门的 `environmentsTested` 发现不了的事：覆盖率/安全汇总项、平台专属的质量检查都带平台的 `env`，所以"环境存在"不等于"这个平台测过"。两道都在（Allure 规则 + 仓库自检）是有意的 —— 后者能逐平台报数，也不会因为 CLI 升级后 `filter` 语义变化而静默失效。已验证（2026-09-21，用真实报告重建的 3493 条结果）：删掉 Linux 的 1166 条用例后，自检报 `这些平台里没有用例结果: Linux (脚本生成的汇总项不算用例; 逐平台: ... Linux: 0 用例 / 3 汇总项)`。**那一次质量门虽然也报了 `environmentsTested`，但不算证据**：当时清单里写的是显示名，所以三个平台**全都**报缺（2026-10-04 复核，见上一节那条“清单里必须写环境 id”）；改成 id 后重做同一实验，只有 Linux 被报缺。
 
 Windows runner 的控制台是 cp1252：Python 默认按该编码输出，**打印中文会直接 `UnicodeEncodeError` 打断步骤**（报告自检在 CI 上踩过）。因此工作流最外层设了 `PYTHONUTF8=1`，两个报告脚本自己也会把标准输出切成 UTF-8（取不到 `reconfigure` 的替身如 pytest `capsys` 就跳过）。新增会向终端打中文的脚本时注意这条。
 
@@ -630,10 +635,13 @@ OperationalError: unsupported file format
 # 1) 跑本地测试并产出 Allure 结果(目录名与 CI 一致, 后续命令可直接复用)
 uv run pytest --alluredir=allure-results
 
-# 2) 由结果生成静态报告
+# 2) 由结果生成静态报告(**先删掉旧报告**: 目录已存在时新报告会被写进
+#    allure-report/awesome/ 而顶层留下一份旧的 —— 见下面第 3 个坑)
+rm -rf allure-report
 allure generate allure-results --output allure-report
 
-# 3) 生成后直接打开浏览器(等价于 generate 之后再 open)
+# 3) 生成后直接打开浏览器(等价于 generate 之后再 open; 同样要先删掉旧报告)
+rm -rf allure-report
 allure generate allure-results --output allure-report --open
 
 # 4) 打开已经生成好的报告(端口用 allurerc.mjs 里的默认值 8080; 冲突时加 `--port 8081`)
@@ -683,7 +691,7 @@ uv run python scripts/verify_allure_report.py allure-report --results allure-res
 
 - **报告要经 HTTP 提供**：控件数据与用例详情都是前端按需 `fetch` 的相对路径，直接双击 `allure-report/index.html`（`file://`）会被浏览器的跨域策略拦掉，界面只剩加载动画或空壳。用 `allure open`，或任意静态服务器。
 - **`allure open` 的目录是必填参数**：只写 `allure open --port 8080` 会直接报错退出，正确写法是 `allure open allure-report --port 8080`。
-- **报告目录已存在时 `allure generate` 不会刷新数据**：实测先删一个 `data/test-results/*.json` 再生成，该文件仍然缺失（2634 → 2633）。要重新生成就先删掉 `allure-report` 目录。
+- **报告目录已存在时 `allure generate` 不会刷新数据，还会把新报告“藏”进子目录**（Allure issue [#691](https://github.com/allure-framework/allure3/issues/691)）：两种症状同源 —— 生成器不会先清掉旧输出。① 实测先删一个 `data/test-results/*.json` 再生成，该文件仍然缺失（2634 → 2633）；② 更隐蔽的是**输出目录已存在时，新报告被写进 `allure-report/awesome/`，顶层的 `index.html` 留成上一次那份**。本机实测（3.20.0，同一个 `--output` 连跑两次）：第一次之后目录是扁平的（`index.html` / `app-*.js` / `data/` / `widgets/`），第二次之后多出 `awesome/`，而 `index.html` 一个字节都没变 —— 你打开的是**旧**报告：本次运行不在里面，历史趋势那一页自然也是空的或停在上一次（“历史记录不可见”多半就是它）。判据很简单：`allure-report/` 里出现 `awesome/` 子目录就是撞上了；那时新报告在 `allure-report/awesome/`（应急就看 `allure open allure-report/awesome`），但干净的做法是 `rm -rf allure-report` 重新生成一次。维护者给的也正是这个做法（“生成前先删掉报告目录，保留 `history.jsonl`”）。**CI 上不该出现**：两个生成作业都在全新 runner 上跑，而 `allure-report/` 在 `.gitignore` 里（`.gitignore:251`）、检出时根本不存在；发布那一步也是先 `rm -rf site` 再解自己刚打的包，并且解完会 `test -f site/allure-report/index.html`。自检脚本把嵌套目录直接判红（`scripts/verify_allure_report.py` 的 `nested_report_problems`，守卫 `test_a_nested_report_directory_is_reported`），以后谁把报告目录解包进工作区、或 CLI 换了输出布局，都会在发布前当场红。
 - **打开前先自检**（见上一节）：缺 `data/test-results/*.json` 时界面照样显示"通过/失败"，点开用例却是空的。
 
 ## 8. 新增测试清单

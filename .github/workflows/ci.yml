@@ -1169,26 +1169,18 @@ jobs:
           mkdir -p .allure
           cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
 
-      - name: Summarize performance and security into Allure
-        # `--expect-platforms` 与 allurerc.mjs 的 `environmentsTested`、以及下面
-        # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账末节
-        # 「证据核对」的"应有" —— 某个平台的产物整体没交上来时, 那些行会直接点名缺失
-        # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p allure-results
-          uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux
-
       - name: Validate the quality gate
-        # 规则在仓库根的 allurerc.mjs 里(唯一来源, 这里不重复传参)。先跑、先留日志:
-        # 首页「全局附件」里的运行总账会把它收进去(见 scripts/create_allure_summary.py)。
+        # 规则在仓库根的 allurerc.mjs 里(唯一来源, 这里不重复传参)。
+        # **必须排在下面写运行总账那一步之前**: 总账在 "Summarize performance and security
+        # into Allure" 里拼, 它把这份日志收进首页「全局附件」的「原生质量门」一节 ——
+        # 2026-10-04 之前顺序是反的, 于是那一节永远写着"本次没有质量门输出"。
         # 校验不通过时先不中断作业(报告还要生成、上传), 由最后一步用退出码判定。
         id: quality-gate
         if: always()
         continue-on-error: true
         shell: bash
         run: |
+          mkdir -p allure-results
           if [ -n "$(ls -A allure-results)" ]; then
             set +e
             allure quality-gate --config allurerc.mjs allure-results 2>&1 \
@@ -1199,6 +1191,17 @@ jobs:
             exit "${code}"
           fi
           echo "没有可用的 allure-results, 跳过质量门校验" | tee allure-quality-gate.txt
+
+      - name: Summarize performance and security into Allure
+        # `--expect-platforms` 与 allurerc.mjs 的 `environmentsTested`、以及下面
+        # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账末节
+        # 「证据核对」的"应有" —— 某个平台的产物整体没交上来时, 那些行会直接点名缺失
+        # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p allure-results
+          uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux
 
       - name: Download failure diagnostics from every job
         # 各作业只在**失败时**上传诊断(见各自的 Collect/Upload failure diagnostics)。

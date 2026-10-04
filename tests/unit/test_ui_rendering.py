@@ -10,10 +10,12 @@ CustomTkinter 的绘制引擎默认把绘制尺寸向下取整到偶数, 奇数�
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from customtkinter import CTkCanvas, CTkComboBox, DrawEngine
+from PIL import Image, ImageTk
 
 import archive_management.ui.rendering as rendering
 from archive_management.ui.rendering import (
@@ -21,6 +23,9 @@ from archive_management.ui.rendering import (
     apply_combo_border_fix,
     paint_combo_border,
 )
+
+#: 仓库根的 ``tests/unit/test_ui_rendering.py`` → 上两级是仓库根。
+_TESTS_ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = [
     pytest.mark.ui,
@@ -110,3 +115,58 @@ def test_apply_combo_border_fix_paints_after_every_draw(
     assert combo._canvas.calls == [
         ("border_parts_right", {"outline": "#6a7681", "fill": "#6a7681"})
     ]
+
+
+# --- 图片必须建在"要用它那个窗口"的解释器里 ---------------------------------
+# 出处: 2026-10-04 Linux 分片 0 —— 上一个用例的窗口没被拆干净, 默认根指着它;
+# 下一条用例贴图标时报 `image "pyimage1" does not exist`。CTkImage 自己贴图时
+# 调的是 `ImageTk.PhotoImage(图片)`(**不带 master**), 于是图片落到了默认根那个
+# 解释器里, 而标签属于新窗口的解释器。真正走显示环境的验证在
+# `tests/integration/test_gui_roots.py`, 这里钉"传没传 master"这件事本身。
+
+_GUARDED_IMAGE_CALL = "ctk.CTkImage("
+
+
+class _FakePhotoImage:
+    """记下构造参数, 代替真要解释器的 ``ImageTk.PhotoImage``."""
+
+    def __init__(self, image: Any, master: Any = None) -> None:
+        """记住图片与 master(不碰 Tk)."""
+        self.image = image
+        self.master = master
+
+
+def test_host_image_creates_the_photo_image_on_the_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``host_image`` 建贴图时必须把宿主传成 ``master``(否则它会落到默认根上)."""
+    monkeypatch.setattr(ImageTk, "PhotoImage", _FakePhotoImage)
+    host = object()
+    picture = rendering.host_image(
+        cast("Any", host), light_image=Image.new("RGB", (10, 10)), size=(10, 10)
+    )
+
+    first = picture._get_scaled_light_photo_image((10, 10))
+    second = picture._get_scaled_light_photo_image((10, 10))
+
+    assert cast("_FakePhotoImage", first).master is host, "贴图要建在宿主那个解释器里"
+    assert first is second, "同一尺寸要复用缓存(与库里的实现一致)"
+
+
+def test_only_the_rendering_layer_builds_images() -> None:
+    """界面层自己建图片必须走 ``host_image``, 不许直接写 ``ctk.CTkImage(...)``.
+
+    这条是静态守卫: 只要有人以后又用库原样的构造器, "图片落到默认根"这个坑就会
+    回来 —— 而它只在"会话里有第二个 Tk 根"时发作, 靠读代码很容易漏。
+    """
+    offenders = [
+        f"{path.name}:{number}"
+        for path in sorted(
+            (_TESTS_ROOT / "src" / "archive_management" / "ui").glob("*.py")
+        )
+        if path.name != "rendering.py"
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if _GUARDED_IMAGE_CALL in line
+    ]
+
+    assert offenders == [], f"这些地方要改用 rendering.host_image: {offenders}"

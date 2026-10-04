@@ -60,6 +60,7 @@ from archive_management.ui.models import (
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory
+from archive_management.ui.rendering import host_image
 from archive_management.ui.textfit import fit_text
 from archive_management.ui.typography import FONT_GLYPH
 from archive_management.ui.widgets import (
@@ -1587,7 +1588,7 @@ class HomePage:
         except (OSError, ValueError) as exc:
             logger.warning("图片无法解码(%s): %s", path, exc)
             return None
-        picture = ctk.CTkImage(light_image=loaded, size=size)
+        picture = host_image(self.frame, light_image=loaded, size=size)
         self._artwork_images[key] = picture
         return picture
 

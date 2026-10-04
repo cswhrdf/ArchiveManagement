@@ -59,20 +59,6 @@ export default {
     // 结果时, 第一反应往往是"漏跑了" —— 这里直接说明那是有意的。
     用例分层: "unit / integration 每次跑 · performance / security 只在 CI",
   },
-  plugins: {
-    // Awesome 报告(默认报告)的界面选项.
-    awesome: {
-      options: {
-        // 固定界面语言: 不写就跟随浏览器语言, 英文浏览器看到的就是英文界面。
-        // 支持 az/br/de/en/es/fr/he/ja/kr/nl/pl/ru/sv/tr/zh。
-        reportLanguage: "zh",
-        // 刻意不设的两项:
-        // - `open: true`: CI 上会去拉起浏览器(无头 runner 只会报错或挂住), 本地要自开就加 `--open`;
-        // - `singleFile: true`: 报告会变成单个 HTML, `data/test-results/*.json` 这些按需拉的
-        //   资源就没有了, 会直接打破 scripts/verify_allure_report.py 的自检与单 zip 发布。
-      },
-    },
-  },
   // 环境 id 白名单(启动期校验): `environments` 里声明的**每个** id 都必须在这里列出,
   // 否则 `allure generate` 直接以 Internal Error 退出 —— 实测 3.18.0 的原文:
   //   config.environments: environment id "common" is not listed in allowedEnvironments
@@ -240,13 +226,24 @@ export default {
       // macOS 已于 2026-09-30 恢复(见 PLAN.md 第 11.9 节): 这里要求三个平台, 与 CI 的三个
       // 矩阵(pytest / pytest-report / security)及汇总作业的 --expect-platforms 必须一致
       // —— tests/unit/test_report_verification.py 会核对这四处的集合。
+      //
+      // **取值必须是环境的 id(小写), 不是平台显示名**(2026-10-04 定位): 规则比的是每条
+      // 结果的 `environment`, 而那是环境身份里的 **id**(`environments` 的键), 于是写
+      // "Windows"/"macOS"/"Linux" 会**一个都比不上** —— 症状是门禁一次报全三个
+      // `The following environments were not tested: "Windows", "macOS", "Linux"`,
+      // 而用例其实三条平台都交齐了(汇总报告里 `quality-gate.json` 的 `testResults: []`
+      // 就是"过滤后一条都没剩"的痕迹)。本地用三平台最小结果实测(见 PLAN.md §48.6):
+      // 期望写 id 通过、写名字必失败; 删掉某个平台的结果后, 规则会**只**报那一个 id 缺失
+      // (说明规则本身是有效的, 不是被过滤条件掐空)。守卫:
+      // `tests/unit/test_report_verification.py` 会核对这里的 id 都在 `environments` 里
+      // 声明过, 并与 CI 矩阵 / `--expect-platforms` 的**显示名**名单逐一对上。
       {
         id: "tests-on-every-platform",
         filter: (tr) =>
           tr.labels.some(
             ({ name, value }) => name === "framework" && value === "pytest",
           ),
-        environmentsTested: ["Windows", "macOS", "Linux"],
+        environmentsTested: ["windows", "macos", "linux"],
       },
     ],
   },

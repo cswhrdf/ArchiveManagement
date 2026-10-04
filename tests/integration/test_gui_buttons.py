@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import close_child_windows, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
@@ -6442,14 +6442,14 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
 def _close_toplevels(app: Any) -> None:
     """关掉用例自己打开的附属窗口(主窗口留给夹具收尾).
 
-    Tk/CustomTkinter 在同一个进程里跨多个根窗口时会留全局状态: 用例开过的附属
-    窗口不关, 后续用例建窗口时就可能撞上 `image "pyimageN" doesn't exist` ——
-    以前这类报错会被当成"环境不可用"跳过, 现在会真的红(见 tests/tk_guard.py), 所以
-    用例自己开的窗口要自己关。
+    与 ``gui_support.close_child_windows`` 是同一件事 —— 夹具收尾时也会先做这一步,
+    这里留个薄封装, 供"中途想控制时机"的用例用: Toplevel 在 Tcl 侧挂在根窗口下、
+    在 Python 侧挂在锚点控件下, 先按 Python 的账把它们拆干净, 主窗口的销毁链就少一处
+    半路断掉的机会(断了会把根留在会话里, 后面用例贴图就报
+    ``image "pyimageN" does not exist`` —— 机制与查法见
+    ``.github/instructions/gui-tests-on-ci.instructions.md`` 第 11 条)。
     """
-    for child in list(app.winfo_children()):
-        if isinstance(child, ctk.CTkToplevel):
-            child.destroy()
+    close_child_windows(app)
 
 
 def test_home_page_covers_section_and_action_guards(

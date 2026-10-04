@@ -34,8 +34,9 @@
 
 用法(CI 汇总 job):
 ``uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux``
-(平台列表要与 CI 的矩阵和 ``allurerc.mjs`` 的 ``environmentsTested`` 一致; 不传时退回
-"结果里出现过的平台")
+(平台列表写**显示名**``Windows,macOS,Linux``, 与 CI 矩阵一致; ``allurerc.mjs`` 的
+``environmentsTested`` 是同一个集合, 但那边**写作环境 id** —— 规则拿环境 id 比清单,
+写显示名会整轮报"没测过", 见 docs/testing.md; 不传时退回"结果里出现过的平台")
 """
 
 from __future__ import annotations

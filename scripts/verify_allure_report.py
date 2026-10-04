@@ -9,6 +9,8 @@
 
 1. 必需资源: ``index.html`` / 单个 ``app-*.js`` / ``summary.json`` /
    ``test-results.json`` / ``widgets/**/statistic.json`` / ``widgets/**/tree.json``;
+   且报告目录里**不该**再嵌套一层报告(``awesome/``, 见 :func:`nested_report_problems`:
+   那是生成时输出目录已经存在的痕迹, 顶层那份是**上一次**的报告, Allure issue #691);
 2. 结果索引(``test-results.json`` 的 ``byId``)里每个结果都要有详情文件
    ``data/test-results/<id>.json``, 且条数与 ``allure-results`` 里的结果文件一致;
 3. 用例分组(``data/test-env-groups/*.json``)引用的结果 id 都能在索引里找到;
@@ -52,6 +54,9 @@ REQUIRED_FILES = ("index.html", "summary.json", "test-results.json")
 # 环境列表: 报告里有非 default 的环境, 才说明平台真的成了 Allure 3 的"环境"维度.
 ENVIRONMENTS_WIDGET = "environments.json"
 DEFAULT_ENVIRONMENT = "default"
+# 输出目录已存在时, ``allure generate`` 会把新报告写进这个子目录(顶层留成上一次那份).
+# 现场与复现见 :func:`nested_report_problems`; 它不该出现在我们的报告目录里.
+NESTED_REPORT_DIRECTORY = "awesome"
 
 # 报告里的 JSON 对象(只做按键取值, 具体字段仍逐个校验类型).
 JsonObject = dict[str, object]
@@ -432,7 +437,32 @@ def static_problems(report_dir: Path) -> list[str]:
     if len(bundles) != 1:
         problems.append(f"app-*.js 数量异常: {len(bundles)}(应为 1)")
     problems.extend(missing_widget_problems(report_dir))
+    problems.extend(nested_report_problems(report_dir))
     return problems
+
+
+def nested_report_problems(report_dir: Path) -> list[str]:
+    """报告目录里嵌套的另一份报告(说明生成时输出目录**已经存在**).
+
+    实测(Allure 3.20.0): 输出目录里已经有报告时, ``allure generate`` 把**新**报告写进
+    ``<输出>/awesome/``, 顶层那些文件留成上一次的 —— 于是 ``index.html``(以及我们打包
+    发布、解到 Pages 的那一份)是**旧**报告: 界面上看不到本次运行, 历史趋势也停在上一次,
+    而新报告静静躺在子目录里。用户报的"历史记录不可见"就是它(Allure issue #691, 维护者
+    给的做法也是"生成前先删掉报告目录")。本机复现: 同一个 ``--output`` 连跑两次,
+    第二次之后 ``report/awesome/index.html`` 才出现, 而 ``report/index.html`` 没变。
+
+    CI 上不该出现: 两个生成作业都在全新 runner 上跑, 而 ``allure-report/`` 在 .gitignore
+    里、检出时不存在(发布那一步也是先 ``rm -rf site`` 再解自己的打包). 所以这一条是
+    **防回归**: 将来若有人把报告目录解包进工作区、或 CLI 换了输出布局, 这里会直接报红,
+    而不是把一份"看起来正常、其实是旧的"报告发到站点上。
+    """
+    if not (report_dir / NESTED_REPORT_DIRECTORY / "index.html").is_file():
+        return []
+    return [
+        f"{report_dir} 里还有一份 {NESTED_REPORT_DIRECTORY}/index.html: "
+        f"生成时输出目录已经存在(Allure issue #691) —— 顶层那份是上一次的报告。"
+        f"生成前先删掉输出目录(`rm -rf {report_dir.name}`), CI 上不该发生(全新 runner)"
+    ]
 
 
 def missing_widget_problems(report_dir: Path) -> list[str]:

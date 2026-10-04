@@ -1,9 +1,9 @@
 ---
-applyTo: "tests/integration/test_gui_*.py,tests/gui_support.py,tests/unit/test_ui_*.py,tests/unit/test_dialogs.py,src/archive_management/ui/home_page.py,src/archive_management/ui/dialogs.py,src/archive_management/ui/keyboard.py"
-description: "写或改 GUI 端到端用例(以及它们量到的那几处界面代码)时的实测坑: CI 上的窗口尺寸不由用例决定、字体度量会变、合成键盘事件走焦点窗口(焦点可能压根不在对话框里)、尺寸夹取要看请求高度并收敛、延后的布局任务要与控件一起撤、行/卡片会被重渲染销毁(等待之后必须重新取引用)、平台默认值(-topmost/尾随空行计高)必须显式写掉、父窗口还没落地时算出来的居中/相对位置是错的(冷启动首次打开). 遇到"本机绿、CI 红(尤其只有 Windows 或只有 Linux 红)"的布局/尺寸/文字截断/按键失败时先读这篇。"
+applyTo: "tests/integration/test_*.py,tests/gui_support.py,tests/unit/test_*.py,src/archive_management/ui/*.py"
+description: "写或改 GUI 端到端用例(以及它们量到的那几处界面代码)时的实测坑: CI 上的窗口尺寸不由用例决定、字体度量会变、合成键盘事件走焦点窗口(焦点可能压根不在对话框里)、尺寸夹取要看请求高度并收敛、延后的布局任务要与控件一起撤、行/卡片会被重渲染销毁(等待之后必须重新取引用)、平台默认值(-topmost/尾随空行计高)必须显式写掉、父窗口还没落地时算出来的居中/相对位置是错的(冷启动首次打开)、一个进程里只能有一个 Tk 根(没拆干净的根会让后面所有用例贴图报 image \"pyimageN\" does not exist, 而收尾断裂本身要按失败处理、不只记一笔). 遇到"本机绿、CI 红(尤其只有 Windows 或只有 Linux 红)"的布局/尺寸/文字截断/按键失败时先读这篇。"
 ---
 
-# GUI 端到端用例在 CI 上: 十一条实测出来的坑与写法
+# GUI 端到端用例在 CI 上: 十二条实测出来的坑与写法
 
 本仓库的 GUI 用例跑在真 Tk 上(本地 Windows、CI 的 ubuntu(xvfb) + windows runner), 下面每条都是
 **实测踩过**的: 失败形态都是"本机全绿、CI 上某几台红", 而且红的那几条看起来像产品 bug, 其实是用例
@@ -299,7 +299,46 @@ def _widget_spot(view: TreeView, canvas_x: float, canvas_y: float) -> tuple[int,
 - 量“某个 item 在屏上的位置”要在**同一次换算**里取: 先 `canvasx(0)` 再减，别一半用控件坐标一半用
   画面坐标去凑。
 
-## 11. 收工前的自检清单
+## 11. 一个进程里只能有一个 Tk 根: 留下的根会让后面**每一条**用例贴不上图
+
+- **症状**: 某条用例报 `TclError: image "pyimage1" does not exist`, 报在建窗口贴图那一步
+  (`CTkLabel.__init__` → `configure(image=…)`); 把它单独跑一遍**反而绿**。
+- **根因(两层, 缺一不成事故)**:
+  1. **上一个窗口没被拆干净**: `tkinter.Tk.destroy()` 是
+     `for c in list(self.children.values()): c.destroy()` —— 任意一个子控件抛 `TclError`, 整条链
+     就停在那里, 根窗口与 `tkinter._default_root` 一起留在会话里(2026-10-04 的现场: 根是**上一条**
+     用例的 `ArchiveApp`, 它的 `_poll_job` 已置空 ⇒ `destroy()` 跑过, 但根还在);
+  2. **图片不带 master**: `CTkImage` 贴图调 `ImageTk.PhotoImage(图片)`, 没有 master 就落到
+     `_default_root` 那个解释器里; 而标签属于新窗口的解释器 ⇒ "图片不存在"。
+- **查法(下次别再从用例顺序猜)**: 失败结果里挂着 coredumpy 现场 dump。用
+  `Coredumpy.load_data_from_path`(**不是 `load()`** —— 那个会直接进 pdb)读出来, 顺着出错帧往上看
+  `f_globals`, `tkinter` 模块里的 `_default_root` 就直接告诉你根是谁、长什么样; 拿它的状态
+  (当前页面/视图/后端)与用例对, 就能认出是哪条用例留下的。
+- **写法**: 图片一律走 `ui.rendering.host_image(宿主控件, …)`(它显式 `master=`), 别用库原样的
+  `ctk.CTkImage(...)` —— 单测 `test_only_the_rendering_layer_builds_images` 守着这条。
+  收尾交给 `gui_support.close_gui_apps`: 它会**验证**根真的没了, 没拆干净就逐个拆子控件补救、记进报告
+  (附件 + 参数 + stderr), 然后**把这条用例判红**(`pytest.fail`, 落在 teardown 阶段, 退出码 1)。判据是
+  **"根还在不在"**, 不是"`destroy()` 抛没抛异常" —— 用例自己提前销毁过窗口时, 收尾的第二次 `destroy()`
+  必然抛 `bad window path name`, 拿异常当判据会一次报出几十条假 ERROR(实测 71 条)。这条口径是刻意选
+  的: 只记不红时, "本机绿、CI 偶发红、而且永远只能看到受害者"会一直演下去 —— 那次事故的代价就是整条
+  Linux 分片 0 多了一条 broken。也**别把它写成 `pytest.skip`**: 跳过的前提是"这条用例量不到东西", 而这里
+  量到了(它只是留下了一个活根)。
+- **还有一条更隐蔽的来源: 建窗口那一次失败(抖动)留下的"半成品根"。** `Tk.__init__` 一上来就把
+  `tkinter._default_root` 指向自己, 而构造函数可能在后一步抛错 —— `gui_app` 拿到的是异常、不是对象, 那个
+  半成品就再没人销毁它, 于是一直占着默认根这个位置: **之后每条用例建起来的窗口都不是默认根**, 不带 master
+  的图片会落到那个不能用的解释器里(与上面同一条机理)。`gui_app` 重试前会按差值把它收掉,
+  `close_gui_apps` 收尾时也最后检查一次这个位置(收掉 + 留证, **不判红**: 它无法归因给当前用例, 判红会让整批
+  连锁变红、把真正那条盖掉)。写守卫时注意两点:
+  1. 判据要写成"**默认根这个位置现在安全吗**"(空着, 或指的是一个能用的根), 别写成"它必须是 `None`" ——
+     后者会让守卫的成败取决于用例的执行顺序;
+  2. **守卫自己不要 `tkinter.Tk()` 造根**: 那会绕开 `gui_app` 的重试, 撞上上面那条 Tk 抖动时当场红
+     (实测 10 次里红 1~2 次, 报的就是 `Can't find a usable init.tcl`)。要摆出"别人的根"就用
+     `gui_app(...)` 建、再 `gui_support.forget_app(app)` 把登记摘掉 —— 既绕开了重试, 又**正好**是
+     "这个根没人负责"的形态。
+     (顺带: 拆别人的根时那一下 `destroy .` 也会偶发打不中, 收尾因此试两次并把异常原文记进报告
+     —— 静默的"没收掉"比报警更难查。)
+
+## 12. 收工前的自检清单
 
 1. 这条断言的期望值是从**真环境**量出来的, 还是写死的常量?
 2. 它有没有前提? 前提是**强制断言**且用**拉丁字符**表达吗?
@@ -313,3 +352,9 @@ def _widget_spot(view: TreeView, canvas_x: float, canvas_y: float) -> tuple[int,
 10. 用到平台**默认值**了吗(`-topmost`、尾随空行计高、窗口能设多大)? 要不要显式写掉它?
 11. 位置/居中是在父窗口**已经落地**之后算的吗? 那一刻它可能还是布局前的占位尺寸。
 12. 往画布上送坐标时, 送的是**控件坐标**吗(画面坐标要减掉滚动偏移)?
+13. 这条用例结束时**会话里还有别的 Tk 根吗**(`tkinter._default_root`)? 有的话, 它会不会让这条用例
+    的图片建到别的解释器里去?
+14. 收尾时留下的脏状态(没拆掉的根、没撤的 `after`、没关的附属窗口)最终**判给谁**? 补救之后这条用例
+    还是绿的吗? 如果是, 它就会变成下一条用例的"偶发红"。
+15. 这条用例(或它走的夹具)里有"建窗口失败后重试"的路径吗? 失败那一次留下的根要收掉, 否则之后每条
+    用例建起来的窗口都**不是**默认根 —— 症状会在很久之后的另一条用例上出现。

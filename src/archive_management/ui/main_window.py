@@ -107,6 +107,7 @@ from archive_management.ui.models import (
 )
 from archive_management.ui.palette import DEFAULT_THEME, Palette
 from archive_management.ui.pickers import pick_file, pick_save_file
+from archive_management.ui.rendering import host_image
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
 from archive_management.ui.tree_view import TreeView
@@ -1562,7 +1563,7 @@ class ArchiveApp(ctk.CTk):
         except (OSError, ValueError) as exc:
             logger.warning("图标无法解码(%s): %s", path, exc)
             return None
-        return ctk.CTkImage(light_image=loaded, size=(84, 84))
+        return host_image(self, light_image=loaded, size=(84, 84))
 
     def _render_toolbar_header(self, detail: GameDetail) -> None:
         """写头部标题/副标题(按控件实际宽度裁剪, 见 _refit_detail_names)."""

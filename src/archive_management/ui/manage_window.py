@@ -32,6 +32,7 @@ from archive_management.ui.metrics import RADIUS_LG, RADIUS_MD
 from archive_management.ui.models import LocationItem, size_label
 from archive_management.ui.palette import Palette
 from archive_management.ui.pickers import pick_directory, pick_file
+from archive_management.ui.rendering import host_image
 from archive_management.ui.schedule_window import edit_schedule
 from archive_management.ui.widgets import (
     ButtonStyle,
@@ -476,7 +477,9 @@ class ManageGameWindow:
         except (OSError, ValueError) as exc:
             logger.warning("预览图无法解码(%s): %s", path, exc)
         else:
-            picture = ctk.CTkImage(light_image=loaded, size=_ARTWORK_PREVIEW_SIZE[kind])
+            picture = host_image(
+                self._window, light_image=loaded, size=_ARTWORK_PREVIEW_SIZE[kind]
+            )
         self._artwork_images[key] = picture
         return picture
 
