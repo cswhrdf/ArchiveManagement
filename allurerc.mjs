@@ -36,6 +36,11 @@ import { existsSync } from "node:fs";
 const failureDiagnostics = existsSync("allure-failure-diagnostics.md")
   ? ["allure-failure-diagnostics.md"]
   : [];
+// 历史修复记录同理: 只在 scripts/repair_allure_history.py **真的动了历史文件**时才生成 ——
+// 每轮都挂一份“什么都没修”的记录只会让人以为趋势一直在出问题。
+const historyRepair = existsSync("allure-history-repair.md")
+  ? ["allure-history-repair.md"]
+  : [];
 
 export default {
   // 报告标题(显示在报告头部与 <title> 上). 不写就是通用的 "Allure Report"。
@@ -95,6 +100,7 @@ export default {
     "allure-run-ledger.md",
     "allure-coverage-exclusions.md",
     ...failureDiagnostics,
+    ...historyRepair,
   ],
   // 失败归类(Categories): 把"失败/损坏"的结果按**错误文本**分门别类, 与默认的
   // Product errors / Test errors 并存 —— 被某条规则命中的结果会被它"消费"掉, 不再落回默认分类。

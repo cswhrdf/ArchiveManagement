@@ -797,6 +797,18 @@ jobs:
           mkdir -p .allure
           cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
 
+      - name: Repair previous Allure history
+        # 报告的“趋势”是按身份键**精确匹配**的(见 allurerc.mjs 的 historyPath), 而 CLI
+        # 用的是**动态版本** —— 键的形状跟着版本/配置变就会把全部旧历史变成“接不上”:
+        # 2026-10-05 实测采用 environments 那轮之后, 7231 条结果里 7226 条历史长度为 1,
+        # 而那一条还是本次运行自己重复追加的快照(看起来就是“历史全丢了”)。
+        # 这一步去重同一轮的重复快照、把旧形状的键按唯一前缀补成当前形状; 实在补不出来
+        # 时清空历史重新开始 —— 无论哪种都会写一份记录挂进首页「全局附件」, 不许静默发生。
+        # `--allure-version` 记的是**这一轮实际用的版本**, 下次形状再变能一眼对上是哪次更新。
+        if: always()
+        shell: bash
+        run: uv run python scripts/repair_allure_history.py --allure-version "$(allure --version)"
+
       - name: Generate Allure report
         # 历史设置(historyPath/appendHistory/historyLimit)与环境映射都在仓库根的
         # allurerc.mjs 里, CLI 会从工作目录自动读取 —— 不再临时写 `.allure/allurerc.json`
@@ -1168,6 +1180,13 @@ jobs:
         run: |
           mkdir -p .allure
           cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
+
+      - name: Repair previous Allure history
+        # 与逐平台作业同一步的理由(见 pytest 作业里那段说明): 历史键的形状一变, 旧点就
+        # 全部接不上; 这一步去重/重键, 实在不行就重置, 并把结论写进首页「全局附件」。
+        if: always()
+        shell: bash
+        run: uv run python scripts/repair_allure_history.py --allure-version "$(allure --version)"
 
       - name: Validate the quality gate
         # 规则在仓库根的 allurerc.mjs 里(唯一来源, 这里不重复传参)。

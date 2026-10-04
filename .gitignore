@@ -65,6 +65,7 @@ coverage-data-*/
 allure-run-ledger.md
 allure-coverage-exclusions.md
 allure-failure-diagnostics.md
+allure-history-repair.md
 performance-results.json
 performance-results.csv
 security-results.json
