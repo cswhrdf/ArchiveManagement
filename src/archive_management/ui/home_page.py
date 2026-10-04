@@ -561,6 +561,14 @@ class HomePage:
         # 宽度变化时重排海报: 启动首屏渲染时控件尺寸还没测量出来
         # (``winfo_width()`` 只有 1), 算出的列数会偏少 —— 4 款游戏会被排成两行。
         self._list_box.bind("<Configure>", self._on_list_box_resize)
+        # **滚动条出现/消失只改内层画布的宽度**, 帧本身的宽度不变(它与滚动条同在一个 grid
+        # 里) —— 只盯帧的话, 表头对齐就永远停在"差一个滚动条宽度"上。实测 CI 的 Windows
+        # runner: 窗口被夹到最小高度 ⇒ 列表需要滚动 ⇒ 六列整体差 22px(就是滚动条宽度;
+        # 旧滚动条宽度是 16px, 症状一模一样), 而本机窗口更高、根本不显示滚动条, 所以只在
+        # CI 红。表头对齐与名称重裁都是按内容宽度算的, 这里连画布一起盯才跟得上。
+        parent_canvas = getattr(self._list_box, "_parent_canvas", None)
+        if parent_canvas is not None:
+            parent_canvas.bind("<Configure>", self._on_list_box_resize, add="+")
 
     def _build_footer(self) -> None:
         """底栏: 左侧是计数, 右下角是"每页条数 + 翻页"控件."""
@@ -1111,6 +1119,13 @@ class HomePage:
                 self._relayout_posters(event.width)
             return
         if self._rows:
+            # 几何真的变了 ⇒ 表头对齐**重新给满轮数**。``_ALIGN_MAX_ATTEMPTS`` 是防打转的,
+            # 但它是"控件一辈子"的计数, 只有某一轮量到完全对齐才归零 —— 启动期那几轮(列表
+            # 还没显示滚动条、行尺寸还在测)会把轮数用光并停在"右侧内边距被夹到 0"的状态,
+            # 之后再来的任何变化都被"已经放弃"挡掉, **永久**差一个滚动条宽度。实测 CI 的
+            # Windows runner: 滚动条出现后表头一直差 40px(= 2x滚动条宽度), 本机窗口更高、
+            # 不显示滚动条所以一直绿。换了几何就该重新试, 打转的保护仍在(见 _align_table_header)。
+            self._align_attempts = 0
             self._schedule_list_sync()
 
     def _relayout_posters(self, width: int) -> None:

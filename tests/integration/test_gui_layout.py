@@ -944,6 +944,91 @@ def test_long_game_name_does_not_widen_the_list_rows() -> None:
     assert 0 <= gap <= _ROW_RIGHT_SLACK, f"固定列块没有贴右: 右侧还空着 {gap}px"
 
 
+def _crowded_app() -> ArchiveApp:
+    """构造"列表一定装不下"的主窗口(把演示数据复制很多行, 见 :class:`_CrowdedService`)."""
+    app = ArchiveApp(
+        _CrowdedService(delay=0, name_text=_LONG_NAME),
+        title="长名称测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+# 行数要多到"任何窗口高度都装不下": 滚动条是按"内容装不下"显示的, 而它在哪台机器上出现
+# 取决于字体度量(CI 的行更高) —— 用例自己把行数堆上去, 才不靠那点运气.
+_CROWDED_REPEATS = 8
+
+
+class _CrowdedService(_LongNameService):
+    """演示数据复制 ``_CROWDED_REPEATS`` 份(每份一行, game_id 加后缀区分).
+
+    只加行数, 不动布局参数: 守卫要踩的是"滚动条出现 ⇒ 内层画布变窄"那条路。
+    """
+
+    def _rename(self, board: HomeBoard) -> HomeBoard:
+        """在父类的改名基础上把行数堆起来(``games`` 是元组)."""
+        crowded = super()._rename(board)
+        copies = [
+            replace(game, game_id=f"{game.game_id}-{copy}")
+            for copy in range(_CROWDED_REPEATS)
+            for game in crowded.games
+        ]
+        return replace(crowded, games=tuple(copies))
+
+
+def test_the_header_follows_the_scrollbar_in_the_smallest_window() -> None:
+    """最小窗口下列表需要滚动 ⇒ 滚动条出现, 表头必须跟着重排.
+
+    出处(2026-10-05 CI, Windows): ``test_long_game_name_does_not_widen_the_list_rows``
+    在 Windows runner 上永久差 22px —— **六列整体差同一个值, 就是滚动条宽度**(旧滚动条
+    是 16px, 现场注释里记过同样的症状)。根因: 滚动条是"内容装不下"时才显示的, 它出现
+    只改**内层画布**的宽度, 而帧本身(与滚动条同在一个 grid 里)宽度不变 ⇒ 没有 Configure
+    事件 ⇒ 已经算好的表头内边距不会跟着改。本机窗口更高、根本不显示滚动条, 所以只在 CI 红。
+
+    判据分两段, 缺一不可: **先确认滚动条真的显示了**(否则这条守卫会静默地什么也没验 ——
+    见 gui-tests 指令里的"别让证据静默消失"), 再要求对齐不变量成立。
+    """
+    app = gui_app(_crowded_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    # CI 的窗口被窗口管理器压到最小尺寸; 这里主动设成同一尺寸(逻辑像素, 与 geometry 一致).
+    app.geometry(f"{WINDOW_MIN_SIZE[0]}x{WINDOW_MIN_SIZE[1]}")
+    _settle_layout(app)
+
+    assert _wait_for_the_scrollbar(app, page), (
+        "这么长的列表应当需要滚动条(这条守卫要踩的就是'滚动条出现改画布宽度'那条路)"
+    )
+    # 滚动条出现之后**不再有任何帧级 Configure**, 表头只能靠自己跟上.
+    places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
+    assert places, "列表没建好"
+    assert header == places[0], f"表头没有跟着滚动条重排: {header} != {places[0]}"
+    assert name_aligned, "名称列头与名称文本不在同一个 x 上"
+    gap = _wait_for_the_fixed_block_to_hug_the_right(app, page)
+    assert 0 <= gap <= _ROW_RIGHT_SLACK, f"固定列块没有贴右: 右侧还空着 {gap}px"
+
+
+def _list_scrollbar(parent: Any) -> Any:
+    """列表的滚动条控件(CustomTkinter 把它挂在滚动区上, 名叫 ``_scrollbar``)."""
+    return getattr(parent._list_box, "_scrollbar", None)
+
+
+def _wait_for_the_scrollbar(app: Any, page: Any, *, timeout: float = 3.0) -> bool:
+    """等到列表的滚动条**真的显示出来**, 返回是否等到.
+
+    显示与否由 ``sync_scrollbar`` 按内容是否装得下决定, 是延后的(见 ``auto_scrollbar``):
+    同步的 ``winfo_ismapped()`` 读到的可能还是上一轮的结论。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _pump(app)
+        scrollbar = _list_scrollbar(page)
+        if scrollbar is not None and scrollbar.winfo_ismapped():
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def test_a_row_reference_goes_stale_after_a_rerender() -> None:
     """行在重渲染后失效 —— 用例必须重新取(这条钉住"TclError 为什么会出现在这里").
 
