@@ -2849,6 +2849,54 @@ def test_tkinter_check_still_fails_the_job_when_tcl_is_broken() -> None:
     assert repair_body.count("import tkinter") == 1, "修完必须复检一次"
 
 
+def test_macos_swaps_the_interpreter_to_dodge_tk_9() -> None:
+    """macOS 的解释器换成 python.org 构建(setup-python 再分发, 捆 Tcl/Tk 8.6).
+
+    2026-10-05 两轮实证: uv 托管的 python-build-standalone 在 macOS 捆 **Tcl/Tk 9.0**,
+    UI 分片死在 9.0 的 Aqua 位图绘制 use-after-free 上(``-[NSCGSContext dealloc]`` 一族),
+    而且"退出码闸门 + 原地重跑"救不了 —— 重跑那次崩在同一处, faulthandler.log 里两条
+    ``Fatal Python error``、体积翻倍到 1.1 GiB。依赖层面的规避: python.org 官方构建捆
+    Tcl/Tk 8.6, 无此缺陷(actions/python-versions 在 macOS 上对 3.11+ 直接再分发
+    python.org 的 universal2 安装包)。三件套缺一不可: 只认系统解释器、真的装 python.org
+    构建、盯住 Tk 版本的断言步(镜像哪天回到 9.x 立刻红, 而不是等 UI 分段崩成一串)。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    block = re.search(r"\n  pytest:\n(.*?)\n  \w", workflow, re.DOTALL)
+    assert block is not None, "ci.yml 里找不到 pytest job"
+    job = block.group(1)
+
+    # 1) macOS 片只认机器上已装好的解释器: uv 不得再下载 standalone(它捆 Tk 9.0)。
+    assert (
+        "UV_PYTHON_PREFERENCE: "
+        "${{ matrix.os == 'macos-latest' && 'only-system' || 'managed' }}" in job
+    ), "macOS 片要 only-system, 其它平台保持 uv 默认的 managed"
+
+    # 2) 解释器来自 setup-python(macOS 上对 3.11+ 再分发 python.org 构建)。
+    setup = job.split(
+        "name: Set up Python (macOS, python.org build with Tcl/Tk 8.6)", 1
+    )[1].split("- name:", 1)[0]
+    assert "actions/setup-python@v7" in setup
+    assert 'python-version: "3.12"' in setup
+    assert "if: runner.os == 'macOS'" in setup
+
+    # 3) Tk 版本的"眼睛": 断言步必须真的检查主版本, 否则规避只是自我感觉良好。
+    guard = job.split("name: Assert Tcl/Tk stays on the 8.6 series (macOS)", 1)[1]
+    guard = guard.split("- name:", 1)[0]
+    assert "TkVersion < 9" in guard
+
+    # 4) "重装 uv 解释器"这味药对 macOS 不存在(它的解释器不是 uv 装的): uv 安装步与
+    #    修复步都要排除 macOS, 失败由 macOS 专属步骤响亮报错 —— 不许静默滑过去。
+    uv_setup = job.split("name: Set up Python (uv-managed, Linux/Windows)", 1)[1]
+    assert "if: runner.os != 'macOS'" in uv_setup.split("- name:", 1)[0]
+    repair_head = job.split("name: Repair the interpreter and re-check Tkinter", 1)[1]
+    assert "runner.os != 'macOS'" in repair_head.split("run:", 1)[0]
+    loud = job.split(
+        "name: Fail loudly if Tkinter is broken on the python.org build", 1
+    )[1].split("- name:", 1)[0]
+    assert "if: steps.tkinter.outcome == 'failure' && runner.os == 'macOS'" in loud
+    assert "exit 1" in loud, "失败要说出来, 别让 GUI 用例静默 skip 成覆盖率谜团"
+
+
 def test_quality_output_reaches_the_report_without_control_sequences(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -512,14 +512,16 @@ def test_huge_crash_reports_are_truncated_in_the_summary(tmp_path: Path) -> None
     assert len(text) < module.INLINE_LIMIT * 2
 
 
-def test_truncated_excerpts_point_at_a_downloadable_artifact(
+def test_truncated_excerpts_name_the_artifact_and_keep_the_link_outside_the_fence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """截断标记要写明**哪份** artifact、给**点得开**的链接: "见 artifact"三个字不够用.
+    """截断标记点名**哪份** artifact; 链接只在围栏外, 且用 markdown 语法.
 
-    2026-10-05 的 macOS 分片崩溃后, 报告附件里的现场只剩"... (已截断, 全文 98.2 KiB 见
-    artifact)" —— 是哪一份、去哪下都得读者自己猜。链接给到本次运行的 artifact 列表页:
-    收集步跑在上传之前, 单个 artifact 的编号那时还不存在, 而列表页地址是稳定的。
+    2026-10-05 的三轮读者反馈: ①"... (已截断, 全文 98.2 KiB 见 artifact)"没说是哪份、
+    去哪下; ②补上链接后它被嵌进 ``~~~`` 代码围栏里 —— 围栏里的 URL 点不了, 还把栈文本
+    斜插成两半; ③链接本身是往运行地址后拼 ``artifacts``, 那个后缀页打不开(产物其实挂在
+    运行页自己的 Artifacts 区)。所以规矩是: 围栏内只有 artifact 名, "排查提示"末条用
+    ``[文本](地址)`` 指向**本次运行页面**。
     """
     module = _load_script("collect_job_diagnostics")
     monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
@@ -539,12 +541,14 @@ def test_truncated_excerpts_point_at_a_downloadable_artifact(
     )
 
     assert "已截断" in text
-    assert "`crash-dumps-macos-latest-0`" in text, "要点名承载全文的那份 artifact"
+    fence = text.split("~~~")[1]
+    assert "见 artifact `crash-dumps-macos-latest-0`" in fence, "围栏内要点名 artifact"
+    assert "https://" not in fence, "代码围栏里不许嵌链接: 点不了, 还把栈文本截成两半"
     assert (
-        "https://github.com/cswhrdf/ArchiveManagement"
-        "/actions/runs/37270928260/artifacts" in text
-    ), "链接要到本次运行的 artifact 列表页"
-    assert "见 artifact `crash-dumps-macos-latest-0`" in text or "见 artifact" in text
+        "[本次运行页面](https://github.com/cswhrdf/ArchiveManagement"
+        "/actions/runs/37270928260)" in text
+    ), "排查提示末条用 markdown 链接指向本次运行页面"
+    assert "/artifacts" not in text, "产物挂在运行页的 Artifacts 区, 拼后缀的地址打不开"
 
 
 def test_the_artifact_hint_degrades_without_the_ci_environment(
@@ -564,9 +568,8 @@ def test_the_artifact_hint_degrades_without_the_ci_environment(
 
     assert "已截断" in text
     assert "见 artifact `crash-dumps-x-0`" in text, "没有 CI 变量时仍然要点名 artifact"
-    assert "见 artifact `crash-dumps-x-0`:" not in text, (
-        "没有 run 变量时不许在截断标记里编一个链接出来"
-    )
+    assert "https://" not in text.split("~~~")[1], "围栏内永远不嵌链接"
+    assert "[本次运行页面]" not in text, "没有 run 变量时不许编一个链接出来"
 
 
 def test_the_fatal_error_headline_is_rescued_from_a_huge_log(tmp_path: Path) -> None:

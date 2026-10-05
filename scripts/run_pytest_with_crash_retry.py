@@ -1,10 +1,15 @@
 r"""把"死于原生崩溃"的测试进程原地重跑一次 —— 只认崩溃, 绝不碰普通失败.
 
 背景(2026-10-05, run 37270928260): macOS 26.6.2 arm64 + Tcl/Tk 9.0 上, UI 分片死在 Tk
-Aqua 位图绘制的 use-after-free(``EXC_BAD_ACCESS @0x72``, 崩在
-``-[NSBitmapGraphicsContext dealloc]``, 排查记录见 ``docs/testing.md``)。这是原生层的
-缺陷, 同一用例在 Linux/Windows 都过; 但 pytest 进程一死, 崩溃点之后的用例全部没有
-结果, 分片报缺。上游没修之前, 唯一务实的缓解是"崩了就再跑一次"。
+Aqua 位图绘制的 use-after-free(``EXC_BAD_ACCESS @0x70``, 崩在 ``-[NSCGSContext
+dealloc]`` 一族, 排查记录见 ``docs/testing.md``)。这是原生层的缺陷, 同一用例在
+Linux/Windows 都过; 但 pytest 进程一死, 崩溃点之后的用例全部没有结果, 分片报缺。
+
+定位更新(同日第二轮实证): 那次崩溃是**确定性**的 —— 部署重试后重跑的那一轮又崩在
+同一处, ``faulthandler.log`` 里出现两条 ``Fatal Python error``、体积翻倍到 1.1 GiB。
+所以本包装**救不了它**; 根治靠依赖层规避(ci.yml 的 macOS 片改用 setup-python 装的
+python.org 构建, 捆 Tcl/Tk 8.6)。这层包装保留下来兜**偶发**崩溃: 退出码闸门保证普通
+失败永远不会被重试, 留着它不亏。
 
 为什么敢说它**不影响测试准确率**:
 

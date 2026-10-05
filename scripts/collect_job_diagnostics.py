@@ -398,44 +398,54 @@ def collect_crash_reports(
     return copied
 
 
-def run_artifacts_url() -> str:
-    """本次运行的 artifact 列表页(CI 变量不全时给空串, 本地跑也不会出错).
+def run_page_url() -> str:
+    """本次运行的页面(CI 变量不全时给空串, 本地跑也不会出错).
 
-    为什么链接到列表页而不是单个 artifact: 收集步跑在上传**之前**, 那时单个 artifact
-    还没有编号(上传后才分配); 而 ``<run>/artifacts`` 这个地址是稳定的, 点进去就是本轮
-    全部产物 —— 名字已经由 ``--full-copy-at`` 写给了读者, 在列表里按名取即可。
+    为什么链到运行页而不是往地址后拼 ``artifacts``: 产物就挂在本页的 "Artifacts" 区,
+    而 ``<run>/artifacts`` 这个后缀地址在现在的 Actions 界面里打不开(2026-10-05 报告
+    读者实测, 点过去是一张失败页)。收集步跑在上传**之前**, 那时单个产物还没有编号
+    (上传后才分配), 能给稳定地址的只有运行页本身 —— 产物名已由 ``--full-copy-at``
+    写给读者, 在那个区里按名取即可。
     """
     server = os.environ.get("GITHUB_SERVER_URL", "")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     run_id = os.environ.get("GITHUB_RUN_ID", "")
     if not (server and repository and run_id):
         return ""
-    return f"{server}/{repository}/actions/runs/{run_id}/artifacts"
+    return f"{server}/{repository}/actions/runs/{run_id}"
 
 
 def full_copy_hint(names: Sequence[str]) -> str:
-    """截断标记里"全文在哪"的半句: artifact 名 + 本次运行的 artifact 列表页链接.
+    """截断标记里"全文在哪"的半句: 只点名 artifact, **不**放链接.
 
-    2026-10-05 的教训: 只写"见 artifact"三个字, 读者得自己猜是哪一份、去哪下 —— 报告
-    附件里那份 98.2 KiB 的 ``.ips`` 就这么被"截断在半路"。名字由工作流传进来
-    (``--full-copy-at``), 链接从环境变量拼, 两样都在才最省事。
+    名字必须写(2026-10-05 的教训: 只写"见 artifact"三个字, 读者得自己猜是哪一份);
+    但链接不进这里 —— 这半句最终落在 ``~~~`` 代码围栏**内**(见 :func:`excerpt`),
+    围栏里的 URL 点不了, 一长串 ``github.com`` 还把栈文本斜插成两半, 妨碍读栈
+    (2026-10-05 报告读者的第二条反馈)。下载入口统一放"排查提示"末条: 那里在围栏外,
+    用 markdown 链接语法指向本次运行页面(见 :func:`build_summary`)。
     """
     if not names:
         return "见 artifact"
     listed = ", ".join(f"`{name}`" for name in names)
-    url = run_artifacts_url()
-    if not url:
-        return f"见 artifact {listed}"
-    return f"见 artifact {listed}: {url}"
+    return f"见 artifact {listed}"
 
 
 def environment_lines() -> list[str]:
-    """收集能说明"在哪跑的"的几行(CI 变量缺失时留空, 本地跑也不会出错)."""
+    """收集能说明"在哪跑的"的几行(CI 变量缺失时留空, 本地跑也不会出错).
+
+    运行链接与 :func:`run_page_url` 同源: 正文里的链接一律用 markdown 语法
+    (``[文本](地址)``), 不裸贴 URL —— 摘要在报告与运行摘要页里都按 markdown 渲染,
+    裸 URL 只会让正文变长而不多出任何能力。
+    """
+    run_url = run_page_url()
+    run_line = (
+        f"- 运行: [第 {os.environ.get('GITHUB_RUN_ATTEMPT', '-')} 次尝试]({run_url})"
+        if run_url
+        else "- 运行: (本地)"
+    )
     return [
         f"- 作业: {os.environ.get('GITHUB_JOB', '(本地)')}",
-        f"- 运行: {os.environ.get('GITHUB_SERVER_URL', '')}/"
-        f"{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/"
-        f"{os.environ.get('GITHUB_RUN_ID', '')} (第 {os.environ.get('GITHUB_RUN_ATTEMPT', '-')} 次)",
+        run_line,
         f"- 提交: {os.environ.get('GITHUB_SHA', '(本地)')}",
         f"- 平台: {platform.platform()}",
         f"- Python: {platform.python_version()}",
@@ -456,7 +466,8 @@ def build_summary(
 
     ``verdict`` 不传时不写判定节 —— 那样这一页只剩"清单 + 现场", 仍然是可读的。
     ``full_copy_at`` 是承载现场全文的 artifact 名单(工作流知道, 脚本不知道): 截断标记
-    与排查提示会点名它们并附上本次运行的 artifact 列表页链接。
+    与排查提示会点名它们; 下载入口只出现在排查提示末条 —— markdown 链接指向本次运行
+    页面(产物挂在运行页的 Artifacts 区), 围栏内的截断标记不嵌链接。
     """
     lines = [f"# 作业失败现场: {label}", ""]
     lines.extend(environment_lines())
@@ -522,11 +533,11 @@ def build_summary(
     )
     pointer: str
     listed = ", ".join(f"`{name}`" for name in full_copy_at)
-    url = run_artifacts_url()
+    url = run_page_url()
     if listed and url:
         pointer = (
             "- 本目录只收清单与文本现场, 不含大文件: 完整的 `.ips` 与 faulthandler 日志"
-            f" 见 artifact {listed}: {url}"
+            f" 见 artifact {listed} —— 下载入口在[本次运行页面]({url})的 Artifacts 区"
         )
     elif listed:
         pointer = (
@@ -578,8 +589,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="append",
         default=[],
         metavar="NAME",
-        help="承载现场全文的 artifact 名: 截断标记与排查提示里会点名它, 并附上本次运行"
-        " artifact 列表页的链接; 可重复传",
+        help="承载现场全文的 artifact 名: 截断标记与排查提示里会点名它, 排查提示另附"
+        " 指向本次运行页面的 markdown 链接(产物挂在运行页的 Artifacts 区); 可重复传",
     )
     parser.add_argument(
         "--expect",

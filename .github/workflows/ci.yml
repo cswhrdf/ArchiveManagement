@@ -327,6 +327,13 @@ jobs:
             shard: 0
             shards: 1
 
+    # macOS 片的解释器来源与其它平台不同(见下面 "Set up Python (macOS, ...)" 一步):
+    # 只认机器上已装好的解释器, 不许 uv 再去下载 standalone(它捆 Tcl/Tk 9.0, 崩溃记录
+    # 见那一步的注释)。其它平台显式写 "managed" —— 与 uv 默认一致, 只为让这个表达式在
+    # 两个分支里都有定义。
+    env:
+      UV_PYTHON_PREFERENCE: ${{ matrix.os == 'macos-latest' && 'only-system' || 'managed' }}
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -342,10 +349,48 @@ jobs:
           enable-cache: true
           save-cache: ${{ matrix.shard == 0 }}
 
-      - name: Set up Python
+      - name: Set up Python (uv-managed, Linux/Windows)
         # 先普通安装(命中 uv 的下载缓存时很快), **不**无条件 --reinstall: 那等于每次都
         # 重下解释器。Tcl 数据文件损坏的情况交给下面"自检失败才重装"那一步。
+        # macOS 不走这一步(见下一步): uv 托管的 python-build-standalone 在 macOS 捆绑
+        # Tcl/Tk 9.0, 其 Aqua 位图绘制路径上有确定性 use-after-free(2026-10-05 两轮 CI
+        # 实锤: 退出码闸门 + 原地重跑也救不了, 只是多攒一份 584 MiB 的 faulthandler 现场)。
+        if: runner.os != 'macOS'
         run: uv python install 3.12
+
+      - name: Set up Python (macOS, python.org build with Tcl/Tk 8.6)
+        # 2026-10-05: macOS 分片连续两轮死在同一个原生崩溃上(Python 栈停在
+        # test_gui_dropdown.py 的 update 泵, .ips 的原生栈是 -[NSCGSContext dealloc]
+        # 一族)。根因在解释器自带的 Tcl/Tk —— uv 托管构建捆 **Tcl/Tk 9.0**, UI 用例在
+        # 9.0 的 Aqua 路径上必崩; python.org 官方构建捆绑 **Tcl/Tk 8.6**, 无此缺陷。
+        # setup-python 在 macOS 上对 3.11+ 直接再分发 python.org 的 universal2 安装包
+        # (见 actions/python-versions 的 README), 所以这里装到的就是 python.org 3.12。
+        # 配合本作业 env 的 UV_PYTHON_PREFERENCE=only-system, 之后所有 uv 命令
+        # (sync/run)都只认这台机器上的解释器, 不会再悄悄下载回 standalone。
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Assert Tcl/Tk stays on the 8.6 series (macOS)
+        # 上面换构建的"眼睛": 规避只有在解释器真的带 Tk 8.6 时才成立。哪天镜像或上游
+        # 变了(macOS 又回到 9.x), 这一步立刻红 —— 而不是等 UI 分段崩成一串、每轮多攒
+        # 半个 GiB 的 faulthandler 现场。TkVersion 是 float(8.6 / 9.0)。用 PATH 上的
+        # python(setup-python 刚装好)而不经 uv —— 此时 .venv 还没建。
+        if: runner.os == 'macOS'
+        run: |
+          python - <<'PY'
+          import sys
+          import tkinter
+
+          print(sys.version)
+          print(f"Tcl/Tk {tkinter.TkVersion}")
+          assert tkinter.TkVersion < 9, (
+              "解释器又带回 Tcl/Tk 9.x 了: 见 docs/testing.md 的 macOS 原生崩溃"
+              "一节 —— 要么确认 setup-python 仍装的是 python.org 构建, 要么先确认"
+              "上游修好了 9.0 的 Aqua 缺陷, 再考虑撤掉这道闸"
+          )
+          PY
 
       - name: Install dependencies
         # 只装测试组(pytest / pytest-cov / allure-pytest / 超时插件 / 失败现场留证)**与
@@ -374,11 +419,24 @@ jobs:
         # 复用后出现过)时 tkinter 会报 "Can't find a usable init.tcl"(上游 astral-sh/uv#7036)。
         # 重建解释器比事后设 TCL_LIBRARY/TK_LIBRARY 更可靠, 也不影响其它平台; 重装后再 sync
         # 一次让虚拟环境跟着新解释器走, 然后立刻复检(这一步没有 continue-on-error)。
-        if: steps.tkinter.outcome == 'failure'
+        # macOS 不会走到这里(见上面 setup-python 那步与下面 macOS 专属的失败步):
+        # 那台机器上的解释器是 setup-python 装的 python.org 构建(自带 Tcl/Tk 8.6 框架),
+        # 不是 uv 的托管副本, "重装 uv 解释器"这味药不存在。
+        if: steps.tkinter.outcome == 'failure' && runner.os != 'macOS'
         run: |
           uv python install --reinstall 3.12
           uv sync --locked --no-default-groups --group test --group quality --no-install-project
           uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK after repair')"
+
+      - name: Fail loudly if Tkinter is broken on the python.org build (macOS)
+        # 上面修复步的镜像分支: macOS 的 tkinter 自检失败时没有"重装解释器"可修 ——
+        # 失败只能是镜像或 Tcl/Tk 8.6 框架层损坏。直接红掉并说清原因, 别让 GUI 用例
+        # 静默 skip、把问题变成"覆盖率门槛难定位的失败"(见上面 "Verify Tkinter
+        # works" 注释里 67.88% < 85% 的教训)。
+        if: steps.tkinter.outcome == 'failure' && runner.os == 'macOS'
+        run: |
+          echo "::error::python.org 构建(setup-python 安装)的 tkinter 起不来 —— 镜像或 Tcl/Tk 8.6 框架损坏, 不是 uv 缓存问题, 没有\"重装解释器\"这味药"
+          exit 1
 
       - name: Install Xvfb and a CJK font (Linux)
         if: runner.os == 'Linux'
