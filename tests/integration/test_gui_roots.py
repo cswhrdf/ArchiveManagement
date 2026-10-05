@@ -349,20 +349,29 @@ def test_a_real_backend_does_not_outlive_its_window(tmp_path: Path) -> None:
 
     出处(2026-10-05, PLAN §39.4): macOS 的崩溃现场里同时挂着约 30 个
     ``apscheduler..._main_loop`` 线程 —— ``BackgroundScheduler()`` 构造时就 ``start()``,
-    但释入口只有一个: 只有 ``_on_close()``(用户点关闭)会放掉它, 而界面用例的收尾走的是
+    但释放入口只有一个: 只有 ``_on_close()``(用户点关闭)会放掉它, 而界面用例的收尾走的是
     ``destroy()``。用例里有 40 多处是“建一个真后端 + 建窗口 + ``finally: app.destroy()``”,
     于是一个进程跑完整批用例就攒下几十个活线程, 而 Tk 解释器早被销毁 —— 从非主线程碰已销毁的
     Tk 是已知的段错误来源(它随后把整个分片带走, 那一批的结论与覆盖率一起丢, 只剩一份 dump)。
 
-    判据是确定性的(实测: 本机几十毫秒内就干净), 所以不靠“等它爆”: 真后端建起来就有一个调度
-    线程 ⇒ 收尾之后必须不剩; ``apscheduler`` 的线程名里带 ``APScheduler``, 不会与
-    pytest/uv/线程池的线程混淆。末尾再验一次幂等 —— 关窗与收尾本来就是两条路, 谁先走都行。
+    **判据是相对的**(2026-10-05 首次上 CI 实测): 第一版写成"进程里一个都不许剩", 三个平台各红
+    一次 —— 残留数分别是 **2 / 3 / 8**, 没有一次是 0。原因是同一个进程里还有别的用例建过真后端
+    (它们只建后端、不建窗口, 也就没有释放入口), 那些存量不该由这条用例来背。所以先量一次基线,
+    再要求"这条用例没有**多**攺下"—— 与 :func:`gui_support.close_gui_apps` 里那条守卫同一个
+    口径。产品侧真退化了(关窗不再释放)仍然会红: 那会让计数超出基线。
+
+    其余两条判据不变: 真后端建起来**必须多出**一个调度线程(否则这条量到的是空气);
+    ``apscheduler`` 的线程名里带 ``APScheduler``, 不会与 pytest/uv/线程池的线程混淆。
+    末尾再验一次幂等 —— 关窗与收尾本来就是两条路, 谁先走都行。
     """
     from archive_management.infrastructure.database import Database
     from archive_management.ui.sql_backend import SqlArchiveService
 
     db = Database(tmp_path / "guard.db")
     db.migrate()
+    # 基线取在**建后端之前**: 调度线程是 ``ApschedulerBackend`` 构造时 ``start()`` 出来的
+    # (窗口只是用它, 不新建), 收尾之后要回到这个数。顺带把"别人的存量"排在外面。
+    baseline = len(_scheduler_threads())
     service = SqlArchiveService(db, backup_root=tmp_path / "backups")
     # 故意不经 gui_app / close_gui_apps: 这条量的是**产品**的关窗路径。收尾那套是第二道防线,
     # 它会替产品把线程放掉 —— 走收尾的话, 产品侧退化了这条用例也看不出来。
@@ -370,16 +379,16 @@ def test_a_real_backend_does_not_outlive_its_window(tmp_path: Path) -> None:
     try:
         app.update_idletasks()
         app.update()
-        assert _scheduler_threads(), (
-            "真后端建起来就该有一个调度线程(否则这条守卫量到的是空气)"
+        assert len(_scheduler_threads()) > baseline, (
+            f"真后端建起来就该多出调度线程(否则这条守卫量到的是空气): 基线 {baseline}"
         )
     finally:
         app.destroy()
 
     deadline = time.monotonic() + 2.0
-    while _scheduler_threads() and time.monotonic() < deadline:
+    while len(_scheduler_threads()) > baseline and time.monotonic() < deadline:
         time.sleep(0.02)  # 产品侧的 shutdown 是 wait=False, 收尾是异步的
-    assert _scheduler_threads() == [], (
-        f"关窗之后不该剩下调度线程: {_scheduler_threads()}"
+    assert len(_scheduler_threads()) <= baseline, (
+        f"关窗之后不该多出调度线程: 之前 {baseline} 个, 现在 {_scheduler_threads()}"
     )
     app._release_background()  # 幂等: 已经释放过再调一次不该抛
