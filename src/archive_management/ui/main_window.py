@@ -447,6 +447,9 @@ class ArchiveApp(ctk.CTk):
         self.kit.apply(self.p)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        #: 销毁牌子: destroy() 立起来, 延后任务(轮询/名称重裁)看到它就什么都不做 ——
+        #: 已经到点、被 Tk 取走的那个任务撤不掉, 只能靠它兜住(见 destroy 的说明)。
+        self._destroyed = False
         self._poll_job = self.after(100, self._poll_messages)
         if smoke_seconds is None:
             # 启动时补一次译名探测: 后台线程、只对当前语言缺条目的游戏联网(有缓存就
@@ -1646,6 +1649,8 @@ class ArchiveApp(ctk.CTk):
     def _refit_detail_names(self) -> None:
         """窗口宽度变化后按新宽度重裁详情页里的名称(延后合并成一次)."""
         self._refit_job = None
+        if self.__dict__.get("_destroyed", False):
+            return  # 与 _poll_messages 同一条理由: 到点的任务可能在被销毁后才轮到
         if self._page is AppPage.DETAIL:
             self._set_detail_names()
             self._fit_selected_text()
@@ -3006,11 +3011,18 @@ class ArchiveApp(ctk.CTk):
         输出落到 stderr, 在 CI 里会挂到**下一个用例**的 stderr 附件上掩盖真问题(实测报告
         里的 stderr 附件就是这么来的)。
 
+        **光撤不够, 还要先立一块牌子**: 已经到点、已被 Tk 取走的那个任务撤不掉
+        (实测: ``destroy()`` 之后仍有一次 ``_poll_messages`` 跑到
+        ``_fit_task_name`` → ``can't invoke "winfo" command: application has been destroyed``),
+        所以先把 ``_destroyed`` 置上 —— :meth:`_poll_messages` 与 :meth:`_refit_detail_names`
+        开头看到它就什么都不做, 也不再排下一个。
+
         任务 id 从 ``self.__dict__`` 里取而不是 ``getattr``: 构造中途失败时这些字段还没建好,
         而 Tk 控件的 ``__getattr__`` 会把未知名字转发给 ``self.tk``(连 ``tk`` 都还没有时
         会无限递归成 ``RecursionError``)。销毁函数自己不能因为"属性没建好"再抛一个异常,
         把真正的失败现场搅乱。
         """
+        self._destroyed = True
         self._cancel_poll_job()
         self._cancel_after_job("_refit_job")
         super().destroy()
@@ -3088,7 +3100,14 @@ class ArchiveApp(ctk.CTk):
         (2026-10-05 的报告: Linux 分片上 5 条这种报错落在
         ``test_default_view_is_branch_tree_and_hides_old_auto_backups`` 名下)。自己跑完的那种
         正常情形下这个 id 已经失效, 撤它是空操作。
+
+        **已被 Tk 取走的那个任务撤不掉**: :meth:`destroy` 会先立 ``_destroyed`` 牌子, 走到这里
+        就什么都不做 —— 否则它会在根已经销毁之后去碰控件, 抛
+        ``can't invoke "winfo" command: application has been destroyed``(实测报告里那条
+        ``Exception in Tkinter callback``), 那同样是挂在别人名下的噪声。
         """
+        if self.__dict__.get("_destroyed", False):
+            return
         self._cancel_poll_job()
         # 顺便把后台线程"寄存"的字体删掉: `tkinter.font.Font.__del__` 会调 Tcl, 而 Tcl
         # 只有主线程能安全调用 —— 后台 worker 触发 GC 时终结字体对象会直接段错误(见

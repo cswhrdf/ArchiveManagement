@@ -312,3 +312,26 @@ def test_a_manual_poll_does_not_orphan_the_next_poll() -> None:
     # 为什么不在这一层再量一次"stderr 里还有没有 invalid command name": 那种报错要等
     # **销毁之后**还有事件循环经过才会响, 而单条用例里量不到那一步(实测: 把产品侧修复撤掉,
     # 这条守卫仍然绿) —— 结构判据("任务表里多了一个")才是可靠的, 噪声本身只能靠整文件跑。
+
+
+def test_the_pump_does_nothing_after_the_window_is_destroyed() -> None:
+    """窗口销毁之后再轮到那两个延后任务时, 它们必须什么都不做.
+
+    出处(2026-10-05 整文件日志里的那条 ``Exception in Tkinter callback``): 轮询任务**已经到点、
+    被 Tk 取走**之后 ``destroy()`` 撤不掉它, 它随后跑到 ``_fit_task_name`` →
+    ``can't invoke "winfo" command: application has been destroyed`` —— 同一类噪声, 挂在别人名下。
+
+    判据是确定性的: 直接调那两个方法(销毁之后), 既不能抛, 也不能再排任务 —— 只靠"撤"是撤不掉
+    已经派发出去的那一个的, 所以销毁时要先立牌子(``_destroyed``), 它们看到就返回。
+    """
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    app.update_idletasks()
+    app.update()
+    close_gui_apps()
+
+    app._poll_messages()
+    app._refit_detail_names()
+
+    assert app.__dict__.get("_destroyed") is True, "销毁时要立牌子"
+    assert app.__dict__.get("_poll_job") is None, "销毁之后不该再排轮询任务"
+    assert app.__dict__.get("_refit_job") is None, "销毁之后不该再排重裁任务"
