@@ -1531,26 +1531,39 @@ def crash_platform(owner: str, summary: Path) -> str:
 def crash_scenes(directory: Path) -> list[CrashScene]:
     """找出"有兜底现场"的作业(目录不存在时返回空表).
 
-    **两种目录结构都要认**, 而不是只认一种:
+    **三种目录结构都要认**, 而不是只认一种:
 
     - ``<artifact 名>/summary.md``: ``actions/upload-artifact`` 传 ``path: job-diagnostics/``
       时, artifact 里装的是那个目录的**内容**(``summary.md`` 在根), 下载到
-      ``failure-diagnostics/<artifact 名>/`` 之后就还是这一层 —— **这是 CI 里真实的布局**;
+      ``failure-diagnostics/<artifact 名>/`` 之后就还是这一层;
+    - ``summary.md`` 直接在目录根: **pattern 只匹配到一个 artifact 时**, ``download-artifact``
+      不建"以产物名命名的子目录", 把内容平铺进 ``path``(多个 artifact 才逐个建)。2026-10-05
+      实测: 那一轮只有 ``job-diagnostics-macos-latest-0`` 一份, 平铺之后脚本按上一条布局找,
+      一条都匹配不到 —— 汇总日志写着"没有兜底现场", 报告首页的"失败现场"附件永远不出现,
+      一声不吭。平铺时 artifact 名已经丢了, 节标题退回 ``verdict.json`` 里的作业标签;
     - ``<artifact 名>/job-diagnostics/summary.md``: 上传时传的是父目录才会多出这一层。
 
-    为什么特意两种都收: 2026-10-04 的脚本只认后一种, 于是**永远匹配不到** —— 崩溃的作业
-    白上传, 报告里一条都没有, 而且一声不吭(用户 2026-10-05 报的正是这个); 而当时的守卫
-    也按同一种(错的)布局造的样本, 所以两边一起绿。两种都收 + 守卫按真实布局造样本, 就再
-    不会因为"上传路径换了一层"而静默失效。
+    为什么特意全部都收: 2026-10-04 的脚本只认最后一种, 于是**永远匹配不到**; 2026-10-05
+    修成只认第一种, 又被"单产物平铺"撞上。两次教训是同一句话: 目录布局由 CI 的上传/下载
+    行为决定, 脚本认不全一种布局, 兜底现场就**静默**消失。守卫(test_ci_diagnostics.py)按
+    每种布局都造样本, 再漏就不会两边一起绿。
     """
-    candidates = sorted(directory.glob("*/summary.md"))
+    candidates = sorted(directory.glob("summary.md"))
+    candidates += sorted(directory.glob("*/summary.md"))
     candidates += sorted(directory.glob("*/*/summary.md"))
     scenes: list[CrashScene] = []
     for path in candidates:
         if not _job_has_a_backstop_scene(path):
             continue
-        owner = path.relative_to(directory).parts[0]
         verdict = _verdict_of(path) or {}
+        relative = path.relative_to(directory)
+        # 平铺布局下没有子目录名(即 artifact 名)可用, 节标题退回作业标签 ——
+        # 崩溃的是哪个作业这件事, 标签说得一样清楚。
+        owner = (
+            relative.parts[0]
+            if len(relative.parts) > 1
+            else str(verdict.get("label") or directory.name)
+        )
         scenes.append(
             CrashScene(
                 owner=owner,

@@ -399,20 +399,45 @@ jobs:
           # shows_half_a_chip 两条红, 而 Windows 上绿)。
           sudo apt-get install -y xvfb fonts-noto-cjk
 
-      - name: Pytest with coverage (Linux)
+      # 用例分**两段**跑(2026-10-05 起): 先跑不开窗口的大部队(``-m "not ui"``), 再让 UI 用例
+      # (``-m "ui"``, 即所有真正开 Tk 窗口的用例)单独一个进程收尾。为什么: macOS 分片曾连续多轮
+      # 死在 Tk 的原生崩溃上(EXC_BREAKPOINT/SIGTRAP, 退出码 133) —— pytest 进程一死, 覆盖率
+      # (pytest-cov 要等会话**结束**才落盘)与崩溃点之后的所有用例结果全部陪葬, 那几轮连
+      # `.coverage.shard-0` 都不存在, 上传步报错、报告缺片。拆成两段后:
+      #   * UI 段再怎么原生崩溃, 丢的也只有 UI 自己那段 —— 前一段的覆盖率与结果**早已落盘**,
+      #     `if: always()` 的上传步照样拿得到;
+      #   * 两段共用同一个 COVERAGE_FILE, 第二段加 `--cov-append` 并进去 —— 崩掉时少掉的只是
+      #     它自己没写完的那部分;
+      #   * 分片键是"当次收集到的用例"(见 tests/sharding.py 与 conftest 的 _apply_shard),
+      #     两段的用例集合互补(一个 not ui、一个 ui), 各平台的片合起来仍是全集, 不重不漏。
+      # 第二段的条件带 `always() && !cancelled()`: 第一段有普通红(断言失败)时 UI 段照跑 ——
+      # 一半用例的失败不该吞掉另一半的结果; 整轮被取消则不再起新进程。
+      - name: Pytest with coverage, non-UI suite first (Linux)
         if: runner.os == 'Linux'
         env:
           # 每片写一份自己的覆盖率数据(合并放到 pytest-report 作业里)。
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
-        run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+        run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
-      - name: Pytest with coverage (Windows/macOS)
+      - name: Pytest with coverage, UI suite in its own process (Linux)
+        if: always() && !cancelled() && runner.os == 'Linux'
+        env:
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
+
+      - name: Pytest with coverage, non-UI suite first (Windows/macOS)
         if: runner.os != 'Linux'
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         # 单片覆盖率天生偏低, 所以这里关掉报告与门槛(--cov-report= / --cov-fail-under=0):
         # 门槛只在合并后的总覆盖率上判, 见 pytest-report 作业。
-        run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+        run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+
+      - name: Pytest with coverage, UI suite in its own process (Windows/macOS)
+        if: always() && !cancelled() && runner.os != 'Linux'
+        env:
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Upload shard Allure results
         # `if-no-files-found: error`: 这一片**没产出结果**时必须在这里响亮地失败。
@@ -439,6 +464,40 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 失败现场留证(见 tests/crash_capture.py): 用例失败的 coredumpy dump 已经挂在 Allure
+        # 附件里, 但**进程级崩溃**(SIGSEGV/SIGABRT/SIGTRAP) 挂不进 —— coredumpy 是 Python 层的
+        # 钩子, 进程被内核杀掉时它没机会跑, pytest-cov 也来不及落盘覆盖率。它挂不进结果, 却是
+        # 这一整套诊断**唯一**真正需要它的地方, 所以判定就看两件事: faulthandler 有没有栈
+        # (SIGTRAP 也已注册, 见 TRAPPED_SIGNALS)、`--expect` 的覆盖率文件在不在 —— 两段跑
+        # 之后覆盖率的"在"只能说明前一段落盘了, 崩溃迹象主要靠 faulthandler 的栈。
+        # 断言失败这类普通红不会被算成现场(覆盖率文件在、没有栈) —— 它们的证据在用例详情里,
+        # 上下两个步骤也就都不会把它们再抄一遍(2026-10-04 按用户的期望收紧)。
+        # **必须排在下面 "Upload crash dumps" 之前**(2026-10-05 的教训): macOS 的 ReportCrash
+        # 在进程死后几秒才异步落盘 `.ips`, 这一步带着 `--crash-report-wait` 把它等来、拷进
+        # `crash-dumps/` —— 排在上传之后等于拷给一个已经传完的目录: 那一轮的 crash-dumps
+        # artifact 里没有 `.ips`, 完整原生栈只剩 summary.md 里截断的 4000 字。
+        # 回显 faulthandler 日志是保留的老习惯: 排查时最顺手的地方仍然是运行日志。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "pytest (${{ matrix.os }}, 分片 ${{ matrix.shard }})" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results \
+            --expect .coverage.shard-${{ matrix.shard }} \
+            crash-dumps allure-results allure-results-quality-platform \
+            allure-manifest.json .coverage.shard-${{ matrix.shard }} coverage.xml \
+            --crash-reports-from "$HOME/Library/Logs/DiagnosticReports" \
+            --crash-report-wait 20
+          for log in crash-dumps/*.log; do
+            [ -f "$log" ] || continue
+            echo "===== $log ====="
+            cat "$log"
+          done
+
       - name: Upload crash dumps
         # 失败现场留证(见 tests/crash_capture.py):
         #   * 用例失败的 coredumpy dump 已经挂在 Allure 附件里(随上面那份结果一起上传);
@@ -447,6 +506,8 @@ jobs:
         #     macOS 分片正是这种情况, 事后只能去翻那一次运行的日志。
         # 所以这里把整个目录也当 artifact 收一份(faulthandler 的输出会写进
         # `crash-dumps/faulthandler.log`, 见 conftest 的 pytest_configure)。
+        # macOS 的系统级崩溃报告(`.ips`, "C 层到底是谁碰坏了内存"唯一能回答的证据)由上面的
+        # 收集步拷进来 —— 所以这一步必须排在它**之后**。
         # `if-no-files-found: ignore`: 大多数分片本来就没有崩溃现场, 不该因此变红。
         if: always()
         uses: actions/upload-artifact@v7
@@ -484,35 +545,6 @@ jobs:
           name: allure-results-quality-platform-${{ matrix.os }}
           path: allure-results-quality-platform/
           if-no-files-found: ignore
-
-      - name: Collect failure diagnostics
-        id: diagnostics
-        # 失败现场留证(见 tests/crash_capture.py): 用例失败的 coredumpy dump 已经挂在 Allure
-        # 附件里, 但**进程级崩溃**(SIGSEGV/SIGABRT) 挂不进 —— coredumpy 是 Python 层的钩子,
-        # 进程被内核杀掉时它没机会跑, pytest-cov 也来不及落盘覆盖率。它挂不进结果, 却是
-        # 这一整套诊断**唯一**真正需要它的地方, 所以判定就看两件事: faulthandler 有没有栈、
-        # `--expect` 的覆盖率文件在不在。
-        # 断言失败这类普通红不会被算成现场(覆盖率文件在、没有栈) —— 它们的证据在用例详情里,
-        # 上下两个步骤也就都不会把它们再抄一遍(2026-10-04 按用户的期望收紧)。
-        # 回显 faulthandler 日志是保留的老习惯: 排查时最顺手的地方仍然是运行日志。
-        if: failure()
-        shell: bash
-        run: |
-          uv run python scripts/collect_job_diagnostics.py \
-            --output job-diagnostics \
-            --label "pytest (${{ matrix.os }}, 分片 ${{ matrix.shard }})" \
-            --github-output "$GITHUB_OUTPUT" \
-            --expect allure-results \
-            --expect .coverage.shard-${{ matrix.shard }} \
-            crash-dumps allure-results allure-results-quality-platform \
-            allure-manifest.json .coverage.shard-${{ matrix.shard }} coverage.xml \
-            --crash-reports-from "$HOME/Library/Logs/DiagnosticReports" \
-            --crash-report-wait 20
-          for log in crash-dumps/*.log; do
-            [ -f "$log" ] || continue
-            echo "===== $log ====="
-            cat "$log"
-          done
 
       - name: Upload failure diagnostics
         # 只有**兜底现场**才上传(判定来自上一步): 断言失败这类红在结果里已经写清楚了。

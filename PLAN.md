@@ -2753,6 +2753,14 @@ macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗�
   销毁过程中**才被排上的, 撤不到; 更麻烦的是名字分不清 —— 我们自己也有叫 `check`(`dialogs.py`)、
   `sync_now`(`widgets.py`)、`apply`(`keyboard.py`) 的回调。那次统一扫还让别的用例变慢(撤掉 Tk 的 idle
   处理器后, 有的用例等不到布局), 所以只治"我们排的、又没人撤"的那些。
+- **光撤还不够: 已经到点、被 Tk 取走的那个任务撤不掉** —— 整文件日志里还有一条
+  `Exception in Tkinter callback`: 轮询跑到 `_fit_task_name` → `winfo_width` 抛
+  `can't invoke "winfo" command: application has been destroyed`(即销毁之后还在碰控件)。修法:
+  `destroy()` 先立 `_destroyed` 牌子, `_poll_messages` / `_refit_detail_names` 看到就返回、也不再排下一个;
+  守卫 `test_the_pump_does_nothing_after_the_window_is_destroyed`(销毁后直接调那两个方法, 不许抛也不许再
+  排任务; 咬合验证: 撤掉牌子即红, `_poll_job` 会变成 `after#NN`)。
+- **实测数字**(`test_gui_buttons.py` 整文件、不带捕获): `invalid command name` **187 → 133**, 而**我们自己的
+  那一类为 0**(剩下全是 Tk/CustomTkinter 在销毁期间排上的); 用例数 160 passed(日期炸弹修好后不再有红)。
 - **fd 层那条判据不可靠**: "收尾后 stderr 里不许再出现 `invalid command name`" 在本机量不出来 —— 那种
   报错要等销毁之后还有事件循环经过才会响, 把产品侧修复撤掉它照样绿; 所以最终只留结构判据。
 - **② 一颗日期炸弹**: 时间范围默认"最近 30 天", 而演示数据的日期是**固定的 2026-09-04..06**。CI 那轮

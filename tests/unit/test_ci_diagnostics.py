@@ -117,6 +117,36 @@ def test_summary_job_pulls_every_diagnostics_artifact() -> None:
     )
 
 
+def test_pytest_job_collects_crash_reports_before_uploading_the_artifact() -> None:
+    """pytest 作业的收集步必须排在 crash-dumps 上传步**之前**.
+
+    macOS 的 ReportCrash 在进程死后几秒才异步落盘 ``.ips``, 收集步带着
+    ``--crash-report-wait`` 把它等来并拷进 ``crash-dumps/``(2026-10-05 之前收集步排在
+    上传之后, 于是那一轮的 crash-dumps artifact 里没有 ``.ips`` —— 完整原生栈只存在于
+    摘要里截断的 4000 字里, 用户下载 artifact 只能看到空白的现场)。
+    """
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+
+    collect = job.index("name: Collect failure diagnostics")
+    upload = job.index("name: Upload crash dumps")
+    assert collect < upload, "收集步要在 crash-dumps 上传之前: .ips 得先拷进目录再上传"
+
+
+def test_pytest_job_runs_the_ui_suite_in_its_own_process() -> None:
+    """UI 用例必须与非 UI 用例分两个 pytest 进程跑(进程隔离, 2026-10-05).
+
+    macOS 上 Tk 的原生崩溃(SIGTRAP)会带走整个 pytest 进程 —— 覆盖率(pytest-cov 要等
+    会话**结束**才落盘)与崩溃点之后的所有用例结果全部陪葬。非 UI 段先跑、UI 段单独
+    进程加 ``--cov-append`` 之后, 崩掉时丢的只有 UI 自己那段。
+    """
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+
+    durable = job.index('-m "not ui" --cov')
+    ui = job.index('-m "ui" --cov --cov-append')
+    assert durable < ui, "非 UI 段先跑: 它的产物落盘之后, UI 段的崩溃才不陪葬"
+    assert "--cov-append" in job[ui:], "UI 段要并进同一份覆盖率数据, 而不是另写一份"
+
+
 def test_diagnostics_report_lands_in_the_allure_config() -> None:
     """报告首页的全局附件里要有那份"失败现场", 而且它是**按文件在不在条件收的**.
 
@@ -340,6 +370,44 @@ def test_failure_diagnostics_are_concatenated_by_job(tmp_path: Path) -> None:
     assert "## job-diagnostics-macos-latest-0" in text
     assert "## job-diagnostics-quality" in text
     assert text.count("# 作业失败现场: ") == 2, "两份摘要都要在, 不能互相覆盖"
+
+
+def test_a_single_artifact_laid_out_flat_is_still_recognized(tmp_path: Path) -> None:
+    """pattern 只匹配到一个诊断 artifact 时, download-artifact 会把内容**平铺**到下载目录.
+
+    2026-10-05 实测: 那一轮只有 ``job-diagnostics-macos-latest-0`` 一份, 平铺之后
+    ``crash_scenes`` 按子目录找一条都匹配不到 —— 汇总日志写着"没有兜底现场", 报告首页的
+    "失败现场"附件与 broken 结论项**静默**消失(这正是用户报的"入口一直不生效")。
+    这个样本按平铺布局造, 认不出就该红。
+    """
+    module = _load_script("create_allure_summary")
+    diagnostics = tmp_path / "failure-diagnostics"
+    diagnostics.mkdir()
+    (diagnostics / "summary.md").write_text(
+        "# 作业失败现场: pytest (macos-latest, 分片 0)\n", encoding="utf-8"
+    )
+    (diagnostics / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+        json.dumps(
+            {
+                "label": "pytest (macos-latest, 分片 0)",
+                "scene": True,
+                "reasons": ["faulthandler.log 有栈"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    scenes = module.crash_scenes(diagnostics)
+
+    assert len(scenes) == 1, "平铺布局下也要认出这份现场, 而不是静默跳过"
+    assert scenes[0].owner == "pytest (macos-latest, 分片 0)", (
+        "丢了 artifact 名, 节标题要退回 verdict.json 里的作业标签"
+    )
+    assert scenes[0].platform == "macOS", "平台归属不能跟着丢(报告里按环境筛)"
+    assert "## pytest (macos-latest, 分片 0)" in module.failure_diagnostics_report(
+        diagnostics
+    )
 
 
 def test_diagnostic_label_defaults_to_local_outside_ci(

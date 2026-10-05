@@ -35,6 +35,7 @@ import hashlib
 import io
 import os
 import re
+import signal
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -52,6 +53,17 @@ DUMP_EXTENSION = ".dump"
 # **进程级崩溃**留下的文件(coredumpy 抓不到的那一类, 见 :func:`enable_hard_crash_log`)。
 # CI 把整个目录当 artifact 上传(见 .github/workflows/ci.yml 的 "Upload crash dumps")。
 CRASH_LOG_NAME = "faulthandler.log"
+# 除 ``faulthandler.enable()`` 默认那五个信号(SIGSEGV/SIGFPE/SIGABRT/SIGBUS/SIGILL)之外,
+# 额外要注册的信号。SIGTRAP 为什么必须加: macOS arm64 的指针认证陷阱(PAC)与断点在进程层面
+# 都以 **SIGTRAP** 结束(2026-10-05 的 macOS 分片: EXC_BREAKPOINT, 退出码 133), 而它不在默认
+# 清单里 —— 于是 ``faulthandler.log`` 是 0 字节, 兜底判定看不见崩溃迹象, 连系统级 ``.ips``
+# 都不去等(见 scripts/collect_job_diagnostics.py 的 collect_and_judge)。注册后至少能留下
+# "死的那一刻各线程的 Python 栈", 判定也把这类崩溃当成"有现场"。
+# Windows 的 ``signal`` 模块没有 SIGTRAP(那里也没有 PAC 这类陷阱), 取不到就是空表: 模块级
+# 常量在**每个**平台都要能导入, 不能为一个平台把别的平台挡在测试之外。
+TRAPPED_SIGNALS = tuple(
+    number for number in (getattr(signal, "SIGTRAP", None),) if number is not None
+)
 # dump 附件的媒体类型: 用 Allure **不认识**的二进制类型, 报告里就只给一个下载链接,
 # 不会再开一块预览区。coredumpy 的 dump 是纯文本(JSON), 以前按 ``text/plain`` 挂,
 # Allure 会把整份文件读进来渲染 —— 实测上兆字节的 dump 一打开就把页面卡死。
@@ -77,6 +89,30 @@ _CRASH_LOG_HANDLE: Any = None
 
 # 文件名里只保留这些字符, 其余压成下划线(避免路径分隔符/冒号/参数里的怪异字符)。
 _UNSAFE = re.compile(r"[^0-9A-Za-z._-]+")
+
+
+def _enable_fault_handlers(handle: Any) -> None:
+    """把 faulthandler 的输出全部指到 ``handle``: 默认五个信号 + :data:`TRAPPED_SIGNALS`.
+
+    ``faulthandler.register`` 单独处理"默认清单之外的信号"(如 SIGTRAP): 注册后同样先写栈、
+    再恢复默认行为 —— 进程仍死于原信号(退出码保持 133 那一类), 不会因为留证而"吞掉"崩溃。
+    平台不认某个信号时只打一句话: 留证失败不能影响跑测试。
+    """
+    faulthandler.enable(file=handle, all_threads=True)
+    if sys.platform == "win32":
+        # Windows 的 signal 模块没有 SIGTRAP(TRAPPED_SIGNALS 在这里恒为空表), typeshed 也
+        # 只在非 Windows 段声明 ``faulthandler.register`` —— 直接跳过, 别为一个平台
+        # (那里本来也没有 PAC 这类陷阱)让静态检查报"不存在的属性"。
+        return
+    for number in TRAPPED_SIGNALS:
+        try:
+            faulthandler.register(number, file=handle, all_threads=True)
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+        ):  # pragma: no cover - 平台不支持该信号
+            print(f"[crash] 无法为信号 {number} 注册崩溃日志")
 
 
 def enable_hard_crash_log(directory: Path) -> Path | None:
@@ -107,7 +143,7 @@ def enable_hard_crash_log(directory: Path) -> Path | None:
         path = directory / CRASH_LOG_NAME
         handle = path.open("a", encoding="utf-8", buffering=1)
         _CRASH_LOG_HANDLE = handle
-        faulthandler.enable(file=handle, all_threads=True)
+        _enable_fault_handlers(handle)
     except Exception as exc:  # pragma: no cover - 目录不可写/句柄不给用
         # 带上类名: 同一条消息可能来自不同的失败(权限/描述符用完), 只留消息不好定位。
         print(f"[crash] 无法准备崩溃日志: {type(exc).__name__}: {exc}")
@@ -129,7 +165,7 @@ def reassert_hard_crash_log() -> bool:
     if _CRASH_LOG_HANDLE is None:
         return False
     try:
-        faulthandler.enable(file=_CRASH_LOG_HANDLE, all_threads=True)
+        _enable_fault_handlers(_CRASH_LOG_HANDLE)
     except Exception:  # pragma: no cover - 句柄已被关掉
         return False
     return True

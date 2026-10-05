@@ -180,9 +180,12 @@ CI 上可能还没轮到 —— 实测 2026-09-30: Windows runner 上"表头与�
   名下, 而那条用例的断言全过了)。`ArchiveApp._poll_messages` 末尾会排下一个任务并**覆盖**
   `_poll_job`, 而用例辅助(`_drain`)每轮都直接调它一次 —— 先前那个 id 就此丢掉、`destroy()` 撤不到,
   它随后在**别处**的事件循环里爆掉, 挂到无辜用例的 stderr 上。修法是产品侧"**先撤掉挂着的再干活**、
-  末尾再排"(这样无论谁直接调都只剩一个)。判据: 数 Tcl 的任务表(`app.tk.call("after", "info")`)里
-  带这个名字的条目, 而不是"等它炸" —— 到点(100ms)的任务只在销毁处理定时器那一刻执行, 等到它响就晚了;
-  而 Tcl 的后台错误走 `bgerror`、**不走 `sys.stderr`**, 要抓就得用 `capfd`。
+  末尾再排"(这样无论谁直接调都只剩一个)。**但光撤不够**: 已经到点、被 Tk 取走的那个任务撤不掉 ——
+  它会跑到销毁后的控件上(`can't invoke "winfo" command: application has been destroyed`, 2026-10-05
+  实测), 所以 `destroy()` 还要先立一块 `_destroyed` 牌子, 延后任务开头看到就返回、也不再排下一个。
+  判据: 数 Tcl 的任务表(`app.tk.call("after", "info")`)里带这个名字的条目, 而不是"等它炸" ——
+  到点(100ms)的任务只在销毁处理定时器那一刻执行, 等到它响就晚了; 而 Tcl 的后台错误走 `bgerror`、
+  **不走 `sys.stderr`**, 要抓就得用 `capfd`。
 - **别顺手把第三方的定时任务也撤掉**: 实测那类噪声里 `check` / `sync_now` / `apply` / `focus_set` /
   `_revert_withdraw_after_windows_set_titlebar_color` 都来自 Tk 与 CustomTkinter, 而且是在**销毁过程中**
   才被排上的(撤不到); 更麻烦的是名字分不清 —— 我们自己也有叫 `check`(`dialogs.py`)、`sync_now`
