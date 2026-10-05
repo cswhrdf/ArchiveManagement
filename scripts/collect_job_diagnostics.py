@@ -32,7 +32,9 @@ diagnostics`` (``if: failure()``) 与 ``Upload failure diagnostics``
         --github-output "$GITHUB_OUTPUT" \
         --expect allure-results --expect .coverage.shard-0 \
         --crash-reports-from "$HOME/Library/Logs/DiagnosticReports" \
-        --crash-report-wait 20 crash-dumps allure-results allure-manifest.json
+        --crash-report-wait 20 \
+        --full-copy-at "crash-dumps-macos-latest-0" \
+        crash-dumps allure-results allure-manifest.json
 
 ``--label`` 不传时退回 ``GITHUB_JOB``; 两者都没有就用 ``"local"``。本地跑同样安全: 只读
 给定的路径、只写 ``--output`` 目录(以及把收到的崩溃报告拷进 ``crash-dumps/``)。
@@ -81,6 +83,14 @@ CRASH_REPORT_SUFFIXES = (".ips", ".crash", ".diag")
 # 文本现场最多内联多少**字符**进摘要: 摘要是要挂进报告给人看的, 不能把上百 KB 的原生栈
 # 塞进去(报告一打开就卡); 超出部分留在 artifact 里, 报告里给文件名当路标。
 INLINE_LIMIT = 4000
+# faulthandler 每次致命错误的开头一行: 在日志里的**最后一次**出现后面, 紧跟的就是崩溃
+# 线程(``Current thread``)的 Python 栈 —— 摘要只截开头的话它根本进不来(见
+# :func:`last_fatal_error_headline`)。
+FATAL_ERROR_MARKER = b"Fatal Python error"
+# 在大日志里从尾部往回找 :data:`FATAL_ERROR_MARKER` 时一次读多少字节: 1 MiB 一块,
+# 百 MiB 级的现场也只要上百次顺序读。相邻块之间要留 marker 长度的重叠, 否则恰好骑在
+# 块边界上的那一次出现会被两边同时错过。
+BACKWARD_SEARCH_CHUNK = 1024 * 1024
 # 等系统级报告时的轮询间隔(ReportCrash 是异步的, 只能轮着看).
 POLL_SECONDS = 1.0
 # 本进程启动的时刻: 只收**这次**跑出来的报告, 免得把上一次运行的现场也收进来。
@@ -134,17 +144,134 @@ def crash_excerpts(directory: Path = CRASH_DUMP_DIRECTORY) -> list[Path]:
     ]
 
 
-def excerpt(path: Path) -> str:
-    """读一段现场文本; 读不到或不是文本时给一行说明, 不抛."""
+def _read_head(path: Path, chars: int) -> tuple[str, bool]:
+    """只读文件开头的若干**字符**(大文件不许整读进内存), 顺带说明是不是已经读到尾.
+
+    按 UTF-8 一个字符最多 4 字节来放大读取量, 再按字符截断 —— 现场文本(栈、``.ips``)
+    几乎全是 ASCII, 浪费可以忽略, 而"先 ``read_text`` 再切"的老写法遇上几百 MiB 的
+    faulthandler 日志会把收集步自己拖死。
+    """
+    with path.open("rb") as handle:
+        raw = handle.read(chars * 4)
+        at_eof = handle.read(1) == b""
+    text = raw.decode("utf-8", errors="replace")
+    # "读完且字符数没超"才算放行: 按 4:1 放大读时 EOF 只说明文件比请求的字节短,
+    # 字符数仍可能超过上限(ASCII 现场文本全是 1:1)。
+    return text[:chars], at_eof and len(text) <= chars
+
+
+# faulthandler 的两种现场头: ``enable()`` 的致命路径写 "Fatal Python error"(崩溃线程
+# ``Current thread`` 的栈跟在头后面); ``register()`` 的用户信号路径**没有头**, 直接写
+# 各线程栈(第一个块就是崩溃线程)。2026-10-05 的 macOS 分片两者都出现了: 注册的处理器
+# 转储完就返回, 故障指令重新执行 → 同一崩溃重复转储了上万份, 而最后的致命头写在文件
+# 末尾 308 字节里 —— 致命路径刚开始转储就又崩了, 一个线程栈都没落盘。有货的是**最后
+# 一份**用户信号转储。所以尾部捞回要看两个 marker(见 :func:`crash_thread_tail`)。
+CURRENT_THREAD_MARKER = b"Current thread"
+
+
+def _rfind_marker(path: Path, marker: bytes) -> int:
+    """在(可能几百 MiB 的)文件里从尾部按块回找 ``marker`` 的最后一次出现.
+
+    找到返回偏移, 没有(或读不了)返回 ``-1``。块之间留 ``len(marker) - 1`` 的重叠:
+    骑在块边界上的出现不能靠前后两块各自 miss 掉。``start`` 归零说明整文件扫完了 ——
+    必须在这里**显式收场**: 只靠 ``position = start + len(marker) - 1`` 收敛的话,
+    "marker 不存在且文件比一块还小"时 position 会永远停在 ``len(marker) - 1`` 上,
+    死循环(2026-10-05 由"只有用户信号转储、没有致命头"的守卫测试踩出)。
+    """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as handle:
+            position = handle.seek(0, os.SEEK_END)
+            while position > 0:
+                start = max(0, position - BACKWARD_SEARCH_CHUNK)
+                handle.seek(start)
+                block = handle.read(position - start)
+                index = block.rfind(marker)
+                if index != -1:
+                    return start + index
+                if start == 0:
+                    return -1
+                # 下一块的**末尾**要伸进本块 marker 长度: 骑在边界上的出现才不会漏。
+                position = start + len(marker) - 1
+            return -1
+    except OSError:  # pragma: no cover - 收集中文件被清掉/不可读
+        return -1
+
+
+def _segment(path: Path, offset: int, chars: int) -> str:
+    """从 ``offset`` 起读若干**字符**(按 4:1 放大读字节再按字符截, 不整读大文件)."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            raw = handle.read(chars * 4)
+    except OSError:  # pragma: no cover - 收集中文件被清掉/不可读
+        return ""
+    return raw.decode("utf-8", errors="replace")[:chars]
+
+
+def last_fatal_error_headline(path: Path) -> str:
+    """从(可能几百 MiB 的)faulthandler 日志里捞回**最后一次**致命错误的头部.
+
+    为什么需要它: faulthandler 把**崩溃线程**(``Current thread``)的栈写在那次 dump 的
+    最前面, 而日志会随重复触发不断变长 —— 摘要只截开头的话, 读者看到的全是等在
+    ``threading.wait`` 里的旁观线程, 真正"死在哪一行"的栈埋在文件尾部(2026-10-05 的
+    macOS 分片: 584.5 MiB 的日志, 开头 4000 字里一个现场线程都没有)。找不到(非
+    faulthandler 的 ``.log``)时给空串, 不抛。摘要实际用的是它的升级版
+    :func:`crash_thread_tail`。
+    """
+    offset = _rfind_marker(path, FATAL_ERROR_MARKER)
+    if offset == -1:
+        return ""
+    return _segment(path, offset, INLINE_LIMIT)
+
+
+def crash_thread_tail(path: Path, chars: int = INLINE_LIMIT) -> str:
+    """尾部捞回"崩溃线程死在哪": 最后一次致命错误的头部优先, 头是空壳时回退到最后一份转储.
+
+    判据(来自 2026-10-05 的真实现场): 最后一次 ``Fatal Python error`` 头之后紧跟
+    ``Current thread`` 才算有货 —— 致命路径"刚开始转储就又崩"时, 头后面只剩
+    ``Extension modules`` 一行(那种头没有任何栈); 此时唯一有货的是(注册信号处理器
+    反复转储留下的)最后一份用户信号转储, 它的第一个块就是 ``Current thread``。
+    """
+    fatal = _rfind_marker(path, FATAL_ERROR_MARKER)
+    if fatal != -1:
+        segment = _segment(path, fatal, chars)
+        if (
+            CURRENT_THREAD_MARKER in segment.encode("utf-8")
+            or _rfind_marker(path, CURRENT_THREAD_MARKER) == -1
+        ):
+            return segment
+    current = _rfind_marker(path, CURRENT_THREAD_MARKER)
+    if current != -1:
+        return _segment(path, current, chars)
+    return ""
+
+
+def excerpt(path: Path, where: str = "见 artifact") -> str:
+    """读一段现场文本; 读不到或不是文本时给一行说明, 不抛.
+
+    超过 :data:`INLINE_LIMIT` 的只内联开头, 并把 ``where``(全文在哪)写进截断标记;
+    ``.log``(faulthandler)再例外地补一段尾部捞回的崩溃线程栈 —— 它在最后一次
+    ``Fatal Python error`` 的头部, 或(头是空壳时)最后一份用户信号转储里
+    (见 :func:`crash_thread_tail`)。
+    """
+    try:
+        head, reached_end = _read_head(path, INLINE_LIMIT)
+        size = human_size(path.stat().st_size)
     except OSError as exc:  # pragma: no cover - 权限/收集中被删
         return f"(读不出来: {type(exc).__name__}: {exc})"
-    if not text.strip():
+    if not head.strip():
         return "(空文件)"
-    if len(text) > INLINE_LIMIT:
-        size = human_size(len(text.encode("utf-8")))
-        return f"{text[:INLINE_LIMIT]}\n... (已截断, 全文 {size} 见 artifact)"
+    if reached_end:
+        return head
+    text = f"{head}\n... (已截断, 全文 {size} {where})"
+    if path.suffix == ".log":
+        rescued = crash_thread_tail(path)
+        if rescued.strip() and rescued[:200] not in head:
+            text += (
+                "\n\n---- 文件尾部捞回的崩溃线程栈(最后一次 Fatal Python error,"
+                "或反复触发时最后一份转储) ----\n"
+                f"{rescued}"
+            )
     return text
 
 
@@ -271,6 +398,37 @@ def collect_crash_reports(
     return copied
 
 
+def run_artifacts_url() -> str:
+    """本次运行的 artifact 列表页(CI 变量不全时给空串, 本地跑也不会出错).
+
+    为什么链接到列表页而不是单个 artifact: 收集步跑在上传**之前**, 那时单个 artifact
+    还没有编号(上传后才分配); 而 ``<run>/artifacts`` 这个地址是稳定的, 点进去就是本轮
+    全部产物 —— 名字已经由 ``--full-copy-at`` 写给了读者, 在列表里按名取即可。
+    """
+    server = os.environ.get("GITHUB_SERVER_URL", "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if not (server and repository and run_id):
+        return ""
+    return f"{server}/{repository}/actions/runs/{run_id}/artifacts"
+
+
+def full_copy_hint(names: Sequence[str]) -> str:
+    """截断标记里"全文在哪"的半句: artifact 名 + 本次运行的 artifact 列表页链接.
+
+    2026-10-05 的教训: 只写"见 artifact"三个字, 读者得自己猜是哪一份、去哪下 —— 报告
+    附件里那份 98.2 KiB 的 ``.ips`` 就这么被"截断在半路"。名字由工作流传进来
+    (``--full-copy-at``), 链接从环境变量拼, 两样都在才最省事。
+    """
+    if not names:
+        return "见 artifact"
+    listed = ", ".join(f"`{name}`" for name in names)
+    url = run_artifacts_url()
+    if not url:
+        return f"见 artifact {listed}"
+    return f"见 artifact {listed}: {url}"
+
+
 def environment_lines() -> list[str]:
     """收集能说明"在哪跑的"的几行(CI 变量缺失时留空, 本地跑也不会出错)."""
     return [
@@ -291,10 +449,14 @@ def build_summary(
     paths: Sequence[Path],
     crash_directory: Path = CRASH_DUMP_DIRECTORY,
     verdict: BackstopVerdict | None = None,
+    *,
+    full_copy_at: Sequence[str] = (),
 ) -> str:
     """拼出 ``summary.md`` 的正文(纯函数: 便于单测直接比对).
 
     ``verdict`` 不传时不写判定节 —— 那样这一页只剩"清单 + 现场", 仍然是可读的。
+    ``full_copy_at`` 是承载现场全文的 artifact 名单(工作流知道, 脚本不知道): 截断标记
+    与排查提示会点名它们并附上本次运行的 artifact 列表页链接。
     """
     lines = [f"# 作业失败现场: {label}", ""]
     lines.extend(environment_lines())
@@ -339,7 +501,7 @@ def build_summary(
         lines.append(f"### `{path.name}`")
         lines.append("")
         lines.append("~~~")
-        lines.append(excerpt(path))
+        lines.append(excerpt(path, full_copy_hint(full_copy_at)))
         lines.append("~~~")
         lines.append("")
     lines.append("## 排查提示")
@@ -358,10 +520,25 @@ def build_summary(
         '`faultingThread` 的原生栈才能回答"C 代码里是谁碰坏了内存"。'
         "ReportCrash 是异步的, 所以收集时等了几秒。"
     )
-    lines.append(
-        "- 本目录只收清单与文本现场, 不含大文件: coredumpy 的 dump 与完整的 `.ips` "
-        "见同名作业的 `crash-dumps` artifact。"
-    )
+    pointer: str
+    listed = ", ".join(f"`{name}`" for name in full_copy_at)
+    url = run_artifacts_url()
+    if listed and url:
+        pointer = (
+            "- 本目录只收清单与文本现场, 不含大文件: 完整的 `.ips` 与 faulthandler 日志"
+            f" 见 artifact {listed}: {url}"
+        )
+    elif listed:
+        pointer = (
+            "- 本目录只收清单与文本现场, 不含大文件: 完整的 `.ips` 与 faulthandler 日志"
+            f" 见 artifact {listed}"
+        )
+    else:
+        pointer = (
+            "- 本目录只收清单与文本现场, 不含大文件: coredumpy 的 dump 与完整的 `.ips` "
+            "见同名作业的 `crash-dumps` artifact。"
+        )
+    lines.append(pointer)
     lines.append(
         "- **普通失败不在这一页**: 用例断言、门禁不通过、步骤报错的证据在用例详情与运行日志里"
         '(见上面的"兜底判定"); 这一页只在**进程级崩溃 / 证据缺失**时才有内容。'
@@ -395,6 +572,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.0,
         help="等系统级报告落盘的最长秒数(只在来源目录存在且已有崩溃迹象时才等)",
+    )
+    parser.add_argument(
+        "--full-copy-at",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="承载现场全文的 artifact 名: 截断标记与排查提示里会点名它, 并附上本次运行"
+        " artifact 列表页的链接; 可重复传",
     )
     parser.add_argument(
         "--expect",
@@ -461,7 +646,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         verdict = collect_and_judge(args, expectations)
         text = build_summary(
-            label, inventory(args.paths, expectations), verdict=verdict
+            label,
+            inventory(args.paths, expectations),
+            verdict=verdict,
+            full_copy_at=args.full_copy_at,
         )
         summary.write_text(text, encoding="utf-8")
         print(text)

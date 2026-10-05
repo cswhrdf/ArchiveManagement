@@ -419,11 +419,20 @@ jobs:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
+      # UI 段外面包了一层"原生崩溃重试"(2026-10-05, scripts/run_pytest_with_crash_retry.py):
+      # macOS 26.6.2 + Tcl/Tk 9.0 的 Tk Aqua 位图绘制 use-after-free 会把 pytest 进程整个
+      # 杀死(同一用例在 Linux/Windows 都过), 崩溃点之后的用例全部没结果、分片报缺。包装
+      # **只认**"死于信号/原生异常"的退出码(SIGTRAP=133/SIGSEGV=139 这一类) —— 断言失败、
+      # 门禁不过都是普通退出码, 一次都不会重跑, 真回归不会被重试稀释或掩盖。重试前会清掉
+      # 崩溃那次新写进 allure-results 的半套结果(同一用例不能有两份结论), 覆盖率不用清
+      # (pytest-cov 只在会话结束才落盘, 崩溃那次什么都没写)。这是**带到期日的临时缓解**:
+      # 窗口一过脚本自动透传不再重试, 守卫测试(tests/unit/test_ci_diagnostics.py)同时变红,
+      # 催着人回来移除这层包装或明确续期。
       - name: Pytest with coverage, UI suite in its own process (Linux)
         if: always() && !cancelled() && runner.os == 'Linux'
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
-        run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
+        run: xvfb-run -a uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Pytest with coverage, non-UI suite first (Windows/macOS)
         if: runner.os != 'Linux'
@@ -437,7 +446,7 @@ jobs:
         if: always() && !cancelled() && runner.os != 'Linux'
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
-        run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
+        run: uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Upload shard Allure results
         # `if-no-files-found: error`: 这一片**没产出结果**时必须在这里响亮地失败。
@@ -479,6 +488,10 @@ jobs:
         # `crash-dumps/` —— 排在上传之后等于拷给一个已经传完的目录: 那一轮的 crash-dumps
         # artifact 里没有 `.ips`, 完整原生栈只剩 summary.md 里截断的 4000 字。
         # 回显 faulthandler 日志是保留的老习惯: 排查时最顺手的地方仍然是运行日志。
+        # `--full-copy-at`: 摘要里被截断的现场(`.ips` / faulthandler 日志)要能被**点着找到**
+        # —— 截断标记与排查提示会写上 artifact 名和本次运行 artifact 列表页的链接
+        # (`<run>/artifacts`)。2026-10-05 之前只写"见 artifact"三个字: 98.2 KiB 的 `.ips`
+        # 被截断在半路, 读者得自己猜是哪一份、去哪下。
         if: failure()
         shell: bash
         run: |
@@ -491,7 +504,8 @@ jobs:
             crash-dumps allure-results allure-results-quality-platform \
             allure-manifest.json .coverage.shard-${{ matrix.shard }} coverage.xml \
             --crash-reports-from "$HOME/Library/Logs/DiagnosticReports" \
-            --crash-report-wait 20
+            --crash-report-wait 20 \
+            --full-copy-at "crash-dumps-${{ matrix.os }}-${{ matrix.shard }}"
           for log in crash-dumps/*.log; do
             [ -f "$log" ] || continue
             echo "===== $log ====="

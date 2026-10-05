@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import os
@@ -509,6 +510,375 @@ def test_huge_crash_reports_are_truncated_in_the_summary(tmp_path: Path) -> None
 
     assert "已截断" in text
     assert len(text) < module.INLINE_LIMIT * 2
+
+
+def test_truncated_excerpts_point_at_a_downloadable_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """截断标记要写明**哪份** artifact、给**点得开**的链接: "见 artifact"三个字不够用.
+
+    2026-10-05 的 macOS 分片崩溃后, 报告附件里的现场只剩"... (已截断, 全文 98.2 KiB 见
+    artifact)" —— 是哪一份、去哪下都得读者自己猜。链接给到本次运行的 artifact 列表页:
+    收集步跑在上传之前, 单个 artifact 的编号那时还不存在, 而列表页地址是稳定的。
+    """
+    module = _load_script("collect_job_diagnostics")
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "cswhrdf/ArchiveManagement")
+    monkeypatch.setenv("GITHUB_RUN_ID", "37270928260")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    (crashes / "python3.12-2026-10-05-061413.ips").write_text(
+        "x" * (module.INLINE_LIMIT * 3), encoding="utf-8"
+    )
+
+    text = module.build_summary(
+        "pytest (macos-latest, 分片 0)",
+        [],
+        crashes,
+        full_copy_at=["crash-dumps-macos-latest-0"],
+    )
+
+    assert "已截断" in text
+    assert "`crash-dumps-macos-latest-0`" in text, "要点名承载全文的那份 artifact"
+    assert (
+        "https://github.com/cswhrdf/ArchiveManagement"
+        "/actions/runs/37270928260/artifacts" in text
+    ), "链接要到本次运行的 artifact 列表页"
+    assert "见 artifact `crash-dumps-macos-latest-0`" in text or "见 artifact" in text
+
+
+def test_the_artifact_hint_degrades_without_the_ci_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地跑(没有 CI 变量)时链接拼不出来: 点名 artifact 仍然成立, 不许因此报错."""
+    module = _load_script("collect_job_diagnostics")
+    for name in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"):
+        monkeypatch.delenv(name, raising=False)
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    (crashes / "python-2026-10-05.ips").write_text(
+        "x" * (module.INLINE_LIMIT * 2), encoding="utf-8"
+    )
+
+    text = module.build_summary("label", [], crashes, full_copy_at=["crash-dumps-x-0"])
+
+    assert "已截断" in text
+    assert "见 artifact `crash-dumps-x-0`" in text, "没有 CI 变量时仍然要点名 artifact"
+    assert "见 artifact `crash-dumps-x-0`:" not in text, (
+        "没有 run 变量时不许在截断标记里编一个链接出来"
+    )
+
+
+def test_the_fatal_error_headline_is_rescued_from_a_huge_log(tmp_path: Path) -> None:
+    """几百 MiB 的 faulthandler 日志只截开头会**漏掉崩溃线程**: 它的栈在尾部那次 dump 里.
+
+    2026-10-05 的 macOS 分片: faulthandler.log 有 584.5 MiB, 摘要的开头 4000 字全是等在
+    ``threading.wait`` 里的旁观线程(多半还是泄漏的调度线程), "Current thread"的栈根本
+    不在其中 —— 所以 ``.log`` 的摘录要额外从尾部找回最后一次 ``Fatal Python error``
+    的头部。样本造得比搜索块还大, 顺带覆盖"往回走不止一块"的路径。
+    """
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    filler = "Thread 0x0000000deadbeef (most recent call first):\n" * 30000
+    tail = (
+        "Fatal Python error: Segmentation fault\n\n"
+        "Current thread 0x000000016e70f000 (most recent call first):\n"
+        '  File "tkinter/__init__.py", line 1379 in update_idletasks\n'
+    )
+    (crashes / "faulthandler.log").write_text(filler + tail, encoding="utf-8")
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "Fatal Python error: Segmentation fault" in text
+    assert "in update_idletasks" in text, (
+        "崩溃线程的栈要进摘要, 不能只留给 584 MiB 的 artifact"
+    )
+
+
+def test_the_backward_search_survives_a_marker_straddling_block_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """从尾部往回找 marker 的扫描要允许 marker 横跨块边界(相邻块之间有重叠).
+
+    没有重叠时, 骑在边界上的那一次出现会被前后两块同时错过 —— 找回来的就是更早的
+    一次, 或者干脆找不到。这里把块调小, 让 marker 恰好压在边界上。
+    """
+    module = _load_script("collect_job_diagnostics")
+    monkeypatch.setattr(module, "BACKWARD_SEARCH_CHUNK", 100)
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    # "Fatal Python error" 长 19 字节, 落在 5000+95 处; 块大小 100 时第一块从 5104 起
+    # —— 正好把 marker 切成两半, 只有重叠回读的那一块才装得下完整的它。
+    content = "a" * 95 + "Fatal Python error" + "z" * 90
+    (crashes / "faulthandler.log").write_text("x" * 5000 + content, encoding="utf-8")
+
+    headline = module.last_fatal_error_headline(crashes / "faulthandler.log")
+
+    assert headline.startswith("Fatal Python error")
+
+
+def test_pytest_job_names_the_artifact_holding_the_full_copies() -> None:
+    """pytest 作业的收集步要点名承载全文的 artifact: 那是工作流才知道的事实."""
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+    step = _step(job, "Collect failure diagnostics")
+
+    assert '--full-copy-at "crash-dumps-${{ matrix.os }}-${{ matrix.shard }}"' in step
+
+
+def test_the_rescue_falls_back_to_the_last_dump_when_the_fatal_header_is_empty(
+    tmp_path: Path,
+) -> None:
+    """致命头是空壳时, 捞回要回退到最后一份用户信号转储的 ``Current thread`` 块.
+
+    这不是想象的边界, 是 2026-10-05 的真实现场: 584.5 MiB 的 faulthandler.log 末尾
+    308 字节只有一个"Fatal Python error: Segmentation fault"头加一行 Extension
+    modules —— 致命路径刚开始转储就又崩了, 一个线程栈都没落盘; 有货的是(注册的信号
+    处理器转储后返回、故障指令反复重新执行留下的)上万份转储里的**最后一份**, 它的
+    第一个块正是崩溃用例的 Python 栈。只认致命头的话, 捞回来的是个空壳。
+    """
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    bystanders = (
+        "Thread 0x0000000deadbeef (most recent call first):\n"
+        '  File ".../threading.py", line 355 in wait\n' * 90
+    )
+    dump = (
+        "Current thread 0x00000001f132a180 (most recent call first):\n"
+        '  File ".../tkinter/__init__.py", line 1373 in update\n'
+        '  File "tests/integration/test_gui_dropdown.py", line 150'
+        " in test_a_dropdown_near_the_bottom_opens_upwards\n"
+        "Thread 0x0000000feedface (most recent call first):\n"
+        '  File ".../threading.py", line 355 in wait\n'
+    )
+    empty_header = (
+        "Fatal Python error: Segmentation fault\n\n\n"
+        "Extension modules: PIL._imaging (total: 13)\n\n"
+    )
+    (crashes / "faulthandler.log").write_text(
+        bystanders + dump + empty_header, encoding="utf-8"
+    )
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "in test_a_dropdown_near_the_bottom_opens_upwards" in text, (
+        "崩溃用例的栈必须被捞回: 空壳致命头后面什么都没有"
+    )
+    assert "文件尾部捞回的崩溃线程栈" in text
+
+
+def test_dumps_without_any_fatal_header_still_rescue_the_crashing_thread(
+    tmp_path: Path,
+) -> None:
+    """日志里只有用户信号转储(没走到致命路径)时, 也要把崩溃线程的栈捞回来."""
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    bystanders = (
+        "Thread 0x0000000deadbeef (most recent call first):\n"
+        '  File ".../threading.py", line 355 in wait\n' * 90
+    )
+    dump = (
+        "Current thread 0x00000001f132a180 (most recent call first):\n"
+        '  File ".../tkinter/__init__.py", line 1373 in update\n'
+    )
+    (crashes / "faulthandler.log").write_text(bystanders + dump, encoding="utf-8")
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "Current thread" in text
+    assert "line 1373 in update" in text, "崩溃线程的栈不能只留在 artifact 里"
+
+
+# ---- 崩溃重试(2026-10-05): 只认"死于信号/原生异常", 带到期日, 不许烂尾 ----
+
+# 子进程剧本: 往计数文件追加一行(数它跑了几次), 往被看护目录写一个"本次运行"的
+# 残缺结果(名字带本次序号), 再按参数给定的退出码退出 —— 用它模拟"pytest 跑到一半
+# 被信号带走/正常失败"两种形态, 三平台都能跑(不用真的发信号: 128+n 的退出码就等于
+# shell 对"死于信号 n"的报告)。
+_CHILD_SCRIPT = (
+    "import pathlib, sys\n"
+    "counter = pathlib.Path(sys.argv[1])\n"
+    "runs = counter.read_text(encoding='utf-8').count('run') if counter.exists() else 0\n"
+    "with counter.open('a', encoding='utf-8') as handle:\n"
+    "    handle.write('run\\n')\n"
+    "watched = pathlib.Path(sys.argv[2])\n"
+    "watched.mkdir(parents=True, exist_ok=True)\n"
+    "(watched / f'partial-run{runs}.json').write_text('{}', encoding='utf-8')\n"
+    "raise SystemExit(int(sys.argv[3]))\n"
+)
+
+
+def test_only_signal_deaths_count_as_crash_exits() -> None:
+    """重试的闸门只对"进程被信号/原生异常杀死"的退出码开: 普通退出码一个都不许过."""
+    module = _load_script("run_pytest_with_crash_retry")
+
+    for code in (0, 1, 2, 4, 5, 120, 127, 255):
+        assert not module.is_crash_exit(code), code
+    assert not module.is_crash_exit(None)
+    for code in (-11, -7, -6, -5, -4, 132, 133, 134, 135, 139):
+        assert module.is_crash_exit(code), code
+    assert module.is_crash_exit(0xC0000005), "Windows 读违例也算原生崩溃"
+    assert module.is_crash_exit(0xC0000409), "Windows fail-fast 也算原生崩溃"
+
+
+def test_the_retry_window_closes_the_day_after_its_deadline() -> None:
+    """窗口到期日当天还能用, 次日关闭 —— 续期时这条守卫不用跟着改."""
+    module = _load_script("run_pytest_with_crash_retry")
+
+    assert module.retry_window_open(module.RETRY_UNTIL)
+    assert not module.retry_window_open(module.RETRY_UNTIL + dt.timedelta(days=1))
+
+
+def test_the_crash_retry_window_has_not_been_forgotten() -> None:
+    """到期日起这条测试必须红: "临时缓解"不许悄悄烂尾(用户 2026-10-05 的要求).
+
+    这不是普通的回归测试 —— 它就是到期提醒本身: 变红即"该回来处理这层包装了",
+    要么移除, 要么写清上游仍未修复的依据后**明确续期**(改 RETRY_UNTIL)。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    today = dt.datetime.now(dt.UTC).date()
+
+    assert today <= module.RETRY_UNTIL, (
+        f"原生崩溃重试的窗口已在 {module.RETRY_UNTIL} 到期: 请移除这层临时包装"
+        "(ci.yml 两个 UI 步骤外面包的 scripts/run_pytest_with_crash_retry.py, 以及"
+        " docs/testing.md 的说明), 或确认上游(macOS 26 + Tcl/Tk 9.0)仍未修复后明确续期"
+    )
+
+
+def test_a_native_crash_triggers_exactly_one_clean_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """原生崩溃 → 清掉该次的残缺结果 → 原样重跑一次; 重跑仍崩就按它的退出码收场.
+
+    清理必须只动**这一次新增**的条目: 前一段进程(not ui)已写进 allure-results 的结果
+    在快照之外 —— 动了它们, 重跑后的报告就缺了半边, 那才是真的伤准确率。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.chdir(tmp_path)
+    summary = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    counter = tmp_path / "counter.txt"
+    # 预置"前一段进程"留下的结果: 重试的清理不许碰它。
+    (tmp_path / "allure-results").mkdir()
+    kept = tmp_path / "allure-results" / "from-not-ui-step.json"
+    kept.write_text("{}", encoding="utf-8")
+
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            "139",
+        ]
+    )
+
+    assert rc == 139, "第二次仍死于同一退出码, 按它收场"
+    assert counter.read_text(encoding="utf-8").count("run") == 2, "只重跑一次"
+    assert kept.exists(), "快照之外的结果不许被动"
+    assert not (tmp_path / "allure-results" / "partial-run0.json").exists(), (
+        "崩溃那次的残缺结果要清掉, 不然重跑后同一用例有两份结论"
+    )
+    assert (tmp_path / "allure-results" / "partial-run1.json").exists()
+    captured = capsys.readouterr()
+    assert "::warning::" in captured.err
+    assert "SIGSEGV(139)" in captured.err
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "原生崩溃重试" in summary_text
+    assert "SIGSEGV(139)" in summary_text
+
+
+def test_plain_failures_are_never_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """普通失败(断言红、门禁不过)一次都不许重跑 —— 真回归不能被重试稀释或掩盖."""
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    counter = tmp_path / "counter.txt"
+
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            "1",
+        ]
+    )
+
+    assert rc == 1
+    assert counter.read_text(encoding="utf-8").count("run") == 1, "退出码 1 不触发重试"
+    assert (tmp_path / "allure-results" / "partial-run0.json").exists(), (
+        "没有重试就没有清理"
+    )
+    assert "::warning::" not in capsys.readouterr().err
+
+
+def test_the_retry_passes_through_once_the_window_has_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """窗口过期后: 崩溃照常透传失败(缓解自然失效), 但要把"该处理了"喊出来."""
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        module, "RETRY_UNTIL", dt.datetime.now(dt.UTC).date() - dt.timedelta(days=1)
+    )
+    counter = tmp_path / "counter.txt"
+
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            "139",
+        ]
+    )
+
+    assert rc == 139
+    assert counter.read_text(encoding="utf-8").count("run") == 1, "过期后不再重试"
+    assert "过期" in capsys.readouterr().err, "失效不能是静默的"
+
+
+def test_ui_steps_are_wrapped_in_the_crash_retry_guard() -> None:
+    """两个 UI 段要套上"只认原生崩溃"的重试包装; not ui 段不许被碰."""
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+
+    for name in (
+        "Pytest with coverage, UI suite in its own process (Linux)",
+        "Pytest with coverage, UI suite in its own process (Windows/macOS)",
+    ):
+        step = _step(job, name)
+        assert "scripts/run_pytest_with_crash_retry.py" in step, name
+        assert "--watch-dir allure-results" in step, f"{name}: 重试前要清残缺结果"
+    for name in (
+        "Pytest with coverage, non-UI suite first (Linux)",
+        "Pytest with coverage, non-UI suite first (Windows/macOS)",
+    ):
+        run_line = next(
+            line
+            for line in _step(job, name).splitlines()
+            if line.strip().startswith("run:")
+        )
+        assert "run_pytest_with_crash_retry.py" not in run_line, (
+            f"{name}: 普通失败的重试面不扩大(注释里提到不算, run: 行才是命令)"
+        )
 
 
 def test_ordinary_failure_is_not_a_backstop_scene(tmp_path: Path) -> None:
