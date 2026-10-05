@@ -729,7 +729,16 @@ jobs:
 
       - name: Enforce the coverage threshold
         # 门槛值在 pyproject 的 [tool.coverage.report] fail_under 里(与本地一致)。
-        # 单独一步: 原生命令的非零退出码只有作为该步最后一条命令时才会让作业失败。
+        # **这一步不再决定这个作业的成败**(用户 2026-10-05: "这一步应该只关心用例是否缺失,
+        # 合并报告是否失败") —— 覆盖率是对**结果**的判定, 让它以非 0 退出会把合并作业弄红,
+        # 而那个红与"某一片没上传产物"长得一模一样, 从作业状态上看不出真相是哪一种。
+        # 判定并没有消失, 只是换了个地方下结论(三道都在, 少一道才叫把门禁变成警告):
+        #   * 这一步照旧打印门槛与缺行清单(退出码也留在日志里, 当场就能看);
+        #   * `Attach coverage report to Allure` 把结论写成报告里的「Coverage report」条目 ——
+        #     低于门槛时那条**结果本身**就是 failed(见 scripts/create_allure_coverage.py);
+        #   * 汇总作业的原生质量门(规则集一: 不过滤 + `maxFailures: 0`)会把那条 failed 算进去
+        #     ⇒ 该红的仍然红, 红在"下结论"的那一步(见 allurerc.mjs 的 qualityGate 说明)。
+        continue-on-error: true
         if: steps.collect-coverage.outcome == 'success'
         run: uv run coverage report --show-missing
 

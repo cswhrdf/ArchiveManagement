@@ -752,6 +752,47 @@ def test_ci_judges_the_coverage_only_on_complete_shard_data() -> None:
     assert "exit 1" in gap[1]
 
 
+def test_the_report_job_only_judges_missing_pieces() -> None:
+    """合并作业的红只来自"用例缺了 / 报告没生成出来", 覆盖率判定交给报告与原生质量门.
+
+    出处(用户 2026-10-05): "这一步里用例的业务错误不应该在这步报出失败, 这一步应该只关心用例
+    是否缺失, 合并报告是否失败"。以前 `coverage report` 低于门槛就以非 0 退出 ⇒ 合并作业变红,
+    而那个红与"某一片没上传产物"长得**一模一样**: 看到红的人分不清是漏收了还是结果不达标。
+
+    判定并没有丢, 两道都在(少一道才叫把门禁变成警告): 低于门槛时报告里那条 `Coverage report`
+    结果本身是 `failed`, 汇总作业的原生质量门(规则集一: 不过滤 + `maxFailures: 0`)把它算进去。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    job = ci_workflow.job_block(workflow, "pytest-report")
+    code = "\n".join(
+        line for line in job.splitlines() if not line.strip().startswith("#")
+    )
+
+    threshold = code.split("name: Enforce the coverage threshold", 1)[1].split(
+        "- name:", 1
+    )[0]
+    assert "continue-on-error: true" in threshold, (
+        "覆盖率判定不该决定合并作业的成败(它与'缺片'的红分不开)"
+    )
+    # "缺了 / 没生成出来"仍然要红: 这几步不许被放过。
+    for step in (
+        "Merge shard Allure results",
+        "Generate Allure report",
+        "Verify Allure report",
+    ):
+        body = code.split(f"name: {step}", 1)[1].split("- name:", 1)[0]
+        assert "continue-on-error: true" not in body, (
+            f"{step} 必须能把这个作业弄红(它管的是'缺了 / 没生成出来')"
+        )
+    # 判定接手的第一道: 低于门槛时那条结论项的状态就是 failed(`verdict_section` 的
+    # 第一个参数是 0~1 的比例, 第二个是百分数门槛 —— 与 pyproject 的 fail_under 同单位)。
+    coverage = _load_script("create_allure_coverage")
+    _section, status, _message = coverage.verdict_section(0.5, 95)
+    assert status == "failed", "门槛判定要落成报告里那条结论项的 failed 状态"
+    _section, status, _message = coverage.verdict_section(0.99, 95)
+    assert status == "passed", "达标的那一侧仍要是 passed(别把结论写成恒红)"
+
+
 def test_collect_coverage_data_names_the_missing_shard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
