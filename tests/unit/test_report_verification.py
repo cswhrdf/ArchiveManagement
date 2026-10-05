@@ -2384,6 +2384,16 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
     # 判据必须**两条都在**(哈希管"整体变了没有", SSIM 管细粒度), 且门槛是有界的数字。
     assert 0 <= module.MAX_HASH_DISTANCE <= 64, "哈希距离上限要在 64 位以内"
     assert 0.0 < module.MIN_SSIM <= 1.0, "SSIM 下限要在 0~1 之间"
+    # 阈值必须落在"实测噪声"与"真要人看的变化"之间(太紧会把 runner 镜像更新变成随机红,
+    # 太松等于没判据)。2026-10-05 的 CI 实测(run 37270928260, 见 PLAN §18.4): 同渲染噪声
+    # **= 0**(四张与基线逐位相同, SSIM 1.0000); 最小真实变化 = SSIM **0.9819** / 哈希 **4**;
+    # 已知真缺陷 = SSIM **0.9722**(11px 行高错)。这里守的是"那个窗口还在", 不是具体数字 ——
+    # 调数字请连着那份实测一起改(并把新分布写回 §18.4)。
+    assert module.MIN_SSIM > 0.9722, "门槛不能高过已知的真缺陷(否则那一类会漏过)"
+    assert module.MIN_SSIM < 1.0, "门槛不能等于 1.0: 同渲染也要留一点余量"
+    assert 1 <= module.MAX_HASH_DISTANCE < 4, (
+        "上限要能给同渲染留 1 位容错, 又要小于实测里最小真实变化的 4"
+    )
 
 
 def test_report_job_does_not_depend_on_the_host_platform() -> None:
