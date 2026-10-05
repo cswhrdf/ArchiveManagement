@@ -10,8 +10,14 @@ repos:
         types: [python]
 
       - id: ruff-format
-        name: ruff format check
-        entry: uv run ruff format --check
+        # 不再用 `--check`: 它只报"哪个文件会被改", 于是流程是"提交 -> 被拦 -> 手工
+        # `uv run ruff format <文件>` -> `git add` -> 再提交", 每次都得跑两遍(用户
+        # 2026-10-05 的要求: 自动整理并把整理好的文件加回暂存区)。改成"就地排版 + 自己重新
+        # 暂存"(与下面 compact-json 同一条理由与做法): 排版结果立刻进索引, 工作区与索引
+        # 一致 ⇒ pre-commit 不算它"弄脏文件", **本次提交直接带上排版好的内容**; 只有
+        # 加不进索引时才退回"拦下提交"(见 scripts/ruff_format_and_stage.py)。
+        name: ruff format (自动排版并重新暂存)
+        entry: uv run python scripts/ruff_format_and_stage.py
         language: system
         types: [python]
 

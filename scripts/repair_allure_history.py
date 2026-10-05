@@ -13,8 +13,12 @@ environments 那次把它从 ``<testCaseHash>.<parametersHash>`` 变成三段, �
    键集合相同或互相包含且时间相近的只留信息更全的那一份 —— 否则"本次结果"会冒充
    "上一次历史", 让人以为历史还在;
 2. **重键**: 旧快照的键与当前形状不同(多出的维度是**追加在末尾**的)时按"唯一同名头部"
-   补全(``a.b`` -> ``a.b.c``); 补不出唯一值的条目丢掉 —— 留着也永远匹配不上, 只会让
-   历史文件里堆积永远用不到的数据;
+   补全(``a.b`` -> ``a.b.c``); 头部对上多个当前键时(采用 environments 之后, 同一用例在
+   三个平台各有一个键)再按条目自己的 ``environment`` 对准平台 —— 旧快照写显示名
+   (``macOS``)、新快照写 id(``macos``), 比较时统一小写。没有这一步时全部旧条目会被当成
+   "补不出唯一值"丢掉, 连接数归零, 兜底反而清空整份历史。补不出唯一值的条目丢掉;
+   已是当前段数的键原样保留, 段数比当前还多的键同样丢弃 —— 把长键砍成前缀会悄悄并掉
+   平台之间的区别, 留着也永远匹配不上, 只会让历史文件里堆积永远用不到的数据;
 3. **兜底**: 重键之后**没有任何一份旧快照**能与最新快照相连 ⇒ 清空历史重新开始。这一步
    一定写进修复记录(``allure-history-repair.md``), 不许静默发生 —— 静默正是这次丢历史的
    代价来源。
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +52,10 @@ DUPLICATE_WINDOW_SECONDS = 300.0
 SAME_RUN_OVERLAP = 0.9
 RESULTS_FIELD = "testResults"
 TIMESTAMP_FIELD = "timestamp"
+# 最新快照比现在旧这么多天时, 修复记录要写出来: 基线被冻结(期间没有任何一轮运行被记进
+# 历史)时键形状对不上, 趋势会整体消失 —— 这正是 2026-10-05 那次"每条用例只剩自己的点"
+# 的另一半病因(基线只认成功运行, 连续失败时期链条不动)。
+STALE_BASELINE_DAYS = 3.0
 # 修复记录里写的文件名(与 allurerc.mjs 的 glob、.gitignore 三处必须一致).
 _REPORT_NAME = REPAIR_REPORT.name
 
@@ -95,6 +104,8 @@ class RepairReport:
     reset: bool = False
     reason: str = ""
     allure_version: str = ""
+    # 最新快照距今几天(基线是不是被冻结了, 修复记录里要能看出来)。
+    newest_age_days: float | None = None
 
     @property
     def changed(self) -> bool:
@@ -109,10 +120,16 @@ class RepairReport:
     def summary(self) -> str:
         """一行日志(CI 里方便扫一眼)."""
         verdict = "已重置(重新开始记历史)" if self.reset else "趋势已恢复"
+        stale = ""
+        if (
+            self.newest_age_days is not None
+            and self.newest_age_days > STALE_BASELINE_DAYS
+        ):
+            stale = f"; 最新快照 {int(self.newest_age_days)} 天前(期间没有一轮运行被记进历史)"
         return (
             f"历史修复: {verdict}; 读入 {self.read} 份, 去重 {self.duplicates} 份, "
             f"重键 {self.rekeyed} 条, 丢弃 {self.unmatched} 条, "
-            f"可连接旧快照 {self.connected}/{self.older_snapshots} 份"
+            f"可连接旧快照 {self.connected}/{self.older_snapshots} 份{stale}"
         )
 
 
@@ -125,6 +142,49 @@ def _prefixes(key: str) -> list[str]:
     """键的所有前缀(``a.b.c`` -> ``["a.b", "a"]``): 用来找"是不是只差末尾维度"."""
     parts = key.split(".") if key else []
     return [".".join(parts[:index]) for index in range(len(parts) - 1, 0, -1)]
+
+
+def _environment_of(value: object) -> str:
+    """条目自己的环境标识, 统一小写后返回.
+
+    旧快照写显示名(``macOS``)、新快照写 id(``macos``): 只差大小写时视为同一环境;
+    字段缺失/不是字符串时返回空串, 调用方退回"唯一前缀"的判定。
+    """
+    if isinstance(value, dict):
+        environment = value.get("environment")
+        if isinstance(environment, str) and environment:
+            return environment.casefold()
+    return ""
+
+
+def _resolve_key(
+    key: str,
+    value: object,
+    target: int,
+    reference: set[str],
+    index: Mapping[str, set[str]],
+    environments: Mapping[str, str],
+) -> str | None:
+    """把一个键映射成当前形状: 补不出唯一值时返回 ``None``(调用方计数并丢弃)."""
+    parts = _parts(key)
+    if parts == target:
+        return key  # 已是当前段数: 原样保留(不许再按前缀改名)
+    if parts > target:
+        return None  # 比当前形状还长: 砍成前缀会并掉平台之间的区别
+    found = _candidates(key, reference, index)
+    if len(found) > 1:
+        wanted = _environment_of(value)
+        if wanted:
+            narrowed = {
+                candidate
+                for candidate in found
+                if environments.get(candidate) == wanted
+            }
+            if narrowed:
+                found = narrowed
+    if len(found) != 1:
+        return None
+    return next(iter(found))
 
 
 def load_snapshots(path: Path) -> tuple[list[Snapshot], int]:
@@ -205,20 +265,40 @@ def _candidates(
     return found
 
 
+def _reference_index(
+    snapshots: Sequence[Snapshot], target: int
+) -> tuple[set[str], dict[str, str]]:
+    """收集"已经是当前形状"的键作参考, 顺带记下每个键的环境(重键消歧用)."""
+    reference: set[str] = set()
+    environments: dict[str, str] = {}
+    for snapshot in snapshots:
+        if target in snapshot.shapes():
+            for key, value in snapshot.results.items():
+                reference.add(key)
+                environment = _environment_of(value)
+                if environment and key not in environments:
+                    environments[key] = environment
+    return reference, environments
+
+
 def rekey(snapshots: Sequence[Snapshot]) -> tuple[int, int]:
     """把旧形状的键补成当前形状, 返回(重键条数, 补不出唯一值而丢掉的条数).
 
     当前形状取**最新快照**的键段数: 它由最近一次生成追加, 也就是这份 CLI 现在会算出来的
     形状。参考集合是"所有已经是当前形状的键" —— 于是重键只用到文件自身的信息, 不需要
     复刻 Allure 的哈希算法(那也复刻不了)。
+
+    已知局限(见 ci.yml 的"Resolve previous run with Allure history"): 键形状刚变的第一轮,
+    基线里还没有新形状的快照, 这里会把旧形状误当成"当前" —— 所以历史基线必须每轮都被
+    消费, 链条一冻结(基线停在形状变更之前), 这一轮的报告就只剩自己的点。
+
+    前缀对上多个当前键时(同一用例在三个平台各有一个键), 按条目自己的 ``environment``
+    对准平台; 对不上时才按"补不出唯一值"丢弃。
     """
     if not snapshots:
         return 0, 0
     target = max(snapshots[-1].shapes() or {0})
-    reference: set[str] = set()
-    for snapshot in snapshots:
-        if target in snapshot.shapes():
-            reference |= snapshot.keys()
+    reference, environments = _reference_index(snapshots, target)
     if not reference or target <= 0:
         return 0, 0
     index = _prefix_index(reference)
@@ -229,13 +309,12 @@ def rekey(snapshots: Sequence[Snapshot]) -> tuple[int, int]:
             continue  # 已经是当前形状
         rebuilt: dict[str, Any] = {}
         for key, value in snapshot.results.items():
-            found = _candidates(key, reference, index)
-            if len(found) != 1:
-                unmatched += 1  # 补不出唯一值: 留着也匹配不上
+            resolved = _resolve_key(key, value, target, reference, index, environments)
+            if resolved is None:
+                unmatched += 1  # 补不出唯一值 / 比当前形状还长: 留着也匹配不上
                 continue
-            renamed = next(iter(found))
-            rekeyed += 0 if renamed == key else 1
-            rebuilt[renamed] = value
+            rekeyed += 0 if resolved == key else 1
+            rebuilt[resolved] = value
         snapshot.results = rebuilt
     return rekeyed, unmatched
 
@@ -259,6 +338,7 @@ def repair(
 
     kept, duplicates = drop_duplicates(snapshots, window)
     report.duplicates = duplicates
+    report.newest_age_days = (time.time() - kept[-1].timestamp) / 86_400.0
     report.new_shape = max(kept[-1].shapes() or {0})
     old_shapes = {shape for snapshot in kept for shape in snapshot.shapes()}
     report.old_shape = min(old_shapes) if old_shapes else None
@@ -316,6 +396,14 @@ def repair_text(report: RepairReport) -> str:
         f"重键 {report.rekeyed} 条, 丢弃 {report.unmatched} 条(补不出唯一值)",
         f"- 旧快照能连上最新快照的: {report.connected}/{report.older_snapshots} 份",
     ]
+    if (
+        report.newest_age_days is not None
+        and report.newest_age_days > STALE_BASELINE_DAYS
+    ):
+        lines.append(
+            f"- 最新快照: {int(report.newest_age_days)} 天前 —— 期间没有任何一轮运行被"
+            "记进历史(基线被冻结时, 键形状对不上, 趋势会整体消失)"
+        )
     if report.broken_lines:
         lines.append(f"- 认不出来的行: {report.broken_lines} 行")
     if report.allure_version:
@@ -332,7 +420,8 @@ def repair_text(report: RepairReport) -> str:
         "(例如采用 environments 之后的 `environmentHash`), 旧快照的键就整体对不上, "
         "于是看起来像是过去的记录全丢了 —— 数据其实都还在历史文件里, 丢的是**匹配**。",
         "所以这里做三件事: 同一轮运行被追加两次的快照去重(否则本次结果会冒充历史), "
-        "旧形状的键按唯一前缀补成当前形状, 实在补不出来时清空历史重新开始并在这里写明。",
+        "旧形状的键按唯一前缀补成当前形状(前缀对上多个平台的键时按条目自己的 environment "
+        "对准), 实在补不出来时清空历史重新开始并在这里写明。",
         "要改这段判断, 先看 `tests/unit/test_ci_history.py` —— 三种走向都钉在那里。",
         "",
     ]

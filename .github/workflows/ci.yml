@@ -776,8 +776,14 @@ jobs:
           echo "::error::覆盖率数据不全(缺片): 本轮不判覆盖率门槛。请到本平台的分片作业里看哪一片没上传产物。"
           exit 1
 
-      - name: Resolve previous successful run
+      - name: Resolve previous run with Allure history
         id: prev-run
+        # 基线**不要求**那一轮是 success(2026-10-05 教训): 只认成功运行时, 连续失败的
+        # 时期(如 macOS Tk 崩溃那几天)没有任何一轮被消费, 基线会冻结在更早的成功运行上
+        # —— 恰逢历史键的形状变了(environments 多出一段), 于是每轮都按旧形状"修",
+        # 报告里每条用例只剩自己的点, 红运行写得再多也永远接不上。失败轮的历史行本来就
+        # 该出现在趋势里(Allure 的趋势正是用来看失败的); "有没有产物"由下面的 artifact
+        # 检查把关, 中途取消/没跑到上传的运行自然被跳过。
         uses: actions/github-script@v9
         env:
           ARTIFACT_NAME: allure-resources-${{ matrix.os }}
@@ -792,8 +798,7 @@ jobs:
               (r) =>
                 r.name === "CI" &&
                 r.id !== context.runId &&
-                r.status === "completed" &&
-                r.conclusion === "success",
+                r.status === "completed",
             );
             for (const candidate of candidates) {
               const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
@@ -834,8 +839,9 @@ jobs:
         # 用的是**动态版本** —— 键的形状跟着版本/配置变就会把全部旧历史变成“接不上”:
         # 2026-10-05 实测采用 environments 那轮之后, 7231 条结果里 7226 条历史长度为 1,
         # 而那一条还是本次运行自己重复追加的快照(看起来就是“历史全丢了”)。
-        # 这一步去重同一轮的重复快照、把旧形状的键按唯一前缀补成当前形状; 实在补不出来
-        # 时清空历史重新开始 —— 无论哪种都会写一份记录挂进首页「全局附件」, 不许静默发生。
+        # 这一步去重同一轮的重复快照、把旧形状的键按唯一前缀补成当前形状(前缀对上
+        # 多个平台的键时按条目自己的 environment 对准); 实在补不出来时清空历史重新
+        # 开始 —— 无论哪种都会写一份记录挂进首页「全局附件」, 不许静默发生。
         # `--allure-version` 记的是**这一轮实际用的版本**, 下次形状再变能一眼对上是哪次更新。
         if: always()
         shell: bash
@@ -1159,8 +1165,11 @@ jobs:
           # 各平台的产物同名, 分开存放才能各自出现在汇总报告里(不能被后写的覆盖).
           merge-multiple: false
 
-      - name: Resolve previous successful run
+      - name: Resolve previous run with Allure history
         id: prev-run
+        # 与逐平台作业同一条理由: 基线不问成败, 只看那一轮是否真的传了产物 ——
+        # 只认成功运行会把链条冻结在旧基线上(连续失败时期 + 键形状变更 = 历史永远
+        # 接不上), 详见 pytest-report 作业里那段说明。
         if: always()
         uses: actions/github-script@v9
         env:
@@ -1176,8 +1185,7 @@ jobs:
               (r) =>
                 r.name === "CI" &&
                 r.id !== context.runId &&
-                r.status === "completed" &&
-                r.conclusion === "success",
+                r.status === "completed",
             );
             for (const candidate of candidates) {
               const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
@@ -1320,7 +1328,7 @@ jobs:
         with:
           name: allure-resources-final
           # 与各平台的 `allure-resources-<os>` 同一个道理: 历史文件是下一轮唯一要取回的
-          # 东西(见上面的 Resolve previous successful run), 而**整份结果集**在这里再传一次
+          # 东西(见上面的 Resolve previous run with Allure history), 而**整份结果集**在这里再传一次
           # 是本工作流里最大的单笔上传 —— 它是 `allure-results-<os>-<分片>` 那几份的合集,
           # 人要原始数据去下分片产物即可。
           path: .allure/history.jsonl
@@ -1352,8 +1360,9 @@ jobs:
         # 不必再让 artifact 绕一圈(原来那个“下载 allure-report-final”的唯一用途就是跨作业取文件)。
         id: unpack
         if: always() && !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.verify-report.outcome == 'success'
-        # 发布是“给人看的副本”, 不让它决定这一轮的成败: 历史趋势的基线只认
-        # `conclusion == success` 的运行, 发布挂掉不该把本轮刚写好的历史行作废。
+        # 发布是“给人看的副本”, 不让它决定这一轮的成败: 历史与报告产物在前面几步
+        # 就已经传完, 发布挂掉不该把作业弄红(趋势基线如今不问成败, 见
+        # “Resolve previous run with Allure history”)。
         # 原来这条 `continue-on-error` 挂在 deploy-pages **整个作业**上, 合并后只能落在发布这三步
         # 上 —— **不能**挂到作业上, 那会把质量门的结论一起吞掉。
         continue-on-error: true

@@ -121,14 +121,18 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 
 输出应为 **0 个文件需要改动**，且与 `ruff format --check .` 同时成立。
 
-本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`），并把 `src/archive_management/resources/` 顶层的**固定数据清单**（如平台工具排除清单）自动压回单行紧凑 JSON（`scripts/compact_json.py`）。这个钩子跑完会把文件 **`git add` 进暂存区**（这次没改写也会加一次，顺手把索引里可能残留的多行版本同步成单行）：工作区与索引一起变成单行后 pre-commit 就不算它“弄脏了文件”，本次提交直接带上转换好的内容，不需要重新 `git add`；万一把结果加不进索引（没有 git 等），才会退回“就地改写并拦下提交”。`resources/i18n/*.json` 是给人审校的文案资源，不受影响。CI 会在 Windows、Ubuntu、macOS 上运行全量测试（三个平台的矩阵与分片数见 [testing.md](testing.md) 第 4 节），并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`），并把 `src/archive_management/resources/` 顶层的**固定数据清单**（如平台工具排除清单）自动压回单行紧凑 JSON（`scripts/compact_json.py`）。这个钩子跑完会把文件 **`git add` 进暂存区**（这次没改写也会加一次，顺手把索引里可能残留的多行版本同步成单行）：工作区与索引一起变成单行后 pre-commit 就不算它“弄脏了文件”，本次提交直接带上转换好的内容，不需要重新 `git add`；万一把结果加不进索引（没有 git 等），才会退回“就地改写并拦下提交”。`resources/i18n/*.json` 是给人审校的文案资源，不受影响。
+
+**排版钩子也是这套做法（2026-10-05 起）**：`ruff format` 那条钩子不再用 `--check`，而是 `scripts/ruff_format_and_stage.py` —— 就地排版、把结果 `git add` 回暂存区，于是**本次提交一次就带上排版好的内容**（以前的流程是“提交 → 被拦下 → 手工 `uv run ruff format <文件>` → `git add` → 再提交”）。改动不会被吞掉：排版结果与工作区一致地进索引，pre-commit 因此不算它“弄脏了文件”；只有加不进索引（没有 git、权限问题）时才退回“拦下提交”。CI 那侧的 `uv run ruff format --check .` 保持只读判据不变（见 [testing.md](testing.md) 的工程门禁一节）。
+
+CI 会在 Windows、Ubuntu、macOS 上运行全量测试（三个平台的矩阵与分片数见 [testing.md](testing.md) 第 4 节），并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
 
 ### 想在本地看 Allure 报告：
 
 1. `uv run pytest --alluredir=allure-results`
 1. `allure generate allure-results --output allure-report`
 1. `allure open allure-report`（标题、界面语言、端口、失败归类、运行变量与环境白名单都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）
-（完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
+   （完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
 
 用例失败时会**自动留现场**（coredumpy dump + 界面截图 + 摘要，机制与纪律见 [testing.md](testing.md) 第 6 节）：dump 落在仓库根的 `crash-dumps/`（已被忽略），用 `coredumpy load crash-dumps/<用例>.dump` 进 pdb，或在 VSCode 里用 coredumpy 扩展右键打开；不想留就加 `--crash-dump-depth=0`。
 

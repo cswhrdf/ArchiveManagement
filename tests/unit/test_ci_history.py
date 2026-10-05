@@ -78,15 +78,23 @@ def _snapshot(
     keys: list[str],
     timestamp_ms: int,
     index: int = 0,
+    environments: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    """造一份历史快照(载荷字段只保留脚本会用到的那些)."""
+    """造一份历史快照(载荷字段只保留脚本会用到的那些).
+
+    ``environments`` 给个别键补上条目自己的环境(重键消歧用): 旧快照写显示名
+    (``macOS``)、新快照写 id(``macos``), 与真实文件一致。
+    """
+    results: dict[str, object] = {}
+    for position, key in enumerate(keys):
+        entry: dict[str, object] = {"name": f"case-{position}", "status": "passed"}
+        if environments and key in environments:
+            entry["environment"] = environments[key]
+        results[key] = entry
     return {
         "uuid": _case_hash(index + 900),
         "timestamp": timestamp_ms,
-        "testResults": {
-            key: {"name": f"case-{position}", "status": "passed"}
-            for position, key in enumerate(keys)
-        },
+        "testResults": results,
     }
 
 
@@ -193,7 +201,10 @@ def test_old_keys_are_rekeyed_to_the_current_shape(tmp_path: Path) -> None:
 
 
 def test_ambiguous_keys_are_dropped_not_guessed(tmp_path: Path) -> None:
-    """一个旧键能补成多个当前键时(同一用例的两个环境)不许猜: 丢掉并计数."""
+    """一个旧键能补成多个当前键时(同一用例的两个环境)不许猜: 丢掉并计数.
+
+    条目自己没写 environment 时才会走到这里 —— 写了的看下一条用例。
+    """
     module = _load_script("repair_allure_history")
     history = tmp_path / "history.jsonl"
     ambiguous = f"{_case_hash(1)}.{_case_hash(7)}"
@@ -214,6 +225,95 @@ def test_ambiguous_keys_are_dropped_not_guessed(tmp_path: Path) -> None:
     assert report.unmatched == 1
     assert report.rekeyed == 1
     assert set(snapshots[0].keys()) == {f"{clean}.{_case_hash(8)}"}
+
+
+def test_platform_ambiguity_is_resolved_by_environment(tmp_path: Path) -> None:
+    """旧键对上三个平台的当前键时, 按条目自己的 environment 对准, 不许整条丢掉.
+
+    2026-10-05 的教训: 采用 environments 之后一个旧键(两段)会同时命中同一用例在
+    windows/linux/macos 三个环境下的键(三段)。只按"唯一前缀"判会把**全部**旧条目当成
+    "补不出唯一值"丢掉, 连接数归零, 兜底直接清空整份历史 —— 修复步骤反而变成毁数据的
+    那一步。旧快照的环境写显示名(macOS), 新快照写 id(macos), 比较时统一小写。
+    """
+    module = _load_script("repair_allure_history")
+    history = tmp_path / "history.jsonl"
+    shared = f"{_case_hash(1)}.{_case_hash(7)}"
+    current = {
+        f"{shared}.{_case_hash(8)}": "windows",
+        f"{shared}.{_case_hash(9)}": "macos",
+        f"{shared}.{_case_hash(10)}": "linux",
+    }
+    _write_history(
+        history,
+        [
+            _snapshot(
+                keys=[shared],
+                timestamp_ms=1_790_000_000_000,
+                index=0,
+                environments={shared: "macOS"},
+            ),
+            _snapshot(
+                keys=list(current),
+                timestamp_ms=1_790_010_000_000,
+                index=1,
+                environments=current,
+            ),
+        ],
+    )
+    report, snapshots = module.repair(history)
+    assert report.unmatched == 0
+    assert report.rekeyed == 1
+    assert not report.reset, "对得上环境时不许触发清空"
+    assert set(snapshots[0].keys()) == {f"{shared}.{_case_hash(9)}"}
+
+
+def test_keys_beyond_the_current_shape_are_dropped_not_downgraded(
+    tmp_path: Path,
+) -> None:
+    """当前形状比旧键**短**时, 多一段的键不许砍成前缀(会并掉平台之间的区别).
+
+    只能丢弃并计数 —— 于是旧快照一条都连不上, 走兜底: 清空并写明。降级成前缀看似
+    "保住了历史", 实际把三个平台的旧点并到一个键上, 趋势会凭空多出错误数据。
+    """
+    module = _load_script("repair_allure_history")
+    history = tmp_path / "history.jsonl"
+    old_key = f"{_case_hash(1)}.{_case_hash(7)}.{_case_hash(8)}"
+    current_key = f"{_case_hash(1)}.{_case_hash(7)}"
+    _write_history(
+        history,
+        [
+            _snapshot(keys=[old_key], timestamp_ms=1_790_000_000_000, index=0),
+            _snapshot(keys=[current_key], timestamp_ms=1_790_010_000_000, index=1),
+        ],
+    )
+    report, snapshots = module.repair(history)
+    assert report.unmatched == 1
+    assert snapshots == [], "重置路径下不返回快照(写回时清空文件)"
+    assert report.reset, "旧快照一条都连不上时按兜底走: 清空并写明"
+
+
+def test_mixed_snapshots_keep_keys_already_in_the_current_shape(
+    tmp_path: Path,
+) -> None:
+    """混合形状的快照里, 已是当前段数的键要原样保留(不许再按前缀改名/重复计数)."""
+    module = _load_script("repair_allure_history")
+    history = tmp_path / "history.jsonl"
+    old_key = f"{_case_hash(1)}.{_case_hash(7)}"
+    current_key = f"{old_key}.{_case_hash(8)}"
+    _write_history(
+        history,
+        [
+            _snapshot(
+                keys=[old_key, current_key],
+                timestamp_ms=1_790_000_000_000,
+                index=0,
+            ),
+            _snapshot(keys=[current_key], timestamp_ms=1_790_010_000_000, index=1),
+        ],
+    )
+    report, snapshots = module.repair(history)
+    assert report.rekeyed == 1, "只有旧形状那条键改名, 已是当前形状的不动"
+    assert set(snapshots[0].keys()) == {current_key}
 
 
 def test_unmatched_entries_are_dropped_and_counted(tmp_path: Path) -> None:

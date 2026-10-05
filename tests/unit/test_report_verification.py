@@ -1130,6 +1130,35 @@ def test_pre_commit_covers_the_dependency_check() -> None:
     assert "uv\\.lock" in config
 
 
+def test_pre_commit_formats_and_restages_instead_of_only_checking() -> None:
+    """排版钩子要"就地排版 + 自己重新暂存", 不能只是 ``--check``.
+
+    出处(用户 2026-10-05): ``--check`` 只报哪个文件会被改, 于是每次都是"提交 -> 被拦下 ->
+    手工 ``ruff format`` -> ``git add`` -> 再提交"。钩子把结果加回索引之后, pre-commit 不算它
+    "弄脏文件", **这次提交直接带上排版好的内容**(与 ``scripts/compact_json.py`` 同一套做法,
+    那一条在 docs/development.md 里已有说明)。
+
+    判据只看这个钩子的那一段: 它的 entry 指向那个脚本, 且不再带 ``--check`` —— CI 那份
+    ``ruff format --check .`` 是另一条路径, 不受影响(它要的就是只读判据)。
+    """
+    config = _PRE_COMMIT.read_text(encoding="utf-8")
+    start = config.index("id: ruff-format")
+    end = config.find("\n      - id: ", start)
+    block = config[start : end if end != -1 else len(config)]
+    assert "scripts/ruff_format_and_stage.py" in block, (
+        "排版钩子要交给脚本做(它才会暂存)"
+    )
+    # 只看踩到的**那一行命令**: 上面的注释里正解释着"不再用 --check", 拿整段找会误判。
+    entry = next(
+        line for line in block.splitlines() if line.strip().startswith("entry:")
+    )
+    assert "--check" not in entry, "只读检查会在改过文件时拦下提交, 那正是要改掉的流程"
+    script = _REPO_ROOT / "scripts" / "ruff_format_and_stage.py"
+    assert script.is_file(), "钩子指向的脚本要在"
+    # 脚本自己会 git add: 这是"提交一次就过"的关键, 少了它 pre-commit 仍会拦下。
+    assert '"add"' in script.read_text(encoding="utf-8")
+
+
 def test_main_survives_a_cp1252_console(
     layout: _Layout, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2593,12 +2622,14 @@ def test_htmlcov_is_not_uploaded_by_every_platform() -> None:
 def test_history_trends_survive_the_pages_deploy() -> None:
     """历史趋势靠 artifact 往返 —— 发布到 Pages 既不能提供它, 也不该把它弄丢。
 
-    机制(这条守卫要钉住的不变式): 两个报告作业各自"找上一次**成功**运行的同名产物 → 取回
-    `.allure/history.jsonl` → 生成报告(读它并追加本次一行) → 把新的 history.jsonl 重新
-    传进产物"。于是趋势的寿命 = artifact 的寿命(与站点无关), 而链条的每一环都要求那一轮的
-    `conclusion` 是 success —— 这也解释了为什么"发布 Pages"这个非门禁动作必须
-    `continue-on-error`: 它失败会让整轮离开成功集合, 于是这一轮刚写好的历史行再也不会
-    被下一轮读走(表现是趋势曲线缺一走)。
+    机制(这条守卫要钉住的不变式): 两个报告作业各自"找上一次**带着同名产物**的运行(不问
+    成败) → 取回 `.allure/history.jsonl` → 生成报告(读它并追加本次一行) → 把新的
+    history.jsonl 重新传进产物"。基线**不许**再要求 `conclusion === "success"`:
+    2026-10-05 的教训 —— 只认成功运行时, 连续失败的时期(macOS Tk 崩溃那几天)没有任何
+    一轮被消费, 基线冻结在键形状变更(environments 多出 environmentHash)之前的成功运行上,
+    红运行写得再多也永远接不上, 报告里每条用例只剩自己的点。失败轮的历史行本来就该出现在
+    趋势里(Allure 的趋势正是用来看失败的); "那一轮是否真的传了产物"由 finder 的 artifact
+    检查把关, 中途取消/没跑到上传的运行自然被跳过。
 
     合并成一个作业之后这条要多守一件事: `continue-on-error` **只能落在发布那几步上**,
     不能挂到作业上 —— 挂上去会把质量门的结论一起吞掉(那样门禁失败也只是条绿记录)。
@@ -2607,8 +2638,15 @@ def test_history_trends_survive_the_pages_deploy() -> None:
 
     for job in ("pytest-report", "allure-summary"):
         block = ci_workflow.job_block(workflow, job)
-        assert "Resolve previous successful run" in block, f"{job} 要先找上一轮成功运行"
-        assert 'conclusion === "success"' in block, f"{job} 只把成功运行当基线"
+        assert "Resolve previous run with Allure history" in block, (
+            f"{job} 要先找到带着历史产物的上一轮运行"
+        )
+        assert 'conclusion === "success"' not in block, (
+            f"{job} 的基线不许只认成功运行: 失败时期会把链条冻结在旧基线上, 历史永远接不上"
+        )
+        assert 'status === "completed"' in block, (
+            f"{job} 只认已完成的运行(仍在跑/被取消的没有产物可取)"
+        )
         hint = f"{job} 要取回上一次的历史文件"
         assert "cp .previous-allure-resources/.allure/history.jsonl" in block, hint
         assert "include-hidden-files: true" in block, (
@@ -2627,8 +2665,8 @@ def test_history_trends_survive_the_pages_deploy() -> None:
     )[0]
     for block in publish.split("\n      - name: "):
         assert "continue-on-error: true" in block, (
-            "发布这几步都要带 continue-on-error: 发布失败不该让整轮离开'成功'集合"
-            f"(历史基线只认成功的运行): {block[:200]}"
+            "发布这几步都要带 continue-on-error: 发布失败不该把作业弄红"
+            f"(报告与历史产物那时已经传完): {block[:200]}"
         )
     assert "history.jsonl" not in publish, "站点只是副本: 发布那几步不该碰历史文件"
 
