@@ -125,7 +125,7 @@ def test_path_that_fits_is_returned_unchanged() -> None:
 
 
 def test_long_paths_keep_the_head_and_the_tail() -> None:
-    """长路径中间省略: 头(盘符/根)与尾(目录名)都留, 且不超宽(第 8/9 号评审)."""
+    """长路径中间省略: 头(盘符/根)与尾(目录名)都留, 且不超宽(评审时定的)."""
     font = _FakeFont()
     path = "C:/Users/ycswh/Documents/COMPILE HEART/约会大作战/saves"
     width = 200

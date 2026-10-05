@@ -57,7 +57,7 @@ def _has_locations(backend: ArchiveService, game_id: str) -> bool:
 def _blocked_panel(
     parent: ctk.CTkToplevel, palette: Palette, blocked: Sequence[ScheduleItem]
 ) -> None:
-    """把"不能创建定时任务"的游戏摆成一块警告卡片(26 号评审).
+    """把"不能创建定时任务"的游戏摆成一块警告卡片(评审时定的).
 
     原来两个游戏名是用逗号拼在同一句里的: 名字一长就折到第二行, 而第二行只有名字、
     没有任何说明文字, 看起来像多出来的一行数据。这里拆成三行各司其职 —— 原因(醒目的
@@ -140,7 +140,7 @@ def edit_schedule(
         keep_prompt=tr("dialog.keep_auto_prompt", max=MAX_KEEP_AUTO),
         initial_interval=task.schedule_text,
         initial_keep=str(task.keep_auto),
-        # 当前排期单独一行: 塞在说明句尾时用户扫一眼找不到状态(25 号评审).
+        # 当前排期单独一行: 塞在说明句尾时用户扫一眼找不到状态(评审时定的).
         current=tr(
             "dialog.schedule_current",
             current=task.schedule_text or tr("task.unscheduled"),
@@ -185,7 +185,7 @@ def add_schedule_dialog(
     """选择要新增定时任务的游戏, 返回游戏 id; 取消或未选返回 None.
 
     选择框可以直接输入内容来筛选游戏(输入即过滤下拉候选)。"统一管理"的推荐入口
-    写在窗口的副标题里, 这里不再重复一遍(26 号评审: 同一句指引两处投放)。
+    写在窗口的副标题里, 这里不再重复一遍(评审时定的: 同一句指引两处投放)。
     """
     if not candidates:
         return None
@@ -369,7 +369,7 @@ class ScheduleWindow:
         )
         self._summary_label.grid(row=1, column=0, padx=16, pady=(2, 0), sticky="w")
         # 说明左对齐, 并且就排在统计下面(同一视觉块): 右对齐的中文断句读起来别扭,
-        # 而它与"共 N 个任务"本来就是在说同一件事(18 号评审)。
+        # 而它与"共 N 个任务"本来就是在说同一件事(评审时定的)。
         self._subtitle_label = ctk.CTkLabel(
             header,
             text=tr("schedule.subtitle"),
@@ -410,7 +410,7 @@ class ScheduleWindow:
         )
         self._list_scroll.grid(row=2, column=0, sticky="nsew")
         self._list_scroll.grid_columnconfigure(0, weight=1)
-        # 只有一两个任务时右侧不该立着一条拖不动的滚动条(18 号评审).
+        # 只有一两个任务时右侧不该立着一条拖不动的滚动条(评审时定的).
         auto_scrollbar(self._list_scroll)
 
         footer = ctk.CTkFrame(container, fg_color="transparent")
@@ -517,7 +517,7 @@ class ScheduleWindow:
         )
         icon.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=8)
         # 标题 = "来自游戏"小标题 + 游戏名: 整行同色同粗时, 前缀读起来像超链接
-        # (18 号评审)。小标题用次要色小字号, 名字才是标题。
+        # (评审时定的)。小标题用次要色小字号, 名字才是标题。
         title = ctk.CTkFrame(row, fg_color="transparent")
         title.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
         prefix = ctk.CTkLabel(
@@ -573,7 +573,7 @@ class ScheduleWindow:
     def _state_color(self, item: ScheduleItem) -> str:
         """启用状态的配色: 只有"已启用"是正向色.
 
-        "已暂停"原本也用浅绿, 与"已启用"无从区分(18 号评审); 现在暂停/归档一律用
+        "已暂停"原本也用浅绿, 与"已启用"无从区分(评审时定的); 现在暂停/归档一律用
         次要文字色, 一眼能看出"当前不会跑"。
         """
         if item.archived or not item.enabled:
@@ -609,10 +609,10 @@ class ScheduleWindow:
         self._paint_buttons()
 
     def _paint_buttons(self) -> None:
-        """可行/禁用一眼可分: 四个按钮全是灰底时看不出哪个能用(18 号评审).
+        """可行/禁用一眼可分: 四个按钮全是灰底时看不出哪个能用(评审时定的).
 
         启用态按各自登记的样式重画(删除是危险色), 不是一律刷成中性色 ——
-        否则这里会把危险色洗掉(48 号评审: 同一窗口内删除的配色要一致)。
+        否则这里会把危险色洗掉(评审时定的: 同一窗口内删除的配色要一致)。
         """
         palette = self._palette
         for button, style in self._button_styles.items():

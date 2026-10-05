@@ -23,6 +23,8 @@ from archive_management.application.imports import (
     PackageLocation,
 )
 from archive_management.domain import (
+    DeletionMode,
+    DeletionPlan,
     GameAction,
     GameFacts,
     HomeFilter,
@@ -39,6 +41,7 @@ from archive_management.domain import (
     keep_surviving,
     tree_depths,
 )
+from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.services.pathcheck import dangerous_target_reason
@@ -106,19 +109,55 @@ def size_label(total: int) -> str:
     return f"{total} B"
 
 
+def format_moment(moment: datetime) -> str:
+    """把时刻格式化为本地时区的展示文本(数据库时间戳一律是 UTC).
+
+    两个后端共用这一份实现, 保证同一时刻在游戏库、详情与任务卡上显示同一个
+    文本; naive 时刻按本地时区处理(``astimezone`` 的默认行为)。
+    """
+    return moment.astimezone().strftime("%Y/%m/%d %H:%M")
+
+
 def format_stamp(value: str, *, fallback: str = "—") -> str:
     """把 ISO 时间戳格式化成 ``2026/09/26 20:11``(空值给占位符).
 
-    全应用只允许一种日期写法: 主页与详情用 ``2026/09/24``, 启停队列曾经用 ``-``
-    分隔 —— 同一屏里两种格式会让人以为其中一处是"原始数据"。脏数据原样显示
-    (把 ``T`` 换成空格), 至少不丢信息。
+    数据库时间戳一律是 UTC, 展示时转换为本地时区(:func:`format_moment` 是
+    唯一的换算点, naive 输入按本地时区处理)。全应用只允许一种日期写法:
+    主页与详情用 ``2026/09/24``, 启停队列曾经用 ``-`` 分隔 —— 同一屏里两种
+    格式会让人以为其中一处是"原始数据"。脏数据原样显示(把 ``T`` 换成空格),
+    至少不丢信息。
     """
     if not value:
         return fallback
     try:
-        return datetime.fromisoformat(value).strftime("%Y/%m/%d %H:%M")
+        return format_moment(datetime.fromisoformat(value))
     except ValueError:
         return value.replace("T", " ")
+
+
+def clean_game_name(name: str) -> str:
+    """清洗用户输入的游戏名: 去首尾空白, 空名给可读错误.
+
+    新建与改名共用同一条纪律, 两个后端都从这里拿清洗结果, 保证空名报错的
+    判定与文案完全一致。
+    """
+    clean = name.strip()
+    if not clean:
+        raise ArchiveManagementError(tr("error.game_name_empty"))
+    return clean
+
+
+def delete_result_text(plan: DeletionPlan, title: str) -> str:
+    """删除备份的结果文案: 连带子分支 / 顶替父节点 / 单节点三种.
+
+    ``title`` 是**被删掉的那一份**的名字: 只说"已删除该备份"等于没说删了
+    什么(I-7: 结果要说清"删了什么")。
+    """
+    if plan.mode is DeletionMode.CASCADE:
+        return tr("result.delete_cascade", count=plan.removed_count)
+    if plan.mode is DeletionMode.SHIFT:
+        return tr("result.delete_shift", title=title)
+    return tr("result.delete_single", title=title)
 
 
 def status_lines(
@@ -133,7 +172,7 @@ def status_lines(
 
     * **状态那几个**(平台/备份/风险/归档或停用)永远在第一行;
     * **自定义标签**从第二行开始, 再多也只有这一行, 放不下的整块让位给省略号
-      (与 06 号评审同一条规矩: 不把 "测试1" 切成 "测…" 这种半句话)。
+      (与评审时定的同一条规矩: 不把 "测试1" 切成 "测…" 这种半句话)。
 
     没有标签时只有一行。两行文案都保证不超宽(省略号的位置也先扣出来), 否则 Tk 会在
     标签边界处再折一次、变成三行。
@@ -705,7 +744,7 @@ class MonitoredDirItem:
         """启用状态的颜色基调: 停用是要被注意的状态, 不能与"路径可用"同色.
 
         路径状态(可用)用成功色, 备注与扫描时间用弱化色; "已停用"用提醒色, 于是
-        "这条记录当前不参与扫描"一眼可见(10 号评审)。
+        "这条记录当前不参与扫描"一眼可见(评审时定的)。
         """
         return "ok" if self.enabled else "attention"
 
@@ -1062,7 +1101,7 @@ class HomeBoard:
         """游戏库是否**完全为空**(连归档的都没有一款).
 
         空库时界面要克制: 表头、底部统计与翻页整行都收起, 只留一条解释性空状态
-        (第 1/2 号评审)。筛选把结果筛空时不算空库 —— 那时用户还需要计数来对照着
+        (评审时定的)。筛选把结果筛空时不算空库 —— 那时用户还需要计数来对照着
         改筛选条件, 因此判据用的是"库里一款都没有", 而不是"这一页没有内容"。
         """
         return self.stats.total == 0 and self.stats.archived == 0
@@ -1281,7 +1320,7 @@ class BatchExportOption:
     #: 行内单独展示的"原始名称: X"(不适用时为空串)。
     #:
     #: 它原来是被拼进 ``detail`` 里的一句灰字, 和"已停用"这种状态连在一起, 看起来像
-    #: 两个字段粘成了一句(27 号评审); 拆成独立字段后界面才能给它单独的颜色与前缀。
+    #: 两个字段粘成了一句(评审时定的); 拆成独立字段后界面才能给它单独的颜色与前缀。
     original_label: str = ""
 
 

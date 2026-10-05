@@ -127,7 +127,7 @@ class ActivationPanel:
                 font=ctk.CTkFont(size=11, weight="bold"),
                 text_color=palette.text_muted,
             ).grid(row=0, column=index, sticky="w", padx=(0, 8))
-        # 动作列也要有列名: 两个按钮不能悬在表头之外(12 号评审).
+        # 动作列也要有列名: 两个按钮不能悬在表头之外(评审时定的).
         ctk.CTkLabel(
             head,
             text=tr("activation.column_actions"),
@@ -225,7 +225,7 @@ class ActivationPanel:
 
         同一个"设为监控对象"按钮因此只有两种样子: **当前监控对象 = 禁用态**(共用
         全站禁用外观), 其它 = 可用态(强调色)。不再出现"灰的一大片说不清什么意思"
-        (12 号评审)。
+        (评审时定的)。
         """
         palette = self._palette
         for button, style in self._styles.items():
@@ -323,7 +323,7 @@ class ActivationPanel:
         """提示行: 固定说明 + 冲突数 + "已暂停"这类当下状态.
 
         队列为空时不再补"等待游戏启动": 那一句已经由空状态承担, 两处重复反而像
-        两个都没说完(第 4/11 号评审)。
+        两个都没说完(评审时定的)。
         """
         conflicts = 0 if outcome is None else len(outcome.conflicts)
         hints = [tr("activation.hint")]

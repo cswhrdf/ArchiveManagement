@@ -174,7 +174,7 @@ def initial_window_size(window: tk.Misc, *, scale: float = 1.0) -> tuple[int, in
     """主窗口打开时的默认尺寸: 设计尺寸, 但不超出屏幕(逻辑像素).
 
     固定 1360x860 在 1366x768 / 1920x900 这类屏幕上比屏幕还高, 窗口下沿(底部状态
-    条)会落到屏幕外面去(与 16 号评审的"设置窗口比屏幕高"同一类问题)。宽度同理:
+    条)会落到屏幕外面去(与评审时"设置窗口比屏幕高"同一类问题)。宽度同理:
     1366 宽的屏幕上 1360 会把窗口右沿顶到屏幕边上。
 
     尺寸的夹法是 :func:`fit_window_size`(记住的几何也走同一条)。
@@ -1693,7 +1693,7 @@ class ArchiveApp(ctk.CTk):
         """按标签的**当前宽度**裁剪任务名.
 
         宽度不够时先换行, 两行还放不下才补省略号 —— 绝不允许出现"每 5m 备份 · 保"
-        这种半句话(13 号评审)。控件还没量出宽度时用设计预算兜底。
+        这种半句话(评审时定的)。控件还没量出宽度时用设计预算兜底。
         """
         width = int(self._task_name_label.winfo_width())
         budget = width if width > 1 else _TASK_NAME_WIDTH
@@ -1709,7 +1709,7 @@ class ArchiveApp(ctk.CTk):
     def _show_task_progress(self, running: bool) -> None:
         """进度条与取消入口只在真的有操作时占面积.
 
-        空闲时那条约 8px 的进度槽在深色底上就是一个没有说明的小绿点(13 号评审),
+        空闲时那条约 8px 的进度槽在深色底上就是一个没有说明的小绿点(评审时定的),
         所以整行收起, 而不是留在那里"占位"。
         """
         widgets = (
@@ -2190,7 +2190,7 @@ class ArchiveApp(ctk.CTk):
         """按每个按钮**当前的 state**重画可用性会变的那一批.
 
         与 state 分开做一次是因为两者必须同时成立: 只改 state 的话, 主色/危险色的
-        按钮被禁用后仍是亮的(49 号评审)。
+        按钮被禁用后仍是亮的(评审时定的)。
         """
         for button in self._stateful_buttons:
             self.kit.repaint_button(button, self.p)

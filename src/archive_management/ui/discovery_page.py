@@ -352,7 +352,7 @@ class DiscoveryPanel:
             row=1, column=0, columnspan=2, padx=_PANEL_PAD, pady=(10, 0), sticky="ew"
         )
         # 左边写明这一排按钮作用于谁: 列表里没有选中项时按钮置灰并说明原因,
-        # 而不是让三个按钮"悬"在筛选下方看不出作用对象(03/08 号评审).
+        # 而不是让三个按钮"悬"在筛选下方看不出作用对象(评审时定的).
         actions.grid_columnconfigure(0, weight=1)
         self._acting_label = ctk.CTkLabel(
             actions,
@@ -421,7 +421,7 @@ class DiscoveryPanel:
         """按可用性重绘本页所有按钮: 禁用态统一压暗, 可用态回到各自样式.
 
         强调项只有两处(页签行右侧的"重新扫描"与监控目录页的"添加"); 删除是危险色
-        描边, 破坏性动作不再比主操作更抢眼(10 号评审)。
+        描边, 破坏性动作不再比主操作更抢眼(评审时定的)。
         """
         palette = self._palette
         for button, style in self._styles.items():
@@ -471,7 +471,7 @@ class DiscoveryPanel:
 
         **每个子页只报自己的数字, 而且只占一行**: 在监控目录页显示"候选 23 项 · 待处理
         13 项"会让人以为这一页也在统计别的东西; 两行计数(第一行总数/待处理、第二行
-        待处理/已忽略)又是在说同一批数(第 3/10 号评审)。因此探测结果页把三种状态**并列
+        待处理/已忽略)又是在说同一批数(评审时定的)。因此探测结果页把三种状态**并列
         在同一行**里 —— 筛选到"已忽略"时一条都没有时, 用户仍能从这一行看出原因, 而
         不用先找第二行。
 
@@ -610,7 +610,7 @@ class DiscoveryPanel:
             self._selected_candidate = visible[0].candidate_id
         for index, item in enumerate(visible):
             row = self._build_candidate_row(item)
-            # 上下都留出内边距: 滚到底时顶部那张卡片不会被贴着边缘裁掉(8/9 号评审).
+            # 上下都留出内边距: 滚到底时顶部那张卡片不会被贴着边缘裁掉(评审时定的).
             row.pack(
                 fill="x", padx=(4, _SCROLL_INSET), pady=(6 if index == 0 else 3, 6)
             )
@@ -797,7 +797,7 @@ class DiscoveryPanel:
         """按选中项与状态决定按钮可用性与文案.
 
         三个候选动作挂在"列表里选中的那一条"上: 没有选中项时一起置灰, 并在按钮
-        左边写明这一点 —— 否则按钮悬在筛选下方, 看不出作用对象(03/08 号评审)。
+        左边写明这一点 —— 否则按钮悬在筛选下方, 看不出作用对象(评审时定的)。
         """
         directory = self._dir_item()
         candidate = self._candidate_item()

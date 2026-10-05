@@ -2,10 +2,10 @@
 
 屏高/屏宽用替身模拟(``monkeypatch tkinter.Misc.winfo_screen*``): 真机上只有一块屏,
 而 1366x768 / 1920x900 这类矮屏正是"窗口比屏幕还高、底部按钮看不见"的高发区
-(optimizations.csv 的 16 号设置窗口 / 28 号导入弹窗 / 29 号批量导入)。用替身比等一台
+(评审时点出的设置窗口 / 导入弹窗 / 批量导入三处)。用替身比等一台
 矮屏机器靠谱, 也不受开发机分辨率影响。
 
-判据分两类(与评审表里的验收口径一致, 不要合并成一条):
+判据分两类(与评审时定的验收口径一致, 不要合并成一条):
 
 1. **模态对话框** —— 硬线(窗口 + 标题栏不出屏幕)之外还要守评审约定的舒适线: 总高
    不超过屏幕可用高度的 80%(35 号)。另外还要求正文区**真的滚起来了**(内容高于视口),
@@ -407,7 +407,7 @@ def app(monkeypatch: pytest.MonkeyPatch) -> ArchiveApp:
 def _measure_dialog(app: ArchiveApp, label: str, spec: _DialogCase) -> None:
     """开一个模态对话框并当场量它(``wait_window`` 被换成量尺寸).
 
-    换掉 ``wait_window`` 的量法与 ``ui-review/capture.py`` 抓截图走同一条路: 那时窗口
+    换掉 ``wait_window`` 的量法与界面评审的抓图脚本走同一条路: 那时窗口
     刚被居中并 update 过, 正是可以量的时刻。量完把新开的窗口销毁, 免得残留影响下一例。
     """
     before = set(app.winfo_children())
@@ -1164,14 +1164,14 @@ def test_dialogs_are_clamped_to_the_measured_comfort_line(app: ArchiveApp) -> No
     _measure_dialog(app, _CLAMP_DIALOG, _case(_CLAMP_DIALOG))
 
 
-# 说明文字最多、最容易"末行只剩标点"的那个对话框(27 号评审就是它)。
+# 说明文字最多、最容易"末行只剩标点"的那个对话框(评审时就是它)。
 _HINT_DIALOG = "27-批量导出(40 款)"
 
 
 def test_dialog_hints_follow_the_width_they_get(app: ArchiveApp) -> None:
     """对话框里的成段说明按**实际分到的宽度**换行(写死宽度会把末尾的句号挤成孤行).
 
-    27 号评审的筛选说明实测需要 470px: 写死 460 时末尾的"。"会被挤到第二行独自站着
+    评审时量到那条筛选说明需要 470px: 写死 460 时末尾的"。"会被挤到第二行独自站着
     (``_label_problems`` 的第二条判据); 跟着对话框给的宽度走之后一行放得下。
     """
     SCREEN["height"] = 768

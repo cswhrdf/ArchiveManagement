@@ -1200,6 +1200,72 @@ def test_pre_commit_formats_and_restages_instead_of_only_checking() -> None:
     assert '"add"' in script.read_text(encoding="utf-8")
 
 
+def test_the_format_hook_retries_when_the_index_is_locked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """回归(2026-10-05 用户实测): 索引被别的进程占住时, 排版钩子不能直接拦下提交.
+
+    现场: 提交时钩子报 ``未能加入暂存区(请手动 git add)`` 拦下整次提交, 连原因都看不到。
+    实测同一批文件在 pre-commit 之外跑 ``git add`` **全是 rc=0**, 在 pre-commit 里则**每次失败
+    的文件都不一样** —— 那是 VS Code 的 Git 集成周期性刷新索引时短暂拿住了 ``.git/index.lock``。
+
+    判据(全部打桩, 不碰真仓库): ① 整批只 ``git add`` 一次(逐文件会成倍放大撞锁机会); ② 失败会
+    重试; ③ 重试期间只要索引已经等于工作区那一份就算成功(没东西可加, 不该拦提交); ④ 一直失败才
+    返回失败, 并把 git 的原始报错打出来(不然用户只看到一句"未能加入暂存区")。
+    """
+    script = _load_script("ruff_format_and_stage")
+
+    class _Completed:
+        """只带脚本用到的那几个字段(真的 ``git`` 由打桩替掉)."""
+
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = "fatal: Unable to create 'index.lock': File exists."
+
+    calls: list[tuple[str, ...]] = []
+    state = {"add_failures": 0, "diff_rc": 1}
+
+    def fake_run_git(_git: str, *arguments: str) -> _Completed:
+        calls.append(arguments)
+        if arguments[0] == "add":
+            if state["add_failures"] > 0:
+                state["add_failures"] -= 1
+                return _Completed(1)
+            return _Completed(0)
+        return _Completed(state["diff_rc"])
+
+    monkeypatch.setattr(script.shutil, "which", lambda _name: "git")
+    monkeypatch.setattr(script, "run_git", fake_run_git)
+    monkeypatch.setattr(script.time, "sleep", lambda _seconds: None)
+    paths = [Path("a.py"), Path("b.py")]
+
+    state["add_failures"] = 1
+    assert script.stage(paths) == [], "失败一次之后要重试成功"
+    adds = [call for call in calls if call[0] == "add"]
+    assert len(adds) == 2, "恰好重试一次"
+    assert adds[0][2:] == ("a.py", "b.py"), "整批一次 add, 不是逐文件"
+
+    # 索引已经等于工作区那一份: 没东西可加, 不该因为 add 失败就拦下提交。
+    calls.clear()
+    state.update(add_failures=script.STAGE_ATTEMPTS, diff_rc=0)
+    assert script.stage(paths) == [], "索引已一致时算成功"
+    assert len([call for call in calls if call[0] == "add"]) == 1, (
+        "第一条命令就发现没有差异, 不必重试"
+    )
+
+    # 一直失败: 返回失败, 并把 git 的原始报错打出来。
+    calls.clear()
+    state.update(add_failures=script.STAGE_ATTEMPTS, diff_rc=1)
+    assert script.stage(paths) == paths, "重试用完仍失败要如实返回"
+    assert len([call for call in calls if call[0] == "add"]) == script.STAGE_ATTEMPTS, (
+        "要重试满 STAGE_ATTEMPTS 次"
+    )
+    assert "index.lock" in capsys.readouterr().err, (
+        "失败原因要打出来(否则只有一句'未能加入暂存区')"
+    )
+
+
 def test_main_survives_a_cp1252_console(
     layout: _Layout, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2333,14 +2399,15 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
     assert "xvfb" in job, "对应的系统包也要装"
     assert "allure-results-visual" in job, "结论要作为产物上传"
     assert "tests/visual-baselines" in job, "基线图入库, 从仓库里读"
-    # 基线**不能**放 ui-review/: 那个目录被它自己的 .gitignore 挡在仓库外, CI 上根本不存在
-    # (曾经因为复用 ui-review/capture.py, 这一步在 CI 上以"找不到复用脚本"退出 2)。
+    # 基线**不能**放未入库的本地目录: 那类目录被它们自己的 .gitignore 挡在仓库外, CI 上根本
+    # 不存在(曾经因为复用界面评审用的那个抓图脚本, 这一步在 CI 上以"找不到复用脚本"退出 2)。
     # 只看命令: 注释里正拿这件事当反面说明(与本仓库其它几条守卫同一个口径)。
+    # 断言里留着那个目录名 —— 它就是这个坑的代号, 谁再把门禁挂上去就当场红。
     code = "\n".join(
         line for line in job.splitlines() if not line.strip().startswith("#")
     )
     assert "ui-review" not in code, (
-        "门禁不许依赖 ui-review/(它不进仓库, 且只是开发阶段的临时物)"
+        "门禁不许依赖未入库的本地目录(它们不进仓库, 且只是开发阶段的临时物)"
     )
     assert "matrix" not in job, "视觉回归不按平台展开: 基线只按一种渲染采"
     assert "font" in job, "要装 CJK 字体: 否则汉字被量成零宽, 画面与基线对不上"

@@ -255,7 +255,7 @@ def test_every_action_kind_maps_to_its_own_style(kit: widgets.UiKit) -> None:
 def test_button_styles_share_one_source_and_danger_is_its_own_color(
     kit: widgets.UiKit,
 ) -> None:
-    """四种样式的配色只有一处定义, 且危险色不等于主色(48 号评审).
+    """四种样式的配色只有一处定义, 且危险色不等于主色(评审时定的).
 
     "破坏性动作穿危险色"要成立, 前提是危险色**只**在一个地方定义: 这里把它钉住 ——
     :func:`widgets.button_colors` 是唯一出处, 登记式的按钮与就地创建的按钮
@@ -334,7 +334,7 @@ def test_poster_backing_uses_the_panel_colour_only_over_a_real_cover() -> None:
 
 
 def test_selection_colours_use_the_soft_accent_not_the_primary_green() -> None:
-    """选中 = 淡底 + 描边, 且不能与主按钮的实心强调色同色(第 1/5 号评审).
+    """选中 = 淡底 + 描边, 且不能与主按钮的实心强调色同色(评审时定的).
 
     列表与海报共用这一条规则: "我选中了谁"和"哪里能点"必须是两件事, 否则同一屏里
     出现两种绿, 用户分不出哪个是状态、哪个是操作。
@@ -350,7 +350,7 @@ def test_selection_colours_use_the_soft_accent_not_the_primary_green() -> None:
 
 
 def test_scrollbar_is_needed_only_when_the_content_overflows() -> None:
-    """滚动条只在内容真的超出视口时出现, 并容忍布局取整(第 1/2/7 号评审)."""
+    """滚动条只在内容真的超出视口时出现, 并容忍布局取整(评审时定的)."""
     assert widgets.scrollbar_needed(900, 520) is True
     assert widgets.scrollbar_needed(300, 520) is False
     # 取整误差(1~2px)不算溢出: 否则会立起一条拖不动的滚动条.
@@ -444,7 +444,7 @@ def test_the_first_verdict_assumes_the_bar_is_shown() -> None:
 
     ``CTkScrollableFrame`` 建容器时一定把滚动条摆进布局, 而"是否已映射"在窗口还没画出来、
     或所在分区/子页是隐藏的时候读到的总是 0。拿它当初值就会得出"已经收起了"的错误结论,
-    之后内容装得下时因为"决策没变"而什么都不做 —— 评审截图里发现页两个列表、定时任务
+    之后内容装得下时因为"决策没变"而什么都不做 —— 评审时发现页两个列表、定时任务
     窗口、编辑标签弹窗右侧的常驻灰条就是这么来的。
     """
     frame = _scroll_frame(300, 520, visible=True)
@@ -511,7 +511,7 @@ def test_sync_scrollbar_hides_whenever_the_content_fits() -> None:
     """装得下就必须收起 —— 哪怕滚动条本来就在.
 
     "只小一点点也保持现状"这种保守规则在按内容定高的窗口上是有害的: 内容高度恰好等于
-    视口, 永远达不到"再低 8px", 滚动条从此收不起来(设置窗口实测, 16 号评审)。
+    视口, 永远达不到"再低 8px", 滚动条从此收不起来(设置窗口实测, 评审时定的)。
     """
     fits_but_shown = _scroll_frame(516, 520, visible=True)
     assert widgets.sync_scrollbar(fits_but_shown) is False
@@ -791,7 +791,7 @@ def test_track_wraplength_follows_a_narrowed_cell_without_writing_in_a_loop() ->
 
 
 def test_paint_button_disabled_dims_background_text_and_border() -> None:
-    """禁用态必须与可用态明显不同: 底色/文字/描边一起压暗(第 1 号评审)."""
+    """禁用态必须与可用态明显不同: 底色/文字/描边一起压暗(评审时定的)."""
     button = _FakeCtkWidget()
     widgets.paint_button_disabled(button, DARK)
 

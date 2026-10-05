@@ -147,7 +147,7 @@ def test_backup_uses_named_folder_and_hides_the_key(tmp_path: Path) -> None:
     detail = service.get_detail(game_id)
     assert detail.storage_folder.startswith("Demo-")
     assert detail.storage_folder != game_id
-    # 内部存储键只在悬停提示里, 不上正文(13 号评审).
+    # 内部存储键只在悬停提示里, 不上正文(评审时定的).
     assert detail.origin_label == tr("hero.storage_folder")
     assert detail.storage_folder not in detail.origin_label
     assert detail.storage_hint == tr(

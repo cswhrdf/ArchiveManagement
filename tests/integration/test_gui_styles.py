@@ -4,9 +4,9 @@
 
 A. **每个按钮都必须显式上色** —— ``fg_color`` 必须来自调色板的 token; 留着
    CustomTkinter 默认那个蓝(``['#3B8ED0', '#1F6AA5']``)就说明这个按钮没上过色,
-   它不随主题变化, 一眼就看得出不是这套界面的一部分(48 号评审)。
+    它不随主题变化, 一眼就看得出不是这套界面的一部分(评审时定的)。
 B. **同一行至多一个主色** —— 主色 = "这一屏最该做的事"; 一行里两个主色等于没有主次,
-   而"取消"永远不穿主色(24/38 号评审)。
+    而"取消"永远不穿主色(评审时定的)。
 C. **危险色的按钮集合必须正好等于预期** —— 删除类动作穿危险色、别的按钮不许穿;
    而且危险色与 :func:`archive_management.ui.widgets.button_colors` 是同一份定义,
    所以"改坏这一处"必然让本用例变红。
@@ -717,7 +717,7 @@ def _problems(palette: Palette) -> list[str]:
     """按六条判据扫一遍记录, 返回人话的问题清单."""
     roles = _palette_roles(palette)
     danger_color = palette.danger.lower()
-    # 取消/关闭永远是次要动作: 穿了主色就说明"主次"没了(24/38 号评审)。
+    # 取消/关闭永远是次要动作: 穿了主色就说明"主次"没了(评审时定的)。
     secondary_only = {
         tr("dialog.cancel"),
         tr("dialog.close"),
@@ -892,7 +892,7 @@ def test_empty_library_chrome_uses_the_palette(tmp_path: Path) -> None:
     四处都在"选中游戏 / 切视图 / 切主题"这些**动作**里 —— 空库时一个都走不到, 于是顶栏与
     状态栏停在 CustomTkinter 的默认灰(实测 ``#2b2b2b``), 顶栏三个按钮还是默认蓝
     (``#1F6AA5``)。有游戏时会被 ``_load_first_game`` 的选中动作顺手刷上色, 所以只有
-    "空库首次启动"这一种状态看得出问题。截图见 ``ui-review/screens/01``~``04``。
+    "空库首次启动"这一种状态看得出问题。
     """
     database = Database(tmp_path / "empty.db")
     database.migrate()

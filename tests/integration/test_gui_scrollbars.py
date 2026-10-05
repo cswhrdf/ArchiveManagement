@@ -1,4 +1,4 @@
-"""按需滚动条的真实控件回归(评审截图里的"常驻灰条").
+"""按需滚动条的真实控件回归(评审时量到的"常驻灰条").
 
 单元测试用替身钉住了 :func:`archive_management.ui.widgets.sync_scrollbar` 的判定逻辑;
 这里换成**真实**的 CustomTkinter 滚动容器, 验证"收起"在真实窗口里真的成立 ——
@@ -6,7 +6,7 @@
 
 - 首次判定发生在窗口还没画出来(或所在分区/子页还藏着)的时候, 此时"是否已映射"读到的
   是 0, 若拿它当初值就会认为"已经收起", 之后内容装得下时什么都不做, 那条滚动条永远
-  立在界面上(评审截图 03/10 的发现页常驻灰条);
+  立在界面上(评审时发现页那条常驻灰条);
 - CustomTkinter 的滚动条每次收到画布回叫(``set()``)都会 ``_draw()``, 而 ``_draw()``
   结尾那句 ``update_idletasks()`` 会把 Tk 里排队的映射动作执行掉, 刚从布局里摘掉的
   滚动条当场又被映射回来(实测: 该位置灰色像素 3706, 修后 0)。
@@ -96,7 +96,7 @@ def test_a_hidden_scrollbar_survives_the_canvas_reporting_its_position() -> None
     """回归: 发现页监控目录那条滚动条收起后不能再被"画布回叫"带回来.
 
     CustomTkinter 的 ``set()`` → ``_draw()`` 结尾会强制刷新事件队列, 那次刷新正是把
-    已经摘掉的滚动条放回画面的时刻 —— 评审截图 03/10 里那条拖不动的常驻灰条就是这么
+    已经摘掉的滚动条放回画面的时刻 —— 评审时那条拖不动的常驻灰条就是这么
     来的(实测: 该位置灰色像素 3706, 修后 0)。这条路径只在真实窗口里出现(裸控件上触发
     回叫不会重现), 因此这条用例走真正的主窗口。
     """
@@ -123,7 +123,7 @@ def test_a_hidden_scrollbar_survives_the_canvas_reporting_its_position() -> None
 def test_the_discovery_panel_has_no_stray_scrollbar_with_an_empty_library(
     tmp_path: Path,
 ) -> None:
-    """回归: 空库时发现页探测结果那条滚动条不该出现(评审截图 03).
+    """回归: 空库时发现页探测结果那条滚动条不该出现(评审时量到的).
 
     发现页是在"游戏库"分区里 `grid_remove` 建好的, 首次判定发生窗口还没画出来时 ——
     旧实现拿"未映射"当初值, 得出"已经收起"的错误结论后什么都不做, 那一条滚动条就一直
@@ -143,7 +143,7 @@ def test_the_discovery_panel_has_no_stray_scrollbar_with_an_empty_library(
 
 
 def _empty_backend(tmp_path: Path) -> tuple[ArchiveService, ApplicationPaths]:
-    """建一个真实的空库后端(库里没有游戏), 与评审截图 03 用的同一条路径."""
+    """建一个真实的空库后端(库里没有游戏), 与评审时用的同一条路径."""
     from archive_management.infrastructure.database import Database
     from archive_management.ui.sql_backend import SqlArchiveService
 
@@ -175,7 +175,7 @@ def test_a_scrollbar_hidden_while_its_section_is_still_hidden_is_really_removed(
 
     主页默认停在"游戏库"分区, 发现页的两个滚动区是在 ``grid_remove`` 状态下建好的:
     那时"是否已映射"读到 0, 若拿它当初值就会认为"已经收起", 于是永远不做收起动作 ——
-    分区显示出来后那条滚动条就一直挂着(评审截图 03/10)。
+    分区显示出来后那条滚动条就一直挂着(评审时量到的)。
     """
     root = gui_app(ctk.CTk)
     section = ctk.CTkFrame(root)

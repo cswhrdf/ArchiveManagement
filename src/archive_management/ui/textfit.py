@@ -81,7 +81,7 @@ def fit_path(text: str, font: MeasurableFont, width: int) -> str:
     """把长路径压进 ``width``: **中间省略**, 头尾都留.
 
     路径越长, 末尾的目录名越重要(前面是所有人都一样的盘符与用户目录), 因此不能用
-    从头截断的 :func:`fit_text`; 但整行不截断又会顶出卡片(第 8/9 号评审)。这里留一小
+    从头截断的 :func:`fit_text`; 但整行不截断又会顶出卡片(评审时定的)。这里留一小
     段头部(盘符/根)与尽可能长的尾部, 中间用省略号连起来; 极窄时退回头部截断。
     """
     if width <= 0 or font.measure(text) <= width:

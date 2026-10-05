@@ -177,7 +177,7 @@ def test_detail_origin_label_empty_before_first_backup() -> None:
 
 
 def test_detail_next_backup_text_gives_a_readable_fallback() -> None:
-    """没有排期时"下次自动备份"要给出口径, 而不是一条像加载失败的短横线(13 号评审)."""
+    """没有排期时"下次自动备份"要给出口径, 而不是一条像加载失败的短横线(评审时定的)."""
     scheduled = replace(_detail(name="Demo"), next_backup_label="2026/09/26 20:11")
 
     assert scheduled.next_backup_text == "2026/09/26 20:11"
@@ -202,7 +202,7 @@ def test_detail_next_backup_text_tells_paused_apart_from_missing() -> None:
 
 
 def test_selected_backup_hint_names_the_real_restore_button() -> None:
-    """选中面板的指引必须写出真实按钮名: 早先这里是没被替换的占位符(13 号评审)."""
+    """选中面板的指引必须写出真实按钮名: 早先这里是没被替换的占位符(评审时定的)."""
     text = tr("sel.not_current", size="14 B", button=tr("action.restore"))
 
     assert "{" not in text
@@ -1006,7 +1006,7 @@ def test_status_lines_truncates_a_single_too_long_chip() -> None:
 
 
 def test_home_board_flags_a_completely_empty_library() -> None:
-    """空库标志只在"一款游戏都没有"时为真: 筛选筛空不算(第 1/2 号评审).
+    """空库标志只在"一款游戏都没有"时为真: 筛选筛空不算(评审时定的).
 
     界面按它收起表头与底部统计; 若把"当前筛选没有匹配"也算成空库, 用户就失去了
     "库里到底有几款"这个改筛选时唯一的参照。
@@ -1021,7 +1021,7 @@ def test_home_board_flags_a_completely_empty_library() -> None:
 
 
 def test_locations_column_header_says_it_is_a_count() -> None:
-    """列头必须说清那一列给的是数量(第 2/6 号评审).
+    """列头必须说清那一列给的是数量(评审时定的).
 
     原文案是"存档位置", 而单元格里写的是 0/1/1 —— 列名与内容不是一回事, 有数据的
     时候很容易被读成路径。
@@ -1031,8 +1031,14 @@ def test_locations_column_header_says_it_is_a_count() -> None:
 
 
 def test_stamps_are_formatted_in_one_way() -> None:
-    """全应用只允许一种日期写法: 空值给占位符, 脏数据原样降级(第 12 号评审)."""
-    assert format_stamp("2026-09-26T20:11:00+00:00") == "2026/09/26 20:11"
+    """全应用只允许一种日期写法: 空值给占位符, 脏数据原样降级(评审时定的).
+
+    时间戳统一记录 UTC、展示时转换为本地时区 —— 期望值按同一规则计算,
+    因此这条断言在任何时区的机器上都成立。
+    """
+    utc_value = "2026-09-26T20:11:00+00:00"
+    expected = datetime.fromisoformat(utc_value).astimezone().strftime("%Y/%m/%d %H:%M")
+    assert format_stamp(utc_value) == expected
     assert format_stamp("") == "—"
     assert format_stamp("不是时间") == "不是时间"
     assert format_stamp("2026-09-26T20:11", fallback="-") == "2026/09/26 20:11"
@@ -1222,7 +1228,7 @@ def test_the_batch_export_row_shows_the_original_name_only_when_it_differs() -> 
 
     带上它是因为"按原名搜得到"这件事得可解释: 搜出来的那行文字里否则看不出跟输入
     有什么关系(而它确实命中了)。拆成独立字段是为了让界面把"原名"与"已停用"这类
-    状态分开呈现(27 号评审: 两句同色灰字拼在一起像两个字段粘成一句)。
+    状态分开呈现(评审时发现: 两句同色灰字拼在一起像两个字段粘成一句)。
     """
     renamed = _packaged_game("1", "星际拓荒", original_name="Outer Wilds")
     same = _packaged_game("2", "山海旅人", original_name="山海旅人")
@@ -1405,7 +1411,7 @@ def test_backup_display_title_falls_back_to_the_branch_name() -> None:
 
 
 def test_schedule_item_next_run_text_says_unscheduled_instead_of_a_dash() -> None:
-    """没有排期的任务: 文案落到"未安排", 不是一个孤零零的破折号(18 号评审)."""
+    """没有排期的任务: 文案落到"未安排", 不是一个孤零零的破折号(评审时定的)."""
     item = ScheduleItem(
         game_id="g",
         game_name="Demo",

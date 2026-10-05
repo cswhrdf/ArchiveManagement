@@ -50,17 +50,17 @@ from archive_management.ui.widgets import (
 )
 
 # 文本类对话框的正文宽度: 提示、输入框与按钮行都按这个宽度左对齐, 三块不再各宽各的
-# (19 号评审: 三块内容都居中但宽度各不相同, 看着像三个独立组件堆在一起)。
+# (评审时定的: 三块内容都居中但宽度各不相同, 看着像三个独立组件堆在一起)。
 _TEXT_WIDTH = 360
 # 对话框里成段说明的左右内边距(单侧): 算可用宽度时要按它的**两倍**减(见 _dialog_hint)。
 _DIALOG_HINT_PAD = 24
-# 定时对话框里两个输入框的宽度: 两者同宽, 左右边界才对得上(25 号评审)。
+# 定时对话框里两个输入框的宽度: 两者同宽, 左右边界才对得上(评审时定的)。
 _SCHEDULE_FIELD_WIDTH = 210
 
 # 长对话框的正文区: 内容超高时由它自己滚, 底部的按钮永远留在屏幕里。
 #
 # 533x832 的导入弹窗在 768/900 高的屏幕上会把底部的「导入」切出屏幕, 而它自己
-# 又不能滚(28 号评审)。高度取屏幕的 80%(有上下限), 宽度是 460 的内容 + 左右各 24
+# 又不能滚(评审时定的)。高度取屏幕的 80%(有上下限), 宽度是 460 的内容 + 左右各 24
 # 边距, 再留一点滚动条的余地。
 _DIALOG_BODY_MAX = 760
 _DIALOG_BODY_MIN = 360
@@ -115,7 +115,7 @@ def _bullet_block(
     """把带"· "项目符号的多行文本渲染成悬挂缩进.
 
     单个带 ``wraplength`` 的标签做不到这件事: 长路径折行后会顶到最左边, 看起来像
-    "比上一行更靠左"的两级列表却只缩进了一级(23 号评审)。这里把符号与正文拆成两个
+    "比上一行更靠左"的两级列表却只缩进了一级(评审时定的)。这里把符号与正文拆成两个
     控件, 折行后的文字就与首行文字左对齐。
     """
     for index, line in enumerate(text.splitlines()):
@@ -159,7 +159,7 @@ def _drop_tag_row(entries: list[ctk.CTkEntry], entry: ctk.CTkEntry) -> bool:
 def _paint_row_remove(button: ctk.CTkButton, palette: Palette, *, filled: bool) -> None:
     """行内"删除"按钮的可用态: 空行压暗.
 
-    空行的"删除"点了等于删一个不存在的标签(21 号评审); 放到模块级是为了不让
+    空行的"删除"点了等于删一个不存在的标签(评审时定的); 放到模块级是为了不让
     :func:`edit_tags_dialog` 的分支数超限。
     """
     if filled:
@@ -452,8 +452,8 @@ def confirm_dialog(
     """显示居中确认对话框,返回用户选择.
 
     ``detail`` 是正文里不该被当成句子一部分的技术值(导出路径、目录路径): 它单独
-    占一行、带输入框底色, 一眼能看出到哪里结束(24 号评审)。``danger`` 为 True 时
-    确认按钮穿危险色 —— 破坏性动作不该与"导入/保存"同一颗绿按钮(24 号评审)。
+    占一行、带输入框底色, 一眼能看出到哪里结束(评审时定的)。``danger`` 为 True 时
+    确认按钮穿危险色 —— 破坏性动作不该与"导入/保存"同一颗绿按钮(评审时定的)。
     """
     ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
     no_text = tr("dialog.cancel") if cancel_text is None else cancel_text
@@ -903,7 +903,7 @@ def edit_tags_dialog(
     rows = ctk.CTkScrollableFrame(
         window, width=440, height=150, fg_color=palette.well, corner_radius=8
     )
-    # 三行内容也立着一条拖不动的滚动条只是噪声(21 号评审).
+    # 三行内容也立着一条拖不动的滚动条只是噪声(评审时定的).
     auto_scrollbar(rows)
     entries: list[ctk.CTkEntry] = []
     result: list[tuple[str, ...]] = []
@@ -911,7 +911,7 @@ def edit_tags_dialog(
     def refresh_add_state() -> None:
         """行数到上限后不允许再加(上限与 normalize_tags 一致)."""
         add.configure(state=_add_state(len(entries), max_tags))
-        # 置灰必须连配色一起改: 只改 state 的话按钮底色仍是亮的(49 号评审).
+        # 置灰必须连配色一起改: 只改 state 的话按钮底色仍是亮的(评审时定的).
         paint_button_state(add, palette, "ghost")
 
     def remove_row(row: ctk.CTkFrame, entry: ctk.CTkEntry) -> None:
@@ -1035,7 +1035,7 @@ def ask_text(
     entry.insert(0, initial)
     entry.pack(fill="x", padx=24, pady=(0, 8))
     entry.focus_set()
-    # "回车也能提交"要写在界面上: 否则用户只能靠猜(19 号评审)。
+    # "回车也能提交"要写在界面上: 否则用户只能靠猜(评审时定的)。
     ctk.CTkLabel(
         window,
         text=tr("dialog.enter_hint"),
@@ -1165,7 +1165,7 @@ def edit_backup_dialog(
         font=section_font,
         text_color=palette.text_body,
     ).pack(padx=24, anchor="w")
-    # 空着的描述框零信息量: 给一句占位说明, 聚焦时自动清掉(22 号评审).
+    # 空着的描述框零信息量: 给一句占位说明, 聚焦时自动清掉(评审时定的).
     desc_placeholder = tr("dialog.backup_desc_placeholder")
     desc_box = ctk.CTkTextbox(
         window,
@@ -1269,7 +1269,7 @@ def schedule_dialog(
 
     周期与保留份数由调用方解析校验: 本函数只收集原始文本, 便于沿用既有
     的错误反馈路径。``current`` 是"当前值"这种**状态**, 单独占一行而不是塞在
-    说明句尾 —— 塞在句尾时用户扫一眼找不到现在是什么状态(25 号评审)。
+    说明句尾 —— 塞在句尾时用户扫一眼找不到现在是什么状态(评审时定的)。
     """
     window = ctk.CTkToplevel(parent)
     window.title(title)
@@ -1287,7 +1287,7 @@ def schedule_dialog(
         font=ctk.CTkFont(size=15, weight="bold"),
         text_color=palette.text_primary,
     ).pack(fill="x", padx=24, pady=(20, 6), anchor="w")
-    # 标题与字段之间画一条线: 不然标题看起来像第一个字段的标签(25 号评审).
+    # 标题与字段之间画一条线: 不然标题看起来像第一个字段的标签(评审时定的).
     ctk.CTkFrame(window, height=1, fg_color=palette.border).pack(
         padx=24, pady=(0, 10), fill="x"
     )
@@ -1310,7 +1310,7 @@ def schedule_dialog(
         ).pack(fill="x", padx=24, anchor="w")
 
     def hint(text: str, *, bottom: int = 6) -> None:
-        """字段的说明: 紧跟在它自己的输入框下面, 形成一组(25 号评审的"节奏碎")."""
+        """字段的说明: 紧跟在它自己的输入框下面, 形成一组(评审时点出的"节奏碎")."""
         ctk.CTkLabel(
             window,
             text=text,
@@ -1422,7 +1422,7 @@ def restore_dialog(
             text_color=palette.danger,
         ).pack(padx=24, pady=(0, 10), fill="x")
         # 警告与下方的选项之间画一条分割线: 只隔十几像素时, 它会被当成复选框的说明
-        # (23 号评审)。
+        # (评审时定的)。
         ctk.CTkFrame(window, height=1, fg_color=palette.border).pack(
             padx=24, pady=(0, 12), fill="x"
         )
@@ -1443,9 +1443,9 @@ def restore_dialog(
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
             # 禁用态的字色也要来自调色板: 不给的话会落到 CustomTkinter 主题里的灰
-            # (与这套界面无关的另一个灰阶, 49 号评审)。
+            # (与这套界面无关的另一个灰阶, 评审时定的)。
             text_color_disabled=palette.text_disabled,
-            # 勾选态不用主按钮那种实心绿: 一个是"选项状态", 一个是"执行"(23 号评审).
+            # 勾选态不用主按钮那种实心绿: 一个是"选项状态", 一个是"执行"(评审时定的).
             fg_color=palette.accent_soft_border,
             hover_color=palette.accent_soft,
             checkmark_color=palette.text_primary,
@@ -1522,7 +1522,7 @@ def import_package_dialog(
 
     正文放在一个按屏幕高度封顶的滚动区里(矮屏上底部的按钮不会被切掉); 单选按钮的
     选中态用淡强调色而不是主按钮那种实心绿, 免得同一屏里绿色既表示"选中"又表示
-    "执行"(28 号评审)。
+    "执行"(评审时定的)。
 
     与其它对话框一致: 只在主线程调用, 窗口居中于主窗口, 用户点"取消"或直接关窗
     都返回 ``None``(调用方据此什么都不做)。
@@ -1559,7 +1559,7 @@ def import_package_dialog(
 
     _dialog_section(body, palette, locations_label)
     _dialog_hint(body, palette, locations_hint)
-    # 高度按"两条位置 + 行间分割线"给够: 行距按 28 号评审拉开后, 120 高会把第二条输入框
+    # 高度按"两条位置 + 行间分割线"给够: 行距按评审时的取值拉开后, 120 高会把第二条输入框
     # 裁掉一半, 滚动条也就一直立着。
     rows = ctk.CTkScrollableFrame(
         body, width=460, height=150, fg_color=palette.well, corner_radius=8
@@ -1580,7 +1580,7 @@ def import_package_dialog(
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
             text_color_disabled=palette.text_disabled,
-            # 选中态不用主按钮那种实心绿: 一个是"选中项", 一个是"执行"(28 号评审).
+            # 选中态不用主按钮那种实心绿: 一个是"选中项", 一个是"执行"(评审时定的).
             fg_color=palette.accent_soft_border,
             hover_color=palette.accent_soft,
             border_color=palette.border,
@@ -1618,7 +1618,7 @@ def import_package_dialog(
     def _paint_targets() -> None:
         """只有"合并"才需要目标游戏: 其余方式把目标区置灰并写明原因.
 
-        只置灰不提原因时, 用户会以为自己的选择被忽略了(28 号评审); 这里把说明文字
+        只置灰不提原因时, 用户会以为自己的选择被忽略了(评审时定的); 这里把说明文字
         换成"先选合并才能挑目标", 位置不变、高度也不变。
         """
         merging = strategy_var.get() == STRATEGY_MERGE
@@ -1703,7 +1703,7 @@ def _batch_export_row(
     """批量导出列表里的一行: 一行一张卡片, 游戏名与元信息分两行.
 
     名字与元信息分行是关键: 原来名字、"原始名称: X"、"已停用"全部串在一个复选框标签
-    里, 三行长短不一, 两种灰色也分不出哪个是哪个(27 号评审)。现在勾选框只写游戏名,
+    里, 三行长短不一, 两种灰色也分不出哪个是哪个(评审时定的)。现在勾选框只写游戏名,
     元信息左对齐在固定位置, 原名(提示色)与状态摘要(次要色)各用各的颜色。
     """
     row = ctk.CTkFrame(rows, fg_color=palette.card, corner_radius=6)
@@ -1758,7 +1758,7 @@ def _build_batch_game_list(
     反映"可见行是否已全部勾上", 没有可见行时置灰。
 
     ``on_change`` 在勾选变化时收到"逐行勾选状态", 调用方据此维护"可以提交了吗"
-    (27 号评审: 一个都没勾时确认按钮仍是亮的, 点了才被告知没勾选)。
+    (评审时定的: 一个都没勾时确认按钮仍是亮的, 点了才被告知没勾选)。
     """
     _dialog_section(window, palette, list_label)
     master_var = ctk.BooleanVar(value=all(option.selected for option in prompt.options))
@@ -1768,14 +1768,14 @@ def _build_batch_game_list(
         variable=master_var,
         font=ctk.CTkFont(size=12),
         text_color=palette.text_body,
-        # 没有可见行时全选框是禁用的, 禁用字色必须来自调色板(49 号评审)。
+        # 没有可见行时全选框是禁用的, 禁用字色必须来自调色板(评审时定的)。
         text_color_disabled=palette.text_disabled,
         fg_color=palette.accent,
         hover_color=palette.accent_soft_border,
         border_color=palette.border,
     )
     master.pack(padx=24, pady=(6, 0), anchor="w")
-    # 限定条件单独一行: 跟在"全选"后面同字号同颜色, 很容易被读成标签的一部分(27 号评审)。
+    # 限定条件单独一行: 跟在"全选"后面同字号同颜色, 很容易被读成标签的一部分(评审时定的)。
     ctk.CTkLabel(
         window,
         text=select_all_scope,
@@ -1787,7 +1787,7 @@ def _build_batch_game_list(
         window, width=460, height=220, fg_color=palette.well, corner_radius=8
     )
     rows.pack(padx=24, pady=(6, 10), fill="x")
-    # 四行内容也立着一条拖不动的滚动条(27 号评审)。
+    # 四行内容也立着一条拖不动的滚动条(评审时定的)。
     auto_scrollbar(rows)
     no_match = ctk.CTkLabel(
         rows,
@@ -1881,7 +1881,7 @@ def export_batch_dialog(
     可见行时置灰; 它旁边单独一行写明这个范围。
 
     一份都没勾选时确认按钮是**禁用态**: 点了才被告知"一份都没勾选"太晚了
-    (27 号评审)。
+    (评审时定的)。
     """
     ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
     window = ctk.CTkToplevel(parent)
@@ -1933,7 +1933,7 @@ def export_batch_dialog(
         command=window.destroy,
     )
     # 两个按钮都要显式上色: 不写 fg_color 就会留着 CustomTkinter 的那个蓝
-    # (与调色板无关, 换主题也不会变) —— 48 号评审。
+    # (与调色板无关, 换主题也不会变) —— 评审时定的。
     paint_button_style(ok_button, palette, "accent")
     paint_button_style(cancel_button, palette, "ghost")
     cancel_button.pack(side="left", padx=(0, 10))
@@ -1943,7 +1943,7 @@ def export_batch_dialog(
 
         禁用要两件事一起做: ``state`` 让点击真的不生效, ``paint_button_disabled``
         把底色与文字一起压暗 —— 只改颜色等于按钮还亮着, 只改 state 则看起来仍可点
-        (27 号评审: 点了才被告知"没有勾选任何游戏"太晚)。
+        (评审时定的: 点了才被告知"没有勾选任何游戏"太晚)。
         """
         if any(ticked.values()):
             ok_button.configure(state="normal")
@@ -2036,7 +2036,7 @@ def batch_import_dialog(
     ).pack(padx=24, pady=(20, 0), anchor="w")
     _dialog_hint(window, palette, prompt.hint)
 
-    # 高度能放下**两张**卡片: 批量场景里一屏只看得到一款牌时, 三款包就要滚三次(29 号评审)。
+    # 高度能放下**两张**卡片: 批量场景里一屏只看得到一款牌时, 三款包就要滚三次(评审时定的)。
     cards = ctk.CTkScrollableFrame(
         window, width=460, height=420, fg_color=palette.well, corner_radius=8
     )
@@ -2047,10 +2047,10 @@ def batch_import_dialog(
         """一款游戏的一张卡片(控件在这里建, 显示顺序由 pack 决定)."""
         card = ctk.CTkFrame(cards, fg_color=palette.card, corner_radius=8)
         # 左右边距对称, 并且不贴滚动条: 原来左 16 右 8, 卡片的右边界被滚动条压住一点缝
-        # (29 号评审)。
+        # (评审时定的)。
         card.pack(fill="x", padx=_CARD_INSET, pady=(2, 4))
         # 名称与元信息同一行: 分开两行时卡片的第二行只有一条灰字, 白占一行高度 —— 批量
-        # 场景里一屏只能放下一款牌(29 号评审)。
+        # 场景里一屏只能放下一款牌(评审时定的)。
         head = ctk.CTkFrame(card, fg_color="transparent")
         head.pack(fill="x", padx=_CARD_PAD, pady=(8, 0))
         ctk.CTkLabel(
@@ -2100,7 +2100,7 @@ def batch_import_dialog(
             _paint_batch_row(parts)
 
         # 小标题一律在自己控件上方(与“包内存档位置”“合并到”同一套排法): 原来“导入方式”
-        # 的标签在单选按钮左边, 而“合并到”的标签在上方, 同一张卡片里两种排法(29 号评审)。
+        # 的标签在单选按钮左边, 而“合并到”的标签在上方, 同一张卡片里两种排法(评审时定的)。
         _card_heading(card, palette, strategy_label)
         radios = ctk.CTkFrame(card, fg_color="transparent")
         radios.pack(fill="x", padx=_CARD_PAD, pady=(2, 0), anchor="w")
@@ -2180,7 +2180,7 @@ def batch_import_dialog(
 # 批量导入卡片的几何: 左右内边距对称, 输入框与下拉框同高。
 #
 # 原来左内边距 16 而右边只剩 8(卡片右边界被滚动条压住一条缝), 同一张卡片里输入框
-# 28px、下拉框 30px, 四个小标题还只靠颜色区分(绿的那个看起来像超链接)(29 号评审)。
+# 28px、下拉框 30px, 四个小标题还只靠颜色区分(绿的那个看起来像超链接)(评审时定的)。
 _CARD_PAD = 12
 _CARD_INSET = 6
 _CARD_CONTROL_HEIGHT = 30
@@ -2264,7 +2264,7 @@ def _import_location_rows(
     """一层存档位置输入框(每条一行: 说明 + 输入框, 行与行之间画一条分割线).
 
     原来的间距是反的: 说明到第一条输入框只隔 8px, 而两条输入框之间空着 30px —— 读起来
-    像两组不同的内容被误分到了一起(28 号评审)。现在每组自己成块, 块之间用分割线断开。
+    像两组不同的内容被误分到了一起(评审时定的)。现在每组自己成块, 块之间用分割线断开。
     """
     entries: list[tuple[ImportLocationRow, ctk.CTkEntry]] = []
     for index, item in enumerate(items):
@@ -2317,7 +2317,7 @@ def _dialog_hint(
 
     宽度**不写死**: 说明按对话框实际分给它的宽度换行(``fill="x"`` 之后这个宽度就是真实
     可用宽度, 见 :func:`widgets.track_wraplength`)。写死 460 时, 一句话只要比它宽几个
-    像素, 末尾的句号就会被挤到第二行独自站着(27 号评审的筛选说明实测如此)。
+    像素, 末尾的句号就会被挤到第二行独自站着(评审时的筛选说明实测如此)。
     """
     label = ctk.CTkLabel(
         window,

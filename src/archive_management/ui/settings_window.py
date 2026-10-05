@@ -192,7 +192,7 @@ class SettingsWindow:
         self._container.grid_rowconfigure(0, weight=1)
 
         # 面板与说明都放进滚动区: 窗口高度被夹到屏幕可用高度以内, 内容装不下时自己
-        # 滚动 —— 底部那条说明与"关闭"按钮留在固定页脚里, 永远看得见(16 号评审)。
+        # 滚动 —— 底部那条说明与"关闭"按钮留在固定页脚里, 永远看得见(评审时定的)。
         self._body = ctk.CTkScrollableFrame(
             self._container, fg_color=palette.background, corner_radius=0
         )
@@ -564,7 +564,7 @@ class SettingsWindow:
                 width=148,
                 height=30,
                 corner_radius=8,
-                # 按键区域要看起来能点: 输入框那样的底 + 1px 描边(16 号评审:
+                # 按键区域要看起来能点: 输入框那样的底 + 1px 描边(评审时定的:
                 # 光秃秃的粗体文字看不出可以点进去录制)。
                 fg_color=palette.input_bg,
                 hover_color=palette.item_hover,
@@ -578,7 +578,7 @@ class SettingsWindow:
             button.grid(row=row, column=1, padx=16, pady=(0, 8), sticky="e")
             self._shortcut_buttons[action] = button
 
-        # 录制中的明确状态: 只有按钮文字变色的话, 用户看不出"正在监听"(17 号评审)。
+        # 录制中的明确状态: 只有按钮文字变色的话, 用户看不出"正在监听"(评审时定的)。
         self._capture_status = ctk.CTkLabel(
             self._shortcut_panel,
             text="",
@@ -602,7 +602,7 @@ class SettingsWindow:
         )
 
         # 这条说明是"为什么我按的键不被接受"的唯一出处, 因此用正文色(而不是最弱的
-        # 灰字) —— 它还要配得上"录制中"时被反复阅读(17 号评审)。
+        # 灰字) —— 它还要配得上"录制中"时被反复阅读(评审时定的)。
         self._shortcut_hint = ctk.CTkLabel(
             self._shortcut_panel,
             text=tr("settings.shortcut_hint"),
@@ -644,7 +644,7 @@ class SettingsWindow:
         self._paint_shortcuts()
 
         # 说明与关闭按钮在一个**固定页脚**里: 内容再长也只滚动上面的面板区,
-        # 这两样永远留在窗口里可读可点(16 号评审)。
+        # 这两样永远留在窗口里可读可点(评审时定的)。
         self._footer = ctk.CTkFrame(self._container, fg_color=palette.background)
         self._footer.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         self._footer.grid_columnconfigure(0, weight=1)
@@ -700,7 +700,7 @@ class SettingsWindow:
 
         写死的 ``wraplength`` 两头都不对: 窄列里(右列控件变宽, 说明这一格只剩 228)会被 Tk
         硬裁 —— 没有省略号, 后半句直接看不到(macOS CI 上的“界面语言”说明); 宽面板里又会
-        提前折行, 读起来像被截断(第 12 号评审)。规则见 :func:`widgets.track_wraplength`。
+        提前折行, 读起来像被截断(评审时定的)。规则见 :func:`widgets.track_wraplength`。
 
         ``initial`` 是还没量出可用宽度之前的落位宽度: 量准之后就不再生效。
         """
@@ -717,7 +717,7 @@ class SettingsWindow:
         """按当前内容重算窗口高度(说明换行变了行数就变了).
 
         宽度写死, 高度只能按**实际内容**算: 说明文字会随语言与可用宽度换行, 写死高度会把
-        底部的说明与“关闭”按钮裁到窗口外面(16 号评审)。装不下时夹到屏幕可用高度以内,
+        底部的说明与“关闭”按钮裁到窗口外面(评审时定的)。装不下时夹到屏幕可用高度以内,
         滚动区自己滚, 那两样留在固定页脚里(1366x768 上底部按钮被屏幕下沿切掉过)。
         """
         try:
@@ -1086,7 +1086,7 @@ class SettingsWindow:
         """刷新快捷键按钮、录制状态与错误提示的文案与配色.
 
         录制中除了底色变强调色, 还要加粗描边 + 一行"正在监听…可取消": 只把按钮
-        文字变绿的话, 用户分不出"录好了"还是"卡住了"(17 号评审)。
+        文字变绿的话, 用户分不出"录好了"还是"卡住了"(评审时定的)。
         """
         palette = self._palette
         for action, button in self._shortcut_buttons.items():

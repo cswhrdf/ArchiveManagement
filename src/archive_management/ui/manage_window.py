@@ -88,7 +88,7 @@ _FOOTER_GAP = 6
 # 正文滚动区的高度下限(逻辑像素): 再矮也得留出能滚动的一块。
 _BODY_MIN_HEIGHT = 200
 # 位置列表的高度跟着内容走: 一条位置时只占一行的高度(不在卡片里空出一大块,
-# 15 号评审), 超过上限则由列表自己滚动。
+# 评审时定的), 超过上限则由列表自己滚动。
 _LIST_MIN_HEIGHT = 88
 _LIST_MAX_HEIGHT = 200
 
@@ -212,7 +212,7 @@ class ManageGameWindow:
             width=88,
         )
         self._toggle_btn.pack(side="left", padx=(0, 6))
-        # 危险动作穿危险色: 与下方的"删除原始存档位置"一致(15 号评审)。
+        # 危险动作穿危险色: 与下方的"删除原始存档位置"一致(评审时定的)。
         self._delete_btn = self._make_button(
             header_actions,
             tr("manage.delete_game"),
@@ -226,7 +226,7 @@ class ManageGameWindow:
         self._build_artwork_section(container, row=1)
 
         # 「定时备份」是一节小标题, 值单独一行用次要色: 它与"原始存档位置"不能
-        # 长得一模一样, 否则整窗自上而下没有层级(15 号评审)。
+        # 长得一模一样, 否则整窗自上而下没有层级(评审时定的)。
         self._schedule_heading = ctk.CTkLabel(
             container,
             text=tr("manage.schedule_heading"),
@@ -264,7 +264,7 @@ class ManageGameWindow:
         auto_scrollbar(self._list_scroll)
 
         # 备份目录是应用自己管理的目录, 正文只说"不用在这里配", 真实路径收进悬停提示:
-        # 把脚本/临时路径整条摊在正文里还会折行, 用户看不懂也用不上(15 号评审)。
+        # 把脚本/临时路径整条摊在正文里还会折行, 用户看不懂也用不上(评审时定的)。
         note = ctk.CTkLabel(
             container,
             text=tr("manage.backup_note"),
@@ -282,7 +282,7 @@ class ManageGameWindow:
         self._location_buttons: list[ctk.CTkButton] = []
         # 两行两组: 第一行是"新增(主操作, 强调色) + 管理现有位置", 第二行只放破坏性的
         # "删除"。六个按钮挤一行时总宽(96+96+108+92+92+80 = 564)已经等于容器可用宽度,
-        # 再加间距就必然溢出 —— 最右边的"删除"会被窗口边缘裁掉半颗(15 号评审的回归)。
+        # 再加间距就必然溢出 —— 最右边的"删除"会被窗口边缘裁掉半颗(评审时的回归)。
         for text, handler, width, gap, primary in (
             (tr("loc.add_dir"), self._on_add_directory, 96, 0, True),
             (tr("loc.add_file"), self._on_add_file, 96, 6, False),
@@ -316,7 +316,7 @@ class ManageGameWindow:
         )
         self._delete_origin_btn.pack(side="left")
 
-        # 「关闭」是中性动作: 不穿危险色(15 号评审)。它放在**固定页脚**里: 正文装不下要
+        # 「关闭」是中性动作: 不穿危险色(评审时定的)。它放在**固定页脚**里: 正文装不下要
         # 滚动时, 它既不该跟着跑, 也不该被屏幕下沿切掉(与设置窗口同一套)。
         footer = ctk.CTkFrame(window, fg_color=palette.background)
         self._footer = footer
@@ -539,7 +539,7 @@ class ManageGameWindow:
 
         ``danger``/``primary`` 只是调用处的说法, 配色统一取自
         :func:`archive_management.ui.widgets.button_colors` —— 危险色只有那一份
-        定义(48 号评审: 同一窗口里三个删除按钮的配色必须一模一样)。
+        定义(评审时定的: 同一窗口里三个删除按钮的配色必须一模一样)。
         """
         style: ButtonStyle = "danger" if danger else "accent" if primary else "ghost"
         button = ctk.CTkButton(
@@ -560,7 +560,7 @@ class ManageGameWindow:
         """按每个按钮的 state 重绘: 置灰的必须真的看起来置灰.
 
         只 ``configure(state="disabled")`` 的话, 主色/危险色的底与描边会留在那里 ——
-        归档后整个窗口的按钮看起来都还可点(49 号评审)。
+        归档后整个窗口的按钮看起来都还可点(评审时定的)。
         """
         for button, style in self._buttons.items():
             paint_button_state(button, self._palette, style)
@@ -639,7 +639,7 @@ class ManageGameWindow:
     def _fit_list_height(self) -> None:
         """位置列表的高度跟着内容走(一条不空、多了滚动).
 
-        列表高度固定成两行时, 只有一条位置的窗口里就空出一大块(15 号评审); 这里按
+        列表高度固定成两行时, 只有一条位置的窗口里就空出一大块(评审时定的); 这里按
         内容请求夹到 [_LIST_MIN_HEIGHT, _LIST_MAX_HEIGHT]。
         """
         self._window.update_idletasks()
@@ -843,7 +843,7 @@ class ManageGameWindow:
             title=tr("manage.rename_title"),
             text=tr("manage.rename_prompt"),
             initial=self._name,
-            # 改名字这个弹窗与"新增游戏"长得一样, 不写清在改谁就只能靠猜(20 号评审)。
+            # 改名字这个弹窗与"新增游戏"长得一样, 不写清在改谁就只能靠猜(评审时定的)。
             context=tr("dialog.rename_context", name=self._name),
         )
         if not name:
@@ -897,7 +897,7 @@ class ManageGameWindow:
             title=tr("manage.delete_title"),
             message=tr("manage.delete_message", name=self._name),
             # 导出路径单独一行(带底色): 夹在句子里时它会把末句的句号挤到孤行,
-            # 折行后也不知道到哪里结束(24 号评审)。
+            # 折行后也不知道到哪里结束(评审时定的)。
             detail=destination,
             confirm_text=tr("manage.delete_confirm"),
             danger=True,

@@ -29,13 +29,13 @@ SSIM **0.9819**(主页工具栏/筛选那一行整体位移), 已知的真缺陷
 永远卡住; 让它静默绿, 又会把"没判据"混进"通过"。所以取中间: 状态通过、描述把话说清楚、
 候选图作为附件上传。
 
-## 依赖谁(为什么不再复用 ui-review/)
+## 依赖谁(为什么不再复用界面评审用的那套本地脚本)
 
 建窗口与切状态这套是**本脚本自己**的(空库那一组画面就是它的全部输入), 抓图原语复用
 ``tests/crash_capture.py`` 里已被 CI 验证的那两个函数(``window_box`` / ``grab_png``)。
 
-``ui-review/`` 那条路已经拆掉: 那个目录被它自己的 ``.gitignore`` 整个挡在仓库外(CI 上
-根本不存在), 而且只是开发阶段的临时物、迟早要删 —— 门禁不该依赖一个仓库里没有的文件。
+复用界面评审那套脚本的路已经拆掉: 那类目录被它们自己的 ``.gitignore`` 整个挡在仓库外(CI 上
+根本不存在), 而且只是开发阶段的临时物 —— 门禁不该依赖一个仓库里没有的文件。
 
 ## 拍什么(两套画面: 有数据的 + 空库)
 
@@ -109,7 +109,7 @@ TESTS_DIRECTORY = REPO_ROOT / "tests"
 WORK_DIRECTORY = Path("visual-work")
 DEFAULT_RESULTS_DIRECTORY = Path("allure-results-visual")
 # 基线图入库, 放 tests/ 下: 它是这道门禁的**输入数据**, 跟着代码走改动才在 PR 里看得见。
-# 刻意不放 ui-review/: 那个目录被它自己的 .gitignore 挡在仓库外(见模块说明)。
+# 刻意不放那些未入库的本地目录(它们被自己的 .gitignore 挡在仓库外, 见模块说明)。
 DEFAULT_BASELINES = Path("tests") / "visual-baselines"
 DEFAULT_CANDIDATES = Path("visual-baselines-candidates")
 

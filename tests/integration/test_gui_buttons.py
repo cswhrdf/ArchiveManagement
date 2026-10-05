@@ -986,7 +986,7 @@ def test_discovery_panel_hides_already_imported_candidates(
             pending=pending,
             ignored=ignored,
         )
-        # 第二行留给扫描结果: 不再重复同一批数(03 号评审的两行计数重复).
+        # 第二行留给扫描结果: 不再重复同一批数(评审时的两行计数重复).
         assert panel._detail_label.cget("text") == ""
     finally:
         app.destroy()
@@ -1344,7 +1344,7 @@ def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
 ) -> None:
     """候选行的长安装路径按"中间省略"裁进卡片; 行重建后旧标签的回调不再写已销毁控件.
 
-    回归 08/09 号评审: 长路径既不换行也不省略, 会直接顶到卡片右边缘。
+    回归(评审时发现): 长路径既不换行也不省略, 会直接顶到卡片右边缘。
     两条断言分工(2026-09-27 重写, 原版在两个平台上都"不会执行"):
 
     * 比对**同一个裁剪函数**在同一宽度下的输出 —— 比文本不比像素, 与字体库无关,
@@ -1608,7 +1608,7 @@ def test_home_page_supports_poster_mode_and_paging(
 
 
 def _assert_no_half_chip(line: str, chips: Sequence[str]) -> None:
-    """断言行内只剩完整标签: 放不下时**整块让位**给末尾那个孤零零的省略号(第 6 号评审).
+    """断言行内只剩完整标签: 放不下时**整块让位**给末尾那个孤零零的省略号(评审时发现的).
 
     口径 2026-10-02 调整(用户): 状态一行、标签一行, 超出部分用省略号 —— 省略号是独立
     的一项(前面带空格), 而不是把最后一个标签裁短成 "测…"。
@@ -1651,7 +1651,7 @@ def test_home_page_hides_the_table_and_footer_when_the_library_is_empty(
 ) -> None:
     """空库时收起表头/表格骨架与底部统计翻页, 加进第一款游戏后再长回来.
 
-    回归第 1/2 号评审: 一条数据都没有却摆着七个列头, 底下再挂一行
+    回归(评审时发现): 一条数据都没有却摆着七个列头, 底下再挂一行
     "共 0 款游戏 · 第 1/1 页", 页面看起来像渲染了一半。
     """
     from archive_management.infrastructure.database import Database
@@ -1689,7 +1689,7 @@ def test_home_page_hides_the_table_and_footer_when_the_library_is_empty(
 def test_list_scrollbar_appears_only_when_the_games_overflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """内容装得下时右侧不立滚动条, 真的溢出才出现(第 1/2/7 号评审).
+    """内容装得下时右侧不立滚动条, 真的溢出才出现(评审时发现的).
 
     常驻的滚动条在说"下面还有内容", 而它其实拖不动 —— 少几行数据时这是纯噪声。
     """
@@ -1715,7 +1715,7 @@ def test_list_scrollbar_appears_only_when_the_games_overflow(
 def test_pager_buttons_look_disabled_when_there_is_nowhere_to_go(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """分页按钮的禁用态必须与可用态明显不同: 底色/文字一起压暗(第 1 号评审)."""
+    """分页按钮的禁用态必须与可用态明显不同: 底色/文字一起压暗(评审时定的)."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch)
@@ -1778,7 +1778,7 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
     """悬停与选中是两件事: 未选中悬停只提底色, 已选中的卡片悬停仍是"选中"的样子.
 
     悬停反馈原来只长在**详情页的备份卡片**上, 主页的列表行与海报卡没有 —— 同一类
-    控件(可点、可选中)在两种页面上行为不一致(第 5 号评审)。规则只有一条, 落在
+    控件(可点、可选中)在两种页面上行为不一致(评审时发现的)。规则只有一条, 落在
     ``widgets.card_surface_colors``: 选中 > 悬停 > 常规。
 
     **设完悬停立刻读**(不中间再 ``_pump``): 主页有一个"延后重排"
@@ -1836,7 +1836,7 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
 def test_poster_card_keeps_its_meta_below_the_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """海报卡片: 角标不压封面、名称与元信息分开、占位字不再超大(第 5 号评审)."""
+    """海报卡片: 角标不压封面、名称与元信息分开、占位字不再超大(评审时定的)."""
     from archive_management.domain import HomeLayout
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.home_page import (
@@ -1884,7 +1884,7 @@ def test_poster_card_keeps_its_meta_below_the_title(
 def test_state_column_never_shows_half_a_chip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """状态列放不下时整块让位给省略号, 不许出现"测…"这种半句话(第 6 号评审).
+    """状态列放不下时整块让位给省略号, 不许出现"测…"这种半句话(评审时发现的).
 
     口径 2026-10-02 调整(用户): **状态一行、自定义标签一行**, 标签再多也只有两行。
     "放不下"由夹具里的**拉丁字符**保证: 裸 Linux runner 上缺中日韩字体时汉字近乎
@@ -3147,7 +3147,7 @@ def test_manage_window_location_actions_need_a_real_selection(
 def test_manage_window_rename_passes_the_current_name_as_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """重命名弹窗要带上"当前名称": 它与"新增游戏"长得一样(20 号评审)."""
+    """重命名弹窗要带上"当前名称": 它与"新增游戏"长得一样(评审时发现的)."""
     from archive_management.ui import manage_window as manage_mod
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -3304,7 +3304,7 @@ def test_manage_window_location_buttons_stay_inside_the_window(
     """位置操作按钮必须整颗落在窗口里.
 
     六个按钮挤一行时总宽已经等于容器可用宽度, 再加间距必然溢出 —— 最右边的
-    "删除"会被窗口边缘裁掉半颗(15 号评审)。
+    "删除"会被窗口边缘裁掉半颗(评审时发现的)。
     """
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -4242,7 +4242,7 @@ def test_settings_window_hints_follow_a_narrow_column(
 def test_settings_window_scrollbar_only_when_the_content_overflows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """屏幕够高(窗口按内容定高)时不该立着一条拖不动的滚动条(16 号评审).
+    """屏幕够高(窗口按内容定高)时不该立着一条拖不动的滚动条(评审时定的).
 
     窗口没映射时 ``winfo_ismapped()`` 恒为 0(假绿), 因此先等到窗口真的在屏幕上,
     再断言滚动条与“内容是否溢出”一致。
@@ -4554,7 +4554,7 @@ def test_task_card_state_follows_schedule_state() -> None:
     app._select_game("shanhai")
     _pump(app)
     assert app._task_state_label.cget("text") == tr("schedule.state_off")
-    # 没有排期时给出口径, 而不是一个像加载失败的短横线(13/18 号评审).
+    # 没有排期时给出口径, 而不是一个像加载失败的短横线(评审时定的).
     assert app._task_next.cget("text") == tr("task.next_none")
     assert app._task_next.cget("text") != "—"
 
@@ -4785,7 +4785,7 @@ def test_deleting_a_game_shows_the_package_path_and_really_exports_it(
     def record_confirm(*_args: Any, **kwargs: Any) -> bool:
         """记下确认框文案并直接同意."""
         messages.append(str(kwargs.get("message", "")))
-        # 告别包的落点按 24 号评审单独一行给出(带底色), 不再塞进正文句子里。
+        # 告别包的落点按评审时的要求单独一行给出(带底色), 不再塞进正文句子里。
         details.append(str(kwargs.get("detail", "")))
         return True
 
@@ -6010,7 +6010,7 @@ def test_gui_backup_button_writes_snapshot_through_service(
         snapshot_root = manifests[0].parent
         assert snapshot_root.parent.parent == backup_root
         # 游戏目录用名称命名(而不是数字 id); 界面上只说"由应用自动命名", 真实
-        # 目录名收在悬停提示里(13 号评审).
+        # 目录名收在悬停提示里(评审时定的).
         assert snapshot_root.parent.name.startswith("快照游戏-")
         assert snapshot_root.parent.name != game.game_id
         assert app._hero_origin_label.cget("text") == tr("hero.storage_folder")

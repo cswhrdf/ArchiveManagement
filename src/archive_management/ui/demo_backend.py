@@ -58,6 +58,9 @@ from archive_management.ui.models import (
     ScanSummary,
     ScheduleItem,
     TaskStatus,
+    clean_game_name,
+    delete_result_text,
+    format_moment,
     home_board,
 )
 
@@ -78,11 +81,6 @@ def _dt(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
 
 
-def _stamp(moment: datetime) -> str:
-    """把时间格式化为本地时区的展示文本(与真实后端一致)."""
-    return moment.astimezone().strftime("%Y/%m/%d %H:%M")
-
-
 # 演示用的译名(真实后端按 AppID 向平台问一次; 这里写死两种语言, 便于演示与用例).
 _DEMO_TRANSLATIONS: dict[str, dict[str, str]] = {
     "cand-1": {"zh-CN": "星际拓荒", "en": "Outer Wilds"},
@@ -97,7 +95,7 @@ def _demo_localized(candidate_id: str) -> str:
 
 def _now_label() -> str:
     """返回当前时间的展示文本(演示扫描时间用)."""
-    return datetime.now().astimezone().strftime("%Y/%m/%d %H:%M")
+    return format_moment(datetime.now(UTC))
 
 
 _GAMES: list[GameSummary] = [
@@ -363,19 +361,6 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
 )
 
 
-def _delete_result_text(plan: DeletionPlan, title: str) -> str:
-    """删除操作的结果文案: 连带子分支 / 顶替父节点 / 单节点三种.
-
-    ``title`` 是**被删掉的那一份**的名字: 只说"已删除该备份"等于没说删了什么
-    (I-7: 结果要说清"删了什么").
-    """
-    if plan.mode is DeletionMode.CASCADE:
-        return tr("result.delete_cascade", count=plan.removed_count)
-    if plan.mode is DeletionMode.SHIFT:
-        return tr("result.delete_shift", title=title)
-    return tr("result.delete_single", title=title)
-
-
 def _same_path(left: str, right: str) -> bool:
     r"""两条存档位置是否指向同一个路径(大小写不敏感, **两侧都规范化**后再比).
 
@@ -626,7 +611,7 @@ class DemoArchiveService:
         if self._current.get(game_id) in removed:
             self._restore_current_after_delete(game_id, plan, reverse)
         self._revision += 1
-        return _delete_result_text(plan, title)
+        return delete_result_text(plan, title)
 
     def _reparent_shifted_child(
         self, game_id: str, plan: DeletionPlan, reverse: dict[int, str]
@@ -957,7 +942,7 @@ class DemoArchiveService:
 
     def add_game(self, name: str) -> GameSummary:
         """新增一个游戏并返回其摘要."""
-        clean = self._clean_name(name)
+        clean = clean_game_name(name)
         game_id = f"game-{self._next_game_id}"
         self._next_game_id += 1
         summary = GameSummary(
@@ -989,7 +974,7 @@ class DemoArchiveService:
 
     def update_game(self, game_id: str, name: str) -> GameSummary:
         """重命名游戏并返回其摘要."""
-        clean = self._clean_name(name)
+        clean = clean_game_name(name)
         self._require_game(game_id)
         self._meta[game_id] = replace(self._meta[game_id], name=clean)
         # 只改展示名称: 原始名称与备份目录名保持不变.
@@ -1515,7 +1500,7 @@ class DemoArchiveService:
     def _board(self) -> HomeBoard:
         """按当前筛选条件重算演示主页(复用真实后端的映射逻辑)."""
         report = home_cases.build_report(self._home_facts(), self._home_filter)
-        return home_board(report, stamp=_stamp)
+        return home_board(report, stamp=format_moment)
 
     # -- 其它 ---------------------------------------------------------------
 
@@ -1559,13 +1544,6 @@ class DemoArchiveService:
     def _require_game(self, game_id: str) -> None:
         if game_id not in self._meta:
             raise ArchiveManagementError(tr("error.unknown_game", game_id=game_id))
-
-    def _clean_name(self, name: str) -> str:
-        """去除首尾空白; 为空时抛错."""
-        clean = name.strip()
-        if not clean:
-            raise ArchiveManagementError(tr("error.game_name_empty"))
-        return clean
 
     def _live_summary(self, game_id: str) -> GameSummary:
         meta = self._meta[game_id]

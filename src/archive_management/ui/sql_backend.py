@@ -45,7 +45,6 @@ from archive_management.domain import (
     ArtworkKind,
     BackupNode,
     CandidateStatus,
-    DeletionMode,
     DeletionPlan,
     Game,
     GameCandidate,
@@ -129,6 +128,9 @@ from archive_management.ui.models import (
     ScanSummary,
     ScheduleItem,
     TaskStatus,
+    clean_game_name,
+    delete_result_text,
+    format_moment,
     home_board,
     size_label,
 )
@@ -145,18 +147,13 @@ def _tone(name: str) -> str:
     return _TONES[digest % len(_TONES)]
 
 
-def _stamp(moment: datetime) -> str:
-    """把时间格式化为本地时区的展示文本."""
-    return moment.astimezone().strftime("%Y/%m/%d %H:%M")
-
-
 def _stamp_or_empty(moment: datetime | None) -> str:
     """时间戳文案: 没有排期时返回空串.
 
     界面据此给出"未配置/未安排"这种能读的说法(见 ``ui.models`` 的
     ``next_backup_text`` / ``next_run_text``), 而不是一个像加载失败的短横线。
     """
-    return _stamp(moment) if moment is not None else ""
+    return format_moment(moment) if moment is not None else ""
 
 
 def _schedule_next_run(
@@ -464,7 +461,7 @@ class SqlArchiveService:
             if latest.node_kind == "auto"
             else tr("backup.kind_manual")
         )
-        return _stamp(created), tr(
+        return format_moment(created), tr(
             "detail.last_backup_sub",
             kind=kind,
             size=size_label(facts.total_size),
@@ -472,14 +469,14 @@ class SqlArchiveService:
 
     def add_game(self, name: str) -> GameSummary:
         """新增游戏, 返回其摘要."""
-        clean = self._clean_name(name)
+        clean = clean_game_name(name)
         game = self._games.add(Game(name=clean))
         log_action("game.add", game_id=game.id, name=clean)
         return self._summary(game)
 
     def update_game(self, game_id: str, name: str) -> GameSummary:
         """重命名游戏, 返回其摘要."""
-        clean = self._clean_name(name)
+        clean = clean_game_name(name)
         game = self._game(game_id)
         # 只改名称: 首次录入的原始名称与磁盘目录名保持不变. 同时清掉"程序写入的
         # 译名"记录: 从这一刻起这个名字是用户起的, 译名探测不得再覆盖它。
@@ -980,7 +977,7 @@ class SqlArchiveService:
             note=directory.note,
             health=path_health(directory.path),
             last_scan_label=(
-                _stamp(directory.last_scan_at)
+                format_moment(directory.last_scan_at)
                 if directory.last_scan_at is not None
                 else ""
             ),
@@ -1334,7 +1331,7 @@ class SqlArchiveService:
 
     def _board(self, report: home_cases.HomeReport) -> HomeBoard:
         """把主页用例结果映射为展示模型(映射逻辑与演示后端共用)."""
-        return home_board(report, stamp=_stamp)
+        return home_board(report, stamp=format_moment)
 
     def _monitored_ref(self, directory_id: str) -> int:
         """把界面传入的字符串 id 解析为存在的监控目录 id."""
@@ -1488,11 +1485,7 @@ class SqlArchiveService:
         title = self._node_title(node)
         plan = self._backups.delete_node(gid, int(backup_id), cascade=True)
         self._touch()
-        if plan.mode is DeletionMode.CASCADE:
-            return tr("result.delete_cascade", count=plan.removed_count)
-        if plan.mode is DeletionMode.SHIFT:
-            return tr("result.delete_shift", title=title)
-        return tr("result.delete_single", title=title)
+        return delete_result_text(plan, title)
 
     def run_export(self, game_id: str, destination: str) -> str:
         """把这款游戏(含全部备份内容)导出到 ``destination``, 返回本地化提示.
@@ -1957,7 +1950,7 @@ class SqlArchiveService:
             backup_id=str(node.id),
             title=node.title,
             created_dt=created,
-            created_label=_stamp(created),
+            created_label=format_moment(created),
             auto=node.node_kind == "auto",
             safety=node.is_safety,
             branch_label=(
@@ -2102,14 +2095,6 @@ class SqlArchiveService:
             ok=probe.ok,
             note=note,
         )
-
-    @staticmethod
-    def _clean_name(name: str) -> str:
-        """去除首尾空白; 为空时抛出异常."""
-        clean = name.strip()
-        if not clean:
-            raise ArchiveManagementError(tr("error.game_name_empty"))
-        return clean
 
     @staticmethod
     def _require_path(path: str, kind: PathKind) -> None:

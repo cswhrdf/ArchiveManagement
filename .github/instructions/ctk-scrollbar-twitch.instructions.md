@@ -9,7 +9,7 @@ description: 'CustomTkinter 按需滚动条(以及所有"改几何 → 事件 �
 
 1. 打开"编辑标签"弹窗后**连点两次"添加标签"**, 界面开始抽搐, 控制台报
    `Exception in Tkinter callback: maximum recursion depth exceeded`;
-2. 评审截图里发现页两个列表、主页列表、定时任务窗口、编辑标签弹窗右侧**永远**立着一条拖不动的
+2. 评审时发现页两个列表、主页列表、定时任务窗口、编辑标签弹窗右侧**永远**立着一条拖不动的
    灰条(内容其实装得下)。
 
 第一类故障会让软件卡死或崩溃, 因此它的守卫用例是 **`@pytest.mark.blocker`**(本地 pre-commit 的
@@ -46,6 +46,7 @@ blocker+critical 子集里就会跑到); 第二类是观感缺陷, 守卫按 `mi
    ```
 
    这组读数一眼就能看出"抽动的不是内容, 是视口" —— 只看单帧读数会误判成"内容一直在临界值"。
+
 4. **量控件的高度请求**: `_desired_height` / `_current_height`。CTk 滚动条默认请求 **200px**。
 
 ## 3. 根因(四个, 都要修)
@@ -120,18 +121,19 @@ blocker+critical 子集里就会跑到); 第二类是观感缺陷, 守卫按 `mi
 
 ## 7. 守卫清单(改了滚动条逻辑必须全绿)
 
-| 用例 | 拦的是什么 |
-| --- | --- |
-| `tests/unit/test_ui_widgets.py::test_auto_scrollbar_pins_the_scrollbar_height_to_one_pixel` | 根因 A: 高度请求必须是 1px(`blocker`) |
-| `tests/unit/test_ui_widgets.py::test_sync_scrollbar_ignores_reentrant_notifications` | 根因 B: 重入必须直接返回(`blocker`) |
-| `tests/unit/test_ui_widgets.py::test_sync_scrollbar_converges_instead_of_flipping` | 两轮判定不许翻来翻去(`blocker`) |
-| `test_sync_scrollbar_hides_whenever_the_content_fits` / `_keeps_a_shown_bar_for_a_small_overflow` / `_does_not_pop_up_for_a_tiny_overflow` | 判定口径与滞回方向 |
-| `test_show_scrollbar_restores_the_grid_position` | 重新显示要给全摆放参数 **且** 压高度 |
-| `tests/integration/test_gui_buttons.py::test_tags_dialog_does_not_twitch_or_crash_while_adding_rows` | 真窗口: 连点两次"添加标签"后无回调异常、判定次数有上限、高度请求 1px(`blocker`) || `tests/unit/test_ui_widgets.py::test_the_first_verdict_assumes_the_bar_is_shown` | 根因 C: 首次判定必须真的执行收起 |
-| `tests/unit/test_ui_widgets.py::test_hiding_uses_grid_forget_so_ctk_cannot_put_it_back` | 修法 6: 收起要走 `grid_forget` |
-| `tests/integration/test_gui_scrollbars.py::test_the_discovery_panel_has_no_stray_scrollbar_with_an_empty_library` | 根因 C 的真窗口版: 空库时发现页不该有滚动条 |
-| `tests/integration/test_gui_scrollbars.py::test_a_hidden_scrollbar_survives_the_canvas_reporting_its_position` | 根因 D: 画布回叫后仍必须保持收起 |
-| `tests/integration/test_gui_scrollbars.py::test_a_scrollbar_appears_only_when_the_content_overflows` | 真窗口上两个方向都成立(装得下收起 / 溢出出现) |
+| 用例                                                                                                                                       | 拦的是什么                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- | --- | -------------------------------------------------------------------------------- | -------------------------------- |
+| `tests/unit/test_ui_widgets.py::test_auto_scrollbar_pins_the_scrollbar_height_to_one_pixel`                                                | 根因 A: 高度请求必须是 1px(`blocker`)                                           |
+| `tests/unit/test_ui_widgets.py::test_sync_scrollbar_ignores_reentrant_notifications`                                                       | 根因 B: 重入必须直接返回(`blocker`)                                             |
+| `tests/unit/test_ui_widgets.py::test_sync_scrollbar_converges_instead_of_flipping`                                                         | 两轮判定不许翻来翻去(`blocker`)                                                 |
+| `test_sync_scrollbar_hides_whenever_the_content_fits` / `_keeps_a_shown_bar_for_a_small_overflow` / `_does_not_pop_up_for_a_tiny_overflow` | 判定口径与滞回方向                                                              |
+| `test_show_scrollbar_restores_the_grid_position`                                                                                           | 重新显示要给全摆放参数 **且** 压高度                                            |
+| `tests/integration/test_gui_buttons.py::test_tags_dialog_does_not_twitch_or_crash_while_adding_rows`                                       | 真窗口: 连点两次"添加标签"后无回调异常、判定次数有上限、高度请求 1px(`blocker`) |     | `tests/unit/test_ui_widgets.py::test_the_first_verdict_assumes_the_bar_is_shown` | 根因 C: 首次判定必须真的执行收起 |
+| `tests/unit/test_ui_widgets.py::test_hiding_uses_grid_forget_so_ctk_cannot_put_it_back`                                                    | 修法 6: 收起要走 `grid_forget`                                                  |
+| `tests/integration/test_gui_scrollbars.py::test_the_discovery_panel_has_no_stray_scrollbar_with_an_empty_library`                          | 根因 C 的真窗口版: 空库时发现页不该有滚动条                                     |
+| `tests/integration/test_gui_scrollbars.py::test_a_hidden_scrollbar_survives_the_canvas_reporting_its_position`                             | 根因 D: 画布回叫后仍必须保持收起                                                |
+| `tests/integration/test_gui_scrollbars.py::test_a_scrollbar_appears_only_when_the_content_overflows`                                       | 真窗口上两个方向都成立(装得下收起 / 溢出出现)                                   |
+
 **每个守卫都要证明"能咬住"**(注意别在断言里先跑事件循环 —— 破坏后可能需要等超时):
 
 - 去掉 `auto_scrollbar` 里的 `_pin_scrollbar_height` → 前两条单元用例红;

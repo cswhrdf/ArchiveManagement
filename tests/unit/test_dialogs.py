@@ -778,7 +778,7 @@ def test_edit_tags_dialog_drops_both_comma_forms(harness: _FakeParent) -> None:
 
 
 def test_restore_dialog_hangs_wrapped_bullet_lines(harness: _FakeParent) -> None:
-    """23 号评审: 摘要里的"· "行要带悬挂缩进, 长路径折行后不能顶到最左边."""
+    """评审时发现: 摘要里的"· "行要带悬挂缩进, 长路径折行后不能顶到最左边."""
     harness.click_text = tr("dialog.restore_confirm")
 
     dialogs.restore_dialog(
@@ -809,7 +809,7 @@ def test_restore_dialog_hangs_wrapped_bullet_lines(harness: _FakeParent) -> None
 def test_restore_dialog_option_does_not_wear_the_primary_green(
     harness: _FakeParent,
 ) -> None:
-    """23 号评审: 勾选态是"选项", 不该与"开始恢复"同一颗实心绿."""
+    """评审时发现: 勾选态是"选项", 不该与"开始恢复"同一颗实心绿."""
     harness.click_text = tr("dialog.restore_confirm")
 
     dialogs.restore_dialog(
@@ -830,7 +830,7 @@ def test_restore_dialog_option_does_not_wear_the_primary_green(
 def test_confirm_dialog_gives_the_path_a_row_and_the_button_a_danger_color(
     harness: _FakeParent,
 ) -> None:
-    """24 号评审: 导出路径单独一行带底色, 破坏性确认按钮穿危险色."""
+    """评审时发现: 导出路径单独一行带底色, 破坏性确认按钮穿危险色."""
     harness.click_text = "删除记录"
 
     dialogs.confirm_dialog(
@@ -856,7 +856,7 @@ def test_confirm_dialog_gives_the_path_a_row_and_the_button_a_danger_color(
 def test_schedule_dialog_shows_the_state_on_its_own_line_with_equal_fields(
     harness: _FakeParent,
 ) -> None:
-    """25 号评审: 当前排期单独一行(不塞在说明句尾), 两个输入框同宽."""
+    """评审时发现: 当前排期单独一行(不塞在说明句尾), 两个输入框同宽."""
     harness.click_text = tr("dialog.schedule_save")
 
     dialogs.schedule_dialog(
@@ -880,7 +880,7 @@ def test_schedule_dialog_shows_the_state_on_its_own_line_with_equal_fields(
 def test_ask_text_hints_enter_and_left_aligns_the_blocks(
     harness: _FakeParent,
 ) -> None:
-    """19 号评审: 回车能提交要写在界面上, 提示/输入框/按钮统一左对齐同宽."""
+    """评审时发现: 回车能提交要写在界面上, 提示/输入框/按钮统一左对齐同宽."""
     harness.click_text = tr("dialog.cancel")
 
     dialogs.ask_text(harness, DARK, title="新增游戏", text=_PROMPT)
@@ -894,7 +894,7 @@ def test_ask_text_hints_enter_and_left_aligns_the_blocks(
 
 
 def test_ask_text_context_says_what_is_being_edited(harness: _FakeParent) -> None:
-    """20 号评审: 重命名与"新增"长得一样, 要写清在改谁."""
+    """评审时发现: 重命名与"新增"长得一样, 要写清在改谁."""
     harness.click_text = tr("dialog.cancel")
 
     dialogs.ask_text(
@@ -913,7 +913,7 @@ def test_ask_text_context_says_what_is_being_edited(harness: _FakeParent) -> Non
 def test_tags_row_delete_is_disabled_while_its_row_is_empty(
     harness: _FakeParent,
 ) -> None:
-    """21 号评审: 空行的"删除"点了等于删一个不存在的标签, 应该压暗."""
+    """评审时发现: 空行的"删除"点了等于删一个不存在的标签, 应该压暗."""
     harness.click_text = tr("dialog.tags_save")
 
     dialogs.edit_tags_dialog(harness, DARK, tags=("探索",))
@@ -928,7 +928,7 @@ def test_tags_row_delete_is_disabled_while_its_row_is_empty(
 
 
 def test_backup_dialog_does_not_count_its_placeholder(harness: _FakeParent) -> None:
-    """22 号评审: 描述框的占位文案不算用户输入, 字数从 0 开始."""
+    """评审时发现: 描述框的占位文案不算用户输入, 字数从 0 开始."""
     harness.click_text = tr("dialog.cancel")
 
     dialogs.edit_backup_dialog(
@@ -1435,9 +1435,9 @@ def test_import_package_dialog_shows_the_summary_and_the_match(
 
 
 def test_dialog_body_height_is_clamped_to_the_screen() -> None:
-    """28 号评审: 长对话框的正文高度按屏幕封顶, 并夹在上下限之间.
+    """评审时发现: 长对话框的正文高度按屏幕封顶, 并夹在上下限之间.
 
-    口径是**整个窗口**不超过屏幕可用高度的 80%(optimizations.csv 35 号), 所以正文区的
+    口径是**整个窗口**不超过屏幕可用高度的 80%(评审时约定的口径), 所以正文区的
     预算要先扣掉"正文之外"那段固定高度(`_DIALOG_CHROME_HEIGHT`, 实测约 50px)。只夹
     正文区的旧口径在 768 高的屏上会把窗口顶到 664(正文 614 + 正文之外 50), 底部的
     「导入」照样差 16px 出屏幕 —— 本用例当初只钉了正文区那一半, 漏的正是这 16px。
@@ -1614,7 +1614,7 @@ def test_the_comfort_line_stops_after_the_pass_limit(
 def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
     harness: _FakeParent,
 ) -> None:
-    """28 号评审: 正文可以滚, 但「取消 / 导入」永远留在滚动区外面."""
+    """评审时发现: 正文可以滚, 但「取消 / 导入」永远留在滚动区外面."""
     harness.click_text = tr("dialog.cancel")
 
     dialogs.import_package_dialog(
@@ -1633,7 +1633,7 @@ def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
 def test_import_package_dialog_explains_why_the_target_list_is_locked(
     harness: _FakeParent,
 ) -> None:
-    """28 号评审: 没选"合并"时目标区要写明原因并看得出是禁用的, 选中后说明换回来."""
+    """评审时发现: 没选"合并"时目标区要写明原因并看得出是禁用的, 选中后说明换回来."""
     dialogs.import_package_dialog(
         harness, DARK, **_import_args(locations=_rows(), targets=_targets())
     )
@@ -1767,7 +1767,7 @@ def test_export_batch_dialog_with_nothing_ticked_returns_an_empty_choice(
 def test_export_batch_dialog_disables_confirm_until_something_is_ticked(
     harness: _FakeParent,
 ) -> None:
-    """27 号评审: 一份都没勾时确认按钮就该是禁用态, 勾上第一个之后才亮起来."""
+    """评审时发现: 一份都没勾时确认按钮就该是禁用态, 勾上第一个之后才亮起来."""
     dialogs.export_batch_dialog(harness, DARK, **_export_batch_args())
 
     confirm = next(
@@ -1792,7 +1792,7 @@ def test_export_batch_dialog_disables_confirm_until_something_is_ticked(
 def test_export_batch_dialog_rows_put_the_metadata_on_its_own_line(
     harness: _FakeParent,
 ) -> None:
-    """27 号评审: 勾选框只写游戏名, 原名与状态摘要是另一行、且各用各的颜色."""
+    """评审时发现: 勾选框只写游戏名, 原名与状态摘要是另一行、且各用各的颜色."""
     prompt = models.BatchExportPrompt(
         summary="共 1 款游戏可以批量导出",
         filter_hint="输入名称可缩小列表",
@@ -1912,7 +1912,7 @@ def test_batch_import_dialog_collects_defaults_per_game(harness: _FakeParent) ->
 def test_batch_import_dialog_keeps_cards_compact_and_uniform(
     harness: _FakeParent,
 ) -> None:
-    """29 号评审: 卡片紧凑(名称与元信息同一行)、控件同高、边距左右对称、无绿字小标题."""
+    """评审时发现: 卡片紧凑(名称与元信息同一行)、控件同高、边距左右对称、无绿字小标题."""
     dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
 
     texts = [label.kwargs.get("text") for label in harness.labels]
