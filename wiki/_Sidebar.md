@@ -13,10 +13,8 @@
 - [[10 常见问题与故障排查]]
 - [[11 导入与导出]]
 
-**开发文档**（源码仓 `docs/`）
+**更多说明**
 
 - [界面与功能]({{REPO_URL}}/blob/dev/docs/features.md)
 - [游戏库]({{REPO_URL}}/blob/dev/docs/library.md)
 - [平台支持]({{REPO_URL}}/blob/dev/docs/platforms.md)
-- [测试体系]({{REPO_URL}}/blob/dev/docs/testing.md)
-- [打包发布]({{REPO_URL}}/blob/dev/docs/development.md)
