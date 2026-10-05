@@ -450,6 +450,8 @@ class ArchiveApp(ctk.CTk):
         #: 销毁牌子: destroy() 立起来, 延后任务(轮询/名称重裁)看到它就什么都不做 ——
         #: 已经到点、被 Tk 取走的那个任务撤不掉, 只能靠它兜住(见 destroy 的说明)。
         self._destroyed = False
+        #: 后台资源(调度器/快捷键监听)是否已释放: :meth:`_release_background` 幂等靠它。
+        self._background_released = False
         self._poll_job = self.after(100, self._poll_messages)
         if smoke_seconds is None:
             # 启动时补一次译名探测: 后台线程、只对当前语言缺条目的游戏联网(有缓存就
@@ -2993,15 +2995,46 @@ class ArchiveApp(ctk.CTk):
         )
 
     def _on_close(self) -> None:
-        """退出前记住窗口的尺寸位置, 再释放调度器与快捷键监听, 避免遗留后台线程."""
+        """退出前记住窗口的尺寸位置, 然后走 :meth:`destroy`(它会释放后台资源)."""
         self._remember_window_geometry()
-        self._hotkeys.shutdown()
-        try:
-            self.backend.shutdown()
-        except Exception as exc:  # pragma: no cover - 退出期异常不阻塞关闭
-            # GUI 不使用 print: 退出期的问题只写日志, 不干扰界面.
-            logger.warning("释放后台资源失败: %s", exc)
         self.destroy()
+
+    def _release_background(self) -> None:
+        """释放后台资源(调度器 + 全局快捷键监听); **幂等**, 可以重复调.
+
+        为什么单独成方法(2026-10-05, PLAN §39.4): 以前只有 :meth:`_on_close` 会释放它们, 而界面
+        用例的收尾走的是 ``destroy()`` —— 一个进程里跑完整套用例会攒下几十个活着的
+        ``APScheduler`` 线程(每个真后端建起来就 start() 一个, 而界面用例里有 40 多处"建真后端
+        的窗口 + ``finally: app.destroy()``"), 而 Tk 解释器早就被销毁了: macOS 上从非主线程碰
+        已销毁的 Tk 是已知的段错误来源(那次 SIGTRAP 现场里就挂着约 30 个
+        ``apscheduler..._main_loop``)。
+
+        为什么单独成方法而不是把三行直接抄进 :meth:`destroy`: 幂等牌的读写、两个释放入口各自
+        的容错都只该有一份; 而且关窗(``_on_close`` → ``destroy``)与用例收尾
+        (``tests/gui_support.close_gui_apps``)本来就是两条路, 谁先走都行 —— 方法幂等, 后走的那
+        条不会重复释放。
+
+        取资源的方式与 :meth:`destroy` 一致: 从 ``self.__dict__`` 里拿, **拿不到就跳过**。
+        构造中途失败也会走到销毁(那时 ``backend`` / ``_hotkeys`` 还没赋值), 而 Tk 控件的
+        ``__getattr__`` 会把未知名字转发给 ``self.tk`` —— 连 ``tk`` 都还没有时会无限递归成
+        ``RecursionError``, 把真正的失败现场搅乱。
+        """
+        if self.__dict__.get("_background_released"):
+            return
+        self._background_released = True
+        owners = (
+            ("快捷键监听", self.__dict__.get("_hotkeys")),
+            ("后台资源", self.__dict__.get("backend")),
+        )
+        for label, owner in owners:
+            release = getattr(owner, "shutdown", None) if owner is not None else None
+            if release is None:
+                continue
+            try:
+                release()
+            except Exception as exc:  # pragma: no cover - 退出期异常不阻塞关闭
+                # GUI 不使用 print: 退出期的问题只写日志, 不干扰界面.
+                logger.warning("释放%s失败: %s", label, exc)
 
     def destroy(self) -> None:
         """销毁前撤掉挂在自己身上的定时任务.
@@ -3021,10 +3054,15 @@ class ArchiveApp(ctk.CTk):
         而 Tk 控件的 ``__getattr__`` 会把未知名字转发给 ``self.tk``(连 ``tk`` 都还没有时
         会无限递归成 ``RecursionError``)。销毁函数自己不能因为"属性没建好"再抛一个异常,
         把真正的失败现场搅乱。
+
+        后台资源(调度器/快捷键监听)也在这里放掉: 窗口没了它们就再没有别的释放入口, 留着就是
+        活着的线程碰已销毁的 Tk(PLAN §39.4 的 macOS SIGTRAP)。放在最后一步拆控件**之前**做 ——
+        一个还在跑的调度器随时可能在自己的线程里回回调到界面。
         """
         self._destroyed = True
         self._cancel_poll_job()
         self._cancel_after_job("_refit_job")
+        self._release_background()
         super().destroy()
 
     def _cancel_after_job(self, name: str) -> None:

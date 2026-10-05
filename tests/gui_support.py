@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -97,6 +98,9 @@ def gui_app(builder: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     from tk_guard import is_known_tk_skip
 
     attempts = 0
+    # "这条用例开始时"的调度线程数: 在创建窗口**之前**采样, 否则新窗口自己 start 的那个调度器会
+    # 被算进基线, 收尾时它就永远不超线了(守卫白设)。用途见 close_gui_apps。
+    scheduler_baseline = len(_scheduler_threads())
     while True:
         attempts += 1
         opened_before = _default_root_object()
@@ -120,6 +124,8 @@ def gui_app(builder: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
             _record_retry(attempts - 1, RuntimeError("重试后建窗口成功"))
         break
     _LIVE_APPS.append(app)
+    # 记在窗口上而不是模块级变量 —— 一个进程里可能同时存在多个窗口。
+    app._scheduler_baseline = scheduler_baseline
     return app
 
 
@@ -179,8 +185,18 @@ def close_gui_apps() -> None:
     from tkinter import TclError
 
     broken: list[str] = []
+    baselines: list[int] = []
     while _LIVE_APPS:
         app = _LIVE_APPS.pop()
+        # 记下这条用例**开始时**的调度线程数(建窗口那一刻记在窗口上, 见 gui_app): 收尾的判据是
+        # "这条用例有没有攒下活的调度器", 而不是"进程里一个都不能有" —— 同一个进程里还会跑非 GUI
+        # 的集成用例, 它们建的真后端一样会起 scheduler(实测有一条会漏, 见 PLAN §15.9), 绝对判据
+        # 会把别人的存量算到这条用例头上。
+        baselines.append(int(getattr(app, "_scheduler_baseline", 0)))
+        # **先**放后台资源再拆控件: 一个活着的调度器随时可能在自己的线程里回调到界面, 而 Tk
+        # 正在被拆 —— macOS 上从非主线程碰已销毁的 Tk 是已知的段错误源(PLAN §39.4)。方法幂等,
+        # 已经走过 `_on_close()` 的窗口再调一次是空操作。
+        _release_background(app)
         close_child_windows(app)
         teardown = destroy_widget_tree(app)
         error: BaseException | None = None
@@ -209,10 +225,66 @@ def close_gui_apps() -> None:
     stray = _default_root_object()
     if stray is not None:
         _discard_stray_root(stray, phase="收尾时")
+    # 后台资源也得不留: 一个进程里跑完整套界面用例会攒下几十个活着的 `APScheduler` 线程, 而
+    # Tk 解释器早被销毁 —— 那正是那次 macOS SIGTRAP 现场里挂着的东西(约 30 个
+    # `apscheduler..._main_loop`, 见 PLAN §39.4)。判据是**相对**的(见上面 baselines 的说明):
+    # 收尾之后不得超过"这条用例开始时"那个数, 超了就是这条用例攒下的。
+    # 这条用例压根没建自己的窗口(baselines 为空)时**不判**: 没有可归因的对象, 而进程里的存量
+    # 可能是别人留下的 —— 界面文件里有一批用例只建真后端不建窗口(`SqlArchiveService(...)` 直接
+    # 用), 它们的存量不该由下一条无辜用例来报(实测: 不做这个区分, 整文件会多出 27 条收尾红)。
+    allowed = min(baselines) if baselines else 0
+    if baselines and _wait_for_scheduler_threads_at_most(allowed) > allowed:
+        broken.append(
+            "收尾后攒下了活的后台调度线程(没释放, 或那个后端没有释放入口): "
+            + ", ".join(_scheduler_threads())
+            + f"; 这条用例开始时是 {allowed} 个"
+        )
     if broken:
         # pytrace=False: 这里没有"出错的那一行"可指, 要紧的是上面那段现场描述(哪条用例、
         # 哪个子控件、原始 TclError)。pytest 会把它记成 teardown 阶段失败。
         pytest.fail("\n\n".join(broken), pytrace=False)
+
+
+def _release_background(app: Any) -> None:
+    """让窗口释放后台资源(调度器 + 快捷键监听); 不是我们的窗口就跳过.
+
+    只调 ``_release_background``(幂等, 见 ``main_window.ArchiveApp._release_background``),
+    **不**在这里自己 shutdown 后端 —— 释放的时机与顺序只有产品知道(例如"同一个 backend 中途
+    重建窗口"的写法里, 提前释放会让第二个窗口的调度整片消失)。
+    """
+    release = getattr(app, "_release_background", None)
+    if release is None:
+        return
+    with contextlib.suppress(Exception):
+        release()
+
+
+def _scheduler_threads() -> list[str]:
+    """还活着的后台调度线程(``apscheduler`` 的调度线程名字里带 ``APScheduler``).
+
+    为什么这么认: 一个活着的 scheduler 恰好一个这样的线程, 而它崩在 macOS 上的栈就是
+    ``apscheduler/schedulers/blocking.py::_main_loop``(PLAN §39.4 的现场)。名字里带
+    ``APScheduler`` 的只有它, 不会误伤 pytest / uv / 线程池那些线程。
+    """
+    return [
+        f"{thread.name}(daemon={thread.daemon})"
+        for thread in threading.enumerate()
+        if "APScheduler" in thread.name
+    ]
+
+
+def _wait_for_scheduler_threads_at_most(allowed: int, timeout: float = 2.0) -> int:
+    """等到活着的调度线程不超过 ``allowed`` 个, 返回最后数到的个数.
+
+    按"等不变量成立"判, 而不是释放完立刻断言: 产品侧的 ``shutdown`` 用的是 ``wait=False``
+    (退出不该被阻塞), 收尾是异步的 —— 实测本机几十毫秒内就干净, 2 秒上限只是给慢机器余量。
+    """
+    deadline = time.monotonic() + timeout
+    count = len(_scheduler_threads())
+    while count > allowed and time.monotonic() < deadline:
+        time.sleep(0.02)
+        count = len(_scheduler_threads())
+    return count
 
 
 def close_child_windows(app: Any) -> None:

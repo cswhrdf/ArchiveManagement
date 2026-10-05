@@ -209,6 +209,13 @@ GUI 用例的环境守卫会把建窗口期的 `TclError` 写成 `pytest.skip("t
 
 与 Tk 无关的跳过不受影响（例如"当前环境不允许创建符号链接""虚拟显示器太小"）。守卫：`tests/unit/test_gui_retry.py`（含一条反向守卫：`couldn't read file "cover.png"` 这类应用侧读文件失败**不许**被当成环境问题）。
 
+### 界面用例收尾：根要拆干净，后台线程也要放掉
+
+两条不变式，缺一条都会让**后面的**用例遭殃：
+
+- **不得留下 Tk 根**（2026-10-04 macOS/Linux 的 `image "pyimage1" does not exist`）：`tkinter._default_root` 上挂着一个不能用/没拆干净的解释器时，后面每条用例贴图都报"图片不存在"。收尾会验证并补救，断裂按**失败**报（不能静默咽掉，否则只会看到受害者）。
+- **不得攒下后台调度线程**（2026-10-05 macOS 分片被整片带走、只剩一份 dump，栈里挂着约 30 个 `apscheduler…_main_loop`）：`BackgroundScheduler()` **构造即 `start()`**，而释放入口过去只有 `_on_close()`（用户点关闭），界面用例走的却是 `destroy()` —— 那 40 多处"建真后端 + 建窗口 + `finally: app.destroy()`"于是各自留下一个活线程，去碰已销毁的 Tk。修法是把释放下沉成幂等的 `ArchiveApp._release_background()`，由 `destroy()` 与 `close_gui_apps` 共用；守卫两条：`test_gui_roots.py::test_a_real_backend_does_not_outlive_its_window`（故意绕开收尾、只走产品关窗路径，抽掉修法即红）与收尾里的**相对基线**判据。判据必须是相对的 —— 同一进程里还有非 GUI 用例会建真后端（实测会漏一个），绝对判据会把别人的存量算到当前用例头上。
+
 ### 只在某个平台红的分片失败：先把那份平台差异搬回本地
 
 2026-09-25 实测：Linux 分片里 `test_demo_update_location_rejects_a_path_used_by_another_location` 报 `DID NOT RAISE`，同一条用例在 Windows 上是绿的。根因不是平台 bug，而是**判重只规范化了一侧**：演示数据里的位置路径是原样保存的展示字符串（`D:\Games\…`），而输入侧会过一遍 `normalize_path` —— POSIX 上这类字符串属于相对路径，会被拼上工作目录，两侧形态不同就永远比不出重复；Windows 上 `normpath` 对这类路径恰好幂等，于是"恰好"看不出来。修法是判重**两侧都规范化**（`add_location` / `update_location` 两处，与监控目录判重同一套做法）。
