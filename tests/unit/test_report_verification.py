@@ -2766,7 +2766,12 @@ def test_history_trends_survive_the_pages_deploy() -> None:
             f"{job} 只认已完成的运行(仍在跑/被取消的没有产物可取)"
         )
         hint = f"{job} 要取回上一次的历史文件"
-        assert "cp .previous-allure-resources/.allure/history.jsonl" in block, hint
+        # 单文件上传的产物里 history.jsonl 落在压缩包**根部**(不带 .allure/ 前缀),
+        # 多路径上传才保留前缀 —— 两种布局都得认(2026-10-05 断链事故: 只按带前缀的
+        # 路径去 cp, final 链每轮清零, 最终报告的历史看起来"全丢了")。更细的守卫在
+        # test_ci_history.py 的 test_history_restore_accepts_both_artifact_layouts。
+        assert ".previous-allure-resources/.allure/history.jsonl" in block, hint
+        assert ".previous-allure-resources/history.jsonl" in block, hint
         assert "include-hidden-files: true" in block, (
             f"{job} 要把新的历史文件传回产物(它是隐藏文件, 必须显式放行)"
         )

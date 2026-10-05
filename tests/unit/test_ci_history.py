@@ -446,9 +446,7 @@ def test_ci_repairs_history_before_generating_the_report() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     jobs = _job_blocks(workflow)
     # 拷回历史的那条命令(比只找 "history.jsonl" 精确: 注释里也出现过这个文件名).
-    restore_command = (
-        "cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl"
-    )
+    restore_command = 'cp "${candidate}" .allure/history.jsonl'
     checked = 0
     for job_name, job in jobs.items():
         if "allure generate" not in job or restore_command not in job:
@@ -464,6 +462,71 @@ def test_ci_repairs_history_before_generating_the_report() -> None:
         step = _step(job, "Repair previous Allure history")
         assert "--allure-version" in step, "CI 用的是动态版本, 实际版本要记进修复记录"
     assert checked >= 2, "至少要有逐平台与汇总两处生成报告"
+
+
+def test_history_restore_accepts_both_artifact_layouts() -> None:
+    """两个恢复历史的步骤都要认两种 artifact 布局, 都找不到时必须响亮报错.
+
+    2026-10-05 实测: 上传侧只列**一个**文件时, artifact 里的最短公共祖先是
+    ``.allure/``, history.jsonl 落在压缩包**根部**; 列多个路径(平台产物带着
+    allure-manifest.json)才会保留 ``.allure/`` 前缀。汇总作业的 final 产物改成
+    单路径后, 恢复步骤仍按带前缀的路径去 cp, 每轮都失败 —— 最终报告的历史每轮
+    清零, 看起来就是"过去执行的记录全丢了"(断链起点: 3b23b9b 把上传从多路径改
+    成单路径)。两种布局都认之后, 上传侧再怎么改形状都不必跟着动恢复侧。
+    """
+    jobs = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))
+    checked = 0
+    for job_id, job in jobs.items():
+        for step_name in (
+            "Restore previous Allure history",
+            "Restore previous final Allure history",
+        ):
+            if f"name: {step_name}" not in job:
+                continue
+            checked += 1
+            step = _step(job, step_name)
+            assert ".previous-allure-resources/.allure/history.jsonl" in step, (
+                f"{job_id}/{step_name} 要先试带 .allure/ 前缀的布局(多路径上传的产物)"
+            )
+            assert ".previous-allure-resources/history.jsonl" in step, (
+                f"{job_id}/{step_name} 也要认单文件上传时落在压缩包根部的布局"
+            )
+            assert "::error::" in step, (
+                f"{job_id}/{step_name} 找不到历史时必须 ::error 报错: 上一步刚确认过"
+                "产物存在, 拷不出来只能是布局变了"
+            )
+            assert "exit 1" in step, (
+                f"{job_id}/{step_name} 找不到历史时必须以非零退出 —— 不能让趋势静默"
+                "从零开始再发生一次"
+            )
+    assert checked == 2, "逐平台与汇总两处都要恢复历史"
+
+
+def test_quality_gate_does_not_touch_the_history_file() -> None:
+    """质量门步骤不许写历史: 它追加的"半套快照"会冒充上一轮.
+
+    2026-10-05 定位(Allure 3.20.0, 本地最小复现): ``allure quality-gate`` 同样
+    遵循 allurerc 的 ``historyPath + appendHistory`` —— 汇总作业里它跑在性能/安全
+    结果并入**之前**, 追加的快照只含当时已收集的结果(7516 条), 而随后的
+    ``allure generate`` 又追加一份完整的(7520 条), 趋势里于是同一轮出现两个点,
+    那条假快照还作为 9.6 MiB 的 data/history/*.json 塞进报告。钉住"藏 -> 跑 ->
+    丢 -> 还"四段的顺序: 少任何一段, 同轮双点就会回来(修复排在质量门之后也来不及
+    —— 报告是 generate 用含假快照的历史渲染的)。
+    """
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["allure-summary"]
+    step = _step(job, "Validate the quality gate")
+    define = step.find("kept=")
+    hidden = step.find('mv .allure/history.jsonl "${kept}"')
+    gate = step.find("allure quality-gate")
+    discard = step.find("rm -f .allure/history.jsonl")
+    restore = step.find('mv "${kept}" .allure/history.jsonl')
+    assert define != -1, "临时名要先定义再用"
+    assert define < hidden < gate, (
+        "质量门跑之前要把真历史藏到同目录的临时名(改名即回, 不跨设备)"
+    )
+    assert gate < discard < restore, (
+        "质量门跑完要丢掉它写的那份, 再放回真历史 —— 顺序反了会把真历史弄丢"
+    )
 
 
 def test_the_note_names_the_version_and_the_reason(tmp_path: Path) -> None:

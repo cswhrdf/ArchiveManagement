@@ -909,11 +909,26 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore previous Allure history
+        # artifact 内的路径取决于上传时 path 的形状: 只列**一个**文件(.allure/history.jsonl)
+        # 时, 最短公共祖先是 .allure/, 文件落在压缩包**根部**; 列多个路径(如平台产物里的
+        # allure-manifest.json)才会保留 .allure/ 前缀。两种布局都认 —— 2026-10-05 实测:
+        # 汇总作业的上传侧从多路径改成单路径后, 下一轮的 cp 在两种布局里都只找得到其中
+        # 一种, 于是 final 历史链悄悄断掉(每轮清零重来)。找不到时响亮报错而不是静默跳过。
         if: steps.prev-run.outputs.run_id != ''
         shell: bash
         run: |
           mkdir -p .allure
-          cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
+          for candidate in \
+            .previous-allure-resources/.allure/history.jsonl \
+            .previous-allure-resources/history.jsonl
+          do
+            if [ -f "${candidate}" ]; then
+              cp "${candidate}" .allure/history.jsonl
+              exit 0
+            fi
+          done
+          echo "::error::allure-resources-${{ matrix.os }} 里找不到 history.jsonl(试过 .allure/history.jsonl 与根下的 history.jsonl) —— 上传侧的打包形状变了, 请对照 'Upload Allure resources' 的 path 列表。"
+          exit 1
 
       - name: Repair previous Allure history
         # 报告的“趋势”是按身份键**精确匹配**的(见 allurerc.mjs 的 historyPath), 而 CLI
@@ -1296,11 +1311,26 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore previous final Allure history
+        # 与逐平台作业同一步的两种布局兼容(见那边说明): final 产物恰恰是断链现场 ——
+        # 2026-10-05 起上传侧只列一个文件, artifact 里就没有 .allure/ 前缀了, 这里却
+        # 按带前缀的路径去 cp, 每轮都失败, 修复步骤跟着"读入 0 份", 最终报告的历史
+        # 每轮清零。找不到时响亮报错: 这一步的前一步刚确认过产物存在, 拷不出来只能是
+        # 布局变了, 不能让"趋势从零开始"再静默发生一次。
         if: steps.prev-run.outputs.run_id != ''
         shell: bash
         run: |
           mkdir -p .allure
-          cp .previous-allure-resources/.allure/history.jsonl .allure/history.jsonl
+          for candidate in \
+            .previous-allure-resources/.allure/history.jsonl \
+            .previous-allure-resources/history.jsonl
+          do
+            if [ -f "${candidate}" ]; then
+              cp "${candidate}" .allure/history.jsonl
+              exit 0
+            fi
+          done
+          echo "::error::allure-resources-final 里找不到 history.jsonl(试过 .allure/history.jsonl 与根下的 history.jsonl) —— 上传侧的打包形状变了, 请对照 'Upload final Allure resources' 的 path 列表。"
+          exit 1
 
       - name: Repair previous Allure history
         # 与逐平台作业同一步的理由(见 pytest 作业里那段说明): 历史键的形状一变, 旧点就
@@ -1322,12 +1352,28 @@ jobs:
         run: |
           mkdir -p allure-results
           if [ -n "$(ls -A allure-results)" ]; then
+            # quality-gate 也会按 allurerc 的 appendHistory 写 historyPath(3.20.0 实测,
+            # 本地最小复现: 配了 historyPath+appendHistory 后跑一次 quality-gate,
+            # .allure/history.jsonl 里就多一行)。这一步排在性能/安全结果并入**之前**,
+            # 它追加的那条"半套快照"会冒充上一轮 —— 2026-10-05 的最终报告趋势里同一轮
+            # 出现两个点(7516 条的假历史 + 7520 条的本次), 就是它和后面的 generate
+            # 各追加一次。所以跑之前把真历史藏到**同目录**(改名即回), 跑完丢掉它写的,
+            # 再放回真历史。质量门的规则只看本次结果(见 allurerc.mjs 的 qualityGate),
+            # 历史文件它根本不需要。
+            kept=".allure/history.keep.$$"
+            if [ -f .allure/history.jsonl ]; then
+              mv .allure/history.jsonl "${kept}"
+            fi
             set +e
             allure quality-gate --config allurerc.mjs allure-results 2>&1 \
               | tee allure-quality-gate.txt
             code=${PIPESTATUS[0]}
             # 把退出码也写进日志: 运行总账据此给出"通过/未通过", 不用去猜文本。
             echo "退出码: ${code}" >> allure-quality-gate.txt
+            rm -f .allure/history.jsonl
+            if [ -f "${kept}" ]; then
+              mv "${kept}" .allure/history.jsonl
+            fi
             exit "${code}"
           fi
           echo "没有可用的 allure-results, 跳过质量门校验" | tee allure-quality-gate.txt
