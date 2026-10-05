@@ -271,3 +271,44 @@ def test_a_foreign_root_left_in_the_session_gets_collected() -> None:
     # 能不能真的把它拆掉是环境侧的事(收尾会试两次并把原因记进报告), 所以失败时把那份
     # 现场当消息抛出来, 而不是只给一句 assert。
     assert root_is_alive(foreign) is False, stray_roots()[-1]
+
+
+def _poll_jobs(app: Any) -> list[str]:
+    """Tcl 任务表里还挂着的**消息轮询**任务(回调名里带 ``_poll_messages``)."""
+    pending = app.tk.call("after", "info")
+    return [
+        str(app.tk.call("after", "info", job))
+        for job in pending
+        if "_poll_messages" in str(app.tk.call("after", "info", job))
+    ]
+
+
+def test_a_manual_poll_does_not_orphan_the_next_poll() -> None:
+    """手动调 ``_poll_messages`` 之后, 挂着的轮询任务必须仍然只有一个.
+
+    出处(2026-10-05 报告): Linux 分片上 ``Default view is branch tree and hides old auto
+    backups`` 的 stderr 附件里是 5 条 ``invalid command name "..._poll_messages"``, 而那条
+    用例本身的断言全过了 —— 噪声来自**前面的**用例: 用例辅助(``_drain``)每轮都直接调
+    ``app._poll_messages()`` 把后台结果搬回主线程, 而该方法末尾又排一个新任务并覆盖
+    ``_poll_job``, 于是先前那个的 id 被丢掉、``destroy()`` 撤不到它; 它随后在别处的事件
+    循环里爆掉, 挂在那条无辜用例名下。
+
+    判据用 Tcl 自己的任务表(``after info``), 不看有没有异常: "还挂着一个"比"等它炸"可靠
+    —— 爆的时机取决于事件循环什么时候跑, 而"多了一个"当场就能量到。
+    """
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    app.update_idletasks()
+    app.update()
+    assert len(_poll_jobs(app)) == 1, (
+        f"正常跑着的时候恰好一个轮询任务: {_poll_jobs(app)}"
+    )
+    for _ in range(3):
+        app._poll_messages()  # 用例就是这么把后台结果搬回主线程的
+        app.update()
+    assert len(_poll_jobs(app)) == 1, (
+        f"手动轮询之后挂着的轮询任务应当还是一个(多出来的是撤不掉的孤儿): "
+        f"{_poll_jobs(app)}"
+    )
+    # 为什么不在这一层再量一次"stderr 里还有没有 invalid command name": 那种报错要等
+    # **销毁之后**还有事件循环经过才会响, 而单条用例里量不到那一步(实测: 把产品侧修复撤掉,
+    # 这条守卫仍然绿) —— 结构判据("任务表里多了一个")才是可靠的, 噪声本身只能靠整文件跑。

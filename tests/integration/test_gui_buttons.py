@@ -458,6 +458,13 @@ def test_default_view_is_branch_tree_and_hides_old_auto_backups() -> None:
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(app)
     app._open_game_detail("outer-wilds")
+    # 时间范围默认是"最近 30 天", 而演示数据的日期是**固定的**(2026-09-04..06): 要断言
+    # "时间线里每一份都有卡片"就得先把范围设成"全部", 否则这条断言随"今天"漂移 ——
+    # 2026-10-05 一到, 09-04 那份(22:31)掉出 30 天窗口, 这里当场 `4 != 5`(实测);
+    # 报告里它一直是绿的, 只是因为跑的那天(10-04 17:52)还在窗口边上。
+    app._filter_period.set(tr("filter.all_time"))
+    app._render_list()
+    _pump(app)
     assert app._view == ViewKind.BRANCH
     branch_nodes = len(app._tree_view.node_ids)
     total_items = len(app._items)

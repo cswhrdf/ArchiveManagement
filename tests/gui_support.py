@@ -496,6 +496,9 @@ def _record_teardown_note(
     账上留着已删的命令, 见 :func:`destroy_widget_tree`)。但它必须看得见: 一旦它变成常态,
     就说明收尾的方式又该改了; 而且**这条记录里带着控件名与异常原文** —— 下次再出现就能直接
     点名是哪个控件、哪一条命令。
+    注: stderr 里那些 ``invalid command name "...check"/"...sync_now"/"...apply"`` 是 Tk 与
+    CustomTkinter **自己**的定时任务在窗口销毁过程中触发的(它们在销毁那一下才被排上, 撤不
+    到), 不能当成本用例的缺陷; 我们自己的会自报家门(见 ``main_window._poll_messages``)。
     """
     import allure
 

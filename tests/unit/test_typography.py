@@ -120,11 +120,18 @@ def test_a_font_is_only_deferred_on_a_worker_thread() -> None:
 
 
 def test_the_message_pump_drains_deferred_fonts() -> None:
-    """主窗口的消息泵负责排空: 它本来就在主线程上按 100ms 周期跑, 不需要新的事件源."""
+    """主窗口的消息泵负责排空: 它本来就在主线程上按 100ms 周期跑, 不需要新的事件源.
+
+    判据取**整个方法体**(到下一个方法定义为止), 不是固定字数: 2026-10-05 给这个方法补了
+    一段说明与一行"先撤掉挂着的轮询任务", 原来 `[:600]` 的窗口就够不着排空了 —— 而"那行
+    调用还在不在"才是这条守卫要问的事。
+    """
     from archive_management.ui import main_window
 
     source = Path(main_window.__file__).read_text(encoding="utf-8")
-    body = source[source.index("def _poll_messages") :][:600]
+    start = source.index("def _poll_messages")
+    end = source.find("\n    def ", start + 1)
+    body = source[start : end if end != -1 else len(source)]
 
     assert "drain_deferred_fonts()" in body
 

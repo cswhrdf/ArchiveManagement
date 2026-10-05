@@ -3011,13 +3011,25 @@ class ArchiveApp(ctk.CTk):
         会无限递归成 ``RecursionError``)。销毁函数自己不能因为"属性没建好"再抛一个异常,
         把真正的失败现场搅乱。
         """
-        for name in ("_poll_job", "_refit_job"):
-            job = self.__dict__.get(name)
-            if job is not None:
-                with contextlib.suppress(tk.TclError):
-                    self.after_cancel(job)
-            setattr(self, name, None)
+        self._cancel_poll_job()
+        self._cancel_after_job("_refit_job")
         super().destroy()
+
+    def _cancel_after_job(self, name: str) -> None:
+        """撤掉 ``self.__dict__`` 里记着的一个 ``after`` 任务(没有/已失效都不报错).
+
+        先取 id 再置空: 撤完不管成不成功都不该留着旧 id(留着它下次会去撤一个已经被别的
+        任务复用的编号)。
+        """
+        job = self.__dict__.get(name)
+        if job is not None:
+            with contextlib.suppress(tk.TclError):
+                self.after_cancel(job)
+        setattr(self, name, None)
+
+    def _cancel_poll_job(self) -> None:
+        """撤掉挂着的消息轮询任务."""
+        self._cancel_after_job("_poll_job")
 
     # ---------------------------------------------------------------- 反馈与后台
 
@@ -3066,7 +3078,18 @@ class ArchiveApp(ctk.CTk):
         threading.Thread(target=runner, daemon=True).start()
 
     def _poll_messages(self) -> None:
-        """主线程轮询队列并分发完成消息与快捷键请求."""
+        """主线程轮询队列并分发完成消息与快捷键请求.
+
+        **开头先把挂着的那个轮询任务撤掉再干活**: 用例与夹具会**直接**调这个方法把后台结果
+        搬回主线程(``tests/integration/test_gui_buttons.py`` 的 ``_drain`` 每轮都调, 一
+        条用例就调好几次), 而末尾又会排下一个 —— 不先撤, 先前那个的 id 就被覆盖成**孤儿**,
+        ``destroy()`` 撤不到它, 它随后在**别的**用例的事件循环里以
+        ``invalid command name "..._poll_messages"`` 爆掉, 挂在那条无辜用例的 stderr 附件上
+        (2026-10-05 的报告: Linux 分片上 5 条这种报错落在
+        ``test_default_view_is_branch_tree_and_hides_old_auto_backups`` 名下)。自己跑完的那种
+        正常情形下这个 id 已经失效, 撤它是空操作。
+        """
+        self._cancel_poll_job()
         # 顺便把后台线程"寄存"的字体删掉: `tkinter.font.Font.__del__` 会调 Tcl, 而 Tcl
         # 只有主线程能安全调用 —— 后台 worker 触发 GC 时终结字体对象会直接段错误(见
         # archive_management.ui.typography._ScaledFont.__del__)。这里本来就在主线程上按
