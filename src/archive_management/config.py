@@ -377,8 +377,8 @@ def _reset_to_defaults(path: Path, *, reason: str) -> ConfigLoad:
 
 def _preserve_invalid(path: Path) -> Path | None:
     """把非法的配置文件改名保留; 失败时只记录日志并返回 None."""
-    if not path.exists():
-        return None
+    if not path.exists():  # pragma: no branch - 调用方只在文件损坏时调它
+        return None  # pragma: no cover - 这条分支永远走不到
     backup = path.with_suffix(path.suffix + INVALID_CONFIG_SUFFIX)
     try:
         path.replace(backup)

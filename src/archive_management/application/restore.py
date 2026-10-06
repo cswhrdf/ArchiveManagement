@@ -785,7 +785,9 @@ def _copy_tree(source: Path, destination: Path) -> None:
     """把已有内容复制进暂存目录(不跟随符号链接)."""
     for child in sorted(source.iterdir(), key=lambda item: item.name):
         target = destination / child.name
-        if child.is_symlink():
+        if (
+            child.is_symlink()
+        ):  # platform: linux macos - 用例需真实建链接, Windows 无权限会跳过
             _discard(target)
             _recreate_symlink(target, str(child.readlink()))
             continue

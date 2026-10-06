@@ -108,11 +108,6 @@ def suggest_candidates(
     )
 
 
-def pending_candidates(database: Database, game_id: int) -> list[SaveCandidate]:
-    """返回某个游戏尚未处理的候选(界面用它列出待确认项)."""
-    return SaveCandidateRepository(database).list_for_game(game_id, status="suggested")
-
-
 def confirm_candidate(database: Database, candidate_id: int) -> SaveLocation:
     """用户确认一条候选: 只有这一步才会写进存档位置表.
 

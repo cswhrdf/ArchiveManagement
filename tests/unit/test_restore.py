@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -757,3 +759,43 @@ def test_restore_replaces_a_directory_with_a_file_of_the_same_name(
 
     assert result.restored_files == 1
     assert _slot(env.save) == "v1"
+
+
+def test_helper_write_file_wraps_an_unwritable_destination(tmp_path: Path) -> None:
+    """暂存目标写不进去(例如上级目录不存在)时给可读错误, 而不是冒裸 OSError."""
+    origin = tmp_path / "slot1.dat"
+    origin.write_bytes(b"v1")
+    missing = tmp_path / "not-there" / "slot1.dat"
+
+    with pytest.raises(SnapshotError, match="恢复文件失败"):
+        restore_mod._write_file(origin, missing, hashlib.sha256(b"v1").hexdigest())
+
+
+def test_helper_move_reports_a_failure_when_both_fallbacks_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同卷改名与跨卷复制两条退路都断掉时给可读错误(不能静默当成搬成功)."""
+    source = tmp_path / "a.dat"
+    source.write_bytes(b"x")
+
+    def refuse_replace(self: Path, target: Path) -> Path:
+        raise OSError("同卷改名失败")
+
+    def refuse_move(src: str, dst: str) -> None:
+        raise OSError("跨卷复制失败")
+
+    monkeypatch.setattr(Path, "replace", refuse_replace)
+    monkeypatch.setattr(shutil, "move", refuse_move)
+
+    with pytest.raises(SnapshotError, match="移动失败"):
+        restore_mod._move(source, tmp_path / "b.dat")
+
+
+def test_helper_report_lets_managed_errors_through(tmp_path: Path) -> None:
+    """进度回调抛出的管理类异常要照原样传出(不能当成"回调坏了, 忽略")."""
+
+    def broken(_fraction: float, _message: str) -> None:
+        raise ArchiveManagementError("回调要求中止")
+
+    with pytest.raises(ArchiveManagementError, match="回调要求中止"):
+        restore_mod._report(broken, 0.5, "恢复中")

@@ -521,7 +521,7 @@ class BackupService:
         self._require_node(game_id, backup_id)
         try:
             return plan_deletion(self.list_nodes(game_id), backup_id)
-        except KeyError as exc:
+        except KeyError as exc:  # pragma: no cover - 上面已确认它在树里
             raise ArchiveManagementError(f"未知的备份节点: {backup_id}") from exc
 
     def delete_node(
