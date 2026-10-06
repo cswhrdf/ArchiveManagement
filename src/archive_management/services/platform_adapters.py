@@ -167,7 +167,9 @@ class SteamAdapter:
         图标哈希来自本机 ``appinfo.vdf``: 解析一次后缓存在适配器实例里, 所以
         每款游戏只付一次字典查找。
         """
-        if game.platform != "steam" or not game.game_id:
+        if game.platform != "steam":  # pragma: no branch - 只有非 Steam 会命中
+            return ()
+        if not game.game_id:  # pragma: no cover - id 非空由 PlatformGame 保证
             return ()
         icons = self._steam_icons().get(game.game_id)
         if icons is None:
