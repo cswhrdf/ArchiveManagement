@@ -6,6 +6,8 @@ import os
 import threading
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -3394,3 +3396,153 @@ def test_a_game_with_nothing_to_backfill_spawns_no_thread(
     service._spawn_hash_backfill(int(game_id))
 
     assert threading.active_count() == before
+
+
+# --------------------------------------------------- 少数入口的退化处理
+#
+# 这些入口平时都有更"正"的路可走(改主题、清探测结果、删位置由界面走别的分支),
+# 于是它们本身从没被执行过。而它们恰恰是**出错时**的收尾: 外部来的 id 可能是任意
+# 字符串、适配器可能炸、磁盘可能写不进去 —— 判据是"退化成什么", 不是"跑过就算"。
+
+
+def test_remove_location_drops_the_record(tmp_path: Path) -> None:
+    """删掉一条存档位置记录: 列表与摘要都不再算它."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    location = service.list_locations(game_id)[0]
+
+    service.remove_location(location.location_id)
+
+    assert service.list_locations(game_id) == []
+    assert service.list_games()[0].has_locations is False
+
+
+def test_theme_only_knows_the_two_names(tmp_path: Path) -> None:
+    """主题只有 dark/light 两种: 别的名字一律按 light(界面上没有第三种可选)."""
+    service = _service(tmp_path)
+
+    assert service.current_theme() == "dark"
+    assert service.set_theme("dark") == "dark"
+    assert service.set_theme("light") == "light"
+    assert service.set_theme("系统默认") == "light"
+    assert service.current_theme() == "light"
+
+
+def test_clear_scan_results_reports_the_count_and_refreshes_the_revision(
+    tmp_path: Path,
+) -> None:
+    """清空探测结果: 给出删掉的条数, 并让数据版本往前走(界面据此重读列表)."""
+    service = _service(tmp_path)
+    install = tmp_path / "Games" / "Hades"
+    install.mkdir(parents=True)
+    CandidateRepository(Database(tmp_path / "app.db")).upsert(
+        GameCandidate(
+            name="哈迪斯",
+            install_dir=str(install),
+            source="steam",
+            reason_code="steam_manifest",
+            detail="appmanifest_1145360.acf",
+        )
+    )
+    assert len(service.list_candidates()) == 1
+    revision = service._data_revision
+
+    assert service.clear_scan_results() == 1
+
+    assert service.list_candidates() == []
+    assert service._data_revision > revision
+
+
+def test_a_broken_adapter_only_costs_the_save_path_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """适配器推断存档路径时炸了: 只让这一款没有建议(界面显示"需手动添加"), 不阻断扫描."""
+    service = _service(tmp_path)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("适配器炸了")
+
+    adapter = SimpleNamespace(supports_save_paths=True, save_candidates=refuse)
+    monkeypatch.setattr(service, "_adapter_for", lambda _platform: adapter)
+    monkeypatch.setattr(
+        sql_mod,
+        "_platform_game",
+        lambda _candidate: PlatformGame(
+            name="哈迪斯", platform="steam", game_id="1145360"
+        ),
+    )
+
+    assert (
+        service._save_suggestions(cast(GameCandidate, SimpleNamespace(name="哈迪斯")))
+        == ()
+    )
+
+
+def test_user_artwork_path_is_empty_when_the_game_is_unknown(tmp_path: Path) -> None:
+    """游戏不存在(刚被删)/参数不对时给空串: 缺一张自定义封面不该打断渲染."""
+    service = _service(tmp_path)
+
+    assert service.user_artwork_path("999", "cover") == ""
+    assert service.user_artwork_path("不是 id", "cover") == ""
+
+
+def test_a_failed_icon_cache_write_just_skips_that_icon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写图标缓存失败(磁盘满/只读)时只跳过这张图, 交给界面回落首字位图."""
+    service = _cached_service(tmp_path, cache_dir=tmp_path / "cache")
+    cache = service._artwork_cache()
+    assert cache is not None
+    source = tmp_path / "icon.ico"
+    source.write_bytes(_PNG)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(service, "_icon_source", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(sql_mod, "square_icon", lambda *_args, **_kwargs: _PNG)
+    monkeypatch.setattr(cache, "store", refuse)
+
+    referenced = PlatformGame(name="Demo", platform="steam", game_id="730")
+
+    assert service._store_icon(cache, referenced) is None
+
+
+def test_ids_that_are_not_numbers_are_treated_as_unknown(tmp_path: Path) -> None:
+    """外部来的 id 可能是任意字符串: 可选的那处给 None, 必需的那处报"不认识"."""
+    service = _service(tmp_path)
+
+    assert service._optional_game_id(None) is None
+    assert service._optional_game_id("不是 id") is None
+    with pytest.raises(ArchiveManagementError):
+        service._location_ref("不是 id")
+
+
+def test_require_backup_rejects_a_non_numeric_id(tmp_path: Path) -> None:
+    """备份 id 不是数字时给"不认识这个备份", 而不是把 ValueError 漏给界面."""
+    service, game_id, _save = _service_with_save(tmp_path)
+
+    with pytest.raises(ArchiveManagementError):
+        service._require_backup(int(game_id), "不是 id")
+
+
+def test_an_unreadable_snapshot_counts_as_unverified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快照读不出来(被删/权限不对)时按"没验证过"处理, 并把结论缓存下来(不反复重扫)."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    backup_id = service.list_backups(game_id)[0].backup_id
+    node = service._require_backup(int(game_id), backup_id)
+    service._verify_cache.clear()
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError("快照读不出来")
+
+    monkeypatch.setattr(sql_mod, "verify_snapshot", refuse)
+
+    assert service._is_verified(node) is False
+    assert service._is_verified(node) is False, "第二次该直接读缓存, 不再去扫快照"
+    assert service._verify_cache[str(node.id)] is False

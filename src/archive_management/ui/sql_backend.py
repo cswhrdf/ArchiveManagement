@@ -2128,7 +2128,10 @@ class SqlArchiveService:
 
     def _summary(self, game: Game) -> GameSummary:
         if game.id is None:  # pragma: no branch - 游戏行来自仓储, id 必然非空
-            raise ArchiveManagementError(tr("error.unknown_game", game_id=""))
+            # 与上一行同一条判据: 仓储出来的行一定有 id, 这一支只是给类型检查一个出口。
+            raise ArchiveManagementError(
+                tr("error.unknown_game", game_id="")
+            )  # pragma: no cover - 仓储出来的行一定有 id
         location_count = self._games.count_locations(game.id)
         backup_count = self._games.count_backups(game.id)
         return GameSummary(
