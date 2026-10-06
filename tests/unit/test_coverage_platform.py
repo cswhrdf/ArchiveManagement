@@ -165,7 +165,8 @@ def test_generated_config_keeps_every_pyproject_value(tmp_path: Path) -> None:
     assert "[report]" in rendered
     assert "branch = true" in rendered
     assert "relative_files = true" in rendered
-    assert "fail_under = 95" in rendered
+    # 门槛跟着 pyproject 走(2026-10-06 提到 100% 时这里红过一次: 别再写死数字).
+    assert f"fail_under = {sections['report']['fail_under']}" in rendered
     assert "source =" in rendered
     assert coverage_platform.exclusion_pattern("windows") in rendered
     # 基线里的豁免一条都不能少(它们是替换关系, 漏掉就等于解除了豁免)。

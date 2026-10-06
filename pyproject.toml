@@ -320,4 +320,4 @@ exclude_also = [
 show_missing = true
 skip_covered = true
 # 覆盖率门槛: 低于该值则 pytest 失败(在 source 中排除入口与平台分支后逐步上调).
-fail_under = 95
+fail_under = 100

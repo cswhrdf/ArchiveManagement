@@ -856,10 +856,10 @@ _COVERAGE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </coverage>
 """
 
-# 达标的一份(合计 (99+99)/(100+100) = 99% > fail_under 95): 结论行的"通过"分支靠它。
+# 达标的一份(合计 (100+100)/(100+100) = 100% = fail_under 100): 结论行的"通过"分支靠它。
 _COVERAGE_XML_PASSING = """<?xml version="1.0" encoding="UTF-8"?>
-<coverage line-rate="0.99" branch-rate="0.99" lines-covered="99" lines-valid="100"
-          branches-covered="99" branches-valid="100">
+<coverage line-rate="1.0" branch-rate="1.0" lines-covered="100" lines-valid="100"
+          branches-covered="100" branches-valid="100">
   <packages/>
 </coverage>
 """
@@ -899,7 +899,9 @@ def test_coverage_item_lands_in_the_platform_environment(
     assert "按包统计" in payload["description"]
     # 结论行就在描述开头: 报告里不用再去另一条结论项里对数字。
     assert payload["description"].startswith("## 结论")
-    assert "当前覆盖率 99.00% 大于预期覆盖率 95%, 验证通过。" in payload["description"]
+    assert (
+        "当前覆盖率 100.00% 大于预期覆盖率 100%, 验证通过。" in payload["description"]
+    )
 
 
 def test_coverage_item_fails_the_platform_when_below_the_threshold(
@@ -937,7 +939,7 @@ def test_coverage_threshold_comes_from_pyproject() -> None:
     fail_under = pyproject["tool"]["coverage"]["report"]["fail_under"]
 
     assert module.coverage_threshold() == float(fail_under)
-    assert module.verdict_text(0.96, module.coverage_threshold()).endswith("验证通过。")
+    assert module.verdict_text(1.0, module.coverage_threshold()).endswith("验证通过。")
     assert "验证未通过" in module.verdict_text(0.9, module.coverage_threshold())
 
 
@@ -1893,7 +1895,7 @@ def test_coverage_conclusion_fails_a_platform_below_the_threshold(
 
     assert status == "failed"
     assert any("Windows" in item and "90.00%" in item for item in failures)
-    assert rows == [("Windows", "90.00%", "90.00%", "90.00%", "95%", "未通过")]
+    assert rows == [("Windows", "90.00%", "90.00%", "90.00%", "100%", "未通过")]
 
 
 def test_coverage_conclusion_stays_green_above_the_threshold(tmp_path: Path) -> None:
@@ -1901,7 +1903,7 @@ def test_coverage_conclusion_stays_green_above_the_threshold(tmp_path: Path) -> 
     module = _load_script("create_allure_summary")
     results = tmp_path / "allure-results"
     results.mkdir()
-    _write_coverage_item(results, platform="Linux", line_rate=0.99, branch_rate=0.99)
+    _write_coverage_item(results, platform="Linux", line_rate=1.0, branch_rate=1.0)
 
     status, failures, rows = module.coverage_conclusion(
         results, module.result_payloads(results), ["Linux"]
@@ -1909,7 +1911,7 @@ def test_coverage_conclusion_stays_green_above_the_threshold(tmp_path: Path) -> 
 
     assert status == "passed"
     assert failures == []
-    assert rows == [("Linux", "99.00%", "99.00%", "99.00%", "95%", "通过")]
+    assert rows == [("Linux", "100.00%", "100.00%", "100.00%", "100%", "通过")]
 
 
 def test_coverage_conclusion_is_red_when_a_platform_has_no_item(
@@ -1919,7 +1921,7 @@ def test_coverage_conclusion_is_red_when_a_platform_has_no_item(
     module = _load_script("create_allure_summary")
     results = tmp_path / "allure-results"
     results.mkdir()
-    _write_coverage_item(results, platform="Windows", line_rate=0.99, branch_rate=0.99)
+    _write_coverage_item(results, platform="Windows", line_rate=1.0, branch_rate=1.0)
 
     status, failures, rows = module.coverage_conclusion(
         results, module.result_payloads(results), ["Windows", "Linux"]
@@ -1946,7 +1948,7 @@ def test_coverage_conclusion_is_red_when_the_numbers_cannot_be_read(
 
     assert status == "failed"
     assert any("Windows" in item and "读不到覆盖率数字" in item for item in failures)
-    assert rows == [("Windows", "?", "?", "?", "95%", "未通过")]
+    assert rows == [("Windows", "?", "?", "?", "100%", "未通过")]
 
 
 def test_coverage_conclusion_without_any_data_is_broken(tmp_path: Path) -> None:
@@ -2052,14 +2054,14 @@ def test_run_ledger_columns_carry_the_performance_and_coverage_verdicts(
 
     assert "- 结论: **未通过(1 条)**" in failing
     assert "| 平台 | 行覆盖率 | 分支覆盖率 | 合计 | 门槛 | 结论 | 原始报告 |" in failing
-    assert "| Windows | 90.00% | 90.00% | 90.00% | 95% | 未通过 |" in failing
+    assert "| Windows | 90.00% | 90.00% | 90.00% | 100% | 未通过 |" in failing
     assert "| 平台 | 基准数 | 未达标 | 结论 |" in failing
     assert "| Linux | 1 | 1 | **未通过** |" in failing
 
     healthy_results = tmp_path / "healthy-results"
     healthy_results.mkdir()
     _write_coverage_item(
-        healthy_results, platform="Windows", line_rate=0.99, branch_rate=0.99
+        healthy_results, platform="Windows", line_rate=1.0, branch_rate=1.0
     )
     healthy = module.run_ledger(
         healthy_results,
@@ -2073,7 +2075,7 @@ def test_run_ledger_columns_carry_the_performance_and_coverage_verdicts(
     )
 
     assert "- 结论: **通过**" in healthy
-    assert "| Windows | 99.00% | 99.00% | 99.00% | 95% | 通过 |" in healthy
+    assert "| Windows | 100.00% | 100.00% | 100.00% | 100% | 通过 |" in healthy
     assert "| Linux | 1 | 0 | 通过 |" in healthy
 
 

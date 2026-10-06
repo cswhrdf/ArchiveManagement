@@ -114,7 +114,7 @@ FAILING_STATUSES = ("failed", "broken")
 # 覆盖率门槛: 必须与 pyproject.toml 的 [tool.coverage.report] fail_under 一致 ——
 # 守卫 test_coverage_fail_under_matches_pyproject 会把两处钉在一起. 汇总作业不装任何依赖,
 # 所以这里写常量而不是去解析配置.
-COVERAGE_THRESHOLD = "95"
+COVERAGE_THRESHOLD = "100"
 # 平台缺一份覆盖率结论项时用的哨兵状态(Allure 自己的状态里没有它, 不会与真实状态撞车).
 MISSING_STATUS = "missing"
 # 有意不统计的覆盖(豁免清单): 与运行总账一样放在仓库根, 由 allurerc.mjs 的
