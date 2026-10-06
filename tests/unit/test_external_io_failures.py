@@ -19,7 +19,13 @@ from PIL import Image
 
 import archive_management.app as app_module
 from archive_management.domain import PlatformGame
-from archive_management.services.artwork import ArtworkCache, _cache_local
+from archive_management.services.artwork import (
+    ArtworkCache,
+    FetchedArtwork,
+    _cache_local,
+    _from_cdn,
+    steam_artwork,
+)
 from archive_management.services.game_names import HttpNameFetcher, NameCache
 from archive_management.services.platform_adapters import SteamAdapter
 from archive_management.services.platform_scan import default_roots
@@ -216,6 +222,34 @@ def test_a_name_cache_that_cannot_be_written_is_silently_skipped(
     cache.put(_APP_ID, "schinese", "无尽塔防 2")  # 不抛
 
     assert not (blocked / "names.json").exists()
+
+
+class _StubFetcher:
+    """返回一张真 PNG 的下载替身."""
+
+    def fetch(self, url: str, *, timeout: float, max_bytes: int) -> FetchedArtwork:
+        """忽略参数, 返回预设内容(声明类型与内容一致, 能过交叉校验)."""
+        del url, timeout, max_bytes
+        return FetchedArtwork(content=_png_bytes(), declared_media_type="image/png")
+
+
+def test_a_downloaded_cover_that_cannot_be_cached_reports_the_reason() -> None:
+    """CDN 图取到了、写缓存却失败: 返回原因而不是路径(界面按原因提示, 不装作有图)."""
+    game = PlatformGame(name="Demo", platform="steam", game_id="730")
+
+    path, reason = _from_cdn(
+        game,
+        "cover",
+        cast("ArtworkCache", _RefusingCache()),
+        version="1",
+        reference=steam_artwork("730")[0],
+        fetcher=_StubFetcher(),
+        timeout=1.0,
+        max_bytes=4096,
+    )
+
+    assert path is None
+    assert reason == "磁盘满"
 
 
 # --------------------------------------------------------------- 适配器
