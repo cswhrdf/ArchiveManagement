@@ -1,24 +1,24 @@
 name: CI
 
-x-ci-branches: &ci_branches
-  branches: [main, dev]
-
-x-ci-ignore-patterns: &ci_ignore_patterns
-  - "**/*.md"
-  - "docs/**"
-  - ".github/instructions/**"
-  - ".github/prompts/**"
-
+# 分支规则与"纯文档改动"的忽略清单只写一次, 两个触发器共用(YAML 锚点)。
+# **锚点必须挂在 GitHub 认得的键上**: 顶层开一个 `x-ci-*` 键会让整份工作流直接报
+# `Unexpected value 'x-ci-branches'` 而**完全不生效**(2026-10-06 实测, 连"文档改动不跑 CI"
+# 这条都不成立 —— 是没有 CI 可跑), 守卫 test_ci_workflow_only_uses_top_level_keys_github_knows
+# 会把顶层键的集合钉住。
 on:
   push:
-    <<: *ci_branches
+    branches: &ci_branches [main, dev]
     # 这里保留 `paths-ignore`，因为它只在 push 触发时生效：文档类修改不需要跑整套 CI。
     # 对 `pull_request` 不能直接用它，否则工作流在路径命中忽略时根本不会出任何 job,
     # 分支保护里的 required status checks 会永久停在 pending。PR 侧改成轻量 `changes` 作业
     # 再用条件跳过重量级作业，保证检查结果总能出现。
-    paths-ignore: *ci_ignore_patterns
+    paths-ignore: &ci_ignore_patterns
+      - "**/*.md"
+      - "docs/**"
+      - ".github/instructions/**"
+      - ".github/prompts/**"
   pull_request:
-    <<: *ci_branches
+    branches: *ci_branches
 
 # 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(21 个作业)。
 # 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。

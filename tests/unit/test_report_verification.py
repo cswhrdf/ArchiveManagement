@@ -2558,6 +2558,44 @@ def test_platform_check_runs_in_a_job_on_its_own_platform() -> None:
     )
 
 
+def test_ci_workflow_only_uses_top_level_keys_github_knows() -> None:
+    """顶层只许出现 GitHub 认得的键 —— 多写一个 `x-...` 就等于整份工作流不生效.
+
+    出处(2026-10-06 实测): 为了共用分支规则与"纯文档改动"的忽略清单, 有人在顶层开了
+    `x-ci-branches` / `x-ci-ignore-patterns` 两个"扩展键"来放 YAML 锚点 —— 这在很多 YAML
+    工具里行得通, 而 GitHub 的解析器直接报 `Unexpected value 'x-ci-branches'`: 整个工作流
+    **一条作业都不会跑**(连"文档改动不跑 CI"都成了假象 —— 不是不跑, 是没有 CI 可跑)。
+    锚点挂在认得的键上即可(见下一条用例), 这道守卫把顶层键的集合钉死。
+    """
+
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    allowed = {
+        "name",
+        "run-name",
+        "on",
+        "permissions",
+        "env",
+        "defaults",
+        "concurrency",
+        "jobs",
+    }
+    found = {
+        match.group(1)
+        for line in workflow.splitlines()
+        # 只用顶层行: 注释与缩进行不算(块状字符串的内容都是缩进的)。
+        if line
+        and not line[0].isspace()
+        and not line.startswith("#")
+        and (match := re.match(r"([A-Za-z][\w-]*):", line)) is not None
+    }
+
+    assert found, "一个顶层键都没找到: 这条守卫失去了检查对象"
+    assert found <= allowed, (
+        f"ci.yml 顶层出现了 GitHub 不认的键: {sorted(found - allowed)}"
+        " —— 它们会让整份工作流报 Unexpected value 而不生效"
+    )
+
+
 def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
     """连续 push 要取消被取代的运行; 纯文档改动不必跑整套 CI, 但必需检查必须拿到结论.
 
@@ -2576,25 +2614,33 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
         "按 ref 分组: PR 与 dev/main 各管各的"
     )
 
-    # 忽略清单声明一次(锚点), push 引用它; 两条触发器的分支规则同样共用一份。
-    assert re.search(
-        r"^x-ci-ignore-patterns:\s*&ci_ignore_patterns\n", workflow, re.M
-    ), "忽略清单要用锚点声明一次, 免得 push / PR 两份规则走散"
-    assert re.search(r"^x-ci-branches:\s*&ci_branches\n", workflow, re.M), (
-        "分支规则也要用锚点共用"
-    )
-    for pattern in ('"**/*.md"', '"docs/**"'):
-        assert pattern in workflow, f"忽略清单里少了 {pattern}"
-
+    # 忽略清单与分支规则各声明一次(锚点), push 用它们; PR 侧引用同一份分支规则。
+    # 锚点必须挂在 GitHub 认得的键上 —— 顶层开 `x-ci-*` 键会让整份工作流不生效,
+    # 由下面 test_ci_workflow_only_uses_top_level_keys_github_knows 守卫。
     push_block = workflow.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0]
-    assert re.search(r"paths-ignore:\s*\*ci_ignore_patterns", push_block), (
-        "push 要引用那份共享的忽略清单"
+    assert re.search(r"branches: &ci_branches", push_block), "分支规则用锚点声明一次"
+    assert re.search(r"paths-ignore: &ci_ignore_patterns", push_block), (
+        "忽略清单用锚点声明一次, 免得 push / PR 两份规则走散"
     )
-    assert "<<: *ci_branches" in push_block, "push 的分支规则用锚点"
+    declared = set(re.findall(r'^\s+- "([^"]+)"$', push_block, re.M))
+    assert declared == {
+        "**/*.md",
+        "docs/**",
+        ".github/instructions/**",
+        ".github/prompts/**",
+    }, f"push 的忽略清单变了: {sorted(declared)}"
 
     pull_block = workflow.split("\n  pull_request:", 1)[1].split("\njobs:", 1)[0]
     assert "paths-ignore" not in pull_block, "PR 不能用路径过滤: 必需检查会停在 pending"
-    assert "<<: *ci_branches" in pull_block, "PR 的分支规则与 push 同一份(锚点)"
+    assert "branches: *ci_branches" in pull_block, "PR 的分支规则与 push 同一份(锚点)"
+
+    # `changes` 作业里的 filters 是**块状字符串**(锚点进不去), 所以两边必须逐条对齐:
+    # 少一条就会"push 不跑、PR 照跑"(或反过来), 而这种事在日志里看不出来。
+    filter_block = workflow.split("filters: |", 1)[1].split("\n\n", 1)[0]
+    negated = set(re.findall(r"^\s+- '!([^']+)'$", filter_block, re.M))
+    assert negated == declared, (
+        f"push 的忽略清单与 PR 的路径过滤要逐条一致: {sorted(declared)} vs {sorted(negated)}"
+    )
 
     # PR 侧靠轻量作业判路径 + 重量级作业条件跳过, 并且有一个"无论如何都给结论"的门禁作业。
     assert workflow.count("dorny/paths-filter") == 1, "用一份路径过滤实现, 别各写一份"
