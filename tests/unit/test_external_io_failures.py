@@ -22,6 +22,7 @@ from archive_management.domain import PlatformGame
 from archive_management.services.artwork import ArtworkCache, _cache_local
 from archive_management.services.game_names import HttpNameFetcher, NameCache
 from archive_management.services.platform_adapters import SteamAdapter
+from archive_management.services.platform_scan import default_roots
 
 pytestmark = [
     pytest.mark.normal,
@@ -220,7 +221,17 @@ def test_a_name_cache_that_cannot_be_written_is_silently_skipped(
 # --------------------------------------------------------------- 适配器
 
 
-def test_a_game_that_is_not_steam_has_no_artwork_refs() -> None:
+def test_a_steam_game_without_a_local_icon_hash_only_gets_the_cover() -> None:
+    """本机没有该游戏的图标哈希时只给封面引用: 后台裁封面兜底, 不去猜图标地址."""
+    adapter = SteamAdapter(default_roots(platform="windows", env={}), icons={})
+    game = PlatformGame(name="Demo", platform="steam", game_id="730")
+
+    refs = adapter.artwork_refs(game)
+
+    assert len(refs) == 1, "只该有封面这一条引用"
+
+
+def test_a_non_steam_game_has_no_artwork_refs() -> None:
     """非 Steam 的游戏没有 CDN 引用: 界面走别的兜底, 一次都不去问 CDN.
 
     只有这一半能造出来: ``PlatformGame.game_id`` 由模型保证非空(实测: 传空串会被 pydantic

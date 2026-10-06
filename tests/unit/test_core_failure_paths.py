@@ -32,6 +32,7 @@ from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
     BackupRepository,
     GameRepository,
+    IgnoredCandidateRepository,
 )
 from archive_management.services.artwork import normalized_image
 from archive_management.services.hotkeys import UnavailableBackend
@@ -66,6 +67,17 @@ def test_the_current_backup_pointer_is_cleared_by_backup_id(tmp_path: Path) -> N
     games.clear_current_backup(node.id)
 
     assert games.current_backup(game.id) is None
+
+
+def test_remembering_or_forgetting_a_blank_name_is_a_no_op(tmp_path: Path) -> None:
+    """被忽略名单遇到空白名直接返回: 不拿空键去写库, 也不拿空键去删."""
+    database = migrated_database(tmp_path)
+    ignored = IgnoredCandidateRepository(database)
+
+    assert ignored.remember("   ") == ""
+    ignored.forget("   ")  # 不抛
+
+    assert ignored.keys() == set()
 
 
 def test_migrating_to_an_older_target_stops_there(tmp_path: Path) -> None:

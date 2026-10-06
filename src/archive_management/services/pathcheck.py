@@ -112,7 +112,7 @@ class _Tally:
 
     def visit(self, child: Path, pending: list[Path]) -> None:
         """记录一个子项; 目录会加入待遍历队列."""
-        if child.is_symlink():  # platform: linux macos - 需能建符号链接
+        if child.is_symlink():  # 链接本身算一项, 不跟进去数
             self.symlinks += 1
             return
         if child.is_dir():
@@ -142,7 +142,7 @@ def summarize_path(raw: str) -> PathSummary:
     越出用户确认过的存档路径, 也避免链接环导致无限递归。
     """
     path = Path(raw)
-    if path.is_symlink():  # platform: linux macos - 用例需真实链接, Windows 会跳过
+    if path.is_symlink():
         return PathSummary(symlinks=1)
     if path.is_file():
         try:
@@ -173,7 +173,7 @@ def has_any_content(raw: str) -> bool:
     (2026-10-03 实测: 木机主目录前 20 秒只数到 18 万项, 队列里还有两百多个目录)。
     """
     path = Path(raw)
-    if path.is_symlink():  # platform: linux macos - 用例需真实链接, Windows 会跳过
+    if path.is_symlink():  # 链接本身算一项(与 summarize_path 的 symlinks 计数一致)
         return True
     if path.is_file():
         return True

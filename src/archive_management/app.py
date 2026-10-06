@@ -108,8 +108,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _run_doctor(paths, verbose=verbose)
     if command == "gui":
         return _run_gui(paths, smoke=args.smoke, verbose=verbose)
-    parser.error(f"未知命令: {command}")
-    return 1
+    parser.error(f"未知命令: {command}")  # pragma: no cover - 子命令已校验
+    return 1  # pragma: no cover - 上面不返回
 
 
 def _start_logging(paths: ApplicationPaths, *, verbose: bool) -> ConfigLoad:
