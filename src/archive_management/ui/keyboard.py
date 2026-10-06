@@ -248,7 +248,10 @@ def _ring_on(widget: ctk.CTkBaseClass, saved: dict[str, object]) -> None:
     options: dict[str, object] = {
         key: value for key, value in paint.items() if key in saved
     }
-    if "border_color" in saved:
+    # 这里的"不在 saved 里"这一半走不到: saved 只由下面这段填, 而上面那道守卫
+    # (没有 border_color 的控件直接 return)已经保证了它非空时必然带 border_color;
+    # 非空之后只有 _ring_off 会整体清掉, 不会只删一个键。
+    if "border_color" in saved:  # pragma: no branch - 上一道守卫已排除没有描边的控件
         options["border_color"] = ring
     if "border_width" in saved:
         options["border_width"] = FOCUS_RING_WIDTH
