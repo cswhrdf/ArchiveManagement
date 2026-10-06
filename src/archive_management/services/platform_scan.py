@@ -153,7 +153,7 @@ class WinRegistry:
         """惰性导入 ``winreg``(非 Windows 返回 None)."""
         try:
             module = importlib.import_module("winreg")
-        except ImportError:  # platform: linux macos - 只有 POSIX 上 winreg 导入会失败
+        except ImportError:  # 非 Windows 或精简过的解释器: 静默降级
             return None
         return cast(WinRegModule, module)
 

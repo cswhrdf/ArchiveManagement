@@ -13,15 +13,21 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import archive_management.domain.deletion as deletion_mod
+import archive_management.services.platform_scan as scan_mod
 from archive_management.domain import BackupNode
 from archive_management.domain.activation import RunEntry, move_to_front
 from archive_management.domain.tree import TreeInput, keep_surviving
 from archive_management.exceptions import SchedulingError
-from archive_management.services.platform_scan import LocalGameScanner, default_roots
+from archive_management.services.platform_scan import (
+    LocalGameScanner,
+    WinRegistry,
+    default_roots,
+)
 from archive_management.services.scheduler import (
     ApschedulerBackend,
     BackupScheduler,
@@ -121,3 +127,21 @@ def test_listing_children_of_an_unreadable_directory_returns_none(
     monkeypatch.setattr(Path, "iterdir", refuse)
 
     assert LocalGameScanner._list_children(folder) is None
+
+
+def test_a_missing_registry_module_is_just_a_degradation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``winreg`` 导不进来(非 Windows / 精简过的解释器)时静默给 ``None``, 而不是抛 ImportError.
+
+    这一支原先靠平台标记跳过, 于是它在别的平台上永远记成缺口; 而"导不进来"完全可以用
+    替身复现 —— 换成替身之后三平台都能量到。
+    """
+
+    def refuse(_name: str, _package: str | None = None) -> object:
+        raise ImportError("没有 winreg")
+
+    # 只换掉本模块看到的那份 importlib: 全局那个真模块动不得(别的导入会一起坏)。
+    monkeypatch.setattr(scan_mod, "importlib", SimpleNamespace(import_module=refuse))
+
+    assert WinRegistry._module() is None

@@ -746,6 +746,48 @@ def test_helper_copy_tree_recreates_existing_symlinks(tmp_path: Path) -> None:
     assert (staging / "slot1.dat").read_text(encoding="utf-8") == "v1"
 
 
+def test_helper_copy_tree_recreates_a_link_without_privileges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重建链接不依赖真权限: "是不是链接"与"建链"两件事都换成可观察的替身.
+
+    上面那条用例要真建链接, 而 Windows 上建链接需要权限 —— 于是它在那里跳过, 这个分支
+    也就一直记成缺口("跳过的用例"同样是覆盖不到的用例)。这里把判定换掉, 三平台都能量到:
+    断言"目标是链接时不复制内容, 而是照着它原来的指向重建一个"。
+    """
+    from archive_management.application.restore import _copy_tree
+
+    source = tmp_path / "save"
+    source.mkdir()
+    (source / "slot1.dat").write_text("v1", encoding="utf-8")
+    link = source / "linked.dat"
+    # 用真文件顶替链接: 只把"它是不是链接"和"它指向哪"这两问改成替身要的答案。
+    link.write_text("被指向的内容", encoding="utf-8")
+
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path, "is_symlink", lambda self: self == link or real_is_symlink(self)
+    )
+    # 期望值也用 Path 拼: 直接写 "../slot1.dat" 会在 Windows 上撞上反斜杠(str 出来不一样)。
+    link_target = Path("../slot1.dat")
+    monkeypatch.setattr(Path, "readlink", lambda _self: link_target)
+    created: list[tuple[Path, str]] = []
+
+    def record(self: Path, target: object, **_kwargs: object) -> None:
+        """记下"在哪儿建了什么链接", 不去碰真文件系统."""
+        created.append((self, str(target)))
+
+    monkeypatch.setattr(Path, "symlink_to", record)
+    staging = tmp_path / "stage"
+    staging.mkdir()
+
+    _copy_tree(source, staging)
+
+    assert created == [(staging / "linked.dat", str(link_target))]
+    assert not (staging / "linked.dat").exists(), "链接按链接重建, 不复制内容"
+    assert (staging / "slot1.dat").read_text(encoding="utf-8") == "v1"
+
+
 def test_restore_replaces_a_directory_with_a_file_of_the_same_name(
     tmp_path: Path,
 ) -> None:
