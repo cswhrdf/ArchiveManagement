@@ -54,6 +54,69 @@ def _scaled(monkeypatch: pytest.MonkeyPatch, scale: float) -> Any:
     return widgets.measured_font(_FakeFont(width=231, linespace=14), _NO_WINDOW)
 
 
+class _FakeAnchor:
+    """只回答"提示定位"用到的四个几何量的锚点替身(不建窗口)."""
+
+    def __init__(self, *, x: int, y: int, height: int, screen_height: int) -> None:
+        self._x = x
+        self._y = y
+        self._height = height
+        self._screen_height = screen_height
+
+    def winfo_rootx(self) -> int:
+        """控件左边界(屏幕坐标)."""
+        return self._x
+
+    def winfo_rooty(self) -> int:
+        """控件上边界(屏幕坐标)."""
+        return self._y
+
+    def winfo_height(self) -> int:
+        """控件高度."""
+        return self._height
+
+    def winfo_screenheight(self) -> int:
+        """屏幕高度(定位要按它判断下方放不放得下)."""
+        return self._screen_height
+
+
+class _FakeTip:
+    """只回答"需要多高"的提示窗口替身."""
+
+    def __init__(self, height: int) -> None:
+        """绑定这个提示需要的高度."""
+        self._height = height
+
+    def update_idletasks(self) -> None:
+        """真实实现要在这里刷一次几何(否则拿到的高度是 1); 替身无事可做."""
+
+    def winfo_reqheight(self) -> int:
+        """提示窗口需要的高度."""
+        return self._height
+
+
+def test_the_tooltip_opens_below_the_anchor_when_it_fits() -> None:
+    """空间够时提示在控件**下方**一个间隙处, 左边界与控件对齐."""
+    anchor = cast(
+        "ctk.CTkBaseClass", _FakeAnchor(x=100, y=200, height=30, screen_height=900)
+    )
+
+    position = widgets._tooltip_position(anchor, cast("tk.Toplevel", _FakeTip(40)))
+
+    assert position == f"+100+{200 + 30 + widgets._TOOLTIP_GAP}"
+
+
+def test_the_tooltip_flips_above_when_there_is_no_room_below() -> None:
+    """下方放不下时改到控件**上方** —— 这是提示贴着屏幕底边时唯一不缩水的出路."""
+    anchor = cast(
+        "ctk.CTkBaseClass", _FakeAnchor(x=100, y=860, height=30, screen_height=900)
+    )
+
+    position = widgets._tooltip_position(anchor, cast("tk.Toplevel", _FakeTip(40)))
+
+    assert position == f"+100+{860 - 40 - widgets._TOOLTIP_GAP}"
+
+
 def test_measured_font_scales_both_width_and_line_height(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
