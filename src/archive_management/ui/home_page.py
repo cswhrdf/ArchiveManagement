@@ -126,7 +126,9 @@ _NAME_PAD = 8
 _NAME_FALLBACK_WIDTH = 200
 # 拖窗口时把"表头对齐 + 名称重裁"合并成一次: 每个像素都跑一遍会卡.
 _SYNC_DELAY_MS = 60
-# 表头对齐最多迭代几轮(表头几何变化不会触发滚动区的 Configure, 得主动再量一轮).
+# 同一个行宽下, 表头对齐最多迭代几轮(表头几何变化不会触发滚动区的 Configure, 得主动再量一轮).
+# 轮数按**数据行的实测宽度**记账: 行宽一变(滚动条出现/收起、窗口缩放、名称重裁)就是新的一轮
+# 几何, 已算好的内边距全部作废, 得重新给满 —— 见 ``HomePage._rearm_alignment``。
 _ALIGN_MAX_ATTEMPTS = 4
 # 名称重裁在"宽度还没测量出来"时最多重试几轮. 各平台的布局时序不同: Linux/macOS
 # 上首次同步时行内标签可能还没被布局(``winfo_width()`` 是 1), 而之后再没有 Configure
@@ -266,8 +268,11 @@ class HomePage:
         self._buttons: dict[ctk.CTkButton, str] = {}
         # 表头的左右内边距(会按实测差值调整, 见 _align_table_header).
         self._head_pads: tuple[int, int] = (_HEAD_LEFT_PAD, _TABLE_SIDE_PAD)
-        # 表头对齐已经调过几轮(收敛后就归零).
+        # 表头对齐已经调过几轮(收敛后就归零; 行宽一变就重新计数, 见 _rearm_alignment).
         self._align_attempts = 0
+        # 上一轮对齐时的行宽(滚动区里数据行真正能用的宽度): 它变了就说明表头的内边距该重算
+        # (0 = 还没量到). 见 _rearm_alignment.
+        self._aligned_row_width = 0
         # 名称重裁因"宽度还没量出来"重试过几轮(每轮渲染重新计数).
         self._refit_attempts = 0
         # 与行内标签同规格的字体对象, 用来量文本宽度(CTkFont 本身就是 Tk 字体).
@@ -1006,6 +1011,7 @@ class HomePage:
         # 列表重建后悬停状态失效: 不清掉会指向已销毁的卡片.
         self._hover = None
         self._align_attempts = 0
+        self._aligned_row_width = 0
         self._refit_attempts = 0
         self._poster_name_blocks = []
         self._apply_poster_columns(0)
@@ -1119,14 +1125,33 @@ class HomePage:
                 self._relayout_posters(event.width)
             return
         if self._rows:
-            # 几何真的变了 ⇒ 表头对齐**重新给满轮数**。``_ALIGN_MAX_ATTEMPTS`` 是防打转的,
-            # 但它是"控件一辈子"的计数, 只有某一轮量到完全对齐才归零 —— 启动期那几轮(列表
-            # 还没显示滚动条、行尺寸还在测)会把轮数用光并停在"右侧内边距被夹到 0"的状态,
-            # 之后再来的任何变化都被"已经放弃"挡掉, **永久**差一个滚动条宽度。实测 CI 的
-            # Windows runner: 滚动条出现后表头一直差 40px(= 2x滚动条宽度), 本机窗口更高、
-            # 不显示滚动条所以一直绿。换了几何就该重新试, 打转的保护仍在(见 _align_table_header)。
-            self._align_attempts = 0
+            # 行宽变了 ⇒ 表头对齐重新给满轮数(具体记账在 :meth:`_rearm_alignment`: 按**行宽**,
+            # 不按"谁通知的" —— 滚动条出现/收起只改内层画布, 通知可能从别的路来)。
             self._schedule_list_sync()
+
+    def _rearm_alignment(self) -> None:
+        """数据行的宽度变过就**重新给满**表头对齐的轮数(同一行宽下最多调 ``_ALIGN_MAX_ATTEMPTS`` 轮).
+
+        为什么要按"行宽"记账(2026-10-05 CI Windows + 2026-10-06 现场 dump):
+        滚动条只占滚动区**内部**的宽度(它自己 16px + 行右侧内缩 6px = 22px), 它出现/收起时外层
+        帧尺寸一点没变, 但数据行的可用宽度变了、已经算好的表头内边距全部作废。以前只在"外层帧的
+        ``<Configure>``" 上重置轮数, 通知从别的路来(滚动区自己的事件、标签自己的 ``<Configure>``、
+        页面自己补的那次同步)就补不上: 现场 dump 里 ``_head_pads=(22, 38)``(按滚动条还在的行宽
+        算的)、``_align_attempts=4``(上限)、``_sync_job=None`` —— 行宽已经 942 却按 920 对齐,
+        六列整体差 22px, 而且再没有任何事件来纠正它(用例等 3s 也等不到)。
+
+        轮数按 :meth:`_row_viewport` 的变化记账(而不是按"谁通知的"): 谁来通知都行, 只要行宽
+        变了就重新给满。这个量比"行控件自己的宽度"粗糙一点 —— 内容比视口宽时行宽由内容决定、
+        滚动条收放不改它, 这里会多给一轮预算 —— 代价只是多量一次(偏移是 0 时什么都不做),
+        换来的是不必再新增一个只在真窗口里才有意义的方法。
+
+        打转的保护没丢: 同一个行宽下, 对齐自己排出来的下一轮照样计入预算(见
+        :meth:`_align_table_header`), 所以最坏只会调满 4 轮停手, 不会自激。
+        """
+        width = self._row_viewport()
+        if width != self._aligned_row_width:
+            self._aligned_row_width = width
+            self._align_attempts = 0
 
     def _relayout_posters(self, width: int) -> None:
         """按给定宽度重算每行张数, 变了就重新摆放卡片(启动首屏与窗口缩放都会用到)."""
@@ -1184,6 +1209,7 @@ class HomePage:
         self._fit_poster_name_blocks()
         if self._filter.layout is not HomeLayout.LIST or not self._rows:
             return
+        self._rearm_alignment()
         self._align_table_header()
         self._refit_row_names()
 
@@ -1274,6 +1300,9 @@ class HomePage:
         表头在卡片里, 而数据行在滚动区里(滚动条与内边距还占掉几十像素), 两者宽度
         并不相等; 不补的话左边"名称"列头与右边"贴右"的固定列都会错开。量出两边的
         偏移后**一次算准**新的左右内边距(几何对两边都是线性的), 不会来回抖。
+
+        轮数上限是防打转的闸, 按**行宽**记账(:meth:`_rearm_alignment`): 同一个行宽下最多
+        再调 ``_ALIGN_MAX_ATTEMPTS`` 轮, 行宽一变就重新给满。
         """
         offset = self._header_offset()
         if offset is None:
@@ -1283,7 +1312,7 @@ class HomePage:
             self._align_attempts = 0
             return
         if self._align_attempts >= _ALIGN_MAX_ATTEMPTS:
-            return  # 调了几轮还不齐就不再折腾(窗口极窄等边界情况)
+            return  # 同一个行宽下调了几轮还不齐就不再折腾(窗口极窄等边界情况)
         left, right = self._head_pads
         # 左边距变化会**整体平移**表头内容, 所以右边距要把这部分再补回来.
         pads = (max(0, left - off_left), max(0, right + off_right - off_left))

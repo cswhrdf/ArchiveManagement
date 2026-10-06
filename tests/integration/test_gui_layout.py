@@ -986,6 +986,10 @@ def test_the_header_follows_the_scrollbar_in_the_smallest_window() -> None:
     只改**内层画布**的宽度, 而帧本身(与滚动条同在一个 grid 里)宽度不变 ⇒ 没有 Configure
     事件 ⇒ 已经算好的表头内边距不会跟着改。本机窗口更高、根本不显示滚动条, 所以只在 CI 红。
 
+    反方向(**收起** ⇒ 行变宽 22px)另有 2026-10-06 CI Windows 的一次现场: 那次是"对齐的
+    轮数用光"把表头冻在旧内边距上, 机制与咬合在
+    ``tests/unit/test_ui_table_alignment.py``(纯替身, 不赌启动时序)。
+
     判据分两段, 缺一不可: **先确认滚动条真的显示了**(否则这条守卫会静默地什么也没验 ——
     见 gui-tests 指令里的"别让证据静默消失"), 再要求对齐不变量成立。
     """
