@@ -3472,6 +3472,30 @@ def test_artwork_landing_refreshes_the_home_page(tmp_path: Path) -> None:
     assert "icon:outer-wilds" in page._artwork_images
 
 
+def test_artwork_landing_on_the_detail_page_leaves_the_home_page_alone() -> None:
+    """详情页可见时的重载不重绘主页: 那次重绘是给"看得见的主页"用的.
+
+    与上一条互补 —— 主页不可见时重绘它只是白做一次整页重建(先销毁旧行再重建),
+    用户一个像素也看不到; 但详情页自己的刷新照旧(下面的断言只看主页那半边)。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import AppPage
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._open_game_detail("outer-wilds")
+    _pump(app)
+    assert _current_page(app) is AppPage.DETAIL, "前提: 详情页真的打开了"
+
+    repaints: list[bool] = []
+    app._home_page.refresh_artwork = lambda: repaints.append(True)
+    app._reload_data()
+    _pump(app)
+
+    assert repaints == [], "详情页可见时轮询触发的重载不该重绘主页"
+    assert _current_page(app) is AppPage.DETAIL, "重载不该把用户从详情页挤回主页"
+
+
 def test_settings_window_language_switch_closes_the_window() -> None:
     """设置窗口里换语言: 交给主窗口处理后关掉自己(主窗口会整体重建)."""
     from archive_management.ui.demo_backend import DemoArchiveService

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import tkinter as tk
 from collections import defaultdict
@@ -451,6 +452,7 @@ class _ConfigStub:
         self.ui = SimpleNamespace()
         self.logging = SimpleNamespace()
         self.activation = SimpleNamespace()
+        self.verification = SimpleNamespace(mode="sha256")
         self.window: object = None
         self.hotkeys: object = None
 
@@ -488,7 +490,9 @@ def _app(monkeypatch: pytest.MonkeyPatch, *, failing: str = "__never__") -> Any:
     return app
 
 
-def test_an_unwritable_config_only_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unwritable_config_only_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """配置写不进去(只读/磁盘满)时只记一条日志.
 
     设置窗口已经把改动落到界面上, 因此这里不能把异常抛回去 —— 那会让"改了个开关"变成
@@ -501,16 +505,22 @@ def test_an_unwritable_config_only_warns(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(main_window, "save_config", refuse)
 
-    app._save_language("en")
-    app._save_font_size(15)
-    app._save_remember_window(True)  # 打开时不动已记下的窗口几何
-    app._save_remember_window(False)  # 关掉时还要顺手清掉已记下的窗口几何
-    app._save_debug(True)
-    app._save_activation(True)
-    app._save_shortcuts()
+    with caplog.at_level(logging.WARNING, logger="archive_management.ui.main_window"):
+        app._save_language("en")
+        app._save_font_size(15)
+        app._save_remember_window(True)  # 打开时不动已记下的窗口几何
+        app._save_remember_window(False)  # 关掉时还要顺手清掉已记下的窗口几何
+        app._save_debug(True)
+        app._save_activation(True)
+        app._save_verification("name")
+        app._save_shortcuts()
+
+    # 写失败要留下痕迹: 界面已经切过去了, 日志是唯一的线索.
+    assert any("保存校验方式失败" in record.getMessage() for record in caplog.records)
 
     app._paths = None  # 没有配置路径: 只保存在内存里
     app._save_remember_window(False)
+    app._save_verification("name")
 
 
 def test_an_unsupported_language_reports_the_reason(
