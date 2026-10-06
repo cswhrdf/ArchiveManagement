@@ -226,12 +226,16 @@ def test_hover_and_selection_use_the_same_priority_as_cards(graph: Any) -> None:
     _pump(app)
 
     view.set_hovered("root-0", DARK)
+    assert view.hovered == "root-0", (
+        "悬停状态要能被问到(与 selected 一样: 守卫读它, 不翻私有字段)"
+    )
     assert view.canvas.itemcget(view._box_items["root-0"], "fill") == DARK.card_hover
 
     view.select("root-0", DARK)
     assert view.canvas.itemcget(view._box_items["root-0"], "fill") == DARK.accent_soft
 
     view.set_hovered(None, DARK)
+    assert view.hovered is None, "悬停走了之后状态也要清掉"
     assert view.canvas.itemcget(view._box_items["root-0"], "fill") == DARK.accent_soft
 
 
