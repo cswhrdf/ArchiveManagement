@@ -60,11 +60,11 @@ _SEVERITY_MARKERS = ("blocker", "critical", "normal", "minor", "trivial")
 _DEFAULT_SUITES = ("tests/unit", "tests/integration")
 # 只在 CI 执行的测试类别: 目录名与 -m 标记名一致.
 _CI_ONLY_SUITES = ("performance", "security")
-# 不碰 uv 的作业(它们只用 runner 自带的工具: 下载产物、`unzip`、上传)。
-# 2026-09-30: 发布 Pages 的那个作业已与汇总**合成一个**, 而汇总必须 sync(它要跑仓库的
-# 脚本与 Allure CLI), 所以这份清单**现在是空的** —— 机制留着: 以后再加"只用 runner 自带
-# 工具"的作业时按这条登记。列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
-_UV_FREE_JOBS: set[str] = set()
+# 不碰 uv 的作业(它们只用 runner 自带的工具与官方 action: 下产物、路径过滤、上传)。
+# 2026-10-06: 报告不再发布 Pages, 但 PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
+# `dorny/paths-filter`、`required-check` 只 `echo` 一行, 都不需要 Python 环境, 所以
+# 按这条登记; 列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
+_UV_FREE_JOBS: set[str] = {"changes", "required-check"}
 # 跨模块共享的测试辅助模块.
 _SHARED_MODULES = ("helpers.py", "reporting.py")
 

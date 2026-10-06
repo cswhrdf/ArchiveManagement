@@ -1184,7 +1184,9 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 - **`defaultLabels`**: 每个测试模块已强制声明 severity（有守卫）, fallback 反而会掩盖"漏标"。
 - **`hideLabels`**: 可选微调（例如 `os` 与 `env` 取值重复可隐藏一个）, 价值很小。
 
-### 12.4 报告发布到 GitHub Pages（2026-09-30 追加, 已落地）
+### 12.4 报告发布到 GitHub Pages（2026-09-30 追加, **2026-10-06 移除**）
+
+- **移除（2026-10-06, 用户要求）**: 不再发布到 GitHub Pages。三个发布步骤（`Unpack the report for Pages` / `Upload the report as a Pages artifact` / `Deploy to GitHub Pages`）、`pages: write` / `id-token: write` 权限与 `environment: github-pages` 都从 `allure-summary` 删掉了, 报告只作为 `allure-report-final` 产物上传（想要网址就自己搭, 仓库不再管）。守卫跟着换: 删 `test_the_pages_actions_are_a_compatible_pair` 与 `test_the_report_is_published_to_pages_from_the_default_branch_only`, 换成反向断言"发布确实删干净了"的 `test_the_pages_deploy_is_gone_and_the_report_is_an_artifact`（见 §12.4 下面那些记录 —— 它们是当时的决定, 留作历史）。
 
 需求: 报告 zip 只能下载后手动打开, Pages 给的是一个稳定网址。
 
@@ -1195,7 +1197,7 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 - **历史趋势（用户问的）**: **能保留, 而且与发布到哪里无关** —— 趋势来自 `.allure/history.jsonl` 在两个报告作业里的 artifact 往返（找上一次**成功**运行的同名产物 → 取回 → `allure generate` 追加本次一行 → 再传回产物）。两条要说清的边界: ① 趋势的寿命 = **artifact 的寿命**（默认 90 天）, 不是站点的寿命; ② 每一环都要求那一轮的 `conclusion` 是 `success`, 所以"报告生成之后才失败"的运行会丢掉它刚写好的那一行 → 正因为 ②, 发布作业用 `continue-on-error: true`（站点只是"给人看的副本", 它失败不该让这一轮的历史再也接不上, 作业在 UI 上仍是失败）。要更耐久得换存储（把 history.jsonl 一起发到站点上再回取 / 接 Allure Report Storage）, 未做。
 - **版本先例**: 见 §15.5（v3 + v4 是合法组合, 刻意不升主版本）。
 
-**状态**: 12.1 三项与 12.4 发布已落地（报告配置 + 五条守卫 + `docs/testing.md`）, 门禁全绿（全量 **2183 passed / 7 skipped**、`Total coverage 97.64%`）; 12.2 的开工条件实测见 §15.3。
+**状态**: 12.1 三项已落地（报告配置 + 五条守卫 + `docs/testing.md`）; **12.4 的 Pages 发布已于 2026-10-06 整体移除**, 门禁全绿（全量 **2183 passed / 7 skipped**、`Total coverage 97.64%`）; 12.2 的开工条件实测见 §15.3。
 
 ## 13. 修 CI 那一轮的红（2026-09-30, 提交 `98aa780`, run 36465748300）
 

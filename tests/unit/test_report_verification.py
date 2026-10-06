@@ -431,32 +431,6 @@ def test_required_platforms_match_the_ci_matrix() -> None:
     )
 
 
-def test_the_pages_actions_are_a_compatible_pair() -> None:
-    """发布站点的两个 action 必须成对(上传 ≥ v3 且 部署 ≥ v4): 单边降级会让部署拿不到产物.
-
-    版本事实(2026-09-30 从两个 action 的 release 页核对, 这是 12.4 要的"版本先例"):
-    ``actions/upload-pages-artifact`` 有 v3.0.1 / v4.0.0 / v5.0.0,
-    ``actions/deploy-pages`` 有 v3.0.2 / v4.0.5 / v5.0.1;
-    官方在 release note 里写死了兼容关系 —— deploy-pages **v3 及以上**只吃
-    upload-pages-artifact **v3 及以上**(或 upload-artifact v4+)上传的产物。
-    所以升级要两边都在"新的那一侧", 不能只动一个。
-    """
-    block = ci_workflow.job_block(
-        _WORKFLOW.read_text(encoding="utf-8"),
-        "allure-summary",
-    )
-
-    uploaded = re.search(r"actions/upload-pages-artifact@v(\d+)", block)
-    deployed = re.search(r"actions/deploy-pages@v(\d+)", block)
-    assert uploaded is not None, "汇总作业要上传 Pages 产物"
-    assert deployed is not None, "汇总作业要部署到 Pages"
-
-    assert int(uploaded.group(1)) >= 3, (
-        "上传侧要 ≥ v3: deploy-pages 只吃 v3 及以上上传的产物"
-    )
-    assert int(deployed.group(1)) >= 4, "部署侧要 ≥ v4(v3 那版已被 v4 取代)"
-
-
 def test_every_platform_conclusion_is_produced_on_every_run() -> None:
     """按平台展开的结论族, 它的产出作业不能对平台"有条件排除"(2026-10-02 的误报就这么来的).
 
@@ -674,11 +648,11 @@ def test_ci_publishes_only_verified_report() -> None:
     assert len(commands) == verifications, "自检点数量与命令数量对不上"
     archive_checks = [command for command in commands if "--archive" in command]
     assert len(archive_checks) == 2, "pytest 与汇总作业各出一份归档报告"
-    # 挂在"出 zip 的那次自检通过"上的地方有三处: 两个作业各一次 `Upload ... Allure report`,
-    # 再加汇总作业里"把 zip 解开发布到 Pages"的第一步(2026-09-30 合并发布作业时新增)。
+    # 挂在"出 zip 的那次自检通过"上的地方就是两份 `Upload ... Allure report`
+    # (2026-10-06 移除 Pages 发布后少了"解开发布"那一步)。
     # 只数命令行(注释里也会引这句话当说明), 所以先把注释剥掉再数。
     gated = code.count("steps.verify-report.outcome == 'success'")
-    assert gated == len(archive_checks) + 1, f"自检与发布挂钩的地方对不上: {gated}"
+    assert gated == len(archive_checks), f"自检与归档挂钩的地方对不上: {gated}"
     assert workflow.count("path: allure-report.tar.gz") == len(archive_checks)
     assert "path: allure-report/" not in workflow, "报告目录不再直接发布"
     # 平台用例检查: pytest 作业的报告传矩阵里的平台(报告作业固定跑在 Ubuntu 上,
@@ -2582,11 +2556,15 @@ def test_platform_check_runs_in_a_job_on_its_own_platform() -> None:
     )
 
 
-def test_ci_cancels_superseded_runs_and_skips_docs_only_pushes() -> None:
-    """连续 push 要取消被取代的运行; 纯文档 push 不必跑整套 CI.
+def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
+    """连续 push 要取消被取代的运行; 纯文档改动不必跑整套 CI, 但必需检查必须拿到结论.
 
-    旧的一轮没人看, 却跟新的一轮一样贵(约 21 个作业)。路径过滤**只加在 push 上**:
-    PR 被过滤掉会让分支保护里的必需检查永远停在 pending, 反而合不了。
+    旧的一轮没人看, 却跟新的一轮一样贵(约 21 个作业)。
+
+    路径过滤**不能直接加在 pull_request 上**: 命中忽略时整条工作流不触发, 分支保护里的
+    必需检查永远停在 pending, PR 反而合不了。所以两边用两种办法: push 用 `paths-ignore`
+    (真的不跑); PR 用轻量 `changes` 作业判路径, 再由重量级作业的 `if:` 条件跳过 —— 这样
+    检查结果总会出现。忽略清单用 YAML 锚点声明一次, 两个触发器共用同一份规则。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
@@ -2595,12 +2573,37 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_pushes() -> None:
     assert "group: ${{ github.workflow }}-${{ github.ref }}" in workflow, (
         "按 ref 分组: PR 与 dev/main 各管各的"
     )
+
+    # 忽略清单声明一次(锚点), push 引用它; 两条触发器的分支规则同样共用一份。
+    assert re.search(
+        r"^x-ci-ignore-patterns:\s*&ci_ignore_patterns\n", workflow, re.M
+    ), "忽略清单要用锚点声明一次, 免得 push / PR 两份规则走散"
+    assert re.search(r"^x-ci-branches:\s*&ci_branches\n", workflow, re.M), (
+        "分支规则也要用锚点共用"
+    )
+    for pattern in ('"**/*.md"', '"docs/**"'):
+        assert pattern in workflow, f"忽略清单里少了 {pattern}"
+
     push_block = workflow.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0]
-    assert "paths-ignore:" in push_block
-    assert '"**/*.md"' in push_block
-    assert '"docs/**"' in push_block
+    assert re.search(r"paths-ignore:\s*\*ci_ignore_patterns", push_block), (
+        "push 要引用那份共享的忽略清单"
+    )
+    assert "<<: *ci_branches" in push_block, "push 的分支规则用锚点"
+
     pull_block = workflow.split("\n  pull_request:", 1)[1].split("\njobs:", 1)[0]
     assert "paths-ignore" not in pull_block, "PR 不能用路径过滤: 必需检查会停在 pending"
+    assert "<<: *ci_branches" in pull_block, "PR 的分支规则与 push 同一份(锚点)"
+
+    # PR 侧靠轻量作业判路径 + 重量级作业条件跳过, 并且有一个"无论如何都给结论"的门禁作业。
+    assert workflow.count("dorny/paths-filter") == 1, "用一份路径过滤实现, 别各写一份"
+    assert "needs.changes.outputs.should_run == 'true'" in workflow, (
+        "重量级作业要按路径过滤的结果跳过"
+    )
+    gate = ci_workflow.job_block(workflow, "required-check")
+    assert "always()" in ci_workflow.job_condition(workflow, "required-check"), (
+        "门禁作业要无条件运行: 它要在 PR 上给必需检查一个结论"
+    )
+    assert "needs: [changes]" in gate, "门禁要等路径过滤出结果"
 
 
 def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
@@ -2619,54 +2622,53 @@ def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
         assert "!cancelled()" in condition, f"{job} 在整轮被取消后仍会启动"
 
 
-def test_the_report_is_published_to_pages_from_the_default_branch_only() -> None:
-    """汇总报告发布到 GitHub Pages: 与汇总**合成一个作业**, 只从默认分支的 push 发布, 发解开的目录。
+def test_the_pages_deploy_is_gone_and_the_report_is_an_artifact() -> None:
+    """报告只作为 `allure-report-final` 产物存在: 不再发布到 GitHub Pages(2026-10-06).
 
-    发布本身很便宜, 但几个前置条件漏了就会出问题:
-    ① 只在 push 上发布 —— PR 上发布等于把未评审的内容放上站点, 而来自 fork 的 PR 也
-       拿不到 `pages: write`(那会变成一条恒红的检查);
-    ② 只在默认分支上发布 —— `dev` 的推送会把站点来回覆盖;
-    ③ Pages 要的是**目录**: 直接传 zip 的话站点根就变成一个压缩包, 打开网址只会下载文件 ——
-       所以必须真的出现解压, 且上传路径指向解出来的报告目录;
-    ④ 没通过报告自检就不发布(`steps.verify-report.outcome == 'success'`)。
-    另外发布没有额外凭据: 顶层只给了 `contents: read` / `actions: read`, 所以这个作业要自己
-    声明 `pages: write` + `id-token: write`(OIDC, 不必发长期凭据), 并保留 `contents: read`
-    —— 作业级 permissions 是**覆盖**而不是叠加, 漏了它 checkout 会直接失败。
-
-    **这条同时守卫“合并”这件事**(2026-09-30): 汇总与发布必须留在同一个作业里, 所以下面除了
-    正向断言, 还反向断言"没有第二个发布作业" —— 重新拆开会让这条红, 而不是静默多付一整套固定开销。
+    删干净比"留一半"重要 —— 站点发布涉及三处彼此耦合的配置, 漏一处就会留下把没通过自检的
+    报告发出去的路径, 或者让 forks 上的 PR 拿到一条恒红的检查:
+    ① 三个发布步骤(`Unpack the report for Pages` / `Upload the report as a Pages artifact` /
+       `Deploy to GitHub Pages`)都不在了;
+    ② `pages: write` / `id-token: write` 权限与 `github-pages` 环境一起删掉 —— 顶层只给
+       `contents: read` / `actions: read`, 作业级权限**覆盖**顶层, 所以这里要显式写回
+       `contents: read`(漏了它 checkout 直接失败)与 `actions: read`(取本轮产物);
+    ③ 报告仍要作为产物上传(自检通过后才上传), 想浏览的人下它。
     """
     workflow = ci_workflow.workflow_text()
-    assert "\n  deploy-pages:\n" not in workflow, (
-        "发布不再是独立作业: 它与汇总合成一个(否则要多付一整套 checkout / uv / npm)"
-    )
     job = ci_workflow.job_block(workflow, "allure-summary")
+    # 只看真正生效的行: 注释里正拿 "github-pages" 当反面说明(与本仓库其它守卫同一个口径
+    # —— 注释是文档, 不是配置)。
+    code = "\n".join(
+        line for line in job.splitlines() if not line.strip().startswith("#")
+    )
+    header = code.split("steps:", 1)[0]
+
+    for gone in (
+        "Deploy to GitHub Pages",
+        "Unpack the report for Pages",
+        "actions/upload-pages-artifact",
+        "actions/deploy-pages",
+    ):
+        assert gone not in code, f"发布已经移除, 不该还留着 {gone}"
+    assert "pages: write" not in header, "发布用的权限要一起删掉"
+    assert "id-token: write" not in header, "发布用的 OIDC 权限要一起删掉"
+    assert "github-pages" not in code, "发布用的 environment 也要一起删掉"
+    assert "environment:" not in header, (
+        "站点用的 environment 只能挂作业级, 删发布就该一起删"
+    )
 
     assert ci_workflow.needs_of(workflow, "allure-summary") == {
+        "changes",
         "quality",
         "pytest-report",
         "security",
     }, "汇总要等齐三批产物(报告还没传完就开始合并会静默少一部分)"
-    assert "Generate final Allure report" in job, "汇总本身还在这里"
-    assert "Deploy to GitHub Pages" in job, "发布也在这里(两者一个作业)"
-
-    # 触发条件写在发布的第一步上(后面两步跟随它的 ready 输出)。
-    step = job.split("name: Unpack the report for Pages", 1)[1].split("run:", 1)[0]
-    assert "always()" in step, step
-    assert "!cancelled()" in step, "整轮被取消后不该再启动发布"
-    assert "github.event_name == 'push'" in step, "PR 上不该发布站点"
-    assert "default_branch" in step, "只从默认分支发布, dev 的推送不该覆盖站点"
-    assert "steps.verify-report.outcome == 'success'" in step, "没通过自检的报告不发布"
-
-    publish = job.split("name: Unpack the report for Pages", 1)[1]
-    assert "pages: write" in job, "发布 Pages 需要它(顶层只给了只读的 contents/actions)"
-    assert "id-token: write" in job, "deploy-pages 用 OIDC 换一次性的部署权限"
-    assert "contents: read" in job, "作业级 permissions 是覆盖: 漏了它 checkout 会失败"
-    assert "environment:" in job, "站点要挂在 github-pages 环境上(作业 URL 也来自它)"
-    assert "github-pages" in job, "environment 的名字必须是 github-pages"
-    assert "allure-report.tar.gz" in publish, "发布的是自检通过后打好的那个归档"
-    assert "tar -xzf" in publish, "Pages 要目录: 必须先把归档解开"
-    assert "path: site/allure-report" in publish, "上传的必须是解出来的报告目录"
+    assert "Generate final Allure report" in code, "汇总本身还在这里"
+    assert "name: allure-report-final" in code, "报告仍要作为产物上传"
+    assert "allure-report.tar.gz" in code, "上传的是自检通过后打好的那个归档"
+    assert "steps.verify-report.outcome == 'success'" in code, "没通过自检的报告不上传"
+    assert "contents: read" in header, "作业级权限是覆盖: 漏了它 checkout 会失败"
+    assert "actions: read" in header, "取本轮的产物要它"
 
 
 def test_report_artifacts_do_not_duplicate_the_whole_result_set() -> None:
@@ -2737,8 +2739,8 @@ def test_htmlcov_is_not_uploaded_by_every_platform() -> None:
     assert "coverage xml -o coverage.xml --fail-under=0" in code
 
 
-def test_history_trends_survive_the_pages_deploy() -> None:
-    """历史趋势靠 artifact 往返 —— 发布到 Pages 既不能提供它, 也不该把它弄丢。
+def test_history_trends_survive_the_artifact_round_trip() -> None:
+    """历史趋势靠 artifact 往返, 与报告是否发布无关。
 
     机制(这条守卫要钉住的不变式): 两个报告作业各自"找上一次**带着同名产物**的运行(不问
     成败) → 取回 `.allure/history.jsonl` → 生成报告(读它并追加本次一行) → 把新的
@@ -2749,8 +2751,8 @@ def test_history_trends_survive_the_pages_deploy() -> None:
     趋势里(Allure 的趋势正是用来看失败的); "那一轮是否真的传了产物"由 finder 的 artifact
     检查把关, 中途取消/没跑到上传的运行自然被跳过。
 
-    合并成一个作业之后这条要多守一件事: `continue-on-error` **只能落在发布那几步上**,
-    不能挂到作业上 —— 挂上去会把质量门的结论一起吞掉(那样门禁失败也只是条绿记录)。
+    发布移除后仍要守一件事: `continue-on-error` **不能挂在作业上** —— 挂上去会把质量门的
+    结论一起吞掉(那样门禁失败也只是条绿记录)。
     """
     workflow = ci_workflow.workflow_text()
 
@@ -2777,21 +2779,10 @@ def test_history_trends_survive_the_pages_deploy() -> None:
         )
 
     summary = ci_workflow.job_block(workflow, "allure-summary")
-    deploy_keys = summary.split("steps:", 1)[0]
-    assert "continue-on-error" not in deploy_keys, (
-        "合并后它不能挂在作业上: 那会把质量门的结论一起吞掉(只该落在发布那几步上)"
+    job_keys = summary.split("steps:", 1)[0]
+    assert "continue-on-error" not in job_keys, (
+        "不能挂在作业上: 那会把质量门的结论一起吞掉"
     )
-    # 发布三步的窗口终点是"失败诊断"那一步: 它排在门禁结论**之前**(失败时才跑, 只收现场),
-    # 并不属于"发布"。
-    publish = summary.split("name: Unpack the report for Pages", 1)[1].split(
-        "name: Collect failure diagnostics", 1
-    )[0]
-    for block in publish.split("\n      - name: "):
-        assert "continue-on-error: true" in block, (
-            "发布这几步都要带 continue-on-error: 发布失败不该把作业弄红"
-            f"(报告与历史产物那时已经传完): {block[:200]}"
-        )
-    assert "history.jsonl" not in publish, "站点只是副本: 发布那几步不该碰历史文件"
 
 
 def test_ci_keeps_the_evidence_of_a_hard_crash() -> None:

@@ -170,14 +170,14 @@ pytest-report (每平台一份报告: 合并各片的 Allure 结果与覆盖率,
       ↓
 allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全/覆盖率汇总
                结论 + 有意不统计的覆盖豁免清单 → **先跑原生质量门（输出交给总账）再生成
-               最终报告**；同一作业里再做发布：仅默认分支的 push 时解开 allure-report.zip → GitHub Pages)
+               最终报告**)
 ```
 
-**作业数量也是额度**：一轮 CI 是 **14 个作业实例**（`quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1；原来独立的 `deploy-pages` 已于 2026-09-30 并进 `allure-summary`，代价是 `pages: write` / `id-token: write` 与 `github-pages` 环境只能声明在**作业级**，所以那个作业在 PR 上跑时也带着它们，而发布的那三步各自带 `continue-on-error`）。**这 14 个与事件、分支无关**：三个平台每个事件都跑（平台列表在 `allurerc.mjs` 的 `environmentsTested`、`--expect-platforms`、报告自检三处是同一个集合）。`security` 的 macOS 曾经只在 push 到默认分支时跑（矩阵 `exclude` 里的降频，省一个按 10 倍计价的实例），**2026-10-02 已撤销**：降频期间 PR 与 `dev` 上没有任何东西验 macOS 的路径/权限语义，而汇总报告会因此少一份 `Security findings(macOS)` —— 总账把它报成"缺失"，可读的人分不出那是设计还是事故（**假警报比不报更坏**）。现场与取代它的守卫记在 `PLAN.md` 第 15.2 节。每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”，见 `PLAN.md` 第 11.10 节）；`paths-ignore` 只加在 **push** 上 —— PR 被路径过滤跳过会让分支保护里的必需检查永远停在 pending，反而合不了 PR。完整的优化清单与取舍记在 `PLAN.md` 第 11 节。
+**作业数量也是额度**：一轮 CI 是 **16 个作业实例**（两个轻量门禁 `changes` / `required-check` 各 1 + `quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1；原来独立的 `deploy-pages` 已于 2026-09-30 并进 `allure-summary`，**2026-10-06 整个发布环节已移除** —— 汇总作业不再需要 `pages: write` / `id-token: write`，也没有 `github-pages` 环境，报告只作为 `allure-report-final` 产物上传）。**重量级作业与事件、分支无关**：三个平台每个事件都跑（平台列表在 `allurerc.mjs` 的 `environmentsTested`、`--expect-platforms`、报告自检三处是同一个集合）。`security` 的 macOS 曾经只在 push 到默认分支时跑（矩阵 `exclude` 里的降频，省一个按 10 倍计价的实例），**2026-10-02 已撤销**：降频期间 PR 与 `dev` 上没有任何东西验 macOS 的路径/权限语义，而汇总报告会因此少一份 `Security findings(macOS)` —— 总账把它报成"缺失"，可读的人分不出那是设计还是事故（**假警报比不报更坏**）。现场与取代它的守卫记在 `PLAN.md` 第 15.2 节。每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”，见 `PLAN.md` 第 11.10 节）；纯文档改动不跑重量级作业，但**两条触发器用的办法不同** —— push 用 `paths-ignore`（命中就整轮不触发）；PR 不能直接用它（命中时整条工作流不触发，分支保护里的必需检查会永远停在 pending），改成轻量的 `changes` 作业判路径、重量级作业按它的输出 `if:` 跳过，另加一个总是给结论的 `required-check` 作为必需检查。完整的优化清单与取舍记在 `PLAN.md` 第 11 节。
 
 每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
 
-**历史趋势到底靠什么活着（与发布到哪里无关）**：两个报告作业各自走一遍“找上一次**带着同名产物**的运行（不问成败）→ 取回里面的 `.allure/history.jsonl` → `allure generate` 读它并追加本次一行 → 把新的 history.jsonl 重新传回 artifact”（`pytest-report` 用 `allure-resources-<平台>`，`allure-summary` 用 `allure-resources-final`）。所以：① 趋势的寿命 = **artifact 的寿命**而不是站点的寿命 —— artifact 默认保留 90 天，窗口内没有任何一轮还留着它时，下一轮就从零开始（不会报错，只是曲线断了）；② 基线**不要求**那一轮 `conclusion` 是 success（2026-10-05 的教训：只认成功运行时，连续失败的时期——比如 macOS Tk 崩溃那几天——没有任何一轮被消费，基线冻结在键形状变更之前的成功运行上，红运行再跑多少次历史也永远接不上，报告里每条用例只剩自己的点；而失败轮的历史行本来就该出现在趋势里，Allure 的趋势正是用来看失败的；那一轮是否真的传了产物由 finder 的 artifact 检查把关，中途取消/没跑到上传的运行自然被跳过）；③ 发布到 GitHub Pages 只是把这轮的 HTML 复制出去，既不喂历史也不影响链条 —— 它自己的失败用 `continue-on-error` 兜住，让报告相关的产物与结论照常落盘；④ 取回时**两种 artifact 布局都要认**——`upload-artifact` 把文件放进压缩包的位置取决于 `path` 列了几样东西：只列**一个**文件时最短公共祖先是 `.allure/`，`history.jsonl` 落在压缩包**根部**；列多个路径（平台产物带着 `allure-manifest.json`）才保留 `.allure/` 前缀。2026-10-05 定位（同日第二起）：`3b23b9b` 把 final 的上传从多路径改成单路径后，恢复步骤仍按带前缀的路径去 `cp`，**每轮都失败**——`Restore previous final Allure history` 步骤红、修复步骤跟着“读入 0 份”、最终报告的历史每轮清零，看起来就是“过去执行的记录全丢了”；而逐平台产物一直是两路径上传，平台链健康（同日实测 14 份快照 13/13 可连接，这正是“平台报告有历史、汇总报告没有”的不对称来源）。现在两个恢复步骤都按两种布局探测，都找不到时 `::error` 响亮退出——上一步刚确认过产物存在，拷不出来只能是布局又变了；⑤ **质量门不许写历史**——`allure quality-gate` 子命令同样遵循 allurerc 的 `historyPath + appendHistory`（3.20.0 本地最小复现：配好后跑一次 quality-gate，`.allure/history.jsonl` 里就多一行）。汇总作业里它跑在性能/安全结果并入**之前**，追加的那条“半套快照”（7516 条）会冒充上一轮，随后的 `allure generate` 又追加完整的（7520 条）——趋势里同一轮出现两个点，那条假快照还作为 9.6 MiB 的 `data/history/*.json` 塞进报告（“每轮多出一份重复的历史记录”就是它）。修复：质量门跑之前把真历史改名为同目录的临时文件（`history.keep.$$`，改名即回、不跨设备），跑完 `rm -f` 它可能写的、再放回真历史；质量门的规则只看本次结果（`allurerc.mjs` 的 `qualityGate`），历史文件它根本不需要。这两处的守卫：`tests/unit/test_ci_history.py` 的 `test_history_restore_accepts_both_artifact_layouts` 与 `test_quality_gate_does_not_touch_the_history_file`。要让历史比 artifact 更耐久得换存储（把 history.jsonl 一起发到站点上再回取，或接 Allure Report Storage），现在没做。
+**历史趋势到底靠什么活着（与报告怎么发布无关）**：两个报告作业各自走一遍“找上一次**带着同名产物**的运行（不问成败）→ 取回里面的 `.allure/history.jsonl` → `allure generate` 读它并追加本次一行 → 把新的 history.jsonl 重新传回 artifact”（`pytest-report` 用 `allure-resources-<平台>`，`allure-summary` 用 `allure-resources-final`）。所以：① 趋势的寿命 = **artifact 的寿命**而不是站点的寿命 —— artifact 默认保留 90 天，窗口内没有任何一轮还留着它时，下一轮就从零开始（不会报错，只是曲线断了）；② 基线**不要求**那一轮 `conclusion` 是 success（2026-10-05 的教训：只认成功运行时，连续失败的时期——比如 macOS Tk 崩溃那几天——没有任何一轮被消费，基线冻结在键形状变更之前的成功运行上，红运行再跑多少次历史也永远接不上，报告里每条用例只剩自己的点；而失败轮的历史行本来就该出现在趋势里，Allure 的趋势正是用来看失败的；那一轮是否真的传了产物由 finder 的 artifact 检查把关，中途取消/没跑到上传的运行自然被跳过）；③ 报告只作为 artifact 存在（`allure-report-final` 等产物，2026-10-06 起不再发布到 GitHub Pages），站点是否可达与历史链条无关；④ 取回时**两种 artifact 布局都要认**——`upload-artifact` 把文件放进压缩包的位置取决于 `path` 列了几样东西：只列**一个**文件时最短公共祖先是 `.allure/`，`history.jsonl` 落在压缩包**根部**；列多个路径（平台产物带着 `allure-manifest.json`）才保留 `.allure/` 前缀。2026-10-05 定位（同日第二起）：`3b23b9b` 把 final 的上传从多路径改成单路径后，恢复步骤仍按带前缀的路径去 `cp`，**每轮都失败**——`Restore previous final Allure history` 步骤红、修复步骤跟着“读入 0 份”、最终报告的历史每轮清零，看起来就是“过去执行的记录全丢了”；而逐平台产物一直是两路径上传，平台链健康（同日实测 14 份快照 13/13 可连接，这正是“平台报告有历史、汇总报告没有”的不对称来源）。现在两个恢复步骤都按两种布局探测，都找不到时 `::error` 响亮退出——上一步刚确认过产物存在，拷不出来只能是布局又变了；⑤ **质量门不许写历史**——`allure quality-gate` 子命令同样遵循 allurerc 的 `historyPath + appendHistory`（3.20.0 本地最小复现：配好后跑一次 quality-gate，`.allure/history.jsonl` 里就多一行）。汇总作业里它跑在性能/安全结果并入**之前**，追加的那条“半套快照”（7516 条）会冒充上一轮，随后的 `allure generate` 又追加完整的（7520 条）——趋势里同一轮出现两个点，那条假快照还作为 9.6 MiB 的 `data/history/*.json` 塞进报告（“每轮多出一份重复的历史记录”就是它）。修复：质量门跑之前把真历史改名为同目录的临时文件（`history.keep.$$`，改名即回、不跨设备），跑完 `rm -f` 它可能写的、再放回真历史；质量门的规则只看本次结果（`allurerc.mjs` 的 `qualityGate`），历史文件它根本不需要。这两处的守卫：`tests/unit/test_ci_history.py` 的 `test_history_restore_accepts_both_artifact_layouts` 与 `test_quality_gate_does_not_touch_the_history_file`。要让历史比 artifact 更耐久得换存储（把 history.jsonl 一起发到站点上再回取，或接 Allure Report Storage），现在没做。
 
 **历史文件在生成报告之前会被自动修一遍**（`scripts/repair_allure_history.py`；两处报告作业都把它排在“拷回历史”之后、“`allure generate`”之前）：报告的趋势按 `retryHash` **精确匹配**，而身份键里每多一个维度（例如 2026-10-05 采用 environments 之后多出的 `environmentHash`），旧快照的键就整体对不上 —— 报告里每条用例只剩本次运行那一个点（实测 7231 条结果里 7226 条历史长度为 1，而那一条还是本次运行自己重复追加的快照）。丢的是**匹配**不是数据：快照一直躺在历史文件里。这一步做三件事：① 同一轮运行被追加两次的快照去重（2026-10-05 定位到根因：`allure quality-gate` 子命令同样遵循 allurerc 的 `appendHistory`，与随后的 `allure generate` 各追加一次，实测两份相隔 2 秒到 26 秒、键集合可能差几条；CI 已在质量门那一步把历史藏起来（见上文⑤），这里的去重是本地连跑两次 generate 等场景的兜底 —— 按“时间窗 + 键集合重合度”判，留信息更全的那一份，不去重的话“本次结果”会冒充“上一次历史”）；② 旧形状的键按**唯一前缀**补成当前形状（当前形状取最新那份快照的键段数、参考集合是文件里已经是当前形状的键，于是不需要复刻 Allure 的哈希算法）；前缀对上多个当前键时（采用 environments 之后同一用例在三个平台各有一个键）再按条目自己的 `environment` 对准平台（旧快照写显示名 `macOS`、新快照写 id `macos`，比较时统一小写——2026-10-05 定位：没有这一步时全部旧条目会被当成“补不出唯一值”丢掉，连接数归零，兜底反而清空整份历史）；已是当前段数的键原样保留，段数比当前还多的键直接丢弃（把长键砍成前缀会悄悄并掉平台之间的区别）；③ 补不出唯一值的条目丢掉，一份旧快照都连不上时**清空历史重新开始**。真要改判断，先看 `tests/unit/test_ci_history.py` —— 三种走向、幂等与“没修东西就不留附件”都钉在那里。已知局限：键形状刚变的第一轮，基线里还没有新形状的快照，这一步会把旧形状误当成“当前”（那一轮的报告仍只剩自己的点，下一轮起恢复）—— 这正是历史基线必须每轮都被消费的原因（见上文“带着同名产物的运行（不问成败）”）。无论哪一步动了文件，都会写一份 `allure-history-repair.md` 挂进首页「全局附件」（按文件在不在条件收，与“失败现场”那份同一套做法），里面还记着这一轮**实际用的 CLI 版本**（CI 用的是浮动标签 `allure@3`，形状再变时能一眼对上是哪次更新）与“最新快照是几天前的”（基线被冻结时一眼能看出来）；没修东西时那份记录会被删掉，免得挂着一份过期结论。
 
@@ -531,11 +531,11 @@ I-9 上线后回头核对"前面几轮的证据还成不成立"，图上多出�
 - **同一功能会有两个入口、两个档位**：实测 `_on_import_package` / `_request_export_batch` / `_on_branch` 各有两个按钮（页面级主色、卡片内次色），所以登记的是**集合**而不是单一性质 —— 集合要写窄并注明理由，别用它来兜住"随便什么颜色"。
 - **"重要功能"的清单必须能被兜底断言检验**：清单里写了一个实际不存在的回调名（拼错、改名）时，判据会对着一片空白永远是绿的。
 
-### 报告自检与发布（不要跳过）
+### 报告自检与上传（不要跳过）
 
 报告是一套静态站点：用例详情页打开时才去取`data/test-results/<结果 id>.json`。这个目录一旦在传输或解压环节被丢掉，报告就只剩汇总与用例树——界面能看到用例通过与否，点开用例却是空的（生成阶段本身没问题，用同一个 allure 版本本地生成就有这些文件）。
 
-因此每个生成报告的作业在发布前都要跑 `scripts/verify_allure_report.py`：
+因此每个生成报告的作业在上传前都要跑 `scripts/verify_allure_report.py`：
 
 - 检查入口资源：`index.html`、单个 `app-*.js`、`summary.json`、`test-results.json`、`widgets/**/statistic.json`、`widgets/**/tree.json`；
 - 逐条核对结果索引（`test-results.json` 的 `byId`）引用的详情文件是否存在，并确认条数与 `allure-results` 里的结果文件一致；
@@ -543,27 +543,27 @@ I-9 上线后回头核对"前面几轮的证据还成不成立"，图上多出�
 - `--expect-platforms` 指定的每个平台环境里都要有**真实用例**结果（判据 `framework=pytest`，与质量门那条规则同一个判据）；
 - 传了 `--manifest` 时，还要把"分片自报的条数"与最终条数对上（见下）。
 
-任一项不通过即作业失败，且**不发布报告**（`Upload Allure report` 只在自检成功时执行）；标准输出里的"结果索引 / 详情文件 / 用例分组"三个计数就是排查入口。自检通过后用 `--zip` 把报告打成单个 `allure-report.zip` 发布：单文件要么完整到达、要么直接报错，不会出现"整个目录被悄悄丢掉"的半损坏状态（改动前的 artifact 就踩过一次）。
+任一项不通过即作业失败，且**不上传报告**（`Upload Allure report` 只在自检成功时执行）；标准输出里的"结果索引 / 详情文件 / 用例分组"三个计数就是排查入口。自检通过后用 `--archive` 把报告打成单个 `allure-report.tar.gz` 上传：单文件要么完整到达、要么直接报错，不会出现"整个目录被悄悄丢掉"的半损坏状态（改动前的 artifact 就踩过一次）。
 
-**平台用例这一项是唯一不拦发布的**（`continue-on-error: true`，结论由汇总作业末尾的门禁结论步骤接手）：它属于**内容**问题而不是"报告坏了"，而报告正是用来看"哪个平台没数据"的地方 —— 拦下来反而拿不到证据（分片作业全挂时更需要看到报告）。两处接线：
+**平台用例这一项是唯一不直接判作业红的**（`continue-on-error: true`，结论由汇总作业末尾的门禁结论步骤接手）：它属于**内容**问题而不是"报告坏了"，而报告正是用来看"哪个平台没数据"的地方 —— 拦下来反而拿不到证据（分片作业全挂时更需要看到报告）。两处接线：
 
 - `pytest-report` 作业传 `--expect-platforms "${{ matrix.platform }}"`（平台来自矩阵，不是 `runner.os` —— 两个平台的报告都跑在 Ubuntu 上），逐平台自查；
-- 汇总作业传 `--expect-platforms Windows,macOS,Linux`，在生成完最终报告之后运行（它不拦发布，结论由末尾的门禁结论步骤接手），输出里的 `按平台用例: Windows 1155 用例 + 2 汇总项, ...` 就是"哪个平台只剩汇总项"的直接证据。
+- 汇总作业传 `--expect-platforms Windows,macOS,Linux`，在生成完最终报告之后运行（它不直接判作业红，结论由末尾的门禁结论步骤接手），输出里的 `按平台用例: Windows 1155 用例 + 2 汇总项, ...` 就是"哪个平台只剩汇总项"的直接证据。
 
 为什么它能发现质量门的 `environmentsTested` 发现不了的事：覆盖率/安全汇总项、平台专属的质量检查都带平台的 `env`，所以"环境存在"不等于"这个平台测过"。两道都在（Allure 规则 + 仓库自检）是有意的 —— 后者能逐平台报数，也不会因为 CLI 升级后 `filter` 语义变化而静默失效。已验证（2026-09-21，用真实报告重建的 3493 条结果）：删掉 Linux 的 1166 条用例后，自检报 `这些平台里没有用例结果: Linux (脚本生成的汇总项不算用例; 逐平台: ... Linux: 0 用例 / 3 汇总项)`。**那一次质量门虽然也报了 `environmentsTested`，但不算证据**：当时清单里写的是显示名，所以三个平台**全都**报缺（2026-10-04 复核，见上一节那条“清单里必须写环境 id”）；改成 id 后重做同一实验，只有 Linux 被报缺。
 
 Windows runner 的控制台是 cp1252：Python 默认按该编码输出，**打印中文会直接 `UnicodeEncodeError` 打断步骤**（报告自检在 CI 上踩过）。因此工作流最外层设了 `PYTHONUTF8=1`，两个报告脚本自己也会把标准输出切成 UTF-8（取不到 `reconfigure` 的替身如 pytest `capsys` 就跳过）。新增会向终端打中文的脚本时注意这条。
 
-下载 artifact 后本地核对（先解压外层 artifact，再解压其中的 `allure-report.zip`）：
+下载 artifact 后本地核对（`allure-report-final` 是单个 `allure-report.tar.gz`，直接解开即可）：
 
 ```shell
 uv run python scripts/verify_allure_report.py allure-report          # 只自检
-uv run python scripts/verify_allure_report.py allure-report --zip    # 自检并重新打包
+uv run python scripts/verify_allure_report.py allure-report --archive    # 自检并重新打包
 uv run python scripts/verify_allure_report.py allure-report --expect-platforms Windows,macOS,Linux
 uv run python scripts/verify_allure_report.py allure-report --results allure-results --manifest "allure-manifests/*.json"
 ```
 
-`--manifest` 的三条判据（都在"内容检查"那一侧，不拦发布）：声明必须有的片号都到了、各分片自报的结果数**不超过**结果目录里的结果文件数（超了说明合并之后掉过数据）、报告里每个平台的用例数**不少于**该平台分片自报的结果数。输出里的 `分片产物清单: Linux 725 条结果(2 片), 缺片 1` 就是缺片的直接证据。
+`--manifest` 的三条判据（都在"内容检查"那一侧，不直接判作业红）：声明必须有的片号都到了、各分片自报的结果数**不超过**结果目录里的结果文件数（超了说明合并之后掉过数据）、报告里每个平台的用例数**不少于**该平台分片自报的结果数。输出里的 `分片产物清单: Linux 725 条结果(2 片), 缺片 1` 就是缺片的直接证据。
 
 ### 失败现场留证（dump + 界面截图）
 
@@ -667,7 +667,7 @@ allure open allure-report
 allure open allure-results
 ```
 
-报告的标题、界面语言与默认端口都在仓库根的 `allurerc.mjs` 里（`name` / `plugins.awesome.options.reportLanguage` / `port`），所以上面这些命令不需要额外参数：报告标题是 `存档管理 · 测试报告`，界面固定中文（与浏览器语言无关）。另外两个刻意**不**设的选项写在配置的注释里：`open: true`（CI 上会去拉起浏览器）与 `singleFile: true`（会拆掉 `data/test-results/*.json` 这些按需拉的资源，直接打破自检与单 zip 发布）。
+报告的标题、界面语言与默认端口都在仓库根的 `allurerc.mjs` 里（`name` / `plugins.awesome.options.reportLanguage` / `port`），所以上面这些命令不需要额外参数：报告标题是 `存档管理 · 测试报告`，界面固定中文（与浏览器语言无关）。另外两个刻意**不**设的选项写在配置的注释里：`open: true`（CI 上会去拉起浏览器）与 `singleFile: true`（会拆掉 `data/test-results/*.json` 这些按需拉的资源，直接打破自检与单文件归档）。
 
 只想看某一类用例时，把第 1 步换成对应目录（性能/安全测试必须显式指定）：
 
@@ -707,7 +707,7 @@ uv run python scripts/verify_allure_report.py allure-report --results allure-res
 
 - **报告要经 HTTP 提供**：控件数据与用例详情都是前端按需 `fetch` 的相对路径，直接双击 `allure-report/index.html`（`file://`）会被浏览器的跨域策略拦掉，界面只剩加载动画或空壳。用 `allure open`，或任意静态服务器。
 - **`allure open` 的目录是必填参数**：只写 `allure open --port 8080` 会直接报错退出，正确写法是 `allure open allure-report --port 8080`。
-- **报告目录已存在时 `allure generate` 不会刷新数据，还会把新报告“藏”进子目录**（Allure issue [#691](https://github.com/allure-framework/allure3/issues/691)）：两种症状同源 —— 生成器不会先清掉旧输出。① 实测先删一个 `data/test-results/*.json` 再生成，该文件仍然缺失（2634 → 2633）；② 更隐蔽的是**输出目录已存在时，新报告被写进 `allure-report/awesome/`，顶层的 `index.html` 留成上一次那份**。本机实测（3.20.0，同一个 `--output` 连跑两次）：第一次之后目录是扁平的（`index.html` / `app-*.js` / `data/` / `widgets/`），第二次之后多出 `awesome/`，而 `index.html` 一个字节都没变 —— 你打开的是**旧**报告：本次运行不在里面，历史趋势那一页自然也是空的或停在上一次（“历史记录不可见”多半就是它）。判据很简单：`allure-report/` 里出现 `awesome/` 子目录就是撞上了；那时新报告在 `allure-report/awesome/`（应急就看 `allure open allure-report/awesome`），但干净的做法是 `rm -rf allure-report` 重新生成一次。维护者给的也正是这个做法（“生成前先删掉报告目录，保留 `history.jsonl`”）。**CI 上不该出现**：两个生成作业都在全新 runner 上跑，而 `allure-report/` 在 `.gitignore` 里（`.gitignore:251`）、检出时根本不存在；发布那一步也是先 `rm -rf site` 再解自己刚打的包，并且解完会 `test -f site/allure-report/index.html`。自检脚本把嵌套目录直接判红（`scripts/verify_allure_report.py` 的 `nested_report_problems`，守卫 `test_a_nested_report_directory_is_reported`），以后谁把报告目录解包进工作区、或 CLI 换了输出布局，都会在发布前当场红。
+- **报告目录已存在时 `allure generate` 不会刷新数据，还会把新报告“藏”进子目录**（Allure issue [#691](https://github.com/allure-framework/allure3/issues/691)）：两种症状同源 —— 生成器不会先清掉旧输出。① 实测先删一个 `data/test-results/*.json` 再生成，该文件仍然缺失（2634 → 2633）；② 更隐蔽的是**输出目录已存在时，新报告被写进 `allure-report/awesome/`，顶层的 `index.html` 留成上一次那份**。本机实测（3.20.0，同一个 `--output` 连跑两次）：第一次之后目录是扁平的（`index.html` / `app-*.js` / `data/` / `widgets/`），第二次之后多出 `awesome/`，而 `index.html` 一个字节都没变 —— 你打开的是**旧**报告：本次运行不在里面，历史趋势那一页自然也是空的或停在上一次（“历史记录不可见”多半就是它）。判据很简单：`allure-report/` 里出现 `awesome/` 子目录就是撞上了；那时新报告在 `allure-report/awesome/`（应急就看 `allure open allure-report/awesome`），但干净的做法是 `rm -rf allure-report` 重新生成一次。维护者给的也正是这个做法（“生成前先删掉报告目录，保留 `history.jsonl`”）。**CI 上不该出现**：两个生成作业都在全新 runner 上跑，而 `allure-report/` 在 `.gitignore` 里（`.gitignore:251`）、检出时根本不存在。自检脚本把嵌套目录直接判红（`scripts/verify_allure_report.py` 的 `nested_report_problems`，守卫 `test_a_nested_report_directory_is_reported`），以后谁把报告目录解包进工作区、或 CLI 换了输出布局，都会在发布前当场红。
 - **打开前先自检**（见上一节）：缺 `data/test-results/*.json` 时界面照样显示"通过/失败"，点开用例却是空的。
 
 ## 8. 新增测试清单
