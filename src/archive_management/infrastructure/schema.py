@@ -415,6 +415,23 @@ _V14_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 15: 记住"这份备份是用哪种校验方式记录的".
+#
+# 校验方式可以随时切换(见 ``config.VerificationSettings``): ``sha256`` 逐文件比对内容
+# 哈希, ``name`` 只核对名称。名称模式下创建的备份**先不算哈希**(清单里的 sha256 留空,
+# 备份因此很快), 由后台协程随后补齐 —— 于是需要一列记下"它当初是怎么记的": 补齐前只能
+# 按名称校验, 还原预检与界面据此给出提示(见 ``application.backup.BackupService``)。
+#
+# 迁移是**空默认值**: 升级前创建的老备份里逐文件 sha256 一应俱全(那时只有一种校验
+# 方式), 因此空串读出来按 sha256 看待(见 ``domain.entities.normalize_verification_mode``)
+# —— "老存档没有当前校验的数据时一律回落到 sha256", 而不是降级成不校。将来新增校验
+# 方式时沿用同一条规则: 新列先给空默认值, 读出来缺数据就回落到 sha256。
+_V15_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE backup_nodes ADD COLUMN verify_mode TEXT NOT NULL DEFAULT ''
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
@@ -430,6 +447,7 @@ SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (12, _V12_STATEMENTS),
     (13, _V13_STATEMENTS),
     (14, _V14_STATEMENTS),
+    (15, _V15_STATEMENTS),
 )
 
 

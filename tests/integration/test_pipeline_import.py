@@ -22,7 +22,13 @@ from archive_management.application.backup import BackupService
 from archive_management.application.export import ExportService
 from archive_management.application.imports import ImportService, PackageNode
 from archive_management.application.locations import add_save_location
-from archive_management.domain import BackupFileEntry, BackupNode, Game, ScheduledJob
+from archive_management.domain import (
+    BackupFileEntry,
+    BackupNode,
+    Game,
+    ScheduledJob,
+    VerificationMode,
+)
 from archive_management.exceptions import (
     ArchiveManagementError,
     DatabaseError,
@@ -39,6 +45,7 @@ from archive_management.services import export_format as fmt
 from archive_management.services.naming import game_folder
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.snapshot import read_manifest
+from archive_management.services.verification import VerificationPolicy
 
 pytestmark = [
     pytest.mark.integration,
@@ -78,7 +85,7 @@ def _node_ids(nodes: Sequence[BackupNode]) -> tuple[int, ...]:
     return tuple(ids)
 
 
-def _build_package(root: Path) -> _Source:
+def _build_package(root: Path, *, mode: VerificationMode = "sha256") -> _Source:
     """造一台源机器并导出包: 两个存档位置 + 三次备份 + 一条定时任务."""
     source_root = root / "source"
     database = helpers.migrated_database(source_root)
@@ -99,7 +106,11 @@ def _build_package(root: Path) -> _Source:
     add_save_location(
         database, game.id, path=str(other), kind="directory", source="steam"
     )
-    backups = BackupService(database, backup_root=source_root / "backups")
+    backups = BackupService(
+        database,
+        backup_root=source_root / "backups",
+        policy=VerificationPolicy(mode=mode),
+    )
     backups.create_backup(game.id, title="第一次")
     helpers.touch_save(source_root)
     backups.create_backup(game.id, title="第二次")
@@ -324,6 +335,32 @@ def test_the_new_strategy_imports_nodes_files_and_the_schedule(
     assert jobs[0].schedule == "1d"
     assert jobs[0].enabled is True
     assert jobs[0].keep_auto == 5
+
+
+def test_an_imported_node_keeps_the_verification_mode_of_the_package(
+    tmp_path: Path,
+) -> None:
+    """名称模式导出的备份导入后仍记着"名称模式": 界面据此知道它的哈希还没补齐."""
+    source = _build_package(tmp_path, mode="name")
+    database, _backup_root, service = _target(tmp_path / "target")
+    inspection = service.inspect(source.package)
+
+    result = service.import_package(
+        inspection, strategy="new", locations=_mapping(source)
+    )
+
+    backups = BackupRepository(database)
+    rows = backups.list_for_game(result.game_id)
+    assert {row.verify_mode for row in rows} == {"name"}
+    # 清单里的 sha256 也照原样进来(名称模式下都是空的), 因此这份备份只按名称校验.
+    file_hashes = [
+        entry.sha256
+        for row in rows
+        for entry in backups.list_files(_node_id(row))
+        if entry.file_kind == "file"
+    ]
+    assert file_hashes, "导入后应当有逐文件清单"
+    assert set(file_hashes) == {""}
 
 
 def test_the_imported_content_matches_the_source_save_folder_byte_for_byte(

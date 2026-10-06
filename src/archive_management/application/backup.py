@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -63,9 +63,17 @@ from archive_management.services.snapshot import (
     SnapshotResult,
     SnapshotSource,
     SnapshotVerification,
+    content_hash_of,
     create_snapshot,
+    manifest_entries,
     remove_snapshot,
-    verify_snapshot,
+    rewrite_manifest,
+)
+from archive_management.services.verification import (
+    VerificationPolicy,
+    hash_files,
+    hashes_complete,
+    verification_of,
 )
 
 # 自动备份默认保留份数从领域层导入(常量定义见 domain/deletion.py).
@@ -84,8 +92,9 @@ class Snapshotter(Protocol):
         *,
         progress: ProgressCallback | None = None,
         cancelled: Callable[[], bool] | None = None,
+        hash_files: bool = True,
     ) -> SnapshotResult:
-        """生成一次快照."""
+        """生成一次快照(``hash_files=False`` 时只复制不算哈希)."""
         ...
 
 
@@ -107,13 +116,33 @@ class BackupService:
         *,
         backup_root: Path,
         snapshotter: Snapshotter = create_snapshot,
+        policy: VerificationPolicy | Callable[[], VerificationPolicy] | None = None,
     ) -> None:
-        """绑定数据库、备份根目录与可替换的快照实现."""
+        """绑定数据库、备份根目录与可替换的快照实现.
+
+        ``policy`` 是这次要用的校验方式与并发上限(见 ``services.verification``):
+        生产里传一个可调用对象, 每次备份/校验都现取一次 —— 用户随时可能在设置窗口里
+        把校验方式改掉; 省略时用默认策略(sha256)。
+        """
         self._root = Path(backup_root)
         self._snapshotter = snapshotter
+        self._policy_source = policy
         self._games = GameRepository(database)
         self._locations = SaveLocationRepository(database)
         self._backups = BackupRepository(database)
+
+    # -- 校验方式 -----------------------------------------------------------
+
+    def policy(self) -> VerificationPolicy:
+        """取当前生效的校验方式与并发上限.
+
+        恢复用例也向这里要(见 ``application.restore``): 预检与写回必须用同一套判定,
+        各存一份很容易两边走偏。
+        """
+        source = self._policy_source
+        if source is None:
+            return VerificationPolicy()
+        return source() if callable(source) else source
 
     # -- 查询 ---------------------------------------------------------------
 
@@ -174,8 +203,13 @@ class BackupService:
         return self._root / node.storage_relpath
 
     def verify(self, node: BackupNode) -> SnapshotVerification:
-        """校验备份节点的快照完整性."""
-        return verify_snapshot(self.snapshot_root(node))
+        """校验备份节点的快照完整性.
+
+        按当前校验方式决定校到什么程度: 选 sha256 时要逐文件比对内容哈希(那是这条链路上
+        最贵的一步), 因此走有并发上限的协程执行器 —— 它把哈希并发算完后才做判定; 选
+        名称模式(或这份备份还没有哈希数据时降级)只核对存在性与清单本身。
+        """
+        return verification_of(self.snapshot_root(node), policy=self.policy())
 
     # -- 写入 ---------------------------------------------------------------
 
@@ -202,9 +236,16 @@ class BackupService:
         自动备份(``kind="auto"``)是特殊备份: 成功后会按 ``keep_auto`` 只保留
         最近的若干份, 更早的自动备份连同其快照一起清理. ``safety=True`` 表示
         这是恢复前自动创建的安全点: 只在时间线视图展示, 不进入分支树。
+
+        校验方式取自当前策略(见 :meth:`policy`): ``sha256`` 边拷边算哈希(严格,
+        但仍只读一遍磁盘); ``name`` 只按名称/大小记录, 不算哈希 —— 备份因此很快,
+        逐文件 sha256 由调用方随后用 :meth:`backfill_hashes` 在后台补齐(界面自己
+        安排线程)。补齐前这份备份只能按名称校验, 它身上记的 ``verify_mode`` 就是
+        这件事的凭据。
         """
         sources = self._sources_for_backup(game_id)
         parent = self._resolve_parent(game_id, parent_id)
+        policy = self.policy()
         folder = self.storage_folder(game_id)
         relpath = backup_relpath(folder, self._stamp(), uuid4().hex[:8])
         destination = self._root / relpath
@@ -228,6 +269,7 @@ class BackupService:
             game_id=game_id,
             progress=progress,
             cancelled=cancelled,
+            hash_files=policy.mode == "sha256",
         )
         if parent is not None and parent.content_hash:
             self._reject_unchanged(
@@ -248,6 +290,7 @@ class BackupService:
             storage_relpath=relpath,
             created_at=datetime.now(UTC),
             is_safety=safety,
+            verify_mode=policy.mode,
         )
         node = self._insert_node(
             node,
@@ -292,11 +335,16 @@ class BackupService:
         game_id: int,
         progress: ProgressCallback | None,
         cancelled: Callable[[], bool] | None,
+        hash_files: bool = True,
     ) -> SnapshotResult:
         """执行一次快照; 取消与失败先记审计日志再原样抛出."""
         try:
             return self._snapshotter(
-                sources, destination, progress=progress, cancelled=cancelled
+                sources,
+                destination,
+                progress=progress,
+                cancelled=cancelled,
+                hash_files=hash_files,
             )
         except OperationCancelledError as exc:
             log_action(action, game_id=game_id, result="cancelled", reason=str(exc))
@@ -357,6 +405,86 @@ class BackupService:
             progress=progress,
             cancelled=cancelled,
         )
+
+    # -- 后台补齐哈希 -------------------------------------------------------
+
+    def needs_hash_backfill(self, node: BackupNode) -> bool:
+        """这份备份还等着补齐哈希吗(名称模式创建, 或者补齐没跑完).
+
+        不读磁盘: 只看节点上记的 ``verify_mode`` —— 它是"这份备份当初是怎么记的"的
+        凭据, 补齐成功时会被改回 ``sha256``。
+        """
+        return node.verify_mode != "sha256"
+
+    def backfill_hashes(
+        self,
+        node: BackupNode,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> int:
+        """把名称模式备份缺的 sha256 补齐: 并发算哈希 → 重写清单 → 回写数据库.
+
+        调用方负责放进后台线程(见 ``ui.sql_backend``): 这一步要完整读一遍快照, 放在
+        界面线程上会把窗口卡住。返回补齐的文件数。
+
+        顺序是**先清单后数据库**: 校验读的是清单, 万一在两次写之间中断, 这份备份仍然
+        是"按名称校验"的(``verify_mode`` 保持 name), 下次还能再补 —— 反过来先写数据库
+        就会留下"数据库说有哈希、清单里却没有"的矛盾。补不上的条目(文件在两次扫描之间
+        消失)保持为空, 同样下次再补。
+        """
+        if node.id is None:  # pragma: no cover - 备份节点一律来自数据库(带 id)
+            return 0
+        root = self.snapshot_root(node)
+        entries = manifest_entries(root)
+        pending = [
+            entry for entry in entries if entry.file_kind == "file" and not entry.sha256
+        ]
+        if not pending:
+            # 没有缺的条目(上一次补齐写完了清单、只是记录没跟上): 只把记录收尾成 sha256,
+            # 免得界面每次都把它当成"还要补齐"。内容哈希按**清单里的**条目重算, 与清单
+            # 保持一致(硬套节点上那个旧的会把两边写成互相矛盾的值)。
+            if node.verify_mode != "sha256":
+                self._backups.record_hashes(
+                    node.id,
+                    {},
+                    content_hash=content_hash_of(entries),
+                    verify_mode="sha256",
+                )
+            return 0
+        policy = self.policy()
+        digests = hash_files(
+            [root / entry.relative_path for entry in pending],
+            limit=policy.max_parallel,
+            cancelled=cancelled,
+        )
+        filled = {
+            entry.relative_path: digests[root / entry.relative_path]
+            for entry in pending
+            if root / entry.relative_path in digests
+        }
+        if not filled:
+            # 缺的条目一个也没算出来(文件在两次扫描之间都被删了): 原样留着, 下次再补.
+            return 0
+        updated = [
+            replace(entry, sha256=filled.get(entry.relative_path, entry.sha256))
+            for entry in entries
+        ]
+        content_hash = rewrite_manifest(root, updated)
+        complete = hashes_complete(updated)
+        self._backups.record_hashes(
+            node.id,
+            filled,
+            content_hash=content_hash,
+            verify_mode="sha256" if complete else "name",
+        )
+        log_action(
+            "backup.hash_backfill",
+            game_id=node.game_id,
+            backup_id=node.id,
+            files=len(filled),
+            complete=complete,
+        )
+        return len(filled)
 
     def update_meta(
         self,

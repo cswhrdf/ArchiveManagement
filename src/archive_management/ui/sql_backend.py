@@ -39,6 +39,7 @@ from archive_management.application.locations import (
     remove_save_location,
 )
 from archive_management.application.restore import RestorePlan, RestoreService
+from archive_management.config import load_or_repair_config
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     PLATFORM_IDS,
@@ -115,6 +116,7 @@ from archive_management.services.scheduler import (
 )
 from archive_management.services.snapshot import verify_snapshot
 from archive_management.services.steam_cloud import SteamCloudSource
+from archive_management.services.verification import VerificationPolicy
 from archive_management.ui.models import (
     BackupItem,
     CandidateItem,
@@ -281,6 +283,19 @@ def _free_destination(directory: Path, stem: str) -> Path:
     return candidate
 
 
+def policy_from_config(config_path: Path) -> VerificationPolicy:
+    """按配置文件读出这次要用的校验方式与并发上限.
+
+    每次操作前现读一次(而不是启动时定死): 用户可能刚在设置窗口里把校验方式改掉,
+    下一次备份/还原就该按新的走 —— 而**正在跑的那一次**用的是开始时的取值。
+    """
+    config = load_or_repair_config(config_path).config
+    return VerificationPolicy(
+        mode=config.verification.mode,
+        max_parallel=config.verification.max_parallel,
+    )
+
+
 @dataclass
 class _ActiveOperation:
     """一次正在进行中的备份(用于进度展示与取消请求)."""
@@ -307,6 +322,7 @@ class SqlArchiveService:
         adapters: Mapping[PlatformId, PlatformAdapter] | None = None,
         name_fetcher: NameFetcher | None = None,
         process_provider: ProcessNameProvider | None = None,
+        config_path: Path | None = None,
     ) -> None:
         """绑定数据库、备份根目录、调度器与缓存目录(后两者默认惰性创建).
 
@@ -333,9 +349,20 @@ class SqlArchiveService:
         self._jobs = ScheduledJobRepository(database)
         self._monitored = MonitoredDirectoryRepository(database)
         self._candidates = CandidateRepository(database)
-        self._backups = BackupService(database, backup_root=backup_root)
+        # 校验方式与并发上限**每次操作前现读配置**(用户可能刚在设置窗口里改过); 没有
+        # 配置路径(测试与演示)时交给服务用默认策略(sha256 + 保守并发数)。
+        self._verification_policy = (
+            (lambda: policy_from_config(config_path))
+            if config_path is not None
+            else None
+        )
+        self._backups = BackupService(
+            database, backup_root=backup_root, policy=self._verification_policy
+        )
         self._restore = RestoreService(
-            database, backup_root=backup_root, backups=self._backups
+            database,
+            backup_root=backup_root,
+            backups=self._backups,
         )
         self._export = ExportService(database, backup_root=backup_root)
         self._import = ImportService(database, backup_root=backup_root)
@@ -1445,6 +1472,8 @@ class SqlArchiveService:
             with self._operation_lock:
                 self._active = None
         self._touch()
+        # 恢复前的安全点也是备份: 名称模式下它同样先没哈希, 在这里一并排上补齐.
+        self._spawn_hash_backfill(gid)
         return tr(
             "result.restore_written",
             name=game.name,
@@ -1804,7 +1833,43 @@ class SqlArchiveService:
         # 主页的"最近活跃/长期未更新"分类依据这次动作的时间.
         self._games.touch_activity(game_id)
         self._touch()
+        self._spawn_hash_backfill(game_id)
         return node
+
+    def _spawn_hash_backfill(self, game_id: int) -> None:
+        """把这款游戏里还缺哈希的备份交给一个后台线程补齐.
+
+        **不在本次备份里等它**: 备份已经落盘并入库, 补齐只是把逐文件 sha256 补上
+        (名称模式跳过哈希就是为了这会儿快) —— 补齐期间这些备份按名称校验, 界面上
+        看得出来(见 ui.models 的校验状态)。
+
+        以**游戏**为单位而不是单个节点: 恢复前的安全点走的是 ``RestoreService``
+        (不经过这里), 它们在恢复完成后由 :meth:`run_restore` 一并排进来; 攒了十几份
+        缺哈希的旧备份也只开一个线程, 顺序补完。
+        """
+        pending = [
+            node
+            for node in self._backups.list_nodes(game_id)
+            if self._backups.needs_hash_backfill(node)
+        ]
+        if not pending:
+            return
+        threading.Thread(
+            target=self._run_hash_backfill,
+            args=(pending,),
+            daemon=True,
+            name="hash-backfill",
+        ).start()
+
+    def _run_hash_backfill(self, nodes: Sequence[BackupNode]) -> None:
+        """后台逐个补齐哈希: 失败只记日志 —— 备份本身已经成功, 哈希缺着不影响使用."""
+        for node in nodes:
+            try:
+                filled = self._backups.backfill_hashes(node)
+            except (ArchiveManagementError, OSError) as exc:
+                logger.warning("补齐备份哈希失败(%s): %s", node.storage_relpath, exc)
+                continue
+            logger.debug("补齐备份哈希 %d 个文件: %s", filled, node.storage_relpath)
 
     def _pause_schedule(self, gid: int) -> None:
         """把某游戏的定时备份置为暂停(停用或归档时调用; 没有任务就不做)."""

@@ -325,6 +325,8 @@ def _backup_config(
         "is_safety": node.is_safety,
         "created_at": None if node.created_at is None else node.created_at.isoformat(),
         "content_hash": node.content_hash,
+        # 这份备份当初是按哪套校验数据记的(名称模式下逐文件哈希可能还空着).
+        "verify_mode": node.verify_mode,
         "current": current,
     }
 

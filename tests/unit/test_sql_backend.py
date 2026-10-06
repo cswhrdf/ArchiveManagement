@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from archive_management.application.imports import (
     BatchInspection,
     ImportInspection,
 )
+from archive_management.config import AppConfig, VerificationSettings, save_config
 from archive_management.domain import (
     ArtworkRef,
     BackupNode,
@@ -30,7 +32,11 @@ from archive_management.domain import (
     SavePathCandidate,
     ScheduledJob,
 )
-from archive_management.exceptions import ArchiveManagementError, ArtworkImageError
+from archive_management.exceptions import (
+    ArchiveManagementError,
+    ArtworkImageError,
+    SnapshotError,
+)
 from archive_management.i18n import set_locale, tr
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
@@ -65,7 +71,7 @@ from archive_management.ui.models import (
     size_label,
     visible_in_branch_view,
 )
-from archive_management.ui.sql_backend import SqlArchiveService
+from archive_management.ui.sql_backend import SqlArchiveService, policy_from_config
 
 # 一张最小的 PNG 文件头(封面缓存只认文件头就能判定可用).
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
@@ -85,7 +91,7 @@ pytestmark = [
 ]
 
 
-def _service(tmp_path: Path) -> SqlArchiveService:
+def _service(tmp_path: Path, *, config_path: Path | None = None) -> SqlArchiveService:
     database = Database(tmp_path / "app.db")
     database.migrate()
     # 用不启动线程的手动调度后端, 让测试不依赖真实时间轴.
@@ -93,6 +99,7 @@ def _service(tmp_path: Path) -> SqlArchiveService:
         database,
         backup_root=tmp_path / "backups",
         scheduler=BackupScheduler(backend=ManualBackend()),
+        config_path=config_path,
     )
 
 
@@ -1047,10 +1054,10 @@ def _advance(save: Path, text: str = "") -> None:
 
 
 def _service_with_save(
-    tmp_path: Path, name: str = "Demo"
+    tmp_path: Path, name: str = "Demo", *, config_path: Path | None = None
 ) -> tuple[SqlArchiveService, str, Path]:
     """构造带一个可用存档位置的游戏, 返回服务、游戏 id 与存档目录."""
-    service = _service(tmp_path)
+    service = _service(tmp_path, config_path=config_path)
     game_id = service.add_game(name).game_id
     save = tmp_path / "save"
     save.mkdir()
@@ -3288,3 +3295,102 @@ def test_a_failed_batch_import_is_logged_and_reraised(
 
     assert any("import.batch_failed" in line for line in audit_log)
     assert service.list_games() == []
+
+
+# -- 校验方式与后台补齐哈希 -------------------------------------------------
+
+
+def test_policy_from_config_reads_the_verification_section(tmp_path: Path) -> None:
+    """校验方式与并发数从配置文件读, 不会因为"没传"而落到默认值上."""
+    path = tmp_path / "config.json"
+    save_config(
+        AppConfig(verification=VerificationSettings(mode="name", max_parallel=3)),
+        path,
+    )
+
+    policy = policy_from_config(path)
+
+    assert (policy.mode, policy.max_parallel) == ("name", 3)
+
+
+def test_a_service_without_a_config_path_uses_the_default_policy(
+    tmp_path: Path,
+) -> None:
+    """测试与演示场景没有配置路径: 用默认策略(sha256), 不凭空去读用户配置."""
+    service, game_id, _save = _service_with_save(tmp_path)
+
+    service.run_backup_now(game_id)
+
+    assert service.list_backups(game_id)[0].verified is True
+
+
+def test_name_mode_backup_is_hash_backfilled_in_the_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """名称模式: 备份立刻返回, 后台线程把缺的 sha256 补齐(界面不必等)."""
+    config_path = tmp_path / "config.json"
+    save_config(AppConfig(verification=VerificationSettings(mode="name")), config_path)
+    service, game_id, _save = _service_with_save(tmp_path, config_path=config_path)
+    done = threading.Event()
+    real_backfill = service._backups.backfill_hashes
+
+    def _backfill(node: BackupNode) -> int:
+        try:
+            return real_backfill(node)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(service._backups, "backfill_hashes", _backfill)
+
+    service.run_backup_now(game_id)
+
+    assert done.wait(timeout=10) is True
+    backup_id = int(service.list_backups(game_id)[0].backup_id)
+    files = service._nodes.list_files(backup_id)
+    assert [entry.sha256 for entry in files if entry.file_kind == "file"] != [""]
+    node = service._backups.get(backup_id)
+    assert node is not None
+    assert service._backups.needs_hash_backfill(node) is False
+
+
+def test_a_failed_hash_backfill_only_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """补齐失败不能让"备份成功"变成错误: 只记一条日志, 哈希留着下次再补."""
+    service, _game_id, _save = _service_with_save(tmp_path)
+    node = BackupNode(game_id=1, verify_mode="name")
+    calls: list[BackupNode] = []
+
+    def _boom(target: BackupNode) -> int:
+        calls.append(target)
+        raise SnapshotError("读不出来了")
+
+    monkeypatch.setattr(service._backups, "backfill_hashes", _boom)
+
+    service._run_hash_backfill([node])
+
+    assert calls == [node]
+
+
+def test_a_backfill_that_found_nothing_stays_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一个文件都没补上(文件都不在了)时不留日志噪音, 也不算失败."""
+    service, _game_id, _save = _service_with_save(tmp_path)
+    node = BackupNode(game_id=1, verify_mode="name")
+    monkeypatch.setattr(service._backups, "backfill_hashes", lambda _node: 0)
+
+    service._run_hash_backfill([node])
+
+
+def test_a_game_with_nothing_to_backfill_spawns_no_thread(
+    tmp_path: Path,
+) -> None:
+    """严格模式下没有待补的备份: 不白开一个后台线程."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    before = threading.active_count()
+
+    service._spawn_hash_backfill(int(game_id))
+
+    assert threading.active_count() == before

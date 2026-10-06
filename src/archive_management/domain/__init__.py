@@ -49,6 +49,8 @@ from archive_management.domain.discovery import (
     dedupe_candidates,
 )
 from archive_management.domain.entities import (
+    DEFAULT_VERIFICATION_MODE,
+    VERIFICATION_MODES,
     BackupFileEntry,
     BackupNode,
     FileKind,
@@ -58,6 +60,8 @@ from archive_management.domain.entities import (
     SaveLocation,
     SaveSource,
     ScheduledJob,
+    VerificationMode,
+    normalize_verification_mode,
 )
 from archive_management.domain.game_rules import (
     ARCHIVED_ACTIONS,
@@ -123,6 +127,7 @@ __all__ = [
     "CONFIDENCE_RANK",
     "DEFAULT_KEEP_AUTO",
     "DEFAULT_PAGE_SIZE",
+    "DEFAULT_VERIFICATION_MODE",
     "HOME_STATE_VERSION",
     "MAX_TAGS",
     "MAX_TAG_LENGTH",
@@ -145,6 +150,7 @@ __all__ = [
     "STALE_DAYS",
     "STEAM_DATA_FORMAT_VERSION",
     "TAG_SEPARATORS",
+    "VERIFICATION_MODES",
     "ActivationState",
     "ArtworkKind",
     "ArtworkRef",
@@ -184,6 +190,7 @@ __all__ = [
     "SteamGameEntry",
     "TreeInput",
     "TreeNode",
+    "VerificationMode",
     "action_allowed",
     "activation_delay",
     "auto_prune_ids",
@@ -203,6 +210,7 @@ __all__ = [
     "maintain_queue",
     "move_to_front",
     "normalize_tags",
+    "normalize_verification_mode",
     "origin_counts",
     "parse_category",
     "parse_platform_game",

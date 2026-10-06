@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,7 @@ from archive_management.application.restore import (
     PROBLEM_KIND_MISMATCH,
     PROBLEM_UNWRITABLE,
     WARN_MORE_LOCATIONS,
+    WARN_NO_HASHES,
     WARN_RECORDED_PATH,
     RestoreService,
     _safe_path,
@@ -36,6 +37,7 @@ from archive_management.infrastructure.repository import (
 )
 from archive_management.services.processes import ProcessNameProvider
 from archive_management.services.snapshot import MANIFEST_FILENAME, SnapshotEntry
+from archive_management.services.verification import VerificationPolicy
 
 pytestmark = [
     pytest.mark.integration,
@@ -156,6 +158,83 @@ def test_plan_marks_snapshot_invalid_when_content_changed(tmp_path: Path) -> Non
     assert plan.snapshot_reason is not None
     with pytest.raises(SnapshotError):
         env.restore.restore(env.game_id, _node_id(node))
+
+
+# ------------------------------------------------------ 校验方式(严格/仅名称)
+
+
+def _name_mode_env(tmp_path: Path) -> _Env:
+    """构造"名称模式"的环境: 备份先不算哈希, 因此这份备份没有内容哈希可比."""
+    env = _setup(tmp_path)
+    backups = BackupService(
+        env.database, backup_root=env.root, policy=VerificationPolicy(mode="name")
+    )
+    restore = RestoreService(
+        env.database,
+        backup_root=env.root,
+        backups=backups,
+        process_provider=_idle_provider,
+    )
+    return replace(env, backups=backups, restore=restore)
+
+
+def _strict_env(env: _Env) -> _Env:
+    """把同一份数据换成"严格校验"的一套用例(用来验"备份没有哈希时降级")."""
+    backups = BackupService(
+        env.database, backup_root=env.root, policy=VerificationPolicy(mode="sha256")
+    )
+    restore = RestoreService(
+        env.database,
+        backup_root=env.root,
+        backups=backups,
+        process_provider=_idle_provider,
+    )
+    return replace(env, backups=backups, restore=restore)
+
+
+def test_name_mode_plan_warns_that_only_names_are_checked(tmp_path: Path) -> None:
+    """名称模式创建的备份没有哈希数据: 请求 sha256 时降级, 并在预检里说清楚."""
+    env = _name_mode_env(tmp_path)
+    node = env.backup()
+    env = _strict_env(env)
+
+    plan = env.restore.plan(env.game_id, _node_id(node))
+
+    assert plan.snapshot_ok is True
+    assert WARN_NO_HASHES in plan.warnings
+
+
+def test_name_mode_restore_skips_the_hash_comparison(tmp_path: Path) -> None:
+    """名称模式下写回只核对名称: 内容被改过也照写(这正是它快的代价)."""
+    env = _name_mode_env(tmp_path)
+    node = env.backup()
+    snapshot = env.backups.snapshot_root(node)
+    (snapshot / "loc-0" / "slot1.dat").write_text("tampered", encoding="utf-8")
+    (env.save / "slot1.dat").write_text("changed", encoding="utf-8")
+
+    plan = env.restore.plan(env.game_id, _node_id(node))
+    result = env.restore.restore(env.game_id, _node_id(node), safety_point=False)
+
+    assert plan.snapshot_ok is True
+    assert plan.warnings == ()
+    assert result.restored_files == 1
+    assert _slot(env.save) == "tampered"
+
+
+def test_asking_only_for_names_skips_the_hashes_even_when_they_exist(
+    tmp_path: Path,
+) -> None:
+    """严格模式备份 + 选了"仅校验名称": 不比对哈希, 写回照旧成功."""
+    env = _name_mode_env(tmp_path)
+    node = env.backup()
+    snapshot = env.backups.snapshot_root(node)
+    (snapshot / "loc-0" / "slot1.dat").write_text("tampered", encoding="utf-8")
+    (env.save / "slot1.dat").write_text("changed", encoding="utf-8")
+
+    result = env.restore.restore(env.game_id, _node_id(node), safety_point=False)
+
+    assert result.restored_files == 1
+    assert _slot(env.save) == "tampered"
 
 
 @pytest.mark.blocker  # 允许写回备份根就等于让备份被自己的恢复流程改掉
@@ -560,6 +639,7 @@ def test_helper_stage_file_requires_exactly_one_file(tmp_path: Path) -> None:
             snapshot_root=tmp_path,
             staging=tmp_path / "stage",
             cancelled=None,
+            verify_hashes=True,
         )
 
 
@@ -582,6 +662,7 @@ def test_helper_stage_file_and_directory_stop_when_already_cancelled(
             snapshot_root=tmp_path,
             staging=tmp_path / "stage-file",
             cancelled=cancelled,
+            verify_hashes=True,
         )
     with pytest.raises(OperationCancelledError):
         _stage_directory(
@@ -591,6 +672,7 @@ def test_helper_stage_file_and_directory_stop_when_already_cancelled(
             staging=tmp_path / "stage-dir",
             progress=None,
             cancelled=cancelled,
+            verify_hashes=True,
         )
     assert not (tmp_path / "stage-file").exists()
     assert not (tmp_path / "stage-dir").exists()

@@ -31,7 +31,12 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from archive_management.domain import FileKind, PathKind
+from archive_management.domain import (
+    DEFAULT_VERIFICATION_MODE,
+    FileKind,
+    PathKind,
+    VerificationMode,
+)
 from archive_management.exceptions import (
     ArchiveManagementError,
     OperationCancelledError,
@@ -178,6 +183,9 @@ class SnapshotVerification:
     missing: tuple[str, ...] = ()
     mismatched: tuple[str, ...] = ()
     reason: str | None = None
+    # 这次**真正执行**的校验方式(见 ``services.verification.resolve_check``): 请求 sha256
+    # 但清单里没有哈希数据时会降级成 name, 调用方据此提示"这次只校了名称"。
+    mode: VerificationMode = DEFAULT_VERIFICATION_MODE
 
 
 def create_snapshot(
@@ -186,11 +194,16 @@ def create_snapshot(
     *,
     progress: ProgressCallback | None = None,
     cancelled: Callable[[], bool] | None = None,
+    hash_files: bool = True,
 ) -> SnapshotResult:
     """把 ``sources`` 复制为 ``destination`` 处的完整快照并返回清单.
 
     ``destination`` 已存在时抛出 :class:`SnapshotError`; 复制过程中任何失败
-    都会清理临时目录, 使调用方可以安全地重试或放弃.
+    都会清理临时目录, 使调用方可以安全地重试或放弃。
+
+    ``hash_files=False``(名称模式)时**不计算内容哈希**: 清单里的 sha256 先留空,
+    由调用方随后用后台协程补齐(见 ``services.verification``)—— 备份因此不必读第二
+    遍磁盘。补齐前这份备份只能按名称校验。
     """
     if not sources:
         raise SnapshotError("没有可备份的存档位置")
@@ -200,7 +213,13 @@ def create_snapshot(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f"{destination.name}.partial-{uuid4().hex}"
     try:
-        entries = _copy_into(temporary, sources, progress=progress, cancelled=cancelled)
+        entries = _copy_into(
+            temporary,
+            sources,
+            progress=progress,
+            cancelled=cancelled,
+            hash_files=hash_files,
+        )
         _report(progress, 0.95, "校验快照清单")
         content_hash = content_hash_of(entries)
         manifest = _manifest(sources, entries, content_hash)
@@ -267,12 +286,19 @@ def _commit_failure_message(error: OSError, attempts: int) -> str:
 
 
 def _inspect_entry(
-    root: Path, entry: SnapshotEntry, *, deep: bool
+    root: Path,
+    entry: SnapshotEntry,
+    *,
+    deep: bool,
+    hasher: Callable[[Path], str],
 ) -> tuple[Literal["missing", "mismatched"] | None, bool]:
     """检查单条清单项: 返回 (问题, 是否计入"已检查"数量).
 
     目录与符号链接只要类型对就算检查过 —— 符号链接只记录目标字符串, 不比对内容;
     文件必须真实存在才算检查过, 于是"已检查 N 项"始终是真实看了一眼的数量。
+
+    ``hasher`` 决定"内容对不对"这件事怎么算: 默认是现读现算, 调用方可以换成预取好的
+    结果(见 ``services.verification``, 那是并发算出来的)。
     """
     target = root / entry.relative_path
     if entry.file_kind == "directory":
@@ -281,30 +307,37 @@ def _inspect_entry(
         return None, True
     if not target.exists():
         return "missing", False
-    if deep and sha256_of_file(target) != entry.sha256:
+    if deep and hasher(target) != entry.sha256:
         return "mismatched", True
     return None, True
 
 
-def verify_snapshot(root: Path, *, deep: bool = True) -> SnapshotVerification:
+def verify_snapshot(
+    root: Path,
+    *,
+    deep: bool = True,
+    hasher: Callable[[Path], str] | None = None,
+) -> SnapshotVerification:
     """按 manifest 校验快照: 检查缺失项与哈希不一致项.
 
     ``deep=False`` 时只检查清单项是否存在, 不重新计算文件哈希, 供 UI 列表
-    等高频只读场景使用.
+    等高频只读场景使用. ``hasher`` 省略时现读现算(:func:`sha256_of_file`);
+    传入预取好的结果时这一轮校验就不再读磁盘(调用方自己负责把哈希算对)。
     """
+    compute = sha256_of_file if hasher is None else hasher
     root = Path(root)
     manifest_path = root / MANIFEST_FILENAME
     if not manifest_path.is_file():
         return SnapshotVerification(
             ok=False, checked=0, reason=f"缺少清单文件: {MANIFEST_FILENAME}"
         )
-    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = _read_manifest_raw(root)
     entries = read_manifest_entries(raw)
     missing: list[str] = []
     mismatched: list[str] = []
     checked = 0
     for entry in entries:
-        problem, counted = _inspect_entry(root, entry, deep=deep)
+        problem, counted = _inspect_entry(root, entry, deep=deep, hasher=compute)
         checked += int(counted)
         if problem == "missing":
             missing.append(entry.relative_path)
@@ -329,12 +362,8 @@ class SnapshotManifest:
     content_hash: str
 
 
-def read_manifest(root: Path) -> SnapshotManifest:
-    """读取快照清单, 供恢复用例定位写回目标.
-
-    与 :func:`verify_snapshot` 的区别是这里还会解析 ``sources``: 恢复必须知道
-    ``loc-<index>`` 当初对应哪个存档路径, 才能把内容写回原位置。
-    """
+def _read_manifest_raw(root: Path) -> dict[str, object]:
+    """读清单的原始字典: 文件缺失、读不动、JSON 坏了都收敛成 SnapshotError."""
     manifest_path = Path(root) / MANIFEST_FILENAME
     if not manifest_path.is_file():
         raise SnapshotError(f"缺少清单文件: {MANIFEST_FILENAME}")
@@ -344,11 +373,46 @@ def read_manifest(root: Path) -> SnapshotManifest:
         raise SnapshotError(f"无法读取快照清单: {exc}") from exc
     if not isinstance(raw, dict):
         raise SnapshotError("快照清单顶层必须是对象")
+    return raw
+
+
+def read_manifest(root: Path) -> SnapshotManifest:
+    """读取快照清单, 供恢复用例定位写回目标.
+
+    与 :func:`verify_snapshot` 的区别是这里还会解析 ``sources``: 恢复必须知道
+    ``loc-<index>`` 当初对应哪个存档路径, 才能把内容写回原位置。
+    """
+    raw = _read_manifest_raw(root)
     return SnapshotManifest(
         entries=read_manifest_entries(raw),
         sources=_parse_sources(raw.get("sources")),
         content_hash=str(raw.get("content_hash", "")),
     )
+
+
+def manifest_entries(root: Path) -> tuple[SnapshotEntry, ...]:
+    """只读清单里的条目(校验与补齐哈希都得先知道这份快照有哪些文件)."""
+    return read_manifest_entries(_read_manifest_raw(root))
+
+
+def rewrite_manifest(root: Path, entries: Sequence[SnapshotEntry]) -> str:
+    """用新的清单项原子重写 manifest, 返回新的整体内容哈希.
+
+    后台补齐哈希用它: 只改各条目的 sha256 与整体内容哈希, 创建时间与来源原样保留。
+    先写同级的临时文件再改名 —— 中途失败(被结束进程/断电)时清单要么是旧的、要么是新
+    的, 不会留下半截 JSON。
+    """
+    path = Path(root) / MANIFEST_FILENAME
+    raw = _read_manifest_raw(root)
+    content_hash = content_hash_of(entries)
+    raw["entries"] = [entry.as_dict() for entry in entries]
+    raw["content_hash"] = content_hash
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+    return content_hash
 
 
 def _source_index(item: dict[str, object]) -> int:
@@ -487,6 +551,7 @@ def _copy_into(
     *,
     progress: ProgressCallback | None,
     cancelled: Callable[[], bool] | None,
+    hash_files: bool,
 ) -> list[SnapshotEntry]:
     """把全部来源复制到临时目录并返回清单."""
     plans = _plan(sources)
@@ -502,7 +567,7 @@ def _copy_into(
             0.9 * (position - 1) / total,
             f"复制 {plan.entry.relative_path}",
         )
-        entries.append(_materialize(plan, temporary))
+        entries.append(_materialize(plan, temporary, hash_files=hash_files))
     return entries
 
 
@@ -596,8 +661,14 @@ def _iter_directory(root: Path) -> list[tuple[Path, str]]:
     return found
 
 
-def _materialize(plan: _CopyPlan, temporary: Path) -> SnapshotEntry:
-    """把单个计划落到临时目录, 返回校验后的清单项."""
+def _materialize(
+    plan: _CopyPlan, temporary: Path, *, hash_files: bool
+) -> SnapshotEntry:
+    """把单个计划落到临时目录, 返回校验后的清单项.
+
+    ``hash_files=False``(名称模式)时只复制不算哈希, 也不做"复制后回读校验":
+    清单里那条空 sha256 就是"还没算"的标记(由调用方随后补齐)。
+    """
     target = temporary / plan.entry.relative_path
     target.parent.mkdir(parents=True, exist_ok=True)
     if plan.entry.file_kind == "directory":
@@ -609,10 +680,21 @@ def _materialize(plan: _CopyPlan, temporary: Path) -> SnapshotEntry:
         return plan.entry
     if plan.origin is None:
         raise SnapshotError(f"缺少复制来源: {plan.entry.relative_path}")
+    if not hash_files:
+        _copy_without_hash(plan.origin, target)
+        return replace(plan.entry, size=target.stat().st_size)
     digest = _copy_with_hash(plan.origin, target)
     if sha256_of_file(target) != digest:
         raise SnapshotError(f"哈希校验失败: {plan.entry.relative_path}")
     return replace(plan.entry, sha256=digest, size=target.stat().st_size)
+
+
+def _copy_without_hash(origin: Path, target: Path) -> None:
+    """只复制内容(名称模式): 不读第二遍磁盘."""
+    try:
+        shutil.copyfile(origin, target)
+    except OSError as exc:
+        raise SnapshotError(f"复制失败 {origin}: {exc}") from exc
 
 
 def _copy_with_hash(origin: Path, target: Path) -> str:

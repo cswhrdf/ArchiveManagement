@@ -98,6 +98,22 @@ def test_games_table_remembers_which_name_the_program_wrote(tmp_path: Path) -> N
     assert database.schema_version() >= 13
 
 
+def test_backup_nodes_remember_the_verification_mode(tmp_path: Path) -> None:
+    """校验方式靠 verify_mode 一列(版本 15 迁移), 供"这份备份是按哪套数据记的"判断."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+
+    with database.connect() as connection:
+        rows = connection.execute("PRAGMA table_info(backup_nodes)").fetchall()
+        columns = {str(row["name"]): row for row in rows}
+
+    assert "verify_mode" in columns
+    assert database.schema_version() >= 15
+    # 默认值是**空串**: 升级前创建的老备份没有这一列, 迁移补上的也是空串 ——
+    # 读出来按 sha256 看待(老存档只有 sha256 的数据).
+    assert columns["verify_mode"]["dflt_value"] == "''"
+
+
 def test_session_commits_changes(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     database.migrate()

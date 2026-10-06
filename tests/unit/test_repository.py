@@ -580,3 +580,59 @@ def test_describe_of_a_missing_backup_is_zero(tmp_path: Path) -> None:
     database = _database(tmp_path)
 
     assert BackupRepository(database).describe(999999) == (0, 0)
+
+
+def test_a_backup_node_round_trips_its_verification_mode(tmp_path: Path) -> None:
+    """校验方式落库再读回来; 升级前的老行(空串)读出来按 sha256 看待."""
+    database = _database(tmp_path)
+    game_id = _game_id(GameRepository(database))
+    repo = BackupRepository(database)
+
+    node = repo.add(BackupNode(game_id=game_id, verify_mode="name"))
+
+    assert node.id is not None
+    loaded = repo.get(node.id)
+    assert loaded is not None
+    assert loaded.verify_mode == "name"
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE backup_nodes SET verify_mode = '' WHERE id = ?", (node.id,)
+        )
+
+    legacy = repo.get(node.id)
+
+    assert legacy is not None
+    assert legacy.verify_mode == "sha256"
+
+
+def test_record_hashes_writes_the_files_and_the_node_together(tmp_path: Path) -> None:
+    """补齐哈希时文件清单与节点记录要么一起改, 要么都不改(否则两边会互相矛盾)."""
+    database = _database(tmp_path)
+    game_id = _game_id(GameRepository(database))
+    repo = BackupRepository(database)
+    node = repo.add_with_files(
+        BackupNode(game_id=game_id, content_hash="旧的", verify_mode="name"),
+        [
+            BackupFileEntry(
+                backup_id=0, relative_path="loc-0/a.dat", size=3, sha256=""
+            ),
+            BackupFileEntry(
+                backup_id=0, relative_path="loc-0/b.dat", size=3, sha256=""
+            ),
+        ],
+    )
+    assert node.id is not None
+
+    repo.record_hashes(
+        node.id,
+        {"loc-0/a.dat": "a" * 64},
+        content_hash="新" * 64,
+        verify_mode="sha256",
+    )
+
+    stored = {item.relative_path: item.sha256 for item in repo.list_files(node.id)}
+    assert stored == {"loc-0/a.dat": "a" * 64, "loc-0/b.dat": ""}
+    updated = repo.get(node.id)
+    assert updated is not None
+    assert updated.content_hash == "新" * 64
+    assert updated.verify_mode == "sha256"

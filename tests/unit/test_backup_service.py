@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,7 +20,13 @@ from archive_management.application.backup import (
     MAX_TITLE_LENGTH,
     BackupService,
 )
-from archive_management.domain import BackupNode, DeletionMode, Game, SaveLocation
+from archive_management.domain import (
+    BackupNode,
+    DeletionMode,
+    Game,
+    SaveLocation,
+    VerificationMode,
+)
 from archive_management.exceptions import (
     ArchiveManagementError,
     ContentUnchangedError,
@@ -33,8 +40,22 @@ from archive_management.infrastructure.repository import (
     GameRepository,
     SaveLocationRepository,
 )
+from archive_management.services import snapshot as snapshot_mod
 from archive_management.services.naming import game_folder
-from archive_management.services.snapshot import MANIFEST_FILENAME, SnapshotSource
+from archive_management.services.snapshot import (
+    _DIRECTORY_SHA256,
+    MANIFEST_FILENAME,
+    SnapshotEntry,
+    SnapshotSource,
+    content_hash_of,
+    manifest_entries,
+    remove_snapshot,
+    rewrite_manifest,
+)
+from archive_management.services.verification import (
+    VerificationPolicy,
+    hashes_complete,
+)
 from helpers import touch_save
 
 pytestmark = [
@@ -48,7 +69,12 @@ pytestmark = [
 ]
 
 
-def _service(tmp_path: Path, *, saves: int = 1) -> tuple[BackupService, int]:
+def _service(
+    tmp_path: Path,
+    *,
+    saves: int = 1,
+    policy: VerificationPolicy | Callable[[], VerificationPolicy] | None = None,
+) -> tuple[BackupService, int]:
     """构造带一个游戏的备份服务, 返回服务与游戏 id."""
     database = Database(tmp_path / "app.db")
     database.migrate()
@@ -69,7 +95,7 @@ def _service(tmp_path: Path, *, saves: int = 1) -> tuple[BackupService, int]:
                 last_check_status="ok",
             )
         )
-    service = BackupService(database, backup_root=tmp_path / "backups")
+    service = BackupService(database, backup_root=tmp_path / "backups", policy=policy)
     return service, game.id
 
 
@@ -840,3 +866,159 @@ def test_deleting_the_current_root_moves_a_stale_pointer_to_the_child(
 
     assert plan.mode is DeletionMode.SHIFT
     assert service._games.current_backup(game_id) == second.id
+
+
+# -- 校验方式与后台补齐哈希 -------------------------------------------------
+
+
+def test_name_mode_skips_hashing_and_records_the_mode(tmp_path: Path) -> None:
+    """名称模式: 备份不算哈希(清单与数据库里的 sha256 都是空的), 并记下当初的方式."""
+    service, game_id = _service(tmp_path, policy=VerificationPolicy(mode="name"))
+
+    node = service.create_backup(game_id, title="快照")
+
+    assert node.verify_mode == "name"
+    assert node.id is not None
+    entries = manifest_entries(service.snapshot_root(node))
+    assert [entry.sha256 for entry in entries if entry.file_kind == "file"] == [""]
+    assert [entry.size for entry in entries if entry.file_kind == "file"] == [7]
+    stored = service._backups.list_files(node.id)
+    assert [entry.sha256 for entry in stored if entry.file_kind == "file"] == [""]
+    # 目录条目只记标记、不算内容: 它仍然带着自己的哨兵值.
+    assert [entry.sha256 for entry in stored if entry.file_kind == "directory"] == [
+        _DIRECTORY_SHA256
+    ]
+
+
+def test_name_mode_backup_asks_for_a_hash_backfill(tmp_path: Path) -> None:
+    """刚创建的名称模式备份需要补齐哈希; 严格模式备份一创建就齐了."""
+    names, game_id = _service(tmp_path, policy=VerificationPolicy(mode="name"))
+    strict_root = tmp_path / "strict"
+    strict_root.mkdir()
+    strict, strict_game_id = _service(
+        strict_root, policy=VerificationPolicy(mode="sha256")
+    )
+
+    assert names.needs_hash_backfill(names.create_backup(game_id)) is True
+    assert strict.needs_hash_backfill(strict.create_backup(strict_game_id)) is False
+
+
+def test_backfill_fills_the_hashes_in_the_manifest_and_the_database(
+    tmp_path: Path,
+) -> None:
+    """补齐: 并发算哈希 -> 重写清单 -> 回写数据库, 之后这份备份按 sha256 可校."""
+    service, game_id = _service(tmp_path, policy=VerificationPolicy(mode="name"))
+    node = service.create_backup(game_id)
+    assert node.id is not None
+
+    filled = service.backfill_hashes(node)
+
+    assert filled == 1
+    root = service.snapshot_root(node)
+    entries = manifest_entries(root)
+    (entry,) = [item for item in entries if item.file_kind == "file"]
+    assert entry.sha256 == snapshot_mod.sha256_of_file(root / entry.relative_path)
+    assert hashes_complete(entries) is True
+    stored = service._backups.list_files(node.id)
+    assert [item.sha256 for item in stored if item.file_kind == "file"] == [
+        entry.sha256
+    ]
+    updated = service._backups.get(node.id)
+    assert updated is not None
+    assert updated.verify_mode == "sha256"
+    assert updated.content_hash == content_hash_of(entries)
+    assert service.needs_hash_backfill(updated) is False
+    assert service.verify(updated).ok is True
+
+
+def test_backfill_only_closes_the_record_when_nothing_is_missing(
+    tmp_path: Path,
+) -> None:
+    """清单已经补全、只是记录没跟上: 不重算哈希, 只把记录收尾成 sha256."""
+    service, game_id = _service(tmp_path, policy=VerificationPolicy(mode="name"))
+    node = service.create_backup(game_id)
+    assert node.id is not None
+    root = service.snapshot_root(node)
+    # 手工模拟"清单写完、数据库还没写"的那一次中断.
+    complete = [
+        replace(entry, sha256=_digest_of(root, entry))
+        for entry in manifest_entries(root)
+    ]
+    rewrite_manifest(root, complete)
+
+    assert service.backfill_hashes(node) == 0
+
+    updated = service._backups.get(node.id)
+    assert updated is not None
+    assert updated.verify_mode == "sha256"
+    assert updated.content_hash == content_hash_of(complete)
+    # 已经补齐的备份再调一次是空操作(界面只在缺哈希时才排它, 这里是兜底).
+    assert service.backfill_hashes(updated) == 0
+
+
+def _digest_of(root: Path, entry: SnapshotEntry) -> str:
+    """按磁盘上的内容算出清单项该有的哈希(目录与符号链接保留原有标记)."""
+    if entry.file_kind != "file":
+        return entry.sha256
+    return snapshot_mod.sha256_of_file(root / entry.relative_path)
+
+
+def test_backfill_keeps_the_archive_as_is_when_the_files_are_gone(
+    tmp_path: Path,
+) -> None:
+    """要补的文件全都不在了: 原样留着(仍算"没补齐"), 下次还能再补."""
+    service, game_id = _service(tmp_path, policy=VerificationPolicy(mode="name"))
+    node = service.create_backup(game_id)
+    assert node.id is not None
+    root = service.snapshot_root(node)
+    remove_snapshot(root / "loc-0")
+
+    assert service.backfill_hashes(node) == 0
+
+    updated = service._backups.get(node.id)
+    assert updated is not None
+    assert updated.verify_mode == "name"
+    assert service.needs_hash_backfill(updated) is True
+
+
+def test_a_policy_provider_is_asked_every_time(tmp_path: Path) -> None:
+    """策略可以传一个"每次现取"的可调用对象(用户随时可能在设置里改校验方式)."""
+    modes: list[VerificationMode] = ["name"]
+    service, game_id = _service(tmp_path, policy=lambda: VerificationPolicy(modes[0]))
+    first = service.create_backup(game_id)
+    modes[0] = "sha256"
+    _touch_save(tmp_path)
+    second = service.create_backup(game_id)
+
+    assert (first.verify_mode, second.verify_mode) == ("name", "sha256")
+    assert service.needs_hash_backfill(first) is True
+    assert service.needs_hash_backfill(second) is False
+
+
+def _name_mode_service(
+    tmp_path: Path, *, policy: VerificationPolicy | None = None
+) -> tuple[BackupService, int]:
+    """构造"名称模式"的备份服务(默认策略就是名称模式)."""
+    database = Database(tmp_path / "app.db")
+    database.migrate()
+    game = GameRepository(database).add(Game(name="Demo"))
+    assert game.id is not None
+    save = tmp_path / "save0"
+    save.mkdir()
+    (save / "slot.dat").write_text("state-0", encoding="utf-8")
+    SaveLocationRepository(database).add(
+        SaveLocation(
+            game_id=game.id,
+            path=str(save),
+            path_kind="directory",
+            is_primary=True,
+            last_checked_at=datetime.now(UTC),
+            last_check_status="ok",
+        )
+    )
+    service = BackupService(
+        database,
+        backup_root=tmp_path / "backups",
+        policy=policy if policy is not None else VerificationPolicy(mode="name"),
+    )
+    return service, game.id

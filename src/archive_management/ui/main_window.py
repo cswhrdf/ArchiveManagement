@@ -39,8 +39,10 @@ from archive_management.domain import (
     REASON_ENABLED,
     REASON_FALLBACK,
     GameAction,
+    VerificationMode,
     action_allowed,
     activation_delay,
+    normalize_verification_mode,
 )
 from archive_management.exceptions import (
     ArchiveManagementError,
@@ -422,6 +424,9 @@ class ArchiveApp(ctk.CTk):
         self._base_font_px = set_base_font_px(loaded.config.ui.base_font_px).base_px
         # 记住窗口几何的开关(默认开): 关掉时关窗不写, 且把已经记下的那套删掉。
         self._remember_window = loaded.config.ui.remember_window
+        # 备份校验方式与并发校验数(设置窗口只读展示后者; 数值由本机情况算出后落盘)。
+        self._verification_mode: VerificationMode = loaded.config.verification.mode
+        self._verification_parallel = loaded.config.verification.max_parallel
         # 自动启停开关同样取自这份配置(默认关闭); 轮询结果、"是否忙"、队列是否非空
         # 与已经连续跑了几档(自适应间隔)都在下面维护。
         self._activation = loaded.config.activation.auto
@@ -621,6 +626,37 @@ class ArchiveApp(ctk.CTk):
                 "settings.remember_switched_on"
                 if enabled
                 else "settings.remember_switched_off"
+            ),
+        )
+        return None
+
+    def _save_verification(self, mode: VerificationMode) -> None:
+        """把备份校验方式写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        # 内容有问题时 load_or_repair_config 已经剔除过非法部分, 这里总能拿到可用配置。
+        config = load_or_repair_config(self._paths.config_path).config
+        config.verification.mode = mode
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存校验方式失败: %s", exc)
+
+    def _on_verification_change(self, mode: str) -> str | None:
+        """切换备份校验方式: 写回配置; 返回 None 表示成功.
+
+        只改配置, 不通知后端: 备份与还原都在**每次操作前**现读一次配置
+        (见 ui.sql_backend.policy_from_config), 因此下一次备份就会按新方式走, 而正在
+        跑的那一次仍用开始时的取值 —— 中途换掉的校验方式不该影响半途的操作。
+        """
+        self._verification_mode = normalize_verification_mode(mode)
+        self._save_verification(self._verification_mode)
+        log_action("ui.switch_verification", mode=mode)
+        self._feedback(
+            FeedbackKind.INFO,
+            tr(
+                "settings.verification_switched",
+                mode=tr(f"settings.verification_{mode}"),
             ),
         )
         return None
@@ -2917,6 +2953,8 @@ class ArchiveApp(ctk.CTk):
             theme=self._theme,
             language=self._language,
             base_font_px=self._base_font_px,
+            verification_mode=self._verification_mode,
+            verification_parallel=self._verification_parallel,
             debug=self._debug,
             activation=self._activation,
             remember_window=self._remember_window,
@@ -2924,6 +2962,7 @@ class ArchiveApp(ctk.CTk):
             on_toggle_theme=self._on_toggle_theme,
             on_apply_language=self._on_language_change,
             on_apply_font_size=self._on_font_size_change,
+            on_apply_verification=self._on_verification_change,
             on_apply_debug=self._on_debug_change,
             on_apply_activation=self._on_activation_change,
             on_apply_remember_window=self._on_remember_window_change,
@@ -3346,6 +3385,7 @@ def run_gui(
         backup_root=paths.backup_root,
         cache_dir=paths.cache_dir,
         artwork_dir=paths.artwork_dir,
+        config_path=paths.config_path,
     )
     app = ArchiveApp(
         backend,

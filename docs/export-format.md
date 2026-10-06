@@ -108,6 +108,7 @@ manifest.json            # 外层清单: kind=batch + games[] 逐游戏一行
 | `is_safety`      | 布尔          | 是否恢复前安全点（决定内容放在 `timeline/` 还是 `branches/`）      |
 | `created_at`     | 字符串或 null | 节点创建时间（ISO 8601）；读不出来时留空，由数据库补当前时间       |
 | `content_hash`   | 字符串或 null | 内容哈希，用于「内容没变不重复备份」的比对                         |
+| `verify_mode`    | 字符串        | 这份备份当初用的校验方式（`sha256` / `name`）；**老包没有这个字段**，读出来按 `sha256` 处理（那时只有这一种） |
 | `current`        | 布尔          | 导出时它是否是游戏的「当前节点」                                   |
 
 `schedule` 的字段：`interval`（周期文本，如 `30m`）、`enabled`（布尔）、`keep_auto`（自动备份保留份数）。

@@ -8,7 +8,7 @@ SQLite 行, 供应用用例与后端调用. 所有写操作都封装在
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
@@ -32,6 +32,7 @@ from archive_management.domain import (
     SaveCandidateStatus,
     SaveLocation,
     ScheduledJob,
+    VerificationMode,
 )
 from archive_management.domain.discovery import normalize_game_name
 from archive_management.exceptions import DatabaseError
@@ -121,6 +122,8 @@ def _row_to_backup_node(row: sqlite3.Row) -> BackupNode:
         storage_relpath=row["storage_relpath"],
         created_at=_parse_dt(row["created_at"]),
         is_safety=_as_bool(row["is_safety"]),
+        # 升级前的老行是空串, 模型会把它收敛成 sha256(老备份只有 sha256 的数据).
+        verify_mode=row["verify_mode"],
     )
 
 
@@ -517,7 +520,7 @@ class BackupRepository:
             cursor = connection.execute(
                 "INSERT INTO backup_nodes (game_id, parent_id, node_kind,"
                 " branch_name, note, content_hash, storage_relpath, created_at,"
-                " is_safety) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " is_safety, verify_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node.game_id,
                     node.parent_id,
@@ -528,6 +531,7 @@ class BackupRepository:
                     node.storage_relpath,
                     created_at,
                     int(node.is_safety),
+                    node.verify_mode,
                 ),
             )
             if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
@@ -544,6 +548,7 @@ class BackupRepository:
             storage_relpath=node.storage_relpath,
             created_at=_parse_dt(created_at),
             is_safety=node.is_safety,
+            verify_mode=node.verify_mode,
         )
 
     def get(self, backup_id: int) -> BackupNode | None:
@@ -551,7 +556,7 @@ class BackupRepository:
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT id, game_id, parent_id, node_kind, branch_name, note, title,"
-                " content_hash, storage_relpath, created_at, is_safety"
+                " content_hash, storage_relpath, created_at, is_safety, verify_mode"
                 " FROM backup_nodes WHERE id = ?",
                 (backup_id,),
             ).fetchone()
@@ -562,7 +567,7 @@ class BackupRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT id, game_id, parent_id, node_kind, branch_name, note, title,"
-                " content_hash, storage_relpath, created_at, is_safety"
+                " content_hash, storage_relpath, created_at, is_safety, verify_mode"
                 " FROM backup_nodes WHERE game_id = ? ORDER BY created_at, id",
                 (game_id,),
             ).fetchall()
@@ -573,7 +578,7 @@ class BackupRepository:
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT id, game_id, parent_id, node_kind, branch_name, note, title,"
-                " content_hash, storage_relpath, created_at, is_safety"
+                " content_hash, storage_relpath, created_at, is_safety, verify_mode"
                 " FROM backup_nodes WHERE game_id = ?"
                 " ORDER BY created_at DESC, id DESC LIMIT 1",
                 (game_id,),
@@ -630,7 +635,8 @@ class BackupRepository:
             cursor = connection.execute(
                 "INSERT INTO backup_nodes (game_id, parent_id, node_kind,"
                 " branch_name, note, title, content_hash, storage_relpath,"
-                " created_at, is_safety) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " created_at, is_safety, verify_mode)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     node.game_id,
                     node.parent_id,
@@ -642,6 +648,7 @@ class BackupRepository:
                     node.storage_relpath,
                     created_at,
                     int(node.is_safety),
+                    node.verify_mode,
                 ),
             )
             if cursor.lastrowid is None:  # pragma: no cover - 插入必然返回行 id
@@ -674,6 +681,7 @@ class BackupRepository:
             storage_relpath=node.storage_relpath,
             created_at=_parse_dt(created_at),
             is_safety=node.is_safety,
+            verify_mode=node.verify_mode,
         )
 
     def add_files(self, backup_id: int, entries: Sequence[BackupFileEntry]) -> int:
@@ -706,6 +714,39 @@ class BackupRepository:
                 (backup_id,),
             ).fetchall()
         return [_row_to_backup_file(row) for row in rows]
+
+    def record_hashes(
+        self,
+        backup_id: int,
+        digests: Mapping[str, str],
+        *,
+        content_hash: str,
+        verify_mode: VerificationMode,
+    ) -> None:
+        """把补齐好的逐文件 sha256 与整体内容哈希写回数据库.
+
+        名称模式下创建的备份先没有哈希(见 ``application.backup``), 后台补齐算完后由
+        这里回写: 清单文件与数据库两边的哈希必须一致, 否则"校验读清单、展示读数据库"
+        会给出互相矛盾的结论 —— 因此三件事放在**同一个事务**里。
+
+        ``digests`` 是 "相对路径 -> sha256", 只写有值的那些(补齐时可能因为文件消失而
+        少算几个, 那些条目的 sha256 保持为空, 下次还能再补)。
+        """
+        if backup_id <= 0:  # pragma: no cover - 节点 id 来自数据库, 必然为正
+            raise ValueError("补齐哈希需要备份 id")
+        with self._database.session() as connection:
+            connection.executemany(
+                "UPDATE backup_files SET sha256 = ? WHERE backup_id = ?"
+                " AND relative_path = ?",
+                [
+                    (digest, backup_id, relative_path)
+                    for relative_path, digest in digests.items()
+                ],
+            )
+            connection.execute(
+                "UPDATE backup_nodes SET content_hash = ?, verify_mode = ? WHERE id = ?",
+                (content_hash, verify_mode, backup_id),
+            )
 
     def describe(self, backup_id: int) -> tuple[int, int]:
         """返回 ``(文件数, 总字节数)``; 只统计真实文件."""

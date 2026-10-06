@@ -91,6 +91,20 @@ def test_export_packages_the_game_backups_and_schedule(tmp_path: Path) -> None:
     assert sum(1 for item in backups if item["current"]) == 1
 
 
+def test_export_carries_the_verification_mode_of_each_node(tmp_path: Path) -> None:
+    """包里的每条备份都记着它当初用的校验方式(导入时才不会把"名称模式"当成严格)."""
+    database, game_id, _save = _fixture(tmp_path)
+    service = ExportService(database, backup_root=tmp_path / "backups")
+    destination = tmp_path / "Demo.archive.zip"
+
+    service.export_game(game_id, destination)
+
+    contents = fmt.read_package(destination, verify_hashes=True)
+    assert {item["verify_mode"] for item in contents.config_list("backups")} == {
+        "sha256"
+    }
+
+
 def test_export_keeps_each_node_snapshot_under_its_own_prefix(tmp_path: Path) -> None:
     """分支节点进 ``branches/``, 安全点进 ``timeline/``, 每个节点带自己的快照清单."""
     database, game_id, _save = _fixture(tmp_path)

@@ -4053,6 +4053,8 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         theme=app._theme,
         language=app._language,
         base_font_px=app._base_font_px,
+        verification_mode=app._verification_mode,
+        verification_parallel=app._verification_parallel,
         debug=app._debug,
         activation=app._activation,
         remember_window=app._remember_window,
@@ -4060,6 +4062,7 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         on_toggle_theme=app._on_toggle_theme,
         on_apply_language=app._on_language_change,
         on_apply_font_size=app._on_font_size_change,
+        on_apply_verification=app._on_verification_change,
         on_apply_debug=app._on_debug_change,
         on_apply_activation=app._on_activation_change,
         on_apply_remember_window=lambda _enabled: None,
@@ -6368,6 +6371,10 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         applied.append(("activation", wanted))
         return "启停失败"
 
+    def fail_verification(mode: str) -> str | None:
+        applied.append(("verification", mode))
+        return "校验方式失败"
+
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(app)
     window = SettingsWindow(
@@ -6376,6 +6383,8 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         theme=app._theme,
         language=app._language,
         base_font_px=16,
+        verification_mode="sha256",
+        verification_parallel=2,
         debug=True,
         activation=True,
         remember_window=True,
@@ -6383,6 +6392,7 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         on_toggle_theme=lambda: app._theme,
         on_apply_language=fail_language,
         on_apply_font_size=fail_font,
+        on_apply_verification=fail_verification,
         on_apply_debug=fail_debug,
         on_apply_activation=fail_activation,
         on_apply_remember_window=lambda _enabled: None,
@@ -6432,13 +6442,23 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         window._on_activation_toggled()
         window._activation_switch.deselect()
         window._on_activation_toggled()
-        assert last() == ("activation", False)
         assert bool(window._activation_switch.get()) is True
         assert tr("settings.activation_failed", reason="启停失败") in _label_texts(
             window._container
         )
 
-        # ⑤ 录制收尾的定时器可能比录制活得久: 没在录制时什么都不做.
+        # ⑤ 校验方式: 不认识的值与"当前方式"都不写回; 换一种但回调报错 → 拨回并说明.
+        current = window._verification_label("sha256")
+        window._on_verification_selected("不认识")
+        window._on_verification_selected(current)
+        window._on_verification_selected(window._verification_label("name"))
+        assert last() == ("verification", "name")
+        assert window._verification_box.get() == current
+        assert tr(
+            "settings.verification_failed", reason="校验方式失败"
+        ) in _label_texts(window._container)
+
+        # ⑥ 录制收尾的定时器可能比录制活得久: 没在录制时什么都不做.
         window._finish_when_idle()
         assert window._capturing is None
     finally:
@@ -6566,6 +6586,11 @@ def test_main_window_covers_empty_states_and_archived_guards(
         assert app._on_debug_change(True) is None
         app._on_debug_change(False)
         assert app._on_activation_change(True) is None
+        assert app._on_verification_change("name") is None
+        assert app._verification_mode == "name"
+        # 陌生取值收敛成 sha256(手改配置/将来新增的方式都不能让它变松).
+        assert app._on_verification_change("crc32") is None
+        assert app._verification_mode == "sha256"
 
         # ② 启停开关关着时"立即再探一次"只把分页切到关闭态.
         app._activation = False
@@ -6726,7 +6751,7 @@ def test_run_gui_reports_every_config_state(
 
 
 def test_settings_writes_reach_the_config_file(tmp_path: Path) -> None:
-    """有配置路径时三个写回口真的落盘(字号 / 调试日志 / 自动启停)."""
+    """有配置路径时四个写回口真的落盘(字号 / 调试日志 / 自动启停 / 校验方式)."""
     from archive_management.config import load_config
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -6750,6 +6775,10 @@ def test_settings_writes_reach_the_config_file(tmp_path: Path) -> None:
         app._on_activation_change(False)
         _drain(app)
         assert load_config(paths.config_path).activation.auto is False
+
+        # 校验方式写回配置文件: 下一次备份/还原现读一次配置就按新方式走.
+        assert app._on_verification_change("name") is None
+        assert load_config(paths.config_path).verification.mode == "name"
     finally:
         app.destroy()
 
@@ -7363,6 +7392,8 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         theme=app._theme,
         language=app._language,
         base_font_px=16,
+        verification_mode="sha256",
+        verification_parallel=2,
         debug=False,
         activation=False,
         remember_window=True,
@@ -7370,6 +7401,7 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         on_toggle_theme=lambda: app._theme,
         on_apply_language=lambda _locale: None,
         on_apply_font_size=lambda _size: None,
+        on_apply_verification=lambda _mode: None,
         on_apply_debug=lambda _enabled: None,
         on_apply_activation=lambda _enabled: None,
         on_apply_remember_window=lambda _enabled: None,
@@ -7400,6 +7432,15 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         assert window.shortcut_text(ACTION_SAVE_NOW) == format_accelerator(
             DEFAULT_SAVE_ACCELERATOR
         )
+
+        # ③ 校验方式: 成功时下拉停在新值, 状态说明跟着改成新方式(不再显示旧值).
+        name_label = window._verification_label("name")
+        window._verification_box.set(name_label)
+        window._on_verification_selected(name_label)
+
+        assert window._verification_box.get() == name_label
+        assert window._verification_mode == "name"
+        assert name_label in window._verification_status.cget("text")
     finally:
         window.close()
         app.destroy()

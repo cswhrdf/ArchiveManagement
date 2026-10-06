@@ -15,6 +15,7 @@ from archive_management.config import (
     AppConfig,
     HotkeySettings,
     LoggingSettings,
+    VerificationSettings,
     WindowSettings,
     load_config,
     load_or_repair_config,
@@ -26,6 +27,7 @@ from archive_management.services.hotkeys import (
     DEFAULT_BRANCH_ACCELERATOR,
     DEFAULT_SAVE_ACCELERATOR,
 )
+from archive_management.services.verification import MAX_PARALLEL, MIN_PARALLEL
 
 pytestmark = [
     pytest.mark.config,
@@ -401,3 +403,83 @@ def test_load_or_reset_survives_a_write_failure(
 
     assert loaded.reset is True
     assert loaded.config == AppConfig()
+
+
+# -- 校验方式 ---------------------------------------------------------------
+
+
+def test_verification_defaults_to_strict_with_a_machine_sized_parallelism() -> None:
+    """默认: sha256 严格校验; 并发校验数在本机算出来的合理区间里."""
+    settings = VerificationSettings()
+
+    assert settings.mode == "sha256"
+    assert MIN_PARALLEL <= settings.max_parallel <= MAX_PARALLEL
+
+
+@pytest.mark.parametrize(
+    ("payload", "notes"),
+    [
+        ({"verification": {"mode": "crc32"}}, ("verification.mode",)),
+        ({"verification": {"max_parallel": 99}}, ("verification.max_parallel",)),
+        ({"verification": "strict"}, ("verification",)),
+    ],
+)
+def test_a_broken_verification_section_falls_back_to_strict(
+    tmp_path: Path, payload: dict[str, Any], notes: tuple[str, ...]
+) -> None:
+    """写坏了校验方式也不降级: 非法取值剔除后一律回到最严的 sha256."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"version": 1, **payload}), encoding="utf-8")
+
+    loaded = load_or_repair_config(path)
+
+    assert loaded.repaired == notes
+    assert loaded.config.verification.mode == "sha256"
+    assert MIN_PARALLEL <= loaded.config.verification.max_parallel <= MAX_PARALLEL
+
+
+def test_the_machine_sized_parallelism_is_written_on_first_run(tmp_path: Path) -> None:
+    """首次启动(文件里还没有这个字段)时算一次并落盘, 用户的取值一点不丢."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"version": 1, "theme": "dark"}), encoding="utf-8")
+
+    loaded = load_or_repair_config(path)
+
+    assert loaded.repaired == ()
+    assert loaded.config.theme == "dark"
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert (
+        written["verification"]["max_parallel"]
+        == loaded.config.verification.max_parallel
+    )
+
+
+def test_an_existing_parallelism_is_left_alone(tmp_path: Path) -> None:
+    """文件里已经写着(可能是用户手改的)就照它用, 不再按本机重算覆盖掉."""
+    path = tmp_path / "config.json"
+    config = AppConfig(verification=VerificationSettings(max_parallel=3))
+    save_config(config, path)
+    before = path.read_text(encoding="utf-8")
+
+    loaded = load_or_repair_config(path)
+
+    assert loaded.config.verification.max_parallel == 3
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_failed_derived_write_still_yields_a_usable_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """落盘失败只记录日志: 本次仍然用内存里那份算好的配置."""
+
+    def _boom(_config: AppConfig, _path: Path) -> None:
+        raise OSError("只读文件系统")
+
+    monkeypatch.setattr(config_module, "save_config", _boom)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"version": 1}), encoding="utf-8")
+
+    loaded = load_or_repair_config(path)
+
+    assert loaded.reset is False
+    assert MIN_PARALLEL <= loaded.config.verification.max_parallel <= MAX_PARALLEL

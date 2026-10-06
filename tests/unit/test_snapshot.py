@@ -9,7 +9,9 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,10 +21,12 @@ from archive_management.services import snapshot as snapshot_mod
 from archive_management.services.snapshot import (
     MANIFEST_FILENAME,
     SnapshotEntry,
+    SnapshotResult,
     SnapshotSource,
     _is_transient_os_error,
     content_hash_of,
     create_snapshot,
+    manifest_entries,
     read_manifest_entries,
     remove_snapshot,
     sha256_of_file,
@@ -580,7 +584,7 @@ def test_materialize_rejects_a_file_plan_without_an_origin(tmp_path: Path) -> No
     )
 
     with pytest.raises(SnapshotError, match="缺少复制来源"):
-        snapshot_mod._materialize(plan, tmp_path / "out")
+        snapshot_mod._materialize(plan, tmp_path / "out", hash_files=True)
 
 
 def test_materialize_rechecks_the_hash_of_what_it_copied(
@@ -596,4 +600,100 @@ def test_materialize_rechecks_the_hash_of_what_it_copied(
     monkeypatch.setattr(snapshot_mod, "sha256_of_file", lambda _path: "0" * 64)
 
     with pytest.raises(SnapshotError, match="哈希校验失败"):
-        snapshot_mod._materialize(plan, tmp_path / "out")
+        snapshot_mod._materialize(plan, tmp_path / "out", hash_files=True)
+
+
+# -- 名称模式(先不算哈希)与后台补齐 -----------------------------------------
+
+
+def _name_mode_snapshot(tmp_path: Path) -> SnapshotResult:
+    """生成一份"名称模式"的快照: 逐文件 sha256 先留空, 大小照记."""
+    return create_snapshot(
+        [SnapshotSource(path=str(_saved_dir(tmp_path)), kind="directory", index=0)],
+        tmp_path / "name-mode",
+        hash_files=False,
+    )
+
+
+def test_name_mode_snapshot_records_sizes_without_hashes(tmp_path: Path) -> None:
+    """名称模式: 复制照旧, 但一个哈希都不算(因此备份不必读第二遍磁盘)."""
+    result = _name_mode_snapshot(tmp_path)
+
+    files = [entry for entry in result.entries if entry.file_kind == "file"]
+    assert [entry.sha256 for entry in files] == ["", ""]
+    # 顺序是 loc-0/nested/slot2.dat 在前、loc-0/slot1.dat 在后(清单按相对路径排序).
+    assert [entry.size for entry in files] == [len("beta"), len("alpha")]
+    assert result.content_hash == content_hash_of(result.entries)
+    # 只校名称能过; 按 sha256 校则过不了 —— 这份备份还没有可比的数据.
+    assert verify_snapshot(result.root, deep=False).ok is True
+    assert verify_snapshot(result.root, deep=True).ok is False
+
+
+def test_name_mode_snapshot_still_reports_a_copy_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """名称模式省掉的是回读校验, 不是错误处理: 复制失败仍要报错并清掉临时目录."""
+
+    def _boom(_source: object, _target: object) -> None:
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(shutil, "copyfile", _boom)
+    destination = tmp_path / "name-mode"
+
+    with pytest.raises(SnapshotError, match="复制失败"):
+        create_snapshot(
+            [SnapshotSource(path=str(_saved_dir(tmp_path)), kind="directory", index=0)],
+            destination,
+            hash_files=False,
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob("name-mode.partial-*")) == []
+
+
+def test_rewrite_manifest_fills_the_hashes_and_keeps_the_metadata(
+    tmp_path: Path,
+) -> None:
+    """补齐哈希: 原子重写清单, 只看条目与整体哈希, 来源与创建时间原样保留."""
+    result = _name_mode_snapshot(tmp_path)
+    manifest_path = result.root / MANIFEST_FILENAME
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+    complete = tuple(
+        replace(
+            entry,
+            sha256=sha256_of_file(result.root / entry.relative_path)
+            if entry.file_kind == "file"
+            else entry.sha256,
+        )
+        for entry in result.entries
+    )
+
+    content_hash = snapshot_mod.rewrite_manifest(result.root, complete)
+
+    assert content_hash == content_hash_of(complete)
+    assert manifest_entries(result.root) == complete
+    after = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert after["sources"] == before["sources"]
+    assert after["created_at"] == before["created_at"]
+    assert after["version"] == before["version"]
+    assert after["content_hash"] == content_hash
+    # 重写走的是"同级临时文件 + 改名": 不能留下半截文件.
+    assert list(result.root.glob("*.tmp")) == []
+    assert verify_snapshot(result.root).ok is True
+
+
+def test_rewrite_manifest_refuses_a_manifest_that_is_not_an_object(
+    tmp_path: Path,
+) -> None:
+    """清单顶层不是对象时拒绝重写, 而不是把一份坏清单覆盖回去."""
+    result = _name_mode_snapshot(tmp_path)
+    (result.root / MANIFEST_FILENAME).write_text("[]", encoding="utf-8")
+
+    with pytest.raises(SnapshotError, match="顶层必须是对象"):
+        snapshot_mod.rewrite_manifest(result.root, result.entries)
+
+
+def test_rewriting_entries_of_a_missing_snapshot_raises(tmp_path: Path) -> None:
+    """快照目录不在时读不到清单, 重写自然也不该成功."""
+    with pytest.raises(SnapshotError, match="缺少清单文件"):
+        snapshot_mod.rewrite_manifest(tmp_path / "nope", ())

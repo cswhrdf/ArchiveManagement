@@ -61,6 +61,11 @@ from archive_management.services.snapshot import (
     read_manifest,
     source_root,
 )
+from archive_management.services.verification import (
+    VerificationPolicy,
+    hashes_complete,
+    resolve_check,
+)
 
 _CHUNK_SIZE = 1024 * 1024
 # 清单相对路径中出现这些前缀即视为绝对路径/盘符, 直接拒绝.
@@ -70,6 +75,8 @@ PROBLEM_UNWRITABLE = "unwritable"
 PROBLEM_KIND_MISMATCH = "kind_mismatch"
 WARN_RECORDED_PATH = "recorded_path"
 WARN_MORE_LOCATIONS = "more_locations"
+# 这份备份还没有哈希数据(名称模式下创建的, 后台还没补齐): 本次只能校名称。
+WARN_NO_HASHES = "no_hashes"
 
 
 @dataclass(frozen=True)
@@ -152,7 +159,12 @@ class RestoreService:
         backups: BackupService | None = None,
         process_provider: ProcessNameProvider | None = None,
     ) -> None:
-        """绑定数据库、备份根目录与可替换的进程探测提供者."""
+        """绑定数据库、备份根目录与可替换的进程探测提供者.
+
+        校验方式与并发上限向 ``backups`` 要(见 :meth:`BackupService.policy`): 预检与
+        写回必须用同一套判定, 而这两步分属两个服务 —— 各存一份迟早会走偏。传入自己的
+        ``backups`` 时也就连带决定了这里用哪种校验方式。
+        """
         self._root = Path(backup_root)
         self._games = GameRepository(database)
         self._locations = SaveLocationRepository(database)
@@ -163,6 +175,10 @@ class RestoreService:
             else BackupService(database, backup_root=backup_root)
         )
         self._process_provider = process_provider
+
+    def _policy(self) -> VerificationPolicy:
+        """取当前生效的校验方式与并发上限(与备份服务共享同一份)."""
+        return self._backups.policy()
 
     # -- 预检 ---------------------------------------------------------------
 
@@ -177,6 +193,7 @@ class RestoreService:
         except (SnapshotError, OSError) as exc:
             reason = str(exc)
         snapshot_ok = False
+        degraded = False
         if manifest is not None:
             verification = self._backups.verify(node)
             entries = manifest.entries
@@ -186,10 +203,16 @@ class RestoreService:
                     f"快照清单校验未通过: 缺失 {len(verification.missing)} 项, "
                     f"哈希不一致 {len(verification.mismatched)} 项"
                 )
+            elif verification.mode != self._policy().mode:
+                # 降级了(这份备份还没有哈希数据): 不拦住恢复, 但要在预检提示里说清楚
+                # 这次只校了名称, 内容是不是被改过看不出来。
+                degraded = True
         targets: list[RestoreTarget] = []
         warnings: list[str] = []
         if manifest is not None:
             targets, warnings = self._inspect_targets(game_id, manifest)
+        if degraded:
+            warnings.insert(0, WARN_NO_HASHES)
         locations = self._locations.list_for_game(game_id)
         plan = RestorePlan(
             backup_id=backup_id,
@@ -245,6 +268,12 @@ class RestoreService:
         self._ensure_restorable(plan, force=force, game_id=game_id, backup_id=backup_id)
         snapshot_root = self._backups.snapshot_root(node)
         manifest = read_manifest(snapshot_root)
+        # 写回时要校到什么程度, 与预检用的是同一套判定(见 services.verification):
+        # 名称模式、或这份备份还没有哈希数据时, 逐文件比对就算了 —— 但复制本身照旧。
+        check = resolve_check(
+            self._policy().mode, hashes_complete=hashes_complete(manifest.entries)
+        )
+        verify_hashes = check == "sha256"
         log_action(
             "restore.start",
             game_id=game_id,
@@ -254,6 +283,7 @@ class RestoreService:
             targets=len(plan.targets),
             safety_point=safety_point,
             forced=force,
+            check=check,
             paths=", ".join(redacted_path(target.path) for target in plan.targets),
         )
         restored_files = 0
@@ -282,6 +312,7 @@ class RestoreService:
                     snapshot_root=snapshot_root,
                     progress=progress,
                     cancelled=cancelled,
+                    verify_hashes=verify_hashes,
                 )
                 restored_files += outcome.files
                 restored_dirs += outcome.directories
@@ -421,6 +452,7 @@ class RestoreService:
         snapshot_root: Path,
         progress: ProgressCallback | None,
         cancelled: Callable[[], bool] | None,
+        verify_hashes: bool,
     ) -> _Outcome:
         """恢复清单里的一个来源: 定位写回目标、报进度, 然后交给逐来源写回."""
         if cancelled is not None and cancelled():
@@ -437,6 +469,7 @@ class RestoreService:
             snapshot_root=snapshot_root,
             progress=progress,
             cancelled=cancelled,
+            verify_hashes=verify_hashes,
         )
 
     def _restore_source(
@@ -449,6 +482,7 @@ class RestoreService:
         snapshot_root: Path,
         progress: ProgressCallback | None,
         cancelled: Callable[[], bool] | None,
+        verify_hashes: bool,
     ) -> _Outcome:
         """写回单个来源: 暂存 -> 原子替换 -> 清理原内容."""
         target = Path(target_path)
@@ -460,6 +494,7 @@ class RestoreService:
                     snapshot_root=snapshot_root,
                     staging=staging,
                     cancelled=cancelled,
+                    verify_hashes=verify_hashes,
                 )
             else:
                 staging.mkdir(parents=True, exist_ok=False)
@@ -473,6 +508,7 @@ class RestoreService:
                     staging=staging,
                     progress=progress,
                     cancelled=cancelled,
+                    verify_hashes=verify_hashes,
                 )
             _swap_in(staging, target)
         except BaseException:
@@ -640,6 +676,7 @@ def _stage_file(
     snapshot_root: Path,
     staging: Path,
     cancelled: Callable[[], bool] | None,
+    verify_hashes: bool,
 ) -> _Outcome:
     """把"文件来源"的单个文件写入暂存路径."""
     files = [entry for entry in entries if entry.file_kind == "file"]
@@ -649,7 +686,7 @@ def _stage_file(
         raise OperationCancelledError("恢复已取消")
     entry = files[0]
     origin = _safe_path(snapshot_root, entry.relative_path)
-    size = _write_file(origin, staging, entry.sha256)
+    size = _write_file(origin, staging, entry.sha256 if verify_hashes else "")
     return _Outcome(files=1, size=size)
 
 
@@ -661,6 +698,7 @@ def _stage_directory(
     staging: Path,
     progress: ProgressCallback | None,
     cancelled: Callable[[], bool] | None,
+    verify_hashes: bool,
 ) -> _Outcome:
     """把目录来源的清单内容写入暂存目录(先建目录, 再写链接与文件)."""
     ordered = sorted(
@@ -690,7 +728,7 @@ def _stage_directory(
             _discard(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         origin = _safe_path(snapshot_root, entry.relative_path)
-        size += _write_file(origin, destination, entry.sha256)
+        size += _write_file(origin, destination, entry.sha256 if verify_hashes else "")
         files += 1
         _report(progress, 0.3 + 0.7 * position / total, f"恢复 {relative}")
     return _Outcome(
@@ -724,7 +762,12 @@ def _safe_path(root: Path, relative: str) -> Path:
 
 
 def _write_file(origin: Path, destination: Path, expected_sha256: str) -> int:
-    """复制单个文件并复核内容哈希, 返回写入的字节数."""
+    """复制单个文件并复核内容哈希, 返回写入的字节数.
+
+    ``expected_sha256`` 为空表示**不比对**(名称模式, 或者这份备份还没有哈希数据):
+    复制本身全程照旧 —— 少掉的是"逐文件核对内容"这一步, 也就是真正耗时的那一半。
+    读出的字节仍然顺带算一遍摘要(不额外读盘), 只是没有可比的期望值。
+    """
     digest = hashlib.sha256()
     try:
         with origin.open("rb") as source, destination.open("wb") as sink:
@@ -733,7 +776,7 @@ def _write_file(origin: Path, destination: Path, expected_sha256: str) -> int:
                 sink.write(chunk)
     except OSError as exc:
         raise SnapshotError(f"恢复文件失败 {origin}: {exc}") from exc
-    if digest.hexdigest() != expected_sha256:
+    if expected_sha256 and digest.hexdigest() != expected_sha256:
         raise SnapshotError(f"恢复内容哈希不一致: {origin.name}")
     return destination.stat().st_size
 

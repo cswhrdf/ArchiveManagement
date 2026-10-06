@@ -12,6 +12,10 @@
   不应该让应用起不来, 但也不能静默丢掉用户的改动, 因此原文件会先改名成
   ``config.json.invalid`` 保留下来; 只有整份文件都读不出来(JSON 坏了 / 顶层不是
   对象 / 版本不认识)时才整份还原为默认值。
+
+另外, **按本机算出来的取值**(目前是校验并发数, 见 :class:`VerificationSettings`)在文件
+里还没有时会被算一次并写回文件: 这类取值来自硬件探测, 每次构造配置都会重算, 不落盘就
+会出现"用户没改过、数字却变了"的情况。
 """
 
 from __future__ import annotations
@@ -31,6 +35,10 @@ from pydantic import (
     field_validator,
 )
 
+from archive_management.domain import (
+    DEFAULT_VERIFICATION_MODE,
+    VerificationMode,
+)
 from archive_management.exceptions import ConfigurationError
 from archive_management.i18n import DEFAULT_LOCALE, available_locales
 from archive_management.services.hotkeys import (
@@ -38,6 +46,11 @@ from archive_management.services.hotkeys import (
     DEFAULT_SAVE_ACCELERATOR,
     combo_error,
     parse_accelerator,
+)
+from archive_management.services.verification import (
+    MAX_PARALLEL,
+    MIN_PARALLEL,
+    recommended_parallel,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +131,24 @@ class UiSettings(BaseModel):
     remember_window: bool = True
 
 
+class VerificationSettings(BaseModel):
+    """备份与还原的校验方式."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 校验方式(取值见 domain.entities.VERIFICATION_MODES): ``sha256`` 逐文件比对内容
+    # 哈希 —— 严格, 但要把快照完整读一遍; ``name`` 只核对名称与类型 —— 快, 但查不出
+    # "内容被改过"。两种方式随时可切: 备份时记录的数据与选了哪种方式无关。
+    mode: VerificationMode = DEFAULT_VERIFICATION_MODE
+    # 同时进行的校验任务数。每个任务都要完整读一个文件, 同时跑太多会一起抢磁盘、
+    # 堆内存(见 services.verification 的协程执行器)。默认值是**按本机算出来的**
+    # (CPU 的一半核心与可用内存取小), 首次启动就写进配置文件, 之后一律从配置读 ——
+    # 否则每次启动都重算, 用户看到的数字会无缘无故地变。
+    max_parallel: int = Field(
+        default_factory=recommended_parallel, ge=MIN_PARALLEL, le=MAX_PARALLEL
+    )
+
+
 # 记住的窗口几何的取值上限: 真机上的多屏虚拟桌面也不会超出它(坐标还可以是负的),
 # 手改配置写个天文数字没有意义, 直接拒绝。
 MAX_WINDOW_VALUE = 20000
@@ -163,6 +194,8 @@ class AppConfig(BaseModel):
     hotkeys: HotkeySettings = Field(default_factory=HotkeySettings)
     activation: ActivationSettings = Field(default_factory=ActivationSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+    # 备份/还原的校验方式与并发上限(见 VerificationSettings)。
+    verification: VerificationSettings = Field(default_factory=VerificationSettings)
     # 上次关闭时的窗口尺寸与位置(默认全空 = 没记过, 用设计尺寸打开)。
     window: WindowSettings = Field(default_factory=WindowSettings)
 
@@ -293,6 +326,9 @@ def load_or_repair_config(path: Path) -> ConfigLoad:
     if config.version != CONFIG_FORMAT_VERSION:
         return _reset_to_defaults(path, reason=f"不支持的文件版本 {config.version}")
     if not notes:
+        derived = _missing_derived_fields(raw)
+        if derived:
+            _save_derived(config, path, derived)
         return ConfigLoad(config=config)
     logger.warning("配置文件有 %d 项需要修复: %s", len(notes), ", ".join(notes))
     backup = _preserve_invalid(path)
@@ -301,6 +337,30 @@ def load_or_repair_config(path: Path) -> ConfigLoad:
     except OSError as exc:  # pragma: no cover - 取决于文件系统
         logger.warning("写回修复后的配置失败, 本次仅使用内存中的取值: %s", exc)
     return ConfigLoad(config=config, repaired=notes, backup=backup)
+
+
+def _missing_derived_fields(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """列出"该按本机算一次并写进文件, 但文件里还没有"的字段路径.
+
+    目前只有一项: 校验并发数。它来自硬件探测(见
+    ``services.verification.recommended_parallel``), 而 pydantic 的默认值每次构造配置
+    都会重算 —— 不落盘的话, 用户改了别的设置把配置写回时这个数字会跟着当时的机器状态
+    悄悄变掉, 设置里显示的与实际用的也就对不上了。
+    """
+    section = raw.get("verification")
+    if isinstance(section, Mapping) and "max_parallel" in section:
+        return ()
+    return ("verification.max_parallel",)
+
+
+def _save_derived(config: AppConfig, path: Path, fields: tuple[str, ...]) -> None:
+    """把按本机算出来的取值写回配置文件(写不进去只记录日志, 本次仍用内存里的取值)."""
+    try:
+        save_config(config, path)
+    except OSError as exc:
+        logger.warning("写回按本机算出的配置失败(%s): %s", ", ".join(fields), exc)
+        return
+    logger.info("已按本机情况写入配置: %s", ", ".join(fields))
 
 
 def _reset_to_defaults(path: Path, *, reason: str) -> ConfigLoad:

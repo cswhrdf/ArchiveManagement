@@ -41,6 +41,8 @@ from archive_management.domain import (
     PathKind,
     SaveSource,
     ScheduledJob,
+    VerificationMode,
+    normalize_verification_mode,
 )
 from archive_management.exceptions import ArchiveManagementError, PackageError
 from archive_management.infrastructure.database import Database
@@ -101,6 +103,9 @@ class PackageNode:
     branch_name: str | None
     created_at: str | None
     content_hash: str | None
+    # 导出那台机器上这份备份用的校验方式; 老包没有这个字段 —— 那时只有 sha256 一种,
+    # 因此缺失一律按 sha256 看待(见 domain.entities.normalize_verification_mode)。
+    verify_mode: VerificationMode
     current: bool
     files: int
     total_bytes: int
@@ -557,6 +562,7 @@ class ImportService:
                 storage_relpath=f"{key}/{node.key}",
                 created_at=_moment(node.created_at),
                 is_safety=node.is_safety,
+                verify_mode=node.verify_mode,
             ),
             entries,
         )
@@ -771,6 +777,7 @@ def _node(contents: PackageContents, raw: Mapping[str, object]) -> PackageNode:
         branch_name=_optional_text(raw, "branch_name"),
         created_at=_optional_text(raw, "created_at"),
         content_hash=_optional_text(raw, "content_hash"),
+        verify_mode=normalize_verification_mode(_optional_text(raw, "verify_mode")),
         current=_flag(raw, "current"),
         files=len(members),
         total_bytes=sum(entry.size for entry in members),

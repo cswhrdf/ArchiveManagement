@@ -10,12 +10,36 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PathKind = Literal["file", "directory"]
 SaveSource = Literal["steam", "manual"]
 NodeKind = Literal["manual", "branch", "auto"]
 FileKind = Literal["file", "symlink", "directory"]
+
+# 备份/恢复的校验方式:
+#
+# - ``sha256``: 逐文件比对内容哈希(严格; 备份时边拷边算, 还原前要重新读一遍快照);
+# - ``name``:   只核对清单里的名称/类型(快; 不读快照内容, 因此查不出"内容被改过").
+#
+# 取值会落进配置文件与数据库, 因此**只增不改**: 将来新增方式(CRC32 之类)时, 老备份
+# 记录里没有它的数据, 读取侧一律按 :data:`DEFAULT_VERIFICATION_MODE` 回落。
+VerificationMode = Literal["sha256", "name"]
+DEFAULT_VERIFICATION_MODE: VerificationMode = "sha256"
+VERIFICATION_MODES: tuple[VerificationMode, ...] = ("sha256", "name")
+
+
+def normalize_verification_mode(value: object) -> VerificationMode:
+    """把配置/数据库里读到的值收敛成一个可用取值.
+
+    空串与不认识的值都回落到 :data:`DEFAULT_VERIFICATION_MODE`: 数据库里备份节点的
+    ``verify_mode`` 在升级前的行上是空串(见 ``infrastructure.schema`` 的 v15), 手改
+    配置文件也可能写进任何东西 —— 这两种情况都必须回到"最严格且数据最全"的 sha256,
+    而不是静默降级成只校验名称。
+    """
+    if isinstance(value, str) and value in VERIFICATION_MODES:
+        return value
+    return DEFAULT_VERIFICATION_MODE
 
 
 class _RowModel(BaseModel):
@@ -83,6 +107,19 @@ class BackupNode(_RowModel):
     storage_relpath: str | None = None
     # 恢复前自动创建的安全点: 只在时间线展示, 不进入分支树的线路关系.
     is_safety: bool = False
+    # 生成这份快照时用的校验方式: 名称模式下清单里的 sha256 先留空(备份更快), 由
+    # 后台协程补齐; 升级前创建的老备份在库里是空串, 读出来按 sha256 看待。
+    verify_mode: VerificationMode = DEFAULT_VERIFICATION_MODE
+
+    @field_validator("verify_mode", mode="before")
+    @classmethod
+    def _normalize_verify_mode(cls, value: object) -> VerificationMode:
+        """把库里的空串(升级前的老行)与陌生取值一律收敛成 sha256.
+
+        收敛放在模型上而不是各个读取方: 备份列表/恢复预检/导出都会构造它, 只要有一处
+        漏了回落, 老备份就会被当成"没有可用的校验数据"。
+        """
+        return normalize_verification_mode(value)
 
 
 class BackupFileEntry(_RowModel):
@@ -92,7 +129,10 @@ class BackupFileEntry(_RowModel):
     backup_id: int
     relative_path: str = Field(min_length=1)
     size: int = Field(default=0, ge=0)
-    sha256: str = Field(min_length=1)
+    # 内容哈希; **允许为空串**: 名称模式下的备份先不留哈希(后台协程随后补齐), 补齐前
+    # 这一列就是空的 —— 它与"升级前的老存档没有新校验数据"是同一种状态(见
+    # ``services.snapshot.SnapshotEntry.sha256``)。
+    sha256: str = ""
     file_kind: FileKind = "file"
 
 

@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping
 
 import customtkinter as ctk
 
+from archive_management.domain import VERIFICATION_MODES, normalize_verification_mode
 from archive_management.i18n import available_locales, tr
 from archive_management.services.hotkeys import (
     ACTION_CREATE_BRANCH,
@@ -80,8 +81,16 @@ _ApplyLanguage = Callable[[str], "str | None"]
 _ApplyFontSize = Callable[[int], "str | None"]
 # 切换布尔开关(调试日志/自动启停); 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyToggle = Callable[[bool], "str | None"]
+# 切换备份校验方式; 返回 None 表示成功, 否则返回可直接展示的失败说明.
+_ApplyVerification = Callable[[str], "str | None"]
 # 录制开始/结束的钩子(主窗口据此暂停与恢复全局快捷键).
 _CaptureHook = Callable[[], None]
+
+# 校验方式下拉里的文案键与取值一一对应(顺序即展示顺序, 默认选中最严的 sha256; 取值
+# 顺序来自 domain.entities.VERIFICATION_MODES, 免得两处各写一份).
+_VERIFICATION_LABELS: dict[str, str] = {
+    mode: f"settings.verification_{mode}" for mode in VERIFICATION_MODES
+}
 
 # 快捷键面板里展示的动作与文案键(顺序即展示顺序).
 _SHORTCUT_ROWS: tuple[tuple[str, str], ...] = (
@@ -125,6 +134,8 @@ class SettingsWindow:
         theme: str,
         language: str,
         base_font_px: int,
+        verification_mode: str,
+        verification_parallel: int,
         on_apply_font_size: _ApplyFontSize,
         debug: bool,
         activation: bool,
@@ -132,6 +143,7 @@ class SettingsWindow:
         shortcuts: Mapping[str, str],
         on_toggle_theme: _ToggleTheme,
         on_apply_language: _ApplyLanguage,
+        on_apply_verification: _ApplyVerification,
         on_apply_debug: _ApplyToggle,
         on_apply_activation: _ApplyToggle,
         on_apply_remember_window: _ApplyToggle,
@@ -139,12 +151,15 @@ class SettingsWindow:
         on_capture_start: _CaptureHook,
         on_capture_end: _CaptureHook,
     ) -> None:
-        """构造设置窗口并绑定主题、语言、三个开关与快捷键回调."""
+        """构造设置窗口并绑定主题、语言、开关、校验方式与快捷键回调."""
         self._parent = parent
         self._palette = palette
         self._theme = theme
         self._language = language
         self._base_font_px = base_font_px
+        # 库里/配置里的陌生取值统一收敛成 sha256(见 domain.entities).
+        self._verification_mode: str = normalize_verification_mode(verification_mode)
+        self._verification_parallel = verification_parallel
         self._on_apply_font_size = on_apply_font_size
         self._debug = debug
         self._activation = activation
@@ -152,6 +167,7 @@ class SettingsWindow:
         self._shortcuts: dict[str, str] = dict(shortcuts)
         self._on_toggle_theme = on_toggle_theme
         self._on_apply_language = on_apply_language
+        self._on_apply_verification = on_apply_verification
         self._on_apply_debug = on_apply_debug
         self._on_apply_activation = on_apply_activation
         self._on_apply_remember_window = on_apply_remember_window
@@ -522,6 +538,78 @@ class SettingsWindow:
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
+        # 备份校验方式: 严格(逐文件比对内容哈希)还是快(只核对名称与大小)。选哪一种
+        # 会直接改变备份与还原的耗时, 因此这句说明里写清了代价; 并发的校验任务数由
+        # 程序按本机情况定(见 services.verification), 只读展示, 不在这里改。
+        self._verification_panel = ctk.CTkFrame(
+            self._body,
+            fg_color=palette.panel,
+            corner_radius=10,
+            border_width=1,
+            border_color=palette.border,
+        )
+        self._verification_panel.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        self._verification_panel.grid_columnconfigure(0, weight=1)
+        self._verification_title = ctk.CTkLabel(
+            self._verification_panel,
+            text=tr("settings.verification"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        self._verification_title.grid(
+            row=0, column=0, padx=16, pady=(16, 2), sticky="w"
+        )
+        self._verification_hint = ctk.CTkLabel(
+            self._verification_panel,
+            text=tr("settings.verification_hint"),
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_hint,
+        )
+        self._verification_hint.grid(row=1, column=0, padx=16, sticky="ew")
+        self._track_hint(
+            self._verification_panel,
+            self._verification_hint,
+            initial=_HINT_INITIAL_WRAPLENGTH,
+        )
+        self._verification_box = ctk.CTkComboBox(
+            self._verification_panel,
+            values=[tr(key) for key in _VERIFICATION_LABELS.values()],
+            width=140,
+            command=self._on_verification_selected,
+            state="readonly",
+            fg_color=palette.input_bg,
+            button_color=palette.raised,
+            button_hover_color=palette.item_hover,
+            border_color=palette.input_border,
+            text_color=palette.text_body,
+            dropdown_fg_color=palette.panel,
+            dropdown_hover_color=palette.item_hover,
+            dropdown_text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+            dropdown_font=ctk.CTkFont(size=12),
+        )
+        self._verification_box.set(self._verification_label(self._verification_mode))
+        self._verification_box.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
+        self._verification_status = ctk.CTkLabel(
+            self._verification_panel,
+            text=self._verification_state_text(),
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._verification_status.grid(
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+        )
+        self._track_hint(
+            self._verification_panel,
+            self._verification_status,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
+
         self._shortcut_panel = ctk.CTkFrame(
             self._body,
             fg_color=palette.panel,
@@ -529,7 +617,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._shortcut_panel.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        self._shortcut_panel.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         self._shortcut_panel.grid_columnconfigure(0, weight=1)
         self._shortcut_title = ctk.CTkLabel(
             self._shortcut_panel,
@@ -753,6 +841,47 @@ class SettingsWindow:
         return tr("theme.to_dark") if self._theme == "light" else tr("theme.to_light")
 
     @staticmethod
+    def _verification_label(mode: str) -> str:
+        """校验方式在列表里显示的名字."""
+        return tr(_VERIFICATION_LABELS[normalize_verification_mode(mode)])
+
+    def _verification_state_text(self) -> str:
+        """当前校验方式的说明(顺便把生效的并发校验数告诉用户)."""
+        return tr(
+            "settings.current_verification",
+            mode=self._verification_label(self._verification_mode),
+            parallel=self._verification_parallel,
+        )
+
+    def _on_verification_selected(self, value: str) -> None:
+        """下拉里选了一种校验方式: 交给主窗口写回配置并报给用户.
+
+        写回失败(磁盘不可写之类)时把下拉框拨回原值, 免得界面显示的一套与配置里
+        实际生效的另一套 —— 校验方式直接决定“备份快不快”, 不能只改一半。
+        """
+        mode = next(
+            (
+                candidate
+                for candidate, key in _VERIFICATION_LABELS.items()
+                if tr(key) == value
+            ),
+            None,
+        )
+        if mode is None or mode == self._verification_mode:
+            return
+        error = self._on_apply_verification(mode)
+        if error is not None:
+            self._verification_box.set(
+                self._verification_label(self._verification_mode)
+            )
+            self._verification_status.configure(
+                text=tr("settings.verification_failed", reason=error)
+            )
+            return
+        self._verification_mode = mode
+        self._verification_status.configure(text=self._verification_state_text())
+
+    @staticmethod
     def _locale_label(locale: str) -> str:
         """语言在列表里显示的名字(每种语言用自己那套写法)."""
         return tr(f"locale.{locale}")
@@ -898,6 +1027,7 @@ class SettingsWindow:
             self._language_panel,
             self._logging_panel,
             self._activation_panel,
+            self._verification_panel,
             self._shortcut_panel,
         ):
             panel.configure(fg_color=palette.panel, border_color=palette.border)
@@ -907,6 +1037,7 @@ class SettingsWindow:
             (self._language_title, palette.text_primary),
             (self._logging_title, palette.text_primary),
             (self._activation_title, palette.text_primary),
+            (self._verification_title, palette.text_primary),
             (self._shortcut_title, palette.text_primary),
             (self._appearance_hint, palette.text_hint),
             (self._language_hint, palette.text_hint),
@@ -916,6 +1047,8 @@ class SettingsWindow:
             (self._debug_label, palette.text_muted),
             (self._activation_hint, palette.text_hint),
             (self._activation_label, palette.text_muted),
+            (self._verification_hint, palette.text_hint),
+            (self._verification_status, palette.text_muted),
             (self._shortcut_hint, palette.text_body),
             (self._capture_status, palette.accent),
             (self._shortcut_error, palette.danger),
@@ -944,8 +1077,8 @@ class SettingsWindow:
         # 开关下面那行说明也是文字控件: 漏在重绘表外时它会留着旧主题的次要色
         # (实测: 切主题后它的 text_color 仍属于上一套调色板)。
         self._remember_hint.configure(text_color=palette.text_muted)
-        # 两个下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
-        for box in (self._font_box, self._language_box):
+        # 下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
+        for box in (self._font_box, self._language_box, self._verification_box):
             _paint_combo(box, palette)
         # 快捷键行的动作名也是文字控件, 漏在重绘表外时它会留着**旧主题**的正文色
         # (浅色主题的深灰文字落在深色面板上, 就是一条几乎看不见的淡灰字)。
