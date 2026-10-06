@@ -78,10 +78,15 @@ from archive_management.services.platforms import current_platform, platform_lab
 def _install_platform_coverage_config() -> None:
     """装上"本平台专属"的覆盖率配置(平台专属代码只在别的平台被排除).
 
-    为什么必须在**导入期**做: ``COVERAGE_RCFILE`` 只在 coverage 建配置的那一刻读一次, 而
-    pytest-cov 是在 ``pytest_configure`` 里建它的 —— 那时再改环境变量已经晚了。conftest 比
-    插件 configure 更早被导入, 所以这里动手才赶得上(与 ``scripts/coverage_platform.py`` 的
-    模块文档合起来看)。
+    为什么必须在**导入期**做: ``COVERAGE_RCFILE`` 只在 coverage 建配置的那一刻读一次。
+
+    **但要说清楚它到底对谁生效**(2026-10-06 实测):
+
+    - 对 ``coverage report`` / ``coverage xml`` 这类命令行**生效** —— CI 判单平台覆盖率正是走
+      那两步(合并后写这份 rc 到 ``GITHUB_ENV``, 再 ``coverage report --show-missing``);
+    - 对 ``pytest --cov`` **不生效**: pytest-cov 在导入根 conftest **之前**就构造了 Coverage
+      (见它的 ``pytest_load_initial_conftests``), 这里再改环境变量已经晚了。所以本地
+      ``pytest --cov`` 跑出来的是**合并口径**(不做平台排除), 与 ``coverage combine`` 一致。
 
     生成失败时 ``setup_environment`` 会打印原因并退回 pyproject 的基线配置: 装配置这件事
     不该把整个会话弄挂(退回之后的行为与改动前完全一致)。

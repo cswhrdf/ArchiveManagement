@@ -853,8 +853,8 @@ jobs:
         if: steps.collect-coverage.outcome == 'success'
         shell: bash
         run: |
-          uv run python scripts/coverage_platform.py write .coverage.platform.rc --platform "${{ matrix.platform }}"
-          echo "COVERAGE_RCFILE=$PWD/.coverage.platform.rc" >> "$GITHUB_ENV"
+          uv run python scripts/coverage_platform.py write .coverage-platform.rc --platform "${{ matrix.platform }}"
+          echo "COVERAGE_RCFILE=$PWD/.coverage-platform.rc" >> "$GITHUB_ENV"
 
       - name: Enforce the coverage threshold
         # 门槛值在 pyproject 的 [tool.coverage.report] fail_under 里(与本地一致)。

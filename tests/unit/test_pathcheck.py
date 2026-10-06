@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from archive_management.services.pathcheck import (
     PathSummary,
     dangerous_target_reason,
+    has_any_content,
     is_within,
     is_writable_target,
     normalize_path,
@@ -24,6 +26,21 @@ pytestmark = [
     pytest.mark.story("校验存档路径"),
     pytest.mark.layer("unit"),
 ]
+
+
+def test_has_any_content_is_false_when_the_directory_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录读不到(权限/已删)时当作"没有内容", 而不是把异常抛给调用方."""
+    folder = tmp_path / "saves"
+    folder.mkdir()
+
+    def refuse(self: Path) -> Iterator[Path]:
+        raise OSError("权限不足")
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+
+    assert has_any_content(str(folder)) is False
 
 
 def test_is_within_ignores_case_for_drive_paths() -> None:

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import configparser
 import importlib.util
 import os
 import re
@@ -96,9 +97,63 @@ def test_exclusions_cover_only_the_other_platforms() -> None:
     assert not re_search(on_linux, linux_marker)
 
 
+def test_the_generated_config_survives_a_round_trip_through_configparser(
+    tmp_path: Path,
+) -> None:
+    """生成的排除规则必须能被 configparser 读回来, 而且真的命中标记行.
+
+    实测踩过: 规则以 ``#`` 开头时 configparser 会把它当**注释整行丢掉** —— 文件里看得见,
+    实际一条都不生效(平台的标记行照旧进统计)。所以这里验的是"读回来还在且能命中",
+    而不是"写出来了"。
+    """
+    target = coverage_platform.write_platform_config(
+        tmp_path / "rc", platform="windows"
+    )
+
+    parsed = configparser.ConfigParser()
+    parsed.read(target, encoding="utf-8")
+    rules = [rule.strip() for rule in parsed["report"]["exclude_also"].splitlines()]
+
+    assert coverage_platform.exclusion_pattern("windows").strip() in rules
+    assert "if TYPE_CHECKING:" in rules, "基线里的豁免也要留下"
+    marker = "if x:  # platform: linux - 只有 POSIX 有 fcntl"
+    assert any(re_search(rule, marker) for rule in rules if rule)
+
+
 def re_search(pattern: str, text: str) -> bool:
     """``re.search`` 的小包装(保持断言读起来是"命中/不命中")."""
     return re.search(pattern, text) is not None
+
+
+def test_the_platform_config_is_only_effective_through_the_coverage_cli() -> None:
+    """平台判定必须走 `coverage` 命令行 —— 这是这套排除能生效的唯一一条路.
+
+    实测(2026-10-06): pytest-cov 在导入根 conftest **之前**就把 Coverage 建好了, 所以 conftest
+    里设的 ``COVERAGE_RCFILE`` 对 `pytest --cov` 不起作用(那样拿到的是合并口径);
+    ``coverage run -m pytest`` + ``coverage report`` 则立刻生效(同一份数据, 缺行 11 → 8)。
+    因此 CI 的判定步骤用命令行: 写 rc 到 ``GITHUB_ENV`` + ``coverage report --show-missing``,
+    出 XML 那一步同理。这里把这条路径钉住: 谁把它改成 `pytest --cov`, 排除就静默失效了。
+    """
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "COVERAGE_RCFILE=$PWD/.coverage-platform.rc" in workflow
+    assert "uv run coverage report" in workflow
+    assert "uv run coverage xml" in workflow
+
+
+def test_the_generated_file_is_not_mistaken_for_parallel_data() -> None:
+    """生成物不能落在 ``.coverage.*`` 里: 那是 coverage 的并行数据 glob.
+
+    ``parallel = true`` 时 ``coverage combine``/``report`` 会把 ``.coverage.*`` 全部当数据文件
+    去读, 一个 rc 混进去就报 "file is not a database"(2026-10-06 实测), 而 CI 的判定正是
+    "先 combine 再三平台各自 report"。
+    """
+    name = coverage_platform.DEFAULT_OUTPUT.name
+
+    assert not name.startswith(".coverage."), f"{name} 会被当成并行数据文件"
+    assert name in (_REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
 
 
 def test_generated_config_keeps_every_pyproject_value(tmp_path: Path) -> None:

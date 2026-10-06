@@ -44,8 +44,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 SOURCE_ROOT = REPO_ROOT / "src"
 
-#: 生成文件的默认落点: 与 ``.coverage`` 数据文件同一层, 已被 ``.gitignore`` 的 ``.coverage.*`` 覆盖。
-DEFAULT_OUTPUT = REPO_ROOT / ".coverage.platform.rc"
+#: 生成文件的默认落点。**必须避开 ``.coverage.*``**: coverage 的 ``parallel = true`` 会把那个
+#: 通配符当作并行数据文件去 combine, 一个 rc 混进去就让合并报 "file is not a database" ——
+#: 而 CI 的判定步骤正是"合并之后跑 `coverage report`"(2026-10-06 实测踩到)。
+DEFAULT_OUTPUT = REPO_ROOT / ".coverage-platform.rc"
 
 #: 项目支持的三平台(与源码里 ``PlatformFamily`` 的取值一致)。
 KNOWN_PLATFORMS = ("linux", "macos", "windows")
@@ -145,10 +147,17 @@ def marker_lines(root: Path | None = None) -> list[tuple[Path, int, str]]:
 
 
 def exclusion_pattern(platform: str) -> str:
-    """排除"打给别的平台"的标记行的正则(``search`` 口径, 不加锚点)."""
+    r"""排除"打给别的平台"的标记行的正则(``search`` 口径, 不加锚点).
+
+    开头不写 ``#`` 是有原因的, 而且两条都踩过:
+
+    - 这条规则会作为一行写进 INI 的 ``exclude_also``, 而行首是 ``#`` 的续行会被 configparser
+      当注释**整行丢掉** —— 规则就只是"写在文件里很好看", 一条也不生效;
+    - 规则前面带 ``.*`` 是为了兼容 coverage 的匹配口径(从行首匹配也能命中标记行)。
+    """
     others = [name for name in KNOWN_PLATFORMS if name != platform]
     return "|".join(
-        rf"#\s*platform:\s*(?:[a-z]+\s+)*{other}(?:\s+[a-z]+)*\s*-\s*"
+        rf".*#\s*platform:\s*(?:[a-z]+\s+)*{other}(?:\s+[a-z]+)*\s*-\s*"
         for other in others
     )
 
