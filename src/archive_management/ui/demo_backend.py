@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from archive_management.application import home as home_cases
@@ -77,8 +77,22 @@ def _chosen_strategy(choice: ImportChoice | None) -> str:
     return STRATEGY_NEW if choice is None else choice.strategy
 
 
-def _dt(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
-    return datetime(year, month, day, hour, minute, tzinfo=UTC)
+def _recent(days_ago: int, hour: int, minute: int) -> datetime:
+    """相对"今天"的时刻: 演示数据的文案写的是"今天/昨天", 时间戳就得跟着当天走.
+
+    写死绝对日期的演示数据是颗定时炸弹: 界面时间范围默认是"最近一个月", 数据一旦过期
+    就被静默筛掉, 而文案还写着"今天 09:40" —— 2026-10-06 正是这么红了三条界面用例。
+    """
+    day = datetime.now(UTC).date() - timedelta(days=days_ago)
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=UTC)
+
+
+def _just_now(offset_seconds: int = 0) -> datetime:
+    """演示里新建的备份/分支/安全点的时刻(标着"刚刚", 就得是刚刚, 免得刚生成就被范围筛掉).
+
+    ``offset_seconds`` 只用于把同一秒内的多条岔开一点(展示上的顺序靠它稳定)。
+    """
+    return datetime.now(UTC) + timedelta(seconds=offset_seconds)
 
 
 # 演示用的译名(真实后端按 AppID 向平台问一次; 这里写死两种语言, 便于演示与用例).
@@ -130,7 +144,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
         BackupItem(
             backup_id="b1",
             title="离开量子月亮前",
-            created_dt=_dt(2026, 9, 6, 9, 40),
+            created_dt=_recent(0, 9, 40),
             created_label="今天 09:40",
             auto=False,
             branch_label="主线",
@@ -141,7 +155,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
         BackupItem(
             backup_id=_FAIL_RESTORE_ID,
             title="尝试黑棘入口",
-            created_dt=_dt(2026, 9, 5, 21, 15),
+            created_dt=_recent(1, 21, 15),
             created_label="昨天 21:15",
             auto=False,
             branch_label="主线",
@@ -153,7 +167,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
         BackupItem(
             backup_id="b3",
             title="",
-            created_dt=_dt(2026, 9, 5, 18, 0),
+            created_dt=_recent(1, 18, 0),
             created_label="昨天 18:00",
             auto=True,
             branch_label="主线",
@@ -164,8 +178,8 @@ _BACKUPS: dict[str, list[BackupItem]] = {
         BackupItem(
             backup_id="b4",
             title="",
-            created_dt=_dt(2026, 9, 4, 22, 31),
-            created_label="2026/09/04 22:31",
+            created_dt=_recent(2, 22, 31),
+            created_label=format_moment(_recent(2, 22, 31)),
             auto=True,
             branch_label="主线",
             size_label="122 MB",
@@ -175,7 +189,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
         BackupItem(
             backup_id="b5",
             title="黑棘",
-            created_dt=_dt(2026, 9, 6, 11, 5),
+            created_dt=_recent(0, 11, 5),
             created_label="今天 11:05",
             auto=False,
             branch_label="分支:黑棘",
@@ -191,7 +205,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
         BackupItem(
             backup_id="s1",
             title="初始存档",
-            created_dt=_dt(2026, 9, 6, 8, 0),
+            created_dt=_recent(0, 8, 0),
             created_label="今天 08:00",
             auto=False,
             branch_label="主线",
@@ -201,7 +215,7 @@ _BACKUPS: dict[str, list[BackupItem]] = {
         BackupItem(
             backup_id="s2",
             title="每日自动备份",
-            created_dt=_dt(2026, 9, 5, 12, 0),
+            created_dt=_recent(1, 12, 0),
             created_label="昨天 12:00",
             auto=True,
             branch_label="主线",
@@ -695,7 +709,7 @@ class DemoArchiveService:
         self._require_game(game_id)
         self._require_locations(game_id)
         items = self._items[game_id]
-        created = _dt(2026, 9, 6, 10, len(items))
+        created = _just_now(len(items))
         items.append(
             BackupItem(
                 backup_id=f"new-{len(items) + 1}",
@@ -789,7 +803,7 @@ class DemoArchiveService:
                 BackupItem(
                     backup_id=f"safety-{len(self._items[game_id]) + 1}",
                     title=tr("backup.title_safety_point"),
-                    created_dt=_dt(2026, 9, 6, 12, len(self._items[game_id])),
+                    created_dt=_just_now(len(self._items[game_id])),
                     created_label=tr("backup.safety_label_just_now"),
                     auto=False,
                     safety=True,
@@ -814,7 +828,7 @@ class DemoArchiveService:
         self._simulate()
         self._require_game(game_id)
         items = self._items[game_id]
-        created = _dt(2026, 9, 6, 11, len(items))
+        created = _just_now(len(items))
         items.append(
             BackupItem(
                 backup_id=f"branch-{len(items) + 1}",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import posixpath
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -57,6 +58,42 @@ def test_backups_exist_for_outer_wilds(service: DemoArchiveService) -> None:
 
 def test_endless_space_has_no_backups(service: DemoArchiveService) -> None:
     assert service.list_backups("endless-space") == []
+
+
+def test_demo_backups_stay_inside_the_default_period_window(
+    service: DemoArchiveService,
+) -> None:
+    """演示数据的时间戳必须跟着"今天"走, 否则默认的"最近一个月"范围会把它们静默筛掉.
+
+    这条守卫是踩过坑才有的: 演示数据曾经写死 ``2026-09-06`` 这样的绝对日期, 而界面时间
+    范围默认取"最近一个月" —— 过了 30 天之后节点就整批从界面上消失, 文案却还写着
+    "今天 09:40"(2026-10-06 就是这么红了三条界面用例)。
+    """
+    threshold = datetime.now(UTC) - timedelta(days=30)
+    for game in service.list_games():
+        for item in service.list_backups(game.game_id):
+            assert item.created_dt >= threshold, (
+                f"{game.game_id}/{item.backup_id} 早于最近一个月: {item.created_dt}"
+            )
+
+
+def test_a_new_demo_backup_is_stamped_with_the_current_moment(
+    service: DemoArchiveService,
+) -> None:
+    """刚建的演示备份: 标签是"刚刚", 时间戳也得是现在 —— 不能盖着一个写死的旧日期.
+
+    (写死的旧日期会连带出"刚备份完却落在默认时间范围之外、界面上根本看不见"。)
+    """
+    before = datetime.now(UTC)
+
+    service.run_backup_now("outer-wilds")
+
+    created = next(
+        item
+        for item in service.list_backups("outer-wilds")
+        if item.created_label == "刚刚"
+    )
+    assert before <= created.created_dt <= datetime.now(UTC) + timedelta(seconds=5)
 
 
 def test_backup_without_locations_raises(service: DemoArchiveService) -> None:
