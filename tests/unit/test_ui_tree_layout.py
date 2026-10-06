@@ -370,3 +370,19 @@ def test_the_marker_wins_the_hit_test_against_its_own_box() -> None:
     assert layout.marker_at(*elsewhere) is None
     assert layout.node_at(*elsewhere) is not None
     assert layout.marker_at(-1.0, -1.0) is None
+
+
+def test_placing_an_empty_forest_gives_no_boxes_and_no_width() -> None:
+    """一棵树都没有(全都剪掉了)时给空框表与 0 宽, 而不是负数宽度.
+
+    总宽是"最后一个框的右边"减一个间距得来的: 一个框都没有时那个减法会得出 ``-h_gap``,
+    画布的滚动范围跟着变成一个负值。
+    """
+    from archive_management.ui.tree_layout import _place_forest
+
+    metrics = tree_layout([]).metrics
+
+    boxes, width = _place_forest([], {}, {}, {}, (), metrics)
+
+    assert boxes == {}
+    assert width == 0.0

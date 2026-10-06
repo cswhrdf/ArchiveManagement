@@ -343,3 +343,15 @@ def test_install_keyboard_support_is_applied_only_once(
     monkeypatch.setattr(keyboard, "_APPLIED", False)
     assert keyboard.install_keyboard_support() is True
     assert keyboard.install_keyboard_support() is False
+
+
+def test_enter_tab_chain_without_a_remembered_value_does_nothing() -> None:
+    """从没被摘出过(没记过原值)的控件放回 Tab 链时什么都不写 —— 不能拍一个 1 上去.
+
+    输入类的默认 ``takefocus`` 是空串, 写死 1 会让空格/回车在它身上被 Tab 语义抢走。
+    """
+    widget = _widget()
+
+    keyboard.enter_tab_chain(cast(Any, widget))
+
+    assert widget._canvas.options == {}

@@ -170,3 +170,34 @@ def test_only_the_rendering_layer_builds_images() -> None:
     ]
 
     assert offenders == [], f"这些地方要改用 rendering.host_image: {offenders}"
+
+
+def test_the_dark_photo_image_is_built_on_the_host_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """深色模式的贴图与浅色那条完全对称: 用的是深色原图与它自己那份缓存.
+
+    两条都必须在**宿主**的解释器上建图(见本模块顶部说明), 少一条时切到那个外观模式
+    就会报 ``image \"pyimageN\" doesn't exist`` —— 所以这里把两边都钉住。
+    """
+    image = rendering._HostImage.__new__(rendering._HostImage)
+    dark = cast(Image.Image, object())
+    image._dark_image = dark
+    cache: dict[tuple[int, int], ImageTk.PhotoImage] = {}
+    image._scaled_dark_photo_images = cache
+    seen: list[tuple[Any, Any, tuple[int, int]]] = []
+
+    def record(
+        source: Any,
+        target: dict[tuple[int, int], ImageTk.PhotoImage],
+        size: tuple[int, int],
+    ) -> ImageTk.PhotoImage:
+        """记下"拿哪张原图、往哪份缓存里建", 不去碰真 Tk."""
+        seen.append((source, target, size))
+        return cast(ImageTk.PhotoImage, object())
+
+    # 顶掉这一个实例上的建图步骤: 真建 PhotoImage 要有 Tk 根。
+    monkeypatch.setattr(image, "_photo_image", record)
+
+    assert image._get_scaled_dark_photo_image((32, 32)) is not None
+    assert seen == [(dark, cache, (32, 32))]

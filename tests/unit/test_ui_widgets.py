@@ -909,3 +909,190 @@ def test_card_surface_colors_put_selection_before_hover() -> None:
         LIGHT.accent_soft,
         LIGHT.accent_soft_border,
     )
+
+
+# --------------------------------------------------- 退路: 控件已销毁、空文案与未登记的按钮
+
+
+class _DeadContainer(_FakeContainer):
+    """已经销毁的假容器: 连排队都做不到(``after_idle`` 报 TclError)."""
+
+    def after_idle(self, func: Any) -> None:
+        """真控件销毁后 ``after_idle`` 就是这个反应."""
+        raise tk.TclError("bad window path name")
+
+
+class _FakeTipHost(_FakeCtkWidget):
+    """挂悬停提示的假控件: 记下排过/撤过的计时器(真 Tk 才有事件循环)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued: list[Any] = []
+        self.cancelled: list[str] = []
+
+    def after(self, _delay: int, callback: Any) -> str:
+        """记下排队的弹出任务."""
+        self.queued.append(callback)
+        return f"job{len(self.queued)}"
+
+    def after_cancel(self, job: str) -> None:
+        """记下被撤掉的任务."""
+        self.cancelled.append(job)
+
+
+def test_a_button_built_under_a_palette_remembers_it(
+    kit: widgets.UiKit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配色已经定下来时, 新建的按钮顺手把"这套色"记在自己身上(焦点环要用)."""
+    remembered: list[Any] = []
+    monkeypatch.setattr(
+        widgets, "remember_palette", lambda widget, palette: remembered.append(widget)
+    )
+    kit.apply(DARK)
+
+    button = kit.button(kit, "动作", style="accent")
+
+    assert remembered == [button]
+
+
+def test_repainting_an_unregistered_button_is_ignored(kit: widgets.UiKit) -> None:
+    """没登记过的按钮不属于这套配色: 重画时直接忽略(不猜它该是什么样子)."""
+    stranger = _FakeCtkWidget()
+
+    kit.repaint_button(cast(Any, stranger), DARK)
+
+    assert stranger.configure_calls == []
+
+
+def test_the_scrollbar_visibility_fix_is_applied_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """补丁是进程级的: 第二次调用什么都不做(否则会把包装器套第二层).
+
+    模块导入时就调过一次, 所以这里先把标志复位 —— 并在用例结束时把 ``_draw`` 也还原,
+    免得它把后面用例里的滚动条行为一起改了。
+    """
+    monkeypatch.setattr(widgets, "_APPLIED_SCROLLBAR_FIX", False)
+    monkeypatch.setattr(ctk.CTkScrollbar, "_draw", ctk.CTkScrollbar._draw)
+
+    assert widgets.apply_scrollbar_visibility_fix() is True
+    assert widgets.apply_scrollbar_visibility_fix() is False
+
+
+def test_auto_scrollbar_gives_up_when_the_container_cannot_queue() -> None:
+    """容器已销毁时不再排队判定(销毁过程也会发 ``<Configure>``), 也不把 TclError 抛出去."""
+    frame = _DeadContainer()
+
+    widgets.auto_scrollbar(frame)
+    frame.handlers["<Configure>"](SimpleNamespace())  # 再来一次事件也不该炸
+
+
+def test_track_wraplength_gives_up_when_the_container_cannot_queue() -> None:
+    """换行判定同样要兜住"容器已销毁": 销毁期间的事件不能把它变成异常."""
+    container = _DeadContainer()
+    label = _FakeCtkWidget()
+
+    widgets.track_wraplength(container, label, inset=20)
+    container.handlers["<Configure>"](SimpleNamespace())
+
+
+def test_track_fit_gives_up_when_the_label_is_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """标签已销毁时重裁直接作废(销毁过程也会发 ``<Configure>``), 不往外抛 TclError."""
+    container = _FakeContainer()
+    container.width = 400
+    label = _FakeCtkWidget()
+    monkeypatch.setattr(widgets, "measured_font", lambda *_args: _FakeFont(60, 14))
+
+    def boom(**_kwargs: Any) -> None:
+        raise tk.TclError("bad window path name")
+
+    monkeypatch.setattr(label, "configure", boom)
+
+    widgets.track_fit(container, cast(Any, label), ("很长的一段说明文字",))
+    container.handlers["<Configure>"](SimpleNamespace())
+
+
+def test_tooltip_text_gives_up_when_the_provider_raises() -> None:
+    """文案是函数(随选中项变)而它自己炸了时给空串: 缺一句提示不该打断渲染."""
+
+    def boom() -> str:
+        raise RuntimeError("文案还没准备好")
+
+    widget = SimpleNamespace(**{widgets._TOOLTIP_ATTR: boom})
+
+    assert widgets.tooltip_text(cast(Any, widget)) == ""
+
+
+def test_a_queued_tooltip_is_cancelled_when_the_pointer_leaves() -> None:
+    """移出时必须撤掉排队的那次弹出 —— 否则鼠标早就走了, 提示才慢悠悠地冒出来."""
+    widget = _FakeTipHost()
+    widgets.attach_tooltip(cast(Any, widget), "备份目录名")
+
+    widget.handlers["<Enter>"](SimpleNamespace())
+    widget.handlers["<Leave>"](SimpleNamespace())
+
+    assert widget.cancelled == ["job1"]
+
+
+def test_an_empty_tooltip_text_shows_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文案为空时不弹空框(文案是到点那一刻才读的, 可能正好被换空了)."""
+    opened: list[str] = []
+
+    def remember(_widget: Any, text: str) -> Any:
+        """记下"该弹出的那句文案", 不去碰真窗口."""
+        opened.append(text)
+        return object()
+
+    monkeypatch.setattr(widgets, "_open_tooltip", remember)
+    empty = _FakeTipHost()
+    widgets.attach_tooltip(cast(Any, empty), "")
+    named = _FakeTipHost()
+    widgets.attach_tooltip(cast(Any, named), "备份目录名")
+
+    empty.handlers["<Enter>"](SimpleNamespace())
+    empty.queued[-1]()
+    named.handlers["<Enter>"](SimpleNamespace())
+    named.queued[-1]()
+
+    assert opened == ["备份目录名"], "空文案不该弹出空框, 有文案的照弹"
+
+
+class _DeadTipWindow:
+    """提示窗口替身: 一被问尺寸就报"窗口已经没了"(TclError)."""
+
+    def __init__(self) -> None:
+        self.destroyed = 0
+
+    def update_idletasks(self) -> None:
+        """ничего."""
+
+    def winfo_reqwidth(self) -> int:
+        """已销毁的窗口就是这个反应."""
+        raise tk.TclError("bad window path name")
+
+    def destroy(self) -> None:
+        """记一次销毁."""
+        self.destroyed += 1
+
+
+def test_hover_tip_ignores_empty_text_and_survives_a_dead_window() -> None:
+    """空文案 = 收起; 量尺寸时窗口已经没了则收摊(而不是把 TclError 抛给调用方)."""
+    tip = widgets.HoverTip(
+        cast(Any, _FakeAnchor(x=0, y=0, height=10, screen_height=800))
+    )
+    tip.show("", root_x=0, root_y=0)
+    assert tip.visible is False
+
+    window = _DeadTipWindow()
+    tip._window = cast(Any, window)
+    tip._label = None  # 标签也没了 → 跳过"只换文案"那一支
+
+    tip.show("提示", root_x=10, root_y=10)
+
+    assert window.destroyed == 1
+    assert tip.visible is False
+    assert tip.text == ""
