@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from archive_management.exceptions import ArchiveManagementError
-from archive_management.ui import typography
+from archive_management.ui import schedule_window, typography
+from archive_management.ui.backend import ArchiveService
 from archive_management.ui.demo_backend import DemoArchiveService
 
 pytestmark = [
@@ -81,3 +83,18 @@ def test_demo_artwork_for_an_unknown_game_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ArchiveManagementError, match="未知游戏"):
         service.set_game_artwork("no-such-game", "cover", str(tmp_path / "cover.png"))
+
+
+def test_a_backend_that_cannot_answer_counts_as_no_locations() -> None:
+    """后端报错(未知游戏等)时按"没有存档位置"处理: 定时备份不可用, 但界面不该炸."""
+
+    class _Broken:
+        """一被问存档位置就报错的后端替身."""
+
+        def list_locations(self, game_id: str) -> list[object]:
+            """模拟未知游戏."""
+            raise ArchiveManagementError(f"未知游戏: {game_id}")
+
+    backend = cast("ArchiveService", _Broken())
+
+    assert schedule_window._has_locations(backend, "nope") is False

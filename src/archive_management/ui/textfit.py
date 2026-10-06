@@ -47,7 +47,7 @@ def _head_length(text: str, font: MeasurableFont, width: int) -> int:
     if limit <= 0:
         return 0
     if limit >= len(text):  # pragma: no branch - 只在放不下时进来
-        return limit
+        return limit  # pragma: no cover - 上面已说明走不到
     # 只在"词中间"才退回空格处: 若正好停在空格边界, 直接切更自然(也不丢字)。
     space = text[:limit].rfind(" ")
     if space > 0 and not text[limit].isspace():
