@@ -10,16 +10,21 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tkinter as tk
+from collections import defaultdict
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from archive_management.exceptions import ArchiveManagementError
-from archive_management.ui import discovery_page, home_page
-from archive_management.ui.palette import DARK
+from archive_management.services.hotkeys import ACTION_SAVE_NOW
+from archive_management.ui import discovery_page, home_page, main_window
+from archive_management.ui.models import FeedbackKind, ViewKind
+from archive_management.ui.palette import DARK, DEFAULT_THEME
 
 pytestmark = [
     pytest.mark.normal,
@@ -432,3 +437,253 @@ def test_painting_a_row_that_is_gone_is_ignored() -> None:
     page._paint_row("1")
 
     assert dead.configured == [], "已销毁的卡片不该被改色"
+
+
+# --------------------------------------------------------- 主窗口: 写不进去 / 后端拒绝 / 后台线程
+
+
+class _ConfigStub:
+    """配置替身: 各段都是普通对象(这些用例只关心"保存有没有抛")."""
+
+    def __init__(self) -> None:
+        self.language = ""
+        self.ui = SimpleNamespace()
+        self.logging = SimpleNamespace()
+        self.activation = SimpleNamespace()
+        self.window: object = None
+        self.hotkeys: object = None
+
+
+def _app(monkeypatch: pytest.MonkeyPatch, *, failing: str = "__never__") -> Any:
+    """造一个"没有窗口"的主窗口: 后端、配置、提示、重绘都换成可观察的替身."""
+    monkeypatch.setattr(
+        main_window,
+        "load_or_repair_config",
+        lambda _path: SimpleNamespace(config=_ConfigStub()),
+    )
+    app: Any = main_window.ArchiveApp.__new__(main_window.ArchiveApp)
+    app._paths = SimpleNamespace(config_path="config.json")
+    app._shortcuts = defaultdict(lambda: "ctrl+alt+x")
+    app._remember_window = True
+    app.p = DARK
+    app.backend = _HomeBackend(failing)
+    app._view = ViewKind.TIMELINE
+    app._busy = False
+    app._hover_id = None
+    app._game = SimpleNamespace(game_id="1", name="演示", archived=False)
+    app._selected_item = lambda: SimpleNamespace(backup_id="b1")
+    app._card_painters = {}
+    notices: list[str] = []
+    app._notice = notices.append
+    feedbacks: list[tuple[object, str]] = []
+    app._feedback = lambda kind, message: feedbacks.append((kind, message))
+    app._report_read_failure = lambda exc: feedbacks.append(("read-failure", str(exc)))
+    posted: list[tuple[str, str]] = []
+    app._messages = SimpleNamespace(put=lambda message: posted.append(message))
+    app._posted = posted
+    app._notices = notices
+    app._feedbacks = feedbacks
+    app._reset_activation_ladder = lambda: None
+    return app
+
+
+def test_an_unwritable_config_only_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """配置写不进去(只读/磁盘满)时只记一条日志.
+
+    设置窗口已经把改动落到界面上, 因此这里不能把异常抛回去 —— 那会让"改了个开关"变成
+    一次报错。顺带钉住"没有配置路径时"那一支(只保存在内存里)。
+    """
+    app = _app(monkeypatch)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError("只读")
+
+    monkeypatch.setattr(main_window, "save_config", refuse)
+
+    app._save_language("en")
+    app._save_font_size(15)
+    app._save_remember_window(True)  # 打开时不动已记下的窗口几何
+    app._save_remember_window(False)  # 关掉时还要顺手清掉已记下的窗口几何
+    app._save_debug(True)
+    app._save_activation(True)
+    app._save_shortcuts()
+
+    app._paths = None  # 没有配置路径: 只保存在内存里
+    app._save_remember_window(False)
+
+
+def test_an_unsupported_language_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """切到不支持的语言时把原因回给设置窗口, 不改当前语言、不重建界面."""
+    app = _app(monkeypatch)
+
+    def refuse(_locale: str) -> None:
+        raise ValueError("不认识的语言")
+
+    monkeypatch.setattr(main_window, "set_locale", refuse)
+
+    assert app._on_language_change("xx") == "不认识的语言"
+
+
+def test_a_rejected_monitor_change_is_announced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """把某款游戏设为监控对象被后端拒绝时, 用一句可读的提示说明白."""
+    app = _app(monkeypatch, failing="set_game_enabled")
+
+    app._on_set_monitor("1")
+
+    assert app._notices, "被拒绝时要有提示"
+    assert "后端拒绝了这一步" in app._notices[0]
+
+
+def test_the_hotkey_callbacks_only_post_a_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快捷键回调跑在监听线程里: 只投递消息, 界面动作留给主线程(否则会跨线程碰 Tk)."""
+    app = _app(monkeypatch)
+
+    app._request_hotkey_backup()
+
+    assert app._posted == [("hotkey", ACTION_SAVE_NOW)]
+
+
+def test_a_missing_or_broken_icon_falls_back_to_the_letter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """图标读不到(刚被删)或解不开(文件损坏)时返回 None, 交给界面走首字回落."""
+    app = _app(monkeypatch, failing="artwork_path")
+    assert app._icon_image("1") is None
+
+    broken = tmp_path / "icon.png"
+    broken.write_text("这不是图片", encoding="utf-8")
+    app.backend = SimpleNamespace(artwork_path=lambda *_args: str(broken))
+    assert app._icon_image("1") is None
+
+
+def test_a_failed_reload_keeps_the_last_picture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """读数据失败(库被外部占用之类)只记一笔并保留上次画面, 不让 Tk 回调里冒异常."""
+    app = _app(monkeypatch)
+
+    def refuse(_task: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    app._reload_data_now = refuse
+
+    app._reload_data()
+
+    assert app._feedbacks == [("read-failure", "database is locked")]
+
+
+def test_repainting_all_cards_hands_the_palette_to_the_kit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全量重绘就是把当前配色交给套件(它自己记住谁要重画)."""
+    app = _app(monkeypatch)
+    painted: list[object] = []
+    app.kit = SimpleNamespace(apply=painted.append)
+
+    app._paint_cards()
+
+    assert painted == [DARK]
+
+
+def test_painting_one_card_that_is_gone_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """悬停是高频交互: 卡片刚好随列表刷新被销毁时, 这一次局部重绘直接作废."""
+    app = _app(monkeypatch)
+
+    def refuse(_palette: object) -> None:
+        raise tk.TclError("bad window path name")
+
+    app._card_painters = {"b1": refuse}
+
+    app._paint_card_by_id("b1")
+    app._paint_card_by_id("never-registered")
+
+
+def test_hovering_paints_only_the_two_affected_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """悬停变化只重绘离开与进入的那两张(全量重绘在卡片多时肉眼可见地卡)."""
+    app = _app(monkeypatch)
+    painted: list[str | None] = []
+    app._paint_card_by_id = painted.append
+
+    app._on_graph_hover("b2")
+
+    assert painted == [None, "b2"]
+
+
+def test_a_rejected_restore_preview_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """恢复前的预检被后端拒绝时给出错误提示, 不再往下走(不弹恢复对话框)."""
+    app = _app(monkeypatch, failing="preview_restore")
+
+    app._on_restore()
+
+    assert app._feedbacks == [(FeedbackKind.ERROR, "后端拒绝了这一步")]
+
+
+def test_a_rejected_delete_plan_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """删除前的计划被后端拒绝时给出错误提示, 不进入确认流程."""
+    app = _app(monkeypatch, failing="plan_delete")
+
+    app._on_delete_backup()
+
+    assert app._feedbacks == [(FeedbackKind.ERROR, "后端拒绝了这一步")]
+
+
+def test_a_rejected_add_game_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """新增游戏被后端拒绝时: 审计里留一笔失败, 界面上给出原因."""
+    app = _app(monkeypatch, failing="add_game")
+    monkeypatch.setattr(main_window, "ask_text", lambda *_args, **_kwargs: "演示")
+
+    app._on_add_game()
+
+    assert app._feedbacks == [(FeedbackKind.ERROR, "后端拒绝了这一步")]
+
+
+def test_a_failed_window_geometry_save_only_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """窗口尺寸写不进去时留一条日志并收工(关窗路径上不该因为配置只读而报错)."""
+    app = _app(monkeypatch)
+    monkeypatch.setattr(
+        main_window,
+        "current_window_geometry",
+        lambda *_args, **_kwargs: SimpleNamespace(width=800, height=600),
+    )
+    monkeypatch.setattr(main_window, "window_scaling", lambda _window: 1.0)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError("只读")
+
+    monkeypatch.setattr(main_window, "save_config", refuse)
+
+    app._remember_window_geometry()
+
+
+def test_a_failed_activation_poll_only_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """后台轮询失败只记日志: 不能让线程死掉, 也不能弹窗打断用户; 消息照旧投回主线程."""
+    app = _app(monkeypatch, failing="poll_activation")
+
+    app._run_activation_poll()
+
+    assert app._posted == [("activation", "")]
+
+
+def test_the_default_theme_comes_from_one_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认主题只有一处定义(设置窗口显示的就是它)."""
+    assert main_window.default_theme() == DEFAULT_THEME
