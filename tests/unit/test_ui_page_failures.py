@@ -18,11 +18,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import customtkinter as ctk
 import pytest
 
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.services.hotkeys import ACTION_SAVE_NOW
-from archive_management.ui import discovery_page, home_page, main_window
+from archive_management.ui import discovery_page, home_page, main_window, manage_window
 from archive_management.ui.models import FeedbackKind, ViewKind
 from archive_management.ui.palette import DARK, DEFAULT_THEME
 
@@ -687,3 +688,329 @@ def test_the_default_theme_comes_from_one_place(
 ) -> None:
     """默认主题只有一处定义(设置窗口显示的就是它)."""
     assert main_window.default_theme() == DEFAULT_THEME
+
+
+# --------------------------------------------------------- 游戏管理窗口: 后端拒绝与用户取消
+#
+# 这个窗口的每个动作都是"点一下 → 后端 → 重画", 而且动作之间还有一道归档闸门
+# (``_blocked``)。闸门、用户取消、后端拒绝三者都要**原地停住**: 既不重画列表, 也不留下
+# 一句"已改成"的提示 —— 否则用户会以为改动生效了。
+
+
+def _manage(
+    monkeypatch: pytest.MonkeyPatch, *, failing: str = "__never__"
+) -> tuple[Any, _HomeBackend, list[str], list[int]]:
+    """造一个"没有窗口"的管理窗口, 返回它、后端替身、弹过的原因与刷新次数."""
+    window: Any = manage_window.ManageGameWindow.__new__(manage_window.ManageGameWindow)
+    kinds = manage_window._ARTWORK_KINDS
+    window._game_id = "1"
+    window._name = "演示"
+    window._enabled = True
+    window._palette = DARK
+    window._window = _WidgetStub()
+    window._backend = _HomeBackend(failing)
+    window._backend.user_artwork_path = lambda *_args: ""
+    window._blocked = lambda _ability: False
+    window._selected_item = lambda: SimpleNamespace(
+        location_id="l1", path="saves/slot", path_kind="directory", ok=True
+    )
+    window._items = ()
+    window._rows = {}
+    window._hover = None
+    window._artwork_images = {}
+    window._artwork_preview = {kind: _WidgetStub() for kind in kinds}
+    window._artwork_state = {kind: _WidgetStub() for kind in kinds}
+    window._artwork_buttons = {kind: (_WidgetStub(), _WidgetStub()) for kind in kinds}
+    window._toggle_btn = _WidgetStub()
+    window._closed = []
+    errors: list[str] = []
+    refreshes: list[int] = []
+    window._show_error = lambda exc: errors.append(str(exc))
+    window.refresh = lambda: refreshes.append(1)
+    window._on_change = lambda: None
+    window._paint_buttons = lambda: None
+    window._fit_window_height = lambda: None
+    window.close = lambda: window._closed.append(1)
+    return window, window._backend, errors, refreshes
+
+
+def test_artwork_render_survives_a_backend_that_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后端读不出有效图片路径(图刚被删)时按"没有图"画占位, 而不是让整窗渲染失败."""
+    monkeypatch.setattr(ctk, "CTkFont", lambda **_kwargs: object())
+    window, _backend, _errors, _refreshes = _manage(monkeypatch, failing="artwork_path")
+
+    window._render_artwork()
+
+    icon_preview = window._artwork_preview["icon"]
+    assert icon_preview.configured[-1]["text"] == "演", "图标位放名称首字"
+    assert icon_preview.configured[-1]["image"] is None
+
+
+def test_an_unreadable_preview_falls_back_to_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """预览图的三种"读不到"(没有路径/文件没了/解不开)都给 None, 让界面走文字占位."""
+    window, _backend, _errors, _refreshes = _manage(monkeypatch)
+    assert window._load_artwork("", "cover") is None
+
+    gone = tmp_path / "gone.png"
+    assert window._load_artwork(str(gone), "cover") is None
+
+    broken = tmp_path / "broken.png"
+    broken.write_text("这不是图片", encoding="utf-8")
+    assert window._load_artwork(str(broken), "cover") is None
+
+
+def test_a_loaded_preview_is_cached_per_file_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """缓存键带上 mtime 与大小: 换了图自然是新键, 同一份文件不重复解码."""
+    window, _backend, _errors, _refreshes = _manage(monkeypatch)
+    picture = tmp_path / "cover.png"
+    picture.write_text("这不是图片", encoding="utf-8")
+    info = picture.stat()
+    key = f"{picture}:{info.st_mtime_ns}:{info.st_size}:cover"
+    cached = object()
+    window._artwork_images[key] = cached
+
+    assert window._load_artwork(str(picture), "cover") is cached
+
+
+def test_choosing_artwork_stops_at_the_gate_the_cancel_and_the_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """选图这条路有三处该原地停住: 归档后不让改、用户取消、后端拒绝."""
+    window, _backend, errors, refreshes = _manage(
+        monkeypatch, failing="set_game_artwork"
+    )
+    window._blocked = lambda _ability: True
+
+    window._choose_artwork("cover")
+
+    monkeypatch.setattr(manage_window, "pick_file", lambda **_kwargs: "")
+    window._blocked = lambda _ability: False
+    window._choose_artwork("cover")  # 用户取消: 连后端都不碰
+
+    monkeypatch.setattr(
+        manage_window, "pick_file", lambda **_kwargs: "pictures/cover.png"
+    )
+    window._choose_artwork("cover")
+
+    assert errors == ["后端拒绝了这一步"]
+    assert refreshes == []
+
+
+def test_resetting_artwork_does_nothing_when_there_is_nothing_to_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本来就用的平台图(没有自定义那份)时恢复默认什么都不做, 不必重画."""
+    window, _backend, _errors, _refreshes = _manage(monkeypatch)
+    window._backend.clear_game_artwork = lambda *_args: False
+    rendered: list[int] = []
+    window._render_artwork = lambda: rendered.append(1)
+
+    window._reset_artwork("cover")
+
+    assert rendered == []
+
+
+def test_painting_a_location_row_that_is_gone_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """管理窗口的行被重画销毁(或已经不在这一页)时这一次局部重绘直接作废."""
+    window, _backend, _errors, _refreshes = _manage(monkeypatch)
+
+    window._paint_row("gone")
+
+    assert window._rows == {}
+
+
+def test_hovering_paints_only_the_two_affected_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """悬停变化只重绘离开与进入的那两行(空白处不算一行)."""
+    window, _backend, _errors, _refreshes = _manage(monkeypatch)
+    painted: list[str] = []
+    window._paint_row = painted.append
+
+    window._set_hover("l1")
+    window._set_hover("l1")  # 同一行: 直接返回
+    window._set_hover(None)
+
+    assert painted == ["l1", "l1"]
+
+
+def test_a_cancelled_schedule_edit_does_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """排期对话框被取消(或保存失败)时什么都不做: 不重画、不提示成功."""
+    window, _backend, _errors, refreshes = _manage(monkeypatch)
+    monkeypatch.setattr(manage_window, "edit_schedule", lambda *_args, **_kwargs: False)
+
+    window._on_schedule()
+
+    assert refreshes == []
+
+
+def test_a_rejected_rename_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """改名被后端拒绝(重名/参数不对)时摆出原因, 也不把新名字记下来."""
+    window, _backend, errors, refreshes = _manage(monkeypatch, failing="update_game")
+    monkeypatch.setattr(manage_window, "ask_text", lambda *_args, **_kwargs: "新名")
+
+    window._on_rename()
+
+    assert errors == ["后端拒绝了这一步"]
+    assert window._name == "演示"
+    assert refreshes == []
+
+
+def test_a_rejected_enable_in_the_manage_window_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启用/停用被拒绝时摆出原因, 也不改本窗口记着的状态."""
+    window, _backend, errors, _refreshes = _manage(
+        monkeypatch, failing="set_game_enabled"
+    )
+
+    window._on_toggle_enabled()
+
+    assert errors == ["后端拒绝了这一步"]
+    assert window._enabled is True
+
+
+def test_a_rejected_delete_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """删除的两步都可能被拒: 算导出路径时(不该弹确认框), 以及真删的时候(窗口不关)."""
+    window, _backend, errors, _refreshes = _manage(
+        monkeypatch, failing="delete_export_path"
+    )
+
+    window._on_delete_game()
+
+    assert errors == ["后端拒绝了这一步"]
+    assert window._closed == []
+
+    other, _backend2, errors2, _refreshes2 = _manage(monkeypatch, failing="delete_game")
+    monkeypatch.setattr(manage_window, "confirm_dialog", lambda *_args, **_kwargs: True)
+
+    other._on_delete_game()
+
+    assert errors2 == ["后端拒绝了这一步"]
+    assert other._closed == [], "删失败时窗口要留着"
+
+
+def test_a_rejected_add_location_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """加存档位置被拒绝时摆出原因, 且不重画列表."""
+    window, _backend, errors, refreshes = _manage(monkeypatch, failing="add_location")
+    monkeypatch.setattr(
+        manage_window, "ask_text", lambda *_args, **_kwargs: "saves/new"
+    )
+
+    window._add_location("directory")
+
+    assert errors == ["后端拒绝了这一步"]
+    assert refreshes == []
+
+
+def test_a_rejected_primary_change_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """改主存档位置被拒绝时摆出原因, 且不重画列表."""
+    window, _backend, errors, refreshes = _manage(
+        monkeypatch, failing="set_primary_location"
+    )
+
+    window._on_set_primary()
+
+    assert errors == ["后端拒绝了这一步"]
+    assert refreshes == []
+
+
+def test_a_rejected_verify_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """校验存档位置被拒绝时摆出原因."""
+    window, _backend, errors, refreshes = _manage(
+        monkeypatch, failing="verify_location"
+    )
+
+    window._on_verify()
+
+    assert errors == ["后端拒绝了这一步"]
+    assert refreshes == []
+
+
+def test_a_rejected_location_edit_in_the_manage_window_reports_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """改存档位置路径被拒绝时摆出原因, 且不重画列表."""
+    window, _backend, errors, refreshes = _manage(
+        monkeypatch, failing="update_location"
+    )
+    monkeypatch.setattr(manage_window, "ask_text", lambda *_args, **_kwargs: "saves/新")
+
+    window._on_edit_path()
+
+    assert errors == ["后端拒绝了这一步"]
+    assert refreshes == []
+
+
+def test_removing_a_location_needs_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """删存档位置要确认: 取消时连后端都不碰; 确认后被拒绝则摆出原因."""
+    window, backend, errors, refreshes = _manage(monkeypatch, failing="remove_location")
+    monkeypatch.setattr(
+        manage_window, "confirm_dialog", lambda *_args, **_kwargs: False
+    )
+
+    window._on_remove()
+
+    assert backend.calls == [], "取消之后不该去动后端"
+    assert errors == []
+
+    monkeypatch.setattr(manage_window, "confirm_dialog", lambda *_args, **_kwargs: True)
+    window._on_remove()
+
+    assert errors == ["后端拒绝了这一步"]
+    assert refreshes == []
+
+
+def test_deleting_the_origin_needs_a_gate_a_selection_and_a_typed_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """删原始目录: 归档闸门、没有选中项、预检被拒、没输入确认名 —— 四处都该原地停住."""
+    window, _backend, errors, refreshes = _manage(
+        monkeypatch, failing="preview_location_removal"
+    )
+
+    window._blocked = lambda _ability: True
+    window._on_delete_origin()
+    assert errors == []
+
+    window._blocked = lambda _ability: False
+    window._selected_item = lambda: None
+    window._on_delete_origin()
+    assert errors == []
+
+    window._selected_item = lambda: SimpleNamespace(
+        location_id="l1", path="saves/slot", path_kind="directory", ok=True
+    )
+    window._on_delete_origin()
+    assert errors == ["后端拒绝了这一步"]
+
+    window._backend.preview_location_removal = lambda *_args: SimpleNamespace(
+        blocked=None, path="saves/slot", files=1, total_size=10, game_name="演示"
+    )
+    monkeypatch.setattr(manage_window, "ask_text", lambda *_args, **_kwargs: None)
+    window._on_delete_origin()
+
+    assert len(errors) == 1, "没有输入确认名时不该再报一次错"
+    assert refreshes == []
