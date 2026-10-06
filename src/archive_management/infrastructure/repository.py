@@ -756,7 +756,7 @@ class BackupRepository:
                 " WHERE backup_id = ? AND file_kind = 'file'",
                 (backup_id,),
             ).fetchone()
-        if row is None:
+        if row is None:  # pragma: no cover - 聚合查询(COUNT/SUM)必然返回一行
             return (0, 0)
         return (int(row[0]), int(row[1]))
 
