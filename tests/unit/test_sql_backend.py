@@ -37,6 +37,7 @@ from archive_management.domain import (
 from archive_management.exceptions import (
     ArchiveManagementError,
     ArtworkImageError,
+    OperationCancelledError,
     SnapshotError,
 )
 from archive_management.i18n import set_locale, tr
@@ -3546,3 +3547,115 @@ def test_an_unreadable_snapshot_counts_as_unverified(
     assert service._is_verified(node) is False
     assert service._is_verified(node) is False, "第二次该直接读缓存, 不再去扫快照"
     assert service._verify_cache[str(node.id)] is False
+
+
+# --------------------------------------------------- 操作失败与取消的收尾
+#
+# 五条"跑起来之后才出事"的路: 用户按了取消、或者导出/恢复中途失败。它们都是整块
+# 窗口里只有一处的那种收尾(把原因换成可展示的一句、补一笔审计、把"进行中操作"
+# 的槽位放掉), 平时走不到 —— 而槽位没放掉会让之后每一次操作都卡在"忙"上。
+
+
+def test_a_cancelled_backup_reports_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """备份中途被取消: 换成可展示的"已取消"说明, 并放掉进行中操作的槽位."""
+    service, game_id, _save = _service_with_save(tmp_path)
+
+    def stop(*_args: object, **_kwargs: object) -> None:
+        raise OperationCancelledError("用户按了取消")
+
+    monkeypatch.setattr(service._backups, "create_backup", stop)
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.run_backup_now(game_id)
+
+    assert str(excinfo.value) == tr("result.backup_canceled")
+    assert service._active is None, "取消之后不能一直占着「进行中」的槽位"
+
+
+def test_a_cancelled_restore_reports_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """恢复中途被取消: 提示要说清"原始存档未被修改"; 槽位照样放掉, 当前节点也不动."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    backup_id = service.list_backups(game_id)[0].backup_id
+
+    def stop(*_args: object, **_kwargs: object) -> None:
+        raise OperationCancelledError("用户按了取消")
+
+    monkeypatch.setattr(service._restore, "restore", stop)
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.run_restore(game_id, backup_id)
+
+    assert str(excinfo.value) == tr("result.restore_canceled")
+    assert service._active is None
+    assert service.list_backups(game_id)[0].backup_id == backup_id
+
+
+def test_a_failed_export_is_logged_and_re_raised(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_log: list[str],
+) -> None:
+    """单包导出失败: 原因原样上抛(界面按域异常展示), 但审计里要留下这一笔."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise ArchiveManagementError("磁盘满了")
+
+    monkeypatch.setattr(service._export, "export_game", boom)
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.run_export(game_id, str(tmp_path / f"out{ARCHIVE_SUFFIX}"))
+
+    assert str(excinfo.value) == "磁盘满了"
+    assert any("export.failed" in line for line in audit_log)
+    assert service._active is None
+
+
+def test_a_failed_batch_export_is_logged_and_re_raised(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_log: list[str],
+) -> None:
+    """批量导出失败: 不回滚(目标路径不留文件由服务层保证), 只补审计并照样上抛."""
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise ArchiveManagementError("磁盘满了")
+
+    monkeypatch.setattr(service._export, "export_games", boom)
+
+    with pytest.raises(ArchiveManagementError):
+        service.run_export_batch([game_id], str(tmp_path / f"batch{ARCHIVE_SUFFIX}"))
+
+    assert any("export.batch_failed" in line for line in audit_log)
+    assert service._active is None
+
+
+def test_a_cancelled_import_batch_is_reported_as_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """导入整批时用户真按了取消: 同一个异常换成"已取消"那句(真失败仍照常上抛)."""
+    service = _service(tmp_path)
+    batch = cast(
+        BatchInspection,
+        SimpleNamespace(path=tmp_path / f"in{ARCHIVE_SUFFIX}", game_count=1),
+    )
+
+    def stop(*_args: object, **_kwargs: object) -> None:
+        raise ArchiveManagementError("导入被打断")
+
+    monkeypatch.setattr(service._import, "import_batch", stop)
+    monkeypatch.setattr(service, "_cancel_requested", lambda: True)
+
+    with pytest.raises(OperationCancelledError) as excinfo:
+        service.run_import_batch(batch, {})
+
+    assert str(excinfo.value) == tr("result.import_batch_canceled")
+    assert service._active is None
