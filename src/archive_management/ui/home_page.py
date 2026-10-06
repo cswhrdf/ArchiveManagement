@@ -572,7 +572,8 @@ class HomePage:
         # 旧滚动条宽度是 16px, 症状一模一样), 而本机窗口更高、根本不显示滚动条, 所以只在
         # CI 红。表头对齐与名称重裁都是按内容宽度算的, 这里连画布一起盯才跟得上。
         parent_canvas = getattr(self._list_box, "_parent_canvas", None)
-        if parent_canvas is not None:
+        # 这一支是给替身控件留的: `CTkScrollableFrame` 一定有内层画布, 真窗口里取不到才怪。
+        if parent_canvas is not None:  # pragma: no branch - 滚动帧必有内层画布
             parent_canvas.bind("<Configure>", self._on_list_box_resize, add="+")
 
     def _build_footer(self) -> None:
