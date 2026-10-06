@@ -668,6 +668,54 @@ def _pragma_file_sections(notes: list[PragmaNote]) -> list[str]:
     return lines
 
 
+def _load_platform_module() -> Any:  # noqa: ANN401 - 按路径加载的脚本, 类型只能动态看
+    """按路径加载同目录的 ``coverage_platform.py``(本脚本也可能被按路径加载).
+
+    规则只能有一份: 平台标记的写法与原因下限定义在那个模块里, 报告附件与守卫都复用它。
+    """
+    import importlib.util
+    from types import ModuleType
+
+    path = Path(__file__).with_name("coverage_platform.py")
+    spec = importlib.util.spec_from_file_location("coverage_platform", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - 同目录的文件一定在
+        return None
+    module: ModuleType = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+PLATFORM_MODULE = _load_platform_module()
+
+
+def _platform_marker_section(root: Path) -> list[str]:
+    """列出 ``# platform: ...`` 标记(仅哪个平台 + 原因), 供豁免清单附件用."""
+    if PLATFORM_MODULE is None:  # pragma: no cover - 同目录的文件一定在
+        return []
+    notes = PLATFORM_MODULE.marker_lines(root)
+    lines = ["## 平台标记(`# platform: ...`)—— 只在**别的**平台被排除", ""]
+    if not notes:
+        lines += ["没有平台标记: 没有按平台区分的代码。", ""]
+        return lines
+    for module, number, text in notes:
+        parsed = PLATFORM_MODULE.parse_marker(text)
+        relative = module.relative_to(root)
+        if parsed is None:
+            lines.append(
+                f"- `{relative}:{number}` — **问题: 写法不规范** — `{_cell(text)}`"
+            )
+            continue
+        platforms, reason = parsed
+        detail = f"- `{relative}:{number}` — 仅 {', '.join(platforms)} — 原因: {reason}"
+        problems = PLATFORM_MODULE.marker_problems(text)
+        if problems:
+            detail += f" — **问题: {'; '.join(problems)}**"
+        lines.append(detail)
+    lines.append("")
+    return lines
+
+
 def coverage_exclusions_report(
     project_root: Path, *, source_root: Path | None = None
 ) -> str:
@@ -694,6 +742,7 @@ def coverage_exclusions_report(
     if problems:
         lines += [f"- **写入问题: {len(problems)} 条(详见文末「写入问题」)。**", ""]
     lines += _pragma_file_sections(notes)
+    lines += _platform_marker_section(root)
     lines += ["## `exclude_also`(pyproject.toml)", ""]
     if excluded:
         lines += [f"- `{_cell(item)}`" for item in excluded]

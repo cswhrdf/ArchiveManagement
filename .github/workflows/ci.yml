@@ -799,6 +799,16 @@ jobs:
         if: steps.collect-coverage.outcome == 'success'
         run: uv run coverage combine
 
+      - name: Write the platform coverage config
+        # 平台专属代码只在**别的**平台被排除(见 scripts/coverage_platform.py 的模块说明)。
+        # 这台机器是 Ubuntu, 而它合并/判定的是**某个平台**的数据 ⇒ 平台名取矩阵里的展示名,
+        # 不取宿主平台。写进 GITHUB_ENV 之后, 下面三步(判门槛 / 出 XML / 挂结论)共用它。
+        if: steps.collect-coverage.outcome == 'success'
+        shell: bash
+        run: |
+          uv run python scripts/coverage_platform.py write .coverage.platform.rc --platform "${{ matrix.platform }}"
+          echo "COVERAGE_RCFILE=$PWD/.coverage.platform.rc" >> "$GITHUB_ENV"
+
       - name: Enforce the coverage threshold
         # 门槛值在 pyproject 的 [tool.coverage.report] fail_under 里(与本地一致)。
         # **这一步不再决定这个作业的成败**(用户 2026-10-05: "这一步应该只关心用例是否缺失,

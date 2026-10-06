@@ -56,6 +56,7 @@ Allure 标签语义(与 Allure 3 报告控件一一对应):
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import logging
 from collections.abc import Generator, Iterator
@@ -72,6 +73,31 @@ import tk_guard
 from archive_management.i18n import DEFAULT_LOCALE, set_locale
 from archive_management.services.audit import AUDIT_LOGGER_NAME
 from archive_management.services.platforms import current_platform, platform_label
+
+
+def _install_platform_coverage_config() -> None:
+    """装上"本平台专属"的覆盖率配置(平台专属代码只在别的平台被排除).
+
+    为什么必须在**导入期**做: ``COVERAGE_RCFILE`` 只在 coverage 建配置的那一刻读一次, 而
+    pytest-cov 是在 ``pytest_configure`` 里建它的 —— 那时再改环境变量已经晚了。conftest 比
+    插件 configure 更早被导入, 所以这里动手才赶得上(与 ``scripts/coverage_platform.py`` 的
+    模块文档合起来看)。
+
+    生成失败时 ``setup_environment`` 会打印原因并退回 pyproject 的基线配置: 装配置这件事
+    不该把整个会话弄挂(退回之后的行为与改动前完全一致)。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "coverage_platform",
+        Path(__file__).resolve().parents[1] / "scripts" / "coverage_platform.py",
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - 文件就在仓库里
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.setup_environment()
+
+
+_install_platform_coverage_config()
 
 _SEVERITY_LEVELS = ("blocker", "critical", "normal", "minor", "trivial")
 _SEVERITY_RANK = {
