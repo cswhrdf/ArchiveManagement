@@ -721,6 +721,143 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
     assert "needs: [changes]" in gate, "门禁要等路径过滤出结果"
 
 
+def test_pr_selects_layers_by_changed_paths_and_full_runs_after_merge() -> None:
+    """方向③(2026-10-07): PR 按改动路径选层, 全量证据只留给 push 与 nightly.
+
+    - 只改 UI(src/archive_management/ui、test_gui_*、视觉基线) → 只跑 UI 段; 冒烟用例
+      都挂在 test_gui_* 上且 smoke+ui 双标记, ``-m "ui"`` 天然含冒烟;
+    - 其它代码改动 → 只跑非 UI 段; 共享基础设施(依赖清单 / conftest / 分片器 / 这份
+      工作流)两层全跑 —— 只跑一层等于拿半套证据赌合并;
+    - 纯文档 PR 两层都不命中, pytest 作业整个跳过(上传步是 if-no-files-found: error,
+      没有任何段跑过时会把作业弄红, 而"跳过"才是如实的结论);
+    - pytest-report / allure-summary(覆盖率门槛 fail_under=100 与完整报告都在这条链上)
+      只在 push 与 schedule 跑; quality(静态检查)不分层照旧;
+    - schedule 没有"上一个提交"可比, changes 作业必须绕过 dorny 直接全绿 —— 否则它一
+      失败, needs: [changes] 的所有作业跟着跳过, nightly 整轮死掉。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+
+    # nightly 触发线真的在(没有它, 全量就只剩 push 一条腿)。
+    assert re.search(r"^  schedule:\n    - cron: ", workflow, re.M), (
+        "nightly(schedule)触发丢了: 全量 + 门禁 + 完整报告需要它兜底"
+    )
+
+    changes = ci_workflow.job_block(workflow, "changes")
+    for output in ("should_run", "ui", "backend"):
+        assert output + ": ${{ steps.decide.outputs." + output + " }}" in changes, (
+            f"changes 作业要经 decide 步输出 {output}"
+        )
+    filter_step = changes.split("name: Detect files that require CI", 1)[1]
+    filter_step = filter_step.split("- name:", 1)[0]
+    assert "if: github.event_name != 'schedule'" in filter_step, (
+        "schedule 下 dorny 没有基线可比: 要跳过它, 由 decide 步兜底"
+    )
+    assert "EVENT_NAME: ${{ github.event_name }}" in changes
+    assert '"$EVENT_NAME" = "schedule"' in changes, "decide 步要在 schedule 下直接全绿"
+
+    # 层过滤的形状: ui = UI 专属 + 共享基础设施; backend = 除文档与 UI 专属外的一切。
+    ui_block = changes.split("\n            ui:", 1)[1].split(
+        "\n            backend:", 1
+    )[0]
+    ui_entries = {
+        entry.removeprefix("- '").removesuffix("'")
+        for entry in (
+            line.strip()
+            for line in ui_block.splitlines()
+            if line.strip().startswith("- '")
+        )
+    }
+    assert ui_entries == {
+        "src/archive_management/ui/**",
+        "tests/integration/test_gui_*.py",
+        "tests/visual-baselines/**",
+        "pyproject.toml",
+        "uv.lock",
+        "tests/conftest.py",
+        "tests/sharding.py",
+        "tests/ci_workflow.py",
+        ".github/workflows/ci.yml",
+    }, f"ui 层的路径集合变了: {sorted(ui_entries)}"
+    backend_block = changes.split("\n            backend:", 1)[1].split("- name:", 1)[0]
+    backend_negated = {
+        entry.removeprefix("- '").removesuffix("'")
+        for entry in (
+            line.strip()
+            for line in backend_block.splitlines()
+            if line.strip().startswith("- '!")
+        )
+    }
+    assert backend_negated == {
+        "!**/*.md",
+        "!docs/**",
+        "!.github/instructions/**",
+        "!.github/prompts/**",
+        "!src/archive_management/ui/**",
+        "!tests/integration/test_gui_*.py",
+        "!tests/visual-baselines/**",
+    }, f"backend 层的排除集合变了: {sorted(backend_negated)}"
+    assert "- '**'" in backend_block, "backend 要兜底: 分不清的改动宁可多跑不漏跑"
+
+    # 四段 pytest 步骤按层放行, 且 push / nightly 无视层输出(前缀放行)。
+    pytest_job = ci_workflow.job_block(workflow, "pytest")
+    for step_name, layer in (
+        ("non-UI suite first (Linux)", "backend"),
+        ("non-UI suite first (Windows/macOS)", "backend"),
+        ("UI suite in its own process (Linux)", "ui"),
+        ("UI suite in its own process (Windows/macOS)", "ui"),
+    ):
+        step = pytest_job.split(f"Pytest with coverage, {step_name}", 1)[1]
+        step = step.split("- name:", 1)[0]
+        condition = re.search(r"^        if: (.+)$", step, re.M)
+        assert condition is not None, f"{step_name} 没有 if 条件"
+        assert "github.event_name != 'pull_request' || " in condition.group(1), (
+            f"{step_name}: push / nightly 必须无视层输出、两段全跑"
+        )
+        assert f"needs.changes.outputs.{layer} == 'true'" in condition.group(1), (
+            f"{step_name}: PR 上要按 {layer} 层放行"
+        )
+    # 段的标记表达式不许顺手改掉(两段互补不重不漏是分片与产物清单核对的前提;
+    # 注释里也写着这对标记, 先剥掉再数)。
+    code = "\n".join(
+        line for line in pytest_job.splitlines() if not line.strip().startswith("#")
+    )
+    assert code.count('-m "not ui"') == 2
+    assert code.count('-m "ui"') == 2
+
+    pytest_condition = ci_workflow.job_condition(workflow, "pytest")
+    assert "needs.changes.outputs.should_run == 'true'" in pytest_condition
+    assert "github.event_name != 'pull_request' ||" in pytest_condition
+    for layer in ("ui", "backend"):
+        assert f"needs.changes.outputs.{layer} == 'true'" in pytest_condition, (
+            f"两层都不命中的 PR 要跳过整个 pytest 作业(否则上传步会因没有产物而误红): 缺 {layer}"
+        )
+
+    for job in ("pytest-report", "allure-summary"):
+        report_condition = ci_workflow.job_condition(workflow, job)
+        assert "github.event_name != 'pull_request'" in report_condition, (
+            f"{job}: 覆盖率门槛与完整报告只留给 push / nightly, PR 不出合并报告"
+        )
+    security_condition = ci_workflow.job_condition(workflow, "security")
+    assert "needs.changes.outputs.backend == 'true'" in security_condition, (
+        "安全用例是后端语义, 纯 UI 的 PR 跳过 security"
+    )
+    assert "github.event_name != 'pull_request' ||" in security_condition
+    quality_condition = ci_workflow.job_condition(workflow, "quality")
+    assert "github.event_name" not in quality_condition, (
+        "静态检查所在的 quality 作业在 PR 上照旧, 不分层"
+    )
+
+    smoke_module = (
+        _REPO_ROOT / "tests" / "integration" / "test_gui_smoke.py"
+    ).read_text(encoding="utf-8")
+    assert "pytest.mark.smoke" in smoke_module, (
+        "test_gui_* 要挂 smoke 标记(UI 层含冒烟的前提)"
+    )
+    assert "pytest.mark.ui" in smoke_module, (
+        'test_gui_* 要挂 ui 标记(-m "ui" 才能选中冒烟用例)'
+    )
+
+
 def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
     """被取代的运行别再花时间做报告: 两个报告作业的条件都要排除“整轮被取消”.
 
