@@ -197,7 +197,10 @@ mypy_path = "$MYPY_CONFIG_FILE_DIR/src:$MYPY_CONFIG_FILE_DIR/tests"
 # tests 各层目录(unit/performance/security)的 conftest 与根目录 tests/conftest.py 同名,
 # mypy 的模块发现会把它们判成 "Duplicate module"; 这些文件是纯 fixture 装配(由 pytest
 # 在收集期加载), 类型问题由 ruff 与运行期用例兜底, 故只对子目录 conftest 豁免检查.
-exclude = "tests[/\\\\].+[/\\\\]conftest\\.py$"
+# ui-review/ 是一次性的本地评审脚本(自述"不参与质量门禁", 也未被 git 跟踪): 目录递归
+# 发现(如本地跑 `mypy .`)会把它扫进来, 这里一并排除 —— files 里没有它, CI 的正式
+# 检查范围不受影响.
+exclude = "(tests[/\\\\].+[/\\\\]conftest\\.py$|ui-review[/\\\\])"
 
 [[tool.mypy.overrides]]
 # CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制

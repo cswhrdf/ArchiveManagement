@@ -451,8 +451,12 @@ def compare_one(name: str, actual: Path, baseline: Path | None) -> Comparison:
         # scikit-image 带 `py.typed`(所以 mypy 能看见这个函数), 但 `structural_similarity`
         # 自己没写标注 —— strict 下的 `no-untyped-call` 会把"调用它"判成错。按仓库既有做法
         # 给出**指定错误码**的最小忽略: 只放过这一次调用, 而不是把整个 skimage 当成 Any。
-        # 上游哪天补上标注, `warn_unused_ignores` 会把这一行报出来, 到时删掉即可。
-        similarity = structural_similarity(  # type: ignore[no-untyped-call]
+        # 这个忽略是环境依赖的: 装了 visual 组时 no-untyped-call 真的会触发; 没装时
+        # skimage 被 ignore_missing_imports 化为 Any、调用不报错, 这行反而成了"未使用的
+        # 忽略"。把 unused-ignore 一并列进忽略码, 两种环境都成立(mypy 对这类两态忽略的
+        # 官方姿势)。上游哪天补上标注后 no-untyped-call 不再触发, warn_unused_ignores
+        # 仍会报出这行, 到时删掉即可。
+        similarity = structural_similarity(  # type: ignore[no-untyped-call, unused-ignore]
             grey_base, grey_actual, data_range=255.0
         )
         ssim = float(similarity)
