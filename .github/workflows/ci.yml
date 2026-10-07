@@ -19,11 +19,12 @@ on:
       - ".github/prompts/**"
   pull_request:
     branches: *ci_branches
-  # nightly(2026-10-07, 方向③): 全量 + 覆盖率门禁 + 完整报告的第二条触发线。PR 上按改动
-  # 路径分层(见 changes 作业), 合并到 dev/main 的那轮 push 本来就是全量 —— nightly 兜的是
-  # "dev 一段时间没有 push"的空窗: 全量证据与 Allure 趋势都不断档(趋势的寿命 = 产物的
-  # 寿命, 见 docs/testing.md 第 6 节)。定时触发用的是默认分支上的这份文件, 也没有"与哪个
-  # 提交比路径"可言 —— 所以 changes 作业在 schedule 下不走 dorny, 由 decide 步直接全绿。
+  # nightly(2026-10-07): 全量 + 覆盖率门禁 + 完整报告的第二条触发线。合并到 dev/main 的
+  # 每次 push(含 PR 合并)本来就各自触发一轮全量, nightly 只做"次日复验", 而且**只在默认
+  # 分支自上一轮以来有新提交时才跑**(见 changes 作业的 freshness 步): 两次定时之间什么
+  # 都没合, 再跑一轮不产生新证据, 只烧 runner。定时触发永远在默认分支上执行, 也没有
+  # "与哪个提交比路径"可言 —— 所以 changes 作业在 schedule 下不走 dorny, 由 freshness
+  # (要不要跑)与 decide(全量放行)两步给出答案。
   schedule:
     - cron: "0 19 * * *" # UTC 19:00 = 北京时间次日凌晨 3 点
 
@@ -70,9 +71,9 @@ jobs:
 
       - name: Detect files that require CI
         id: filter
-        # schedule 没有"上一个提交"可比, dorny 给不出路径集合(nightly 的定义就是全量),
-        # 这一步在 schedule 下整个跳过, 由下面的 decide 步直接放行 —— 否则它一失败,
-        # needs: [changes] 的所有作业跟着跳过, nightly 整轮就死了。
+        # schedule 没有"上一个提交"可比, dorny 给不出路径集合 —— nightly 的取舍由
+        # freshness(要不要跑)与 decide(全量放行)两步接管, 这一步在 schedule 下整个
+        # 跳过。它若失败, needs: [changes] 的所有作业跟着跳过, nightly 整轮就死了。
         if: github.event_name != 'schedule'
         uses: dorny/paths-filter@v3
         with:
@@ -84,7 +85,7 @@ jobs:
               - '!.github/instructions/**'
               - '!.github/prompts/**'
 
-            # 方向③(2026-10-07): PR 按改动路径分层。ui 层 = UI 专属路径 + 共享基础设施;
+            # PR 按改动路径分层(2026-10-07): ui 层 = UI 专属路径 + 共享基础设施;
             # 冒烟用例全部挂在 test_gui_* 上、带 smoke+ui 双标记, 所以 `-m "ui"` 天然含冒烟。
             # 共享基础设施(pyproject / uv.lock / conftest / 分片器 / 这份工作流)同时会被
             # backend 层的兜底 `**` 命中 —— 它们影响所有用例, 只跑一层等于拿半套证据赌合并。
@@ -111,19 +112,44 @@ jobs:
               - '!tests/integration/test_gui_*.py'
               - '!tests/visual-baselines/**'
 
+      - name: Check whether the default branch moved since the last nightly
+        id: freshness
+        # nightly 只该在默认分支自上一轮以来有新提交时跑: 没变化的一轮不产生新证据,
+        # 只烧 runner(合并进来的每次 push 本来就有 push 触发的全量在先)。"每天一跑"
+        # 的节奏下, HEAD 提交年龄 < 24h 与"自上一轮 nightly 以来有 push"等价(边界差
+        # 不到一小时, 不影响结论), 而且不用查 workflow 运行历史 —— 那要 API 往返与
+        # 空结果处理, 提交时间在 shallow checkout(depth 1)里就有。
+        # 附带一个已知取舍: nightly 与 main 的 push 运行同属一个 concurrency 组(按 ref
+        # 分组), 19:00 整撞上正在跑的 main 全量时会取代它 —— nightly 自己就是同一 SHA
+        # 的全量, 证据不缺, 只浪费被取代那轮的已跑部分(与连续 push 的取代同一语义)。
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          head_ts=$(git log -1 --format=%ct)
+          age=$(( $(date +%s) - head_ts ))
+          echo "age_seconds=$age" >> "$GITHUB_OUTPUT"
+          if [ "$age" -lt 86400 ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Decide which layers to run
         id: decide
         # 各作业统一从 decide 取输出(而不是直接读 steps.filter.outputs.*): schedule 下
-        # filter 步被跳过、输出为空, 必须在这里补一个"全绿"的答案。
+        # filter 步被跳过、输出为空, 必须在这里补一个"层全绿"的答案; 而"要不要跑"听
+        # freshness 的 —— 默认分支没动时 should_run=false, 整轮按纯文档 PR 的同一条
+        # 路径跳过重量级作业。
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           FILTERED_SHOULD_RUN: ${{ steps.filter.outputs.should_run }}
           FILTERED_UI: ${{ steps.filter.outputs.ui }}
           FILTERED_BACKEND: ${{ steps.filter.outputs.backend }}
+          HEAD_IS_FRESH: ${{ steps.freshness.outputs.fresh }}
         run: |
           if [ "$EVENT_NAME" = "schedule" ]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "should_run=$HEAD_IS_FRESH" >> "$GITHUB_OUTPUT"
             echo "ui=true" >> "$GITHUB_OUTPUT"
             echo "backend=true" >> "$GITHUB_OUTPUT"
           else
@@ -386,7 +412,7 @@ jobs:
 
   pytest:
     needs: [changes]
-    # PR 按层跑(方向③): 纯 UI 改动只跑 UI 段、纯后端改动只跑非 UI 段, 两层都命中时全跑;
+    # PR 按层跑: 纯 UI 改动只跑 UI 段、纯后端改动只跑非 UI 段, 两层都命中时全跑;
     # push 与 nightly 无视层输出。两层都不命中的纯文档 PR 整个跳过本作业 —— 与 quality
     # 作业按 should_run 跳过是同一个模式, 必需检查由 required-check 兜底。作业级保证
     # "至少一层命中"是给上传步(if-no-files-found: error)的: 没有任何段跑过时那几步会把
@@ -585,7 +611,7 @@ jobs:
       # 第二段的条件带 `always() && !cancelled()`: 第一段有普通红(断言失败)时 UI 段照跑 ——
       # 一半用例的失败不该吞掉另一半的结果; 整轮被取消则不再起新进程。
       #
-      # 分层(2026-10-07 方向③): PR 上每一段再按 changes 作业的层输出放行 —— backend 层
+      # 分层(2026-10-07): PR 上每一段再按 changes 作业的层输出放行 —— backend 层
       # (非 UI 的 src / 测试 / 基础设施)跑 "not ui" 段, ui 层(src/archive_management/ui、
       # test_gui_*、视觉基线)跑 "ui" 段; push 与 nightly 无视层输出、两段全跑(合并后的
       # 全量证据一条不少)。作业级的 if 已保证至少有一层命中, 所以总有一段把结果与覆盖率
@@ -766,7 +792,7 @@ jobs:
     # 但**被取代的运行不必再出报告**: 这一条要用 `!cancelled()` 表达, 不能只写 `always()`
     # —— `always()` 连“整轮被取消”也返回 true, 那样旧的那一轮会在取消后照样启动本作业
     # (合并/生成/上传白跑一遍, 而且被取消的作业按已用时长计费)。
-    # 并且只在 push 到 dev/main 与 nightly 跑(方向③): 覆盖率门槛(fail_under=100)与逐平台
+    # 并且只在 push 到 dev/main 与 nightly 跑: 覆盖率门槛(fail_under=100)与逐平台
     # 合并报告都在这条链上, PR 只跑选中层、不再出合并结论 —— PR 的证据是分片作业的日志
     # 与分片产物(allure-results-<os>-<shard> / coverage-data-*); 合并后那轮 push 本来
     # 就是全量, 证据一条不少。
@@ -1257,7 +1283,7 @@ jobs:
     name: Allure 汇总报告
     needs: [changes, quality, pytest-report, security]
     # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
-    # 完整报告与原生质量门也只留给 push / nightly(方向③), 与 pytest-report 同一条规则。
+    # 完整报告与原生质量门也只留给 push / nightly, 与 pytest-report 同一条规则。
     if: always() && !cancelled() && needs.changes.outputs.should_run == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载

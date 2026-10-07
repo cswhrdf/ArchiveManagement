@@ -722,7 +722,7 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
 
 
 def test_pr_selects_layers_by_changed_paths_and_full_runs_after_merge() -> None:
-    """方向③(2026-10-07): PR 按改动路径选层, 全量证据只留给 push 与 nightly.
+    """PR 按改动路径选层(2026-10-07 落地), 全量证据只留给 push 与 nightly.
 
     - 只改 UI(src/archive_management/ui、test_gui_*、视觉基线) → 只跑 UI 段; 冒烟用例
       都挂在 test_gui_* 上且 smoke+ui 双标记, ``-m "ui"`` 天然含冒烟;
@@ -732,8 +732,9 @@ def test_pr_selects_layers_by_changed_paths_and_full_runs_after_merge() -> None:
       没有任何段跑过时会把作业弄红, 而"跳过"才是如实的结论);
     - pytest-report / allure-summary(覆盖率门槛 fail_under=100 与完整报告都在这条链上)
       只在 push 与 schedule 跑; quality(静态检查)不分层照旧;
-    - schedule 没有"上一个提交"可比, changes 作业必须绕过 dorny 直接全绿 —— 否则它一
-      失败, needs: [changes] 的所有作业跟着跳过, nightly 整轮死掉。
+    - nightly 不白跑: schedule 下 changes 作业绕过 dorny, 但只有默认分支自上一轮以来
+      有新提交(freshness 步: HEAD 提交年龄 < 24h)才放行 should_run —— 没变化的一轮
+      按纯文档 PR 的同一条路径整体跳过, 不烧 runner。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
@@ -753,7 +754,22 @@ def test_pr_selects_layers_by_changed_paths_and_full_runs_after_merge() -> None:
         "schedule 下 dorny 没有基线可比: 要跳过它, 由 decide 步兜底"
     )
     assert "EVENT_NAME: ${{ github.event_name }}" in changes
-    assert '"$EVENT_NAME" = "schedule"' in changes, "decide 步要在 schedule 下直接全绿"
+    assert '"$EVENT_NAME" = "schedule"' in changes, (
+        "decide 步在 schedule 下走专门分支(层输出全绿)"
+    )
+    freshness_step = changes.split("name: Check whether the default branch moved", 1)[1]
+    freshness_step = freshness_step.split("- name:", 1)[0]
+    assert "if: github.event_name == 'schedule'" in freshness_step, (
+        "freshness 只在 schedule 下跑: push / PR 的路径取舍不归它管"
+    )
+    assert "git log -1 --format=%ct" in freshness_step
+    assert "86400" in freshness_step, "提交年龄门槛(24h)要与每日一跑的节奏对上"
+    assert "HEAD_IS_FRESH: ${{ steps.freshness.outputs.fresh }}" in changes, (
+        "decide 要把 freshness 的结果接进 schedule 分支"
+    )
+    assert 'echo "should_run=$HEAD_IS_FRESH"' in changes, (
+        "nightly 的 should_run 由 freshness 决定: 没变化的一轮要整体跳过"
+    )
 
     # 层过滤的形状: ui = UI 专属 + 共享基础设施; backend = 除文档与 UI 专属外的一切。
     ui_block = changes.split("\n            ui:", 1)[1].split(
