@@ -591,24 +591,22 @@ def test_update_meta_sets_title_and_note(tmp_path: Path) -> None:
     assert service.get(node.id) == updated
 
 
-def test_update_meta_rejects_long_note(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    [("note", MAX_NOTE_LENGTH), ("title", MAX_TITLE_LENGTH)],
+    ids=["long-note", "long-title"],
+)
+def test_update_meta_rejects_over_limit_fields(
+    tmp_path: Path, field: str, limit: int
+) -> None:
+    """备注与标题各自超过上限时拒绝修改, 合法值不受影响."""
     service, game_id = _service(tmp_path)
     node = service.create_backup(game_id)
     assert node.id is not None
+    payload: dict[str, str] = {"title": "t", "note": ""}
+    payload[field] = "x" * (limit + 1)
     with pytest.raises(ArchiveManagementError):
-        service.update_meta(
-            game_id, node.id, title="t", note="x" * (MAX_NOTE_LENGTH + 1)
-        )
-
-
-def test_update_meta_rejects_long_title(tmp_path: Path) -> None:
-    service, game_id = _service(tmp_path)
-    node = service.create_backup(game_id)
-    assert node.id is not None
-    with pytest.raises(ArchiveManagementError):
-        service.update_meta(
-            game_id, node.id, title="x" * (MAX_TITLE_LENGTH + 1), note=""
-        )
+        service.update_meta(game_id, node.id, **payload)
 
 
 def test_update_meta_rejects_unknown_backup(tmp_path: Path) -> None:

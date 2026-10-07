@@ -21,12 +21,6 @@ pytestmark = [
 ]
 
 
-@pytest.fixture
-def service() -> DemoArchiveService:
-    """不模拟耗时的演示后端."""
-    return DemoArchiveService(delay=0)
-
-
 def test_update_monitored_directory_changes_path_and_note(
     service: DemoArchiveService,
 ) -> None:

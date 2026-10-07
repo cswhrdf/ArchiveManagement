@@ -194,6 +194,10 @@ no_implicit_optional = false
 allow_redefinition = false
 ignore_missing_imports = true
 mypy_path = "$MYPY_CONFIG_FILE_DIR/src:$MYPY_CONFIG_FILE_DIR/tests"
+# tests 各层目录(unit/performance/security)的 conftest 与根目录 tests/conftest.py 同名,
+# mypy 的模块发现会把它们判成 "Duplicate module"; 这些文件是纯 fixture 装配(由 pytest
+# 在收集期加载), 类型问题由 ruff 与运行期用例兜底, 故只对子目录 conftest 豁免检查.
+exclude = "tests[/\\\\].+[/\\\\]conftest\\.py$"
 
 [[tool.mypy.overrides]]
 # CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制
@@ -224,7 +228,13 @@ known_first_party = [
   "tk_guard",
   "timeout_guard",
   "allure_catalog",
+  "button_support",
+  "report_support",
+  "sql_support",
 ]
+# 拆分/新增 tests 下的共享辅助模块时**必须同步登记上面这份清单** —— 忘了的话 deptry
+# 会把它当"未声明依赖"(DEP001, 一处 import 一条), 本地提交钩子当场拦下(2026-10-07:
+# button/report/sql_support 三组就是这样被拦住的)。
 exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
 
 [tool.deptry.per_rule_ignores]

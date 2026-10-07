@@ -102,7 +102,7 @@ uv run radon cc -s --min B src                                   # 复杂度报�
 uv run xenon --max-absolute B --max-modules F --max-average F src # 复杂度门槛
 ```
 
-**复杂度的两把尺子同分**：门槛取 `10`，与 Ruff 的 `[tool.ruff.lint.mccabe] max-complexity`完全相同；Radon 的等级对应 1-5 / 6-10 / 11-20 / …，所以“不超过 10”就是“最差只能到 B 级”，`xenon` 的模块级与平均复杂度不设限（Ruff 并不检查这两项）。但两者的**刻度不同**：Radon 会把 `with`、`assert`、布尔运算也算作分支，同一段代码通常比 Ruff 的 C901 高 2~5 分，因此写新函数时以 Radon 为准（`radon cc --min C src` 当前为空，说明全部函数都在 B 级以内）。`tests/unit/test_report_verification.py` 里有守卫，保证两处数值不会各自漂移。
+**复杂度的两把尺子同分**：门槛取 `10`，与 Ruff 的 `[tool.ruff.lint.mccabe] max-complexity`完全相同；Radon 的等级对应 1-5 / 6-10 / 11-20 / …，所以“不超过 10”就是“最差只能到 B 级”，`xenon` 的模块级与平均复杂度不设限（Ruff 并不检查这两项）。但两者的**刻度不同**：Radon 会把 `with`、`assert`、布尔运算也算作分支，同一段代码通常比 Ruff 的 C901 高 2~5 分，因此写新函数时以 Radon 为准（`radon cc --min C src` 当前为空，说明全部函数都在 B 级以内）。`tests/unit/test_report_quality_items.py` 里有守卫，保证两处数值不会各自漂移。
 
 `deptry` 的两处说明：CI 的静态分析作业带 `--no-install-project`（项目没装进 `.venv`），依赖是按"仓库源码"解析的，所以 `known_first_party` 里同时列了 `archive_management` 与 `tests` 下的共享辅助模块。
 

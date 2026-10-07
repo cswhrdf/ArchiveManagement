@@ -1120,6 +1120,7 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 | 13  | PR 上用**已有的** `--min-severity blocker`（或 `critical`）只跑关键用例, main 跑全量          | 仓库已经实现了这个开关, 几乎零开发量                                                                                                                                                      |
 | 14  | 给最慢的 GUI 用例打 `pytest.mark.slow`, PR 上 `-m "not slow"`                                 | 需要先按耗时排序（`--durations=20` 或 Allure 里的 duration）                                                                                                                              |
 | 15  | 按作业拆依赖分组: `[dependency-groups]` 拆成 `test`/`coverage`/`quality`/`analysis`/`package` | **已实施（2026-09-21）**, 实测收益比原估小得多: 缓存热时每实例只省约 0.5~1 秒（`uv sync` 装 51 个包 522ms）, 真正省下的是**冷缓存**那一轮（锁文件一变就得重建 uv 缓存）与各作业的安装体积 |
+| 16  | **降单条 ui 用例固定成本**: 先 profile 典型用例 call 段（ArchiveApp 构造 / pump / 断言 / destroy 收尾链）的时间占比, 再定点优化占比最大的一段 | 这是测试套件执行时间的**真正大头**（本地与 CI 都受益）: 2026-10-07 `--durations` 实测, 成本集中在 call 而非 fixture, Top60 慢用例合计只占 ~27% —— 是"280 条 ui × 每条 3~4s"的**数量×固定成本**型, 打 `slow` 标记排除头部用例收益有限（已并入第 14 条的不做结论）。红线: 建真窗 / 真实窗口映射是布局断言的一部分, 优化不得伤"真实 UI"语义 | **未做（2026-10-07 登记）**; 缓解措施先行 —— 本地手动全量可双进程分片（`scripts/run_tests_local.py`, 实测 18:28 → 12:27, 见 docs/testing.md §6） |
 
 **第 15 条的落地细节**: 各作业实际装的组 —— `quality` = test+quality+analysis; `pytest` = test+quality（片 0 的平台检查要 mypy）; `pytest-report` = coverage; `security` = test; `allure-summary` = **一组不装**（脚本只用标准库, Allure CLI 走 npm）; release 的 build = test+quality+package。
 
@@ -1149,7 +1150,7 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 
 1. **档 1**: 21 → 18 个实例; 剩两项已结案（npm 缓存已实施见 §12.4; 解释器目录缓存 2026-10-05 定案**不做**）。
 2. **档 2**: 18 → 13 → **11**（本节）; Windows 上的实例从 5 降到 2。**当前计数**: 默认分支上是 **14** 个实例（macOS 恢复后只给 1 片）, PR 与 dev 推送上是 **13** 个。
-3. **档 3**: 第 15 条已完成; 第 12/13/14 条**不做**（2026-10-05 定案）, 口径已定 —— **PR 仍跑三平台**（见下面的红线与 §15.2）。
+3. **档 3**: 第 15 条已完成; 第 12/13/14 条**不做**（2026-10-05 定案）, 口径已定 —— **PR 仍跑三平台**（见下面的红线与 §15.2）; 第 16 条 2026-10-07 登记未做（先以本地双片分片缓解）。
 
 ## 12. 测试报告增强（Allure 3，2026-09-29）
 

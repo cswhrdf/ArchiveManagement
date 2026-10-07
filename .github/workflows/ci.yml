@@ -247,7 +247,7 @@ jobs:
         # ``UV_PROJECT_ENVIRONMENT`` 让它装进独立环境, 不动本作业其余步骤共用的 .venv。
         #
         # 脚本自己也会拦: 汉字量不出宽度时它标红**且不产出候选基线**(见 tests/unit/
-        # test_report_verification.py 的守卫), 并把探针(模块与库的实际路径)写进 fonts.txt ——
+        # test_report_visual_catalog.py 的守卫), 并把探针(模块与库的实际路径)写进 fonts.txt ——
         # 宁可这一轮没有基线, 也不拿一张看不清的图当"正确"。
         env:
           UV_PROJECT_ENVIRONMENT: .venv-visual
@@ -775,7 +775,7 @@ jobs:
         # 版本下限在**运行期**判定: 工作流用的是浮动标签 `allure@3`(2026-10-04 用户按需求改成
         # 动态取最新), 而 3.13~3.17 在配了 historyPath 时会让**质量门静默放行**(退 0 且不输出
         # 任何内容, issue #895; 3.18.0 的 PR #962 修复) —— 那种失效在报告里看不出来, 所以装完
-        # 当场比一次。静态那一条由 tests/unit/test_report_verification.py 守着(只允许浮动标签
+        # 当场比一次。静态那一条由 tests/unit/test_ci_workflow.py 守着(只允许浮动标签
         # 或 ≥ 配置里最低要求的钉住版本)。
         shell: bash
         run: |

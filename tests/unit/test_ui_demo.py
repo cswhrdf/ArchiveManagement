@@ -35,11 +35,6 @@ pytestmark = [
 ]
 
 
-@pytest.fixture
-def service() -> DemoArchiveService:
-    return DemoArchiveService(delay=0)
-
-
 def test_list_games(service: DemoArchiveService) -> None:
     games = service.list_games()
     assert len(games) == 3

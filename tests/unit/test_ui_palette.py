@@ -40,16 +40,14 @@ def test_theme_names_contain_both() -> None:
     assert set(THEME_NAMES) == {"dark", "light"}
 
 
-def test_for_theme_dark() -> None:
-    assert Palette.for_theme("dark") is DARK
-
-
-def test_for_theme_light() -> None:
-    assert Palette.for_theme("light") is LIGHT
-
-
-def test_for_theme_unknown_falls_back_to_dark() -> None:
-    assert Palette.for_theme("neon") is DARK
+@pytest.mark.parametrize(
+    ("theme", "expected"),
+    [("dark", DARK), ("light", LIGHT), ("neon", DARK)],
+    ids=["dark", "light", "unknown-falls-back-to-dark"],
+)
+def test_for_theme_returns_the_named_palette(theme: str, expected: Palette) -> None:
+    """命名主题取对应的调色板; 未知名不抛异常, 回落到深色."""
+    assert Palette.for_theme(theme) is expected
 
 
 def test_palettes_define_required_colors() -> None:

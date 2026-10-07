@@ -47,7 +47,7 @@ SCALE = f"{GAME_COUNT} 款游戏 x 2 存档位置 x 3 备份节点"
 NOW = BASE_MOMENT + timedelta(days=1)
 
 
-def _stamp(moment: datetime) -> str:
+def _display_stamp(moment: datetime) -> str:
     """把时间格式化为展示文本(基准只要求可调用且返回字符串)."""
     return moment.strftime("%Y-%m-%d %H:%M")
 
@@ -130,7 +130,7 @@ def test_home_board_uses_bounded_memory(
         perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0),
     ):
         report = load_home(home_database, now=NOW)
-        board = home_board(report, stamp=_stamp)
+        board = home_board(report, stamp=_display_stamp)
 
     assert len(board.games) == board.stats.total  # 默认视图不含归档游戏
     assert board.stats.total + board.stats.archived == GAME_COUNT
