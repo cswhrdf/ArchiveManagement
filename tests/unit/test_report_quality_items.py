@@ -165,7 +165,8 @@ def test_complexity_gate_matches_ruffs_mccabe_limit() -> None:
 def test_pre_commit_covers_the_dependency_check() -> None:
     """deptry 是唯一同时进本地钩子与 CI 的新工具(用户要求), 配置不能掉."""
     config = _PRE_COMMIT.read_text(encoding="utf-8")
-    assert "uv run deptry" in config
+    # 只判"它是钩子之一"; 怎么跑(走 uv、且**不许隐式重建环境**)由下面那条判据统一管。
+    assert "deptry ." in config
     # 依赖清单变了也要重查, 所以钩子的触发范围不止 .py。
     assert "pyproject\\.toml" in config
     assert "uv\\.lock" in config
@@ -194,6 +195,29 @@ def test_pre_commit_formats_and_restages_instead_of_only_checking() -> None:
         line for line in block.splitlines() if line.strip().startswith("entry:")
     )
     assert "--check" not in entry, "只读检查会在改过文件时拦下提交, 那正是要改掉的流程"
+
+
+def test_every_uv_hook_runs_without_rebuilding_the_environment() -> None:
+    """每条 ``uv run`` 钩子都必须带 ``--no-sync``: **提交这条路不许碰虚拟环境**.
+
+    出处(2026-10-08 现场): 钩子里的 ``uv run`` 没关掉隐式 sync, 于是"刚改过依赖 + 提交"这
+    个组合会让提交过程顺手重建 ``.venv`` —— 编辑器的 Ruff 扩展正占着
+    ``.venv\\Scripts\\ruff.exe``, 复制失败(``os error 32 另一个程序正在使用此文件``),
+    ruff-check 钩子 exit 2 拦下提交, 而环境已被卸掉 14 个包、卡在"半装"状态。现场只剩一句
+    "文件被占用", 与代码毫无关系, 很难当场看懂。
+
+    关掉隐式 sync 之后: 提交永远不会动环境; 依赖真的变了, 钩子只会明确报"找不到工具",
+    先 ``uv sync`` 再提交即可。这条判据同时给"新加一个钩子别忘了同样处理"兜底。
+    """
+    entries = [
+        line.strip()
+        for line in _PRE_COMMIT.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("entry:") and "uv run" in line
+    ]
+    # 兜底: 一条 `uv run` 都没有时, 下面的判据会"因为没有对象"而空转。
+    assert entries, "配置里没有 uv run 钩子: 判据失去了检查对象"
+    offenders = [entry for entry in entries if "--no-sync" not in entry]
+    assert offenders == [], f"这些钩子会在提交时隐式重建环境: {offenders}"
     script = _REPO_ROOT / "scripts" / "ruff_format_and_stage.py"
     assert script.is_file(), "钩子指向的脚本要在"
     # 脚本自己会 git add: 这是"提交一次就过"的关键, 少了它 pre-commit 仍会拦下。

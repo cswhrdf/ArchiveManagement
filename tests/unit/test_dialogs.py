@@ -1552,9 +1552,13 @@ class _ComfortWindow:
         self._requested = requested
         self._chrome = chrome
         self._measured = measured
+        # 夹取"量了几轮": 已在下限时应当第一轮就收工(见
+        # test_the_comfort_line_stops_when_the_body_is_already_at_its_floor)。
+        self.idle_calls = 0
 
     def update_idletasks(self) -> None:
-        """假窗口没有待处理事件."""
+        """假窗口没有待处理事件; 只数一下夹取问了几轮."""
+        self.idle_calls += 1
 
     def winfo_screenheight(self) -> int:
         """屏幕高度(舒适线 = 它的 80%)."""
@@ -1652,6 +1656,29 @@ def test_the_comfort_line_stops_after_the_pass_limit(
     dialogs._clamp_to_comfort_line(window, current=561)
 
     assert body.height == 509 - dialogs._CLAMP_PASSES, "收够上限就该停手"
+
+
+def test_the_comfort_line_stops_when_the_body_is_already_at_its_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正文区已在下限却仍超线时**第一轮就收工**: 不再往下收, 也不做无用的反复量测.
+
+    这是"够不着"的形态(2026-10-02 实测: 700 高的屏 + 125% 缩放下批量导入的正文区已压到
+    ``_DIALOG_BODY_MIN``, 整窗仍是 654 物理 > 448): 口径是"夹取使完手段"就停手 —— 继续
+    往下压会把内容切成看不见, 反复量四轮也只是白跑。断言"量了几轮"正是为了咬住这两件事:
+    把早退去掉、或把 ``<=`` 改成 ``<``, 这条就会看到 4 轮而不是 1 轮。
+
+    收到上限附近就收工时走的却是**另一条**路(请求高度不再越线, 见上一条用例), 所以这一行
+    一直没有用例走到 —— 别把它当成防御性死代码删掉。
+    """
+    monkeypatch.setattr(ctk, "CTkScrollableFrame", _ComfortBody)
+    body = _ComfortBody(dialogs._DIALOG_BODY_MIN)
+    window: Any = _ComfortWindow(body, requested=900, measured=900)
+
+    dialogs._clamp_to_comfort_line(window, current=900)
+
+    assert body.height == dialogs._DIALOG_BODY_MIN, "已在下限的正文区不该被改写"
+    assert window.idle_calls == 1, "已在下限就该第一轮收工"
 
 
 def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
