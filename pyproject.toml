@@ -223,6 +223,7 @@ known_first_party = [
   "conftest",
   "gui_support",
   "sharding",
+  "durations",
   "crash_capture",
   "ci_workflow",
   "tk_guard",
@@ -232,6 +233,11 @@ known_first_party = [
   "report_support",
   "sql_support",
 ]
+# scikit-image 的模块名是 skimage 而不是包名直译的 scikit_image: 拿不到该包的
+# 安装元数据时(本地没装 visual 组 —— CI 的静态分析作业装了, 见 uv sync 那行
+# `--group visual`), deptry 只能猜映射, 猜错就把 scripts/create_allure_visual.py
+# 里的合法 import 误报成 DEP001。写死映射后两边都不再依赖环境。
+package_module_name_map = { "scikit-image" = "skimage" }
 # 拆分/新增 tests 下的共享辅助模块时**必须同步登记上面这份清单** —— 忘了的话 deptry
 # 会把它当"未声明依赖"(DEP001, 一处 import 一条), 本地提交钩子当场拦下(2026-10-07:
 # button/report/sql_support 三组就是这样被拦住的)。
@@ -266,6 +272,10 @@ DEP004 = [
 # 截图转成 ndarray 才能交给 structural_similarity —— PIL 的 Image 没有 .shape, 传不进去。
 # 刻意不把 numpy 写进依赖清单: 它是这套算尺的实现细节, 跟着 scikit-image 的版本走才对。
 DEP003 = ["allure", "allure_commons", "numpy"]
+# numpy 的 DEP001 同理豁免: 没装 visual 组的环境里 deptry 关联不到"由 scikit-image
+# 带进来"这层传递关系, 会把它当"未声明"误报(装了 visual 组时不会; 见上面的映射注释)。
+# 它本来就不在 [project].dependencies 里, deptry 不是、也不该是 numpy 的门禁。
+DEP001 = ["numpy"]
 
 
 [tool.pytest.ini_options]

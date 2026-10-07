@@ -60,6 +60,7 @@ import importlib.util
 import inspect
 import logging
 from collections.abc import Generator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,7 @@ import allure
 import pytest
 
 import crash_capture
+import durations
 import sharding
 import timeout_guard
 import tk_guard
@@ -277,6 +279,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help=f"失败现场 dump 的递归深度(默认 {crash_capture.DEFAULT_DEPTH}; 0 = 不生成 dump)",
     )
+    # 分片权重的数据采集(见 tests/durations.py): 全量跑一次刷新 tests/durations.json,
+    # sharding.cost_of 就能按每条用例的真实耗时装箱, 而不是目录经验单价。
+    parser.addoption(
+        "--record-durations",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="把每条用例的耗时(setup+call+teardown 之和, 秒)写成 JSON;"
+        " 全量跑一次即可刷新 tests/durations.json(分片权重的数据源)",
+    )
 
 
 def _resolve_severity(item: pytest.Item) -> str:
@@ -387,6 +399,33 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     ``pytest_configure`` 之后, 是唯一能保证"最后一次 enable 是我们"的位置。
     """
     crash_capture.reassert_hard_crash_log()
+
+
+# --record-durations 的累积器: nodeid -> 秒(setup/call/teardown 三段相加).
+# 无条件累加(每条用例三次字典操作, 开销可忽略), 是否落盘由会话结束时的选项决定.
+_DURATION_SAMPLES: dict[str, float] = {}
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """把每个阶段报告的耗时并进当前用例的累计(见 ``tests/durations.py``)."""
+    durations.accumulate(_DURATION_SAMPLES, report.nodeid, report.duration)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """带 ``--record-durations`` 时把本会话的每条用例耗时落盘.
+
+    空会话(``--collect-only``)不覆盖已有数据: 那份文件是全量跑出来的, 别被一次
+    "什么都没跑"的调用清空。部分运行会**整体覆盖**属于既定行为 —— 记录的就是
+    "这次跑了什么"。
+    """
+    path = session.config.getoption("--record-durations")
+    if path is None:
+        return
+    if not _DURATION_SAMPLES:
+        print(f"[durations] 本会话没有跑用例, 不覆盖 {path}")
+        return
+    durations.write(path, _DURATION_SAMPLES, recorded_at=datetime.now(UTC))
+    print(f"[durations] 已记录 {len(_DURATION_SAMPLES)} 条用例的耗时 -> {path}")
 
 
 def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:

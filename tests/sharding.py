@@ -7,14 +7,22 @@ CI 会把同一平台的用例拆进多个作业并行跑, 最后把各片的 Al
 - **不重不漏**: 各片合起来正好是全集(靠 ``tests/unit/test_sharding.py`` 的守卫锁住);
 - **尽量均匀**: 套件耗时几乎都在 GUI 用例上, 只按用例**条数**平分会把慢的全堆在一片。
 
-因此这里按**目录的经验单价**估权重, 再用"最慢的优先"贪心装箱(LPT)。单价是量出来的
-经验值, 不需要精确: 只要量级对, 装箱结果就能把慢用例摊开; 新目录按
-:data:`DEFAULT_COST` 处理, 不会因为"没见过"就被当成免费。
+因此权重分三级取(见 :func:`cost_of`): **实测值**(``tests/durations.json`` 里每条用例
+最近一次全量运行的真实耗时)优先; 没有实测的退回**目录经验单价**; 没见过的目录再按
+:data:`DEFAULT_COST` 处理, 不会因为"没见过"就被当成免费。实测值是必须的: 同一模块里
+单条用例的耗时能差 8 倍(2026-10-07 实测 test_gui_home.py: 1.5s~12.1s), 只按目录单价
+装箱等于按条数装箱, 慢用例会堆在同一片把墙钟拖长。数据用全量跑一次刷新::
+
+    uv run python scripts/run_tests_local.py -- --record-durations=tests/durations.json
+
+(双片各记一份, 脚本自动合并; 记录/合并/加载的实现与约定见 ``tests/durations.py``。)
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+
+import durations
 
 # 各目录下一个用例的大致耗时(秒). 2026-09 实测(Windows 本机, 约 1060 个用例):
 # tests/integration 约 180s / 128 个, tests/unit 约 39s / 931 个; 这里取偏整的数,
@@ -27,10 +35,22 @@ _COST_BY_PREFIX: tuple[tuple[str, float], ...] = (
 # 没见过的目录(以后新增测试目录)按这个估: 偏保守, 免得整片都是未知用例。
 DEFAULT_COST = 0.3
 
+# 每条用例的实测耗时(秒, ``tests/durations.json``, 见 ``tests/durations.py``): 有记录的
+# 用例按真实耗时装箱, 没有的退回上面的目录单价。注意 0.0 也是合法的实测值, 所以下面
+# 的判空必须用 ``is not None`` 而不是真值判断。
+_DURATION_OVERRIDES: dict[str, float] = durations.load()
+
 
 def cost_of(node_id: str) -> float:
-    """估算一个用例的耗时(秒); 目录不认识时返回 :data:`DEFAULT_COST`."""
-    normalized = node_id.replace("\\", "/")
+    """估算一个用例的耗时(秒): 实测值优先, 其次目录单价, 再否则 :data:`DEFAULT_COST`."""
+    # 参数化 id 里的 ``\uXXXX`` 转义自带反斜杠, 全串归一会破坏匹配 —— 只归一 ``::``
+    # 之前的文件部分(那才是 Windows 风格分隔符会出现的地方), 参数部分保持原样
+    # (实测键就是按 pytest 的 nodeid 原样记录的)。
+    file_part, separator, rest = node_id.partition("::")
+    normalized = file_part.replace("\\", "/") + separator + rest
+    recorded = _DURATION_OVERRIDES.get(normalized)
+    if recorded is not None:
+        return recorded
     for prefix, cost in _COST_BY_PREFIX:
         if normalized.startswith(prefix):
             return cost

@@ -18,6 +18,13 @@ r"""本地全量验证的并行分片: 同机起 N 个 pytest 进程各跑一片
     uv run python scripts/run_tests_local.py -- tests/unit -q    # 双片只跑 unit
     uv run python scripts/run_tests_local.py --shard-count 3     # 想试 3 片时
 
+透传参数里的 ``--record-durations=PATH`` 会被特殊处理: 两片不能写同一份文件(后写的
+会覆盖先写的), 所以每片各记 ``shard-<i>-durations.json``, 全部结束后自动合并(重叠取
+中位数)写到 PATH —— 全量跑一次即可刷新分片权重的实测数据(见 ``tests/durations.py``
+与 ``tests/sharding.py``)::
+
+    uv run python scripts/run_tests_local.py -- --record-durations=tests/durations.json
+
 每片的完整输出落在临时目录的 ``shard-<i>.log`` 里(结束时会打印路径), 终端只打各片
 的摘要尾行; 任一片非 0 退出就以非 0 收场(取各片退出码的最大值), Ctrl+C 会转发给
 所有还在跑的分片进程.
@@ -29,13 +36,16 @@ r"""本地全量验证的并行分片: 同机起 N 个 pytest 进程各跑一片
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 
 # 每片结束后往终端打的摘要行数: pytest 的收尾统计(deselected / passed / skipped /
 # 耗时)就在日志的最后几行, 不必把整份日志倾倒进终端.
@@ -93,11 +103,93 @@ def _validate(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _split_record_target(pytest_args: list[str]) -> Path | None:
+    """从透传参数里摘出 ``--record-durations`` 的目标路径(两种写法都认, 没有则 None)."""
+    for index, flag in enumerate(pytest_args):
+        if flag == "--record-durations" and index + 1 < len(pytest_args):
+            return Path(pytest_args[index + 1])
+        if flag.startswith("--record-durations="):
+            return Path(flag.split("=", 1)[1])
+    return None
+
+
+def _shard_pytest_args(
+    pytest_args: list[str], target: Path | None, log_dir: Path, index: int
+) -> list[str]:
+    """把本片的 ``--record-durations`` 改写到片私有文件, 其余参数原样保留.
+
+    两片写同一份文件会互相覆盖(后结束的那份把先结束的清掉), 所以记录目标存在时,
+    每片改写为 ``<日志目录>/shard-<i>-durations.json``, 合并交给收尾一步做。
+    """
+    if target is None:
+        return list(pytest_args)
+    shard_path = log_dir / f"shard-{index}-durations.json"
+    rewritten: list[str] = []
+    skip_value = False
+    for flag in pytest_args:
+        if skip_value:
+            skip_value = False
+            rewritten.append(str(shard_path))
+            continue
+        if flag == "--record-durations":
+            rewritten.append(flag)
+            skip_value = True
+            continue
+        if flag.startswith("--record-durations="):
+            rewritten.append(f"--record-durations={shard_path}")
+            continue
+        rewritten.append(flag)
+    return rewritten
+
+
+def _load_durations_module() -> ModuleType:
+    """按路径加载 ``tests/durations.py``(scripts 不在 pythonpath 里, 不能直接 import).
+
+    已经导入过(pytest 里跑守卫用例)就复用那份: 再 spec-load 会造出第二个同名模块
+    对象, 行为一样但身份不同, 没必要。
+    """
+    existing = sys.modules.get("durations")
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        "durations",
+        Path(__file__).resolve().parents[1] / "tests" / "durations.py",
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("加载 tests/durations.py 失败: importlib 没给出模块规格")
+    module: ModuleType = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _merge_recorded_durations(target: Path, log_dir: Path, count: int) -> None:
+    """把各片的耗时记录合并(重叠取中位数)写到目标路径; 一片都没有就不覆盖.
+
+    片失败也照样合并: 失败与否是用例结论, 记录的是"每条用例跑了多久", 两件事互不
+    拖累。硬崩溃确实会少那一片的文件, 少了哪片就少哪片(没跑到的条目在分片时退回
+    目录单价, 见 ``tests/sharding.py``)。
+    """
+    durations = _load_durations_module()
+    maps = []
+    for index in range(count):
+        shard_path = log_dir / f"shard-{index}-durations.json"
+        if shard_path.exists():
+            maps.append(durations.parse(shard_path.read_text(encoding="utf-8")))
+    if not maps:
+        print(f"[durations] 一份分片记录都没找到, 不写 {target}", file=sys.stderr)
+        return
+    merged = durations.merge(*maps)
+    durations.write(target, merged, recorded_at=datetime.now(UTC))
+    print(f"[durations] 已合并 {len(maps)} 片、{len(merged)} 条用例的耗时 -> {target}")
+
+
 def _launch_shards(
     uv: str, count: int, pytest_args: list[str], log_dir: Path
 ) -> list[tuple[int, subprocess.Popen[bytes], Path]]:
     """逐片启动 ``uv run pytest``, 返回 (片号, 进程, 日志路径) 的列表."""
     shards: list[tuple[int, subprocess.Popen[bytes], Path]] = []
+    record_target = _split_record_target(pytest_args)
     for index in range(count):
         log_path = log_dir / f"shard-{index}.log"
         command = [
@@ -108,7 +200,7 @@ def _launch_shards(
             str(count),
             "--shard-index",
             str(index),
-            *pytest_args,
+            *_shard_pytest_args(pytest_args, record_target, log_dir, index),
         ]
         print(f"[shard {index}] 启动: {' '.join(command)}")
         print(f"[shard {index}] 日志: {log_path}")
@@ -185,6 +277,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         _terminate_shards(shards)
         return 130
+    record_target = _split_record_target(list(args.pytest_args))
+    if record_target is not None:
+        # 合并放在退出码判定之前: 用例失败不该拖着耗时数据一起丢。
+        _merge_recorded_durations(record_target, log_dir, args.shard_count)
     return _report(shards, codes, time.monotonic() - started)
 
 
