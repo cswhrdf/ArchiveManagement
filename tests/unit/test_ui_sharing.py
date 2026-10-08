@@ -383,9 +383,14 @@ def test_group_scope_rebaselines_and_restores_the_original(
 
 def test_registry_close_closes_every_pool_window(
     pool_factory: tuple[list[FakeApp], Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """会话收尾: 每个池的窗口都交给统一的拆窗路径, 且 close 幂等."""
     made, env = pool_factory
+    # 会话末的实存量(替身环境里给个非 0 的数, 才能证明"刷新过"而不是"恰好为 0"):
+    # 判据是"拆窗不得新增调度线程", 而不是"回到建窗那一刻的世界"(整批用例跑完后,
+    # 别的用例攒下的存量不该由收尾来报, 见 gui_support.scheduler_thread_count).
+    monkeypatch.setattr(gui_support, "scheduler_thread_count", lambda: 7)
     with env.registry.test_scope(env.factory):
         pass
 
@@ -402,3 +407,7 @@ def test_registry_close_closes_every_pool_window(
     )
     assert made[0] in monkeypatch_close_args[0], "demo 池的窗口要走统一收尾"
     assert len(monkeypatch_close_args[0]) == 2, "两个池的窗口都要收"
+    for window in monkeypatch_close_args[0]:
+        assert window._scheduler_baseline == 7, (
+            "收尾前应把线程基线刷成会话末的实存量(建窗时刻的 0 代表不了整批跑完的进程)"
+        )

@@ -307,6 +307,17 @@ def _release_background(app: Any) -> None:
         release()
 
 
+def scheduler_thread_count() -> int:
+    """当前活着的后台调度线程数(会话级收尾刷新判据用, 见 ``ui_sharing.SharedUiRegistry.close``).
+
+    逐用例的收尾判据是"不得超过**这条用例开始时**(建窗采样)的线程数"; 会话级收尾收的是
+    活过整批用例的共享窗 —— 期间别的用例(只建真后端不建窗的那批, 实测有会漏的)攒下的
+    调度线程是**存量**, 不该由收尾来报。收尾前把基线刷新成"此刻的实存量", 判据就变成
+    "拆这些窗不得**新增**线程" —— 共享窗自己 release 的调度器没真退掉照样判红。
+    """
+    return len(_scheduler_threads())
+
+
 def _scheduler_threads() -> list[str]:
     """还活着的后台调度线程(``apscheduler`` 的调度线程名字里带 ``APScheduler``).
 

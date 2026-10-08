@@ -525,6 +525,13 @@ class SharedUiRegistry:
         for pool in self._pools.values():
             if pool.app is not None:
                 gui_support.unprotect_shared_root(pool.app)
+        # 线程判据换成"会话末的实存量": 池窗建在会话早期, 它建窗时的基线(常常是 0)没法
+        # 代表整批用例跑完后的进程 —— 期间"只建真后端不建窗"的用例攒下的调度线程是存量
+        # (gui_support.scheduler_thread_count 的说明), 用旧基线会把存量算到收尾头上。
+        current = gui_support.scheduler_thread_count()
+        for pool in self._pools.values():
+            if pool.app is not None:
+                pool.app._scheduler_baseline = current
         broken = gui_support.close_apps(
             [pool.app for pool in self._pools.values() if pool.app is not None]
         )

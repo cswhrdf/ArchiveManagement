@@ -406,6 +406,94 @@ def test_open_for_registers_the_popup_it_showed(
     assert dropdown.active_dropdown() is shell
 
 
+# --------------------------------------------------------- 行高精算(_refine)
+
+
+class _LaidOutListbox:
+    """按摆好的行位置回答 ``bbox`` 的列表替身.
+
+    ``_refine`` 读的是"第 0 行与第 1 行上沿之差" —— 行距在 Tk 里由 Listbox 自己排,
+    桌面环境下打开浮层的那一刻往往还没排出来(``bbox`` 给空), 这里把两种形态都摆得
+    出来, 让"量到了/没量到"由用例说了算。
+    """
+
+    def __init__(
+        self,
+        *,
+        rows: list[tuple[int, int, int, int] | None] | None = None,
+    ) -> None:
+        self.rows = rows if rows is not None else []
+
+    def bbox(self, index: int) -> tuple[int, int, int, int] | None:
+        """行没排出来(或没这一行)时 Tk 给的就是空."""
+        if index >= len(self.rows):
+            return None
+        return self.rows[index]
+
+
+def _refine_spy(popup: Any, *, row_height: int) -> dict[str, int]:
+    """摆好 ``_refine`` 要读的属性, 并把重排三步换成记账."""
+    calls: dict[str, int] = {name: 0 for name in ("_measure", "_fill", "_write")}
+    popup.row_height = row_height
+    popup.window = object()  # _refine 只要它"不是 None"
+    popup.calls = calls
+
+    def _record(name: str, *_args: Any) -> Any:
+        """替掉一步重排: 记一笔; ``_measure`` 还要交回三元组."""
+        calls[name] += 1
+        if name == "_measure":
+            return object(), 0, 10
+        return None
+
+    for name in ("_measure", "_fill", "_write"):
+        setattr(popup, name, lambda *_args, _name=name: _record(_name))
+    return calls
+
+
+def test_refine_keeps_the_estimate_while_rows_are_not_laid_out() -> None:
+    """行还没排出来(``bbox`` 给空)时保持估出来的行高, 不触发重排.
+
+    桌面环境下打开浮层后的第一拍常常就是这个形态(映射是异步的), 判据是**别拿着
+    半截信息乱摆**: 估的行高虽不精确, 但比拿空数据重算稳。
+    """
+    popup = _popup()
+    calls = _refine_spy(popup, row_height=14)
+    popup.listbox = _LaidOutListbox(rows=[(0, 0, 14, 14), None])
+    popup._refine(0, 0)
+    assert popup.row_height == 14
+    assert sum(calls.values()) == 0
+
+
+def test_refine_adopts_the_listbox_pitch_and_replaces_the_plan() -> None:
+    """量到真实行距(与估值对不上)时采纳它, 并按新行高把浮层重摆一遍."""
+    popup = _popup()
+    calls = _refine_spy(popup, row_height=14)
+    popup.listbox = _LaidOutListbox(rows=[(0, 0, 14, 14), (0, 15, 14, 14)])
+    popup._refine(0, 0)
+    assert popup.row_height == 15
+    assert calls == {"_measure": 1, "_fill": 1, "_write": 1}
+
+
+def test_refine_keeps_the_plan_when_the_pitch_matches_the_estimate() -> None:
+    """行距与估值一致时不再重摆一遍(白闪一次没有意义)."""
+    popup = _popup()
+    calls = _refine_spy(popup, row_height=15)
+    popup.listbox = _LaidOutListbox(rows=[(0, 0, 14, 14), (0, 15, 14, 14)])
+    popup._refine(0, 0)
+    assert popup.row_height == 15
+    assert sum(calls.values()) == 0
+
+
+def test_refine_ignores_a_non_positive_pitch() -> None:
+    """两行量出来贴在同一处(非正行距)是坏数据, 不采纳也不重摆."""
+    popup = _popup()
+    calls = _refine_spy(popup, row_height=14)
+    popup.listbox = _LaidOutListbox(rows=[(0, 0, 14, 14), (0, 0, 14, 14)])
+    popup._refine(0, 0)
+    assert popup.row_height == 14
+    assert sum(calls.values()) == 0
+
+
 # --------------------------------------------------------- 进程级补丁的幂等
 
 
