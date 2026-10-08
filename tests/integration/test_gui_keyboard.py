@@ -37,7 +37,7 @@ G. **窗口级 Esc/回车只属于对话框** —— 常驻窗口(设置、定�
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,7 +47,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from gui_support import gui_app
+from ui_sharing import SharedUiRegistry, demo_app
 
 try:
     import customtkinter as ctk
@@ -62,7 +62,6 @@ from archive_management.services.hotkeys import (
 )
 from archive_management.ui import contrast, dialogs, keyboard
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import ArchiveApp
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
@@ -113,11 +112,11 @@ def _new_app(backend: ArchiveService) -> ArchiveApp:
 
 
 @pytest.fixture
-def app() -> Any:
-    """主窗口."""
-    application = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(application)
-    return application
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 用例间由池做快照-识别-还原)."""
+    with ui_shared.test_scope(demo_app) as application:
+        _pump(application)
+        yield application
 
 
 def _state(widget: Any) -> str:

@@ -72,6 +72,7 @@ import durations
 import sharding
 import timeout_guard
 import tk_guard
+import ui_sharing
 from archive_management.i18n import DEFAULT_LOCALE, set_locale
 from archive_management.services.audit import AUDIT_LOGGER_NAME
 from archive_management.services.platforms import current_platform, platform_label
@@ -569,6 +570,20 @@ def _close_gui_apps() -> Iterator[None]:
     from gui_support import close_gui_apps
 
     close_gui_apps()
+
+
+@pytest.fixture(scope="session")
+def ui_shared() -> Iterator[ui_sharing.SharedUiRegistry]:
+    """方向② B2: 共享 UI 会话注册表(机制与三条纪律见 ``tests/ui_sharing.py``).
+
+    session 级: 池里的窗口活过整批用例 —— 每条用例前后由 ``test_scope`` 做
+    "对齐基线 / 识别漂移并还原(还原不过就重建整窗)"; 会话末尾统一走
+    ``gui_support.close_apps`` 收尾, 拆不干净与逐用例收尾一样判红。不用它的
+    用例零开销: 注册表是空的, 收尾是空操作。
+    """
+    registry = ui_sharing.SharedUiRegistry()
+    yield registry
+    registry.close()
 
 
 @pytest.fixture(autouse=True)

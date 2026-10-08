@@ -13,20 +13,14 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
+from collections.abc import Iterator
 from typing import Any
 
 import customtkinter as ctk
 import pytest
 
-from archive_management.services.hotkeys import (
-    GlobalHotkeyService,
-    UnavailableBackend,
-)
 from archive_management.ui import widgets
-from archive_management.ui.backend import ArchiveService
-from archive_management.ui.demo_backend import DemoArchiveService
-from archive_management.ui.main_window import ArchiveApp
-from gui_support import gui_app
+from ui_sharing import SharedUiRegistry, demo_app
 
 pytestmark = [
     pytest.mark.integration,
@@ -43,15 +37,6 @@ pytestmark = [
 _WAIT_SECONDS = widgets._TOOLTIP_DELAY_MS / 1000 + 0.3
 
 
-def _new_app(backend: ArchiveService) -> ArchiveApp:
-    """不注册系统级快捷键: 避免遗留键盘钩子或误触发备份(与其它界面用例同一做法)."""
-    return ArchiveApp(
-        backend,
-        title="提示测试",
-        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("提示测试禁用")),
-    )
-
-
 def _pump(app: ctk.CTk, seconds: float = 0.0) -> None:
     """跑一会儿事件循环(提示靠 ``after`` 到期, 必须真的给它时间)."""
     if seconds:
@@ -59,6 +44,14 @@ def _pump(app: ctk.CTk, seconds: float = 0.0) -> None:
     for _ in range(6):
         app.update_idletasks()
         app.update()
+
+
+@pytest.fixture
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 用例间由池做快照-识别-还原)."""
+    with ui_shared.test_scope(demo_app) as application:
+        _pump(application)
+        yield application
 
 
 def _tip_windows(widget: Any) -> list[tk.Toplevel]:
@@ -85,10 +78,8 @@ def _anchor(app: ctk.CTk) -> tk.Label:
     return label
 
 
-def test_hovering_pops_the_tip_and_leaving_takes_it_away() -> None:
+def test_hovering_pops_the_tip_and_leaving_takes_it_away(app: Any) -> None:
     """进入延时后弹出、移出立刻收起; 收起窗口**不等于**把文案撤掉(还要能再弹一次)."""
-    app = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(app)
     label = _anchor(app)
 
     label.event_generate("<Enter>")
@@ -103,12 +94,13 @@ def test_hovering_pops_the_tip_and_leaving_takes_it_away() -> None:
     label.event_generate("<Enter>")
     _pump(app, _WAIT_SECONDS)
     assert _tip_windows(label), "再进入要能再弹: 说明收场之后状态是干净的"
-
-
-def test_clicking_away_and_destroying_the_anchor_both_clean_up() -> None:
-    """点下与控件销毁都要收场: 不留幽灵窗口, 销毁期间也不许吐 ``TclError``."""
-    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    # 锚点是贴在共享窗口上的: 拆掉它(连带计时器), 别留给后面的用例。
+    label.destroy()
     _pump(app)
+
+
+def test_clicking_away_and_destroying_the_anchor_both_clean_up(app: Any) -> None:
+    """点下与控件销毁都要收场: 不留幽灵窗口, 销毁期间也不许吐 ``TclError``."""
     label = _anchor(app)
 
     label.event_generate("<Enter>")
@@ -125,10 +117,8 @@ def test_clicking_away_and_destroying_the_anchor_both_clean_up() -> None:
     _pump(app)
 
 
-def test_attaching_twice_only_replaces_the_text() -> None:
+def test_attaching_twice_only_replaces_the_text(app: Any) -> None:
     """同一控件再挂一次只换文案: 事件不重复绑(否则一次悬停会弹出好几层)."""
-    app = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(app)
     label = _anchor(app)
     before = label.bind("<Enter>")
 
@@ -136,3 +126,6 @@ def test_attaching_twice_only_replaces_the_text() -> None:
 
     assert widgets.tooltip_text(label) == "换过的文案"
     assert label.bind("<Enter>") == before, "事件被重复绑了一次"
+    # 锚点是贴在共享窗口上的: 拆掉它(连带计时器), 别留给后面的用例。
+    label.destroy()
+    _pump(app)

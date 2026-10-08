@@ -220,21 +220,22 @@ exclude_dirs = ["tests", "scripts", "packaging", "build", "dist", ".venv", "dev-
 # archive_management 判成"传递依赖"(DEP003), 一报就是 197 条。tests 下的共享辅助模块
 # (pythonpath = tests)同样属于"自己家的代码"。
 known_first_party = [
-  "archive_management",
-  "helpers",
-  "reporting",
-  "conftest",
-  "gui_support",
-  "sharding",
-  "durations",
-  "crash_capture",
-  "ci_workflow",
-  "tk_guard",
-  "timeout_guard",
   "allure_catalog",
+  "archive_management",
   "button_support",
+  "ci_workflow",
+  "conftest",
+  "crash_capture",
+  "durations",
+  "gui_support",
+  "helpers",
   "report_support",
+  "reporting",
+  "sharding",
   "sql_support",
+  "timeout_guard",
+  "tk_guard",
+  "ui_sharing",
 ]
 # scikit-image 的模块名是 skimage 而不是包名直译的 scikit_image: 拿不到该包的
 # 安装元数据时(本地没装 visual 组 —— CI 的静态分析作业装了, 见 uv sync 那行

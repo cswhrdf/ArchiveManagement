@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from gui_support import gui_app
+from ui_sharing import SharedUiRegistry
 
 try:
     import customtkinter as ctk
@@ -65,6 +67,23 @@ def _pump(app: Any, seconds: float = 0.6) -> None:
         time.sleep(0.02)
 
 
+def _shared_build() -> ArchiveApp:
+    """本模块的共享池工厂: 7 条用例共一份主窗口(下拉浮层的状态用例自己收场).
+
+    不并入全局 demo 池: 用例会把 ``_page_size_box`` 的 values/command 改成自己的
+    30 个选项与回调 —— 这不在共享池的状态面里, 单独一池让污染出不了本模块。
+    """
+    return _build(DemoArchiveService(delay=0))
+
+
+@pytest.fixture
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 用例间由池做快照-识别-还原)."""
+    with ui_shared.test_scope(_shared_build) as application:
+        _pump(application)
+        yield application
+
+
 def _open(combo: ctk.CTkComboBox, app: Any) -> dropdown_mod.DropdownPopup:
     """打开下拉并返回浮层(用 CTk 自己的入口, 与点箭头走同一条路)."""
     combo._open_dropdown_menu()
@@ -74,13 +93,11 @@ def _open(combo: ctk.CTkComboBox, app: Any) -> dropdown_mod.DropdownPopup:
     return popup
 
 
-def test_a_long_dropdown_stops_at_the_cap_and_scrolls() -> None:
+def test_a_long_dropdown_stops_at_the_cap_and_scrolls(app: Any) -> None:
     """值很多时: 显示行数锁在上限、右侧给滚动条、整块不越出软件窗口.
 
     改前 (原生 ``tk.Menu``): 30 个值会排成一列 30 行, 窗口矮的时候直接压到窗口外面。
     """
-    app = gui_app(_build, DemoArchiveService(delay=0))
-    _pump(app)
     combo = app._home_page._page_size_box
     combo.configure(values=list(_MANY_VALUES))
     popup = _open(combo, app)
@@ -157,7 +174,7 @@ def test_a_dropdown_near_the_bottom_opens_upwards() -> None:
     assert popup.scrollbar is not None
 
 
-def test_clicking_the_arrow_opens_the_dropdown() -> None:
+def test_clicking_the_arrow_opens_the_dropdown(app: Any) -> None:
     """点箭头真的能打开 —— 走**完整点击路径**.
 
     出处(用户 2026-10-03): "下拉框点击完全无反应"。根因是打开浮层的那一次点击自己也会
@@ -165,8 +182,6 @@ def test_clicking_the_arrow_opens_the_dropdown() -> None:
     直接调 ``_open_dropdown_menu`` 量不到这条闭环(那一步没有点击事件), 所以这里按控件
     自己的坐标点箭头, 让事件走一遍 canvas 的 tag 绑定与顶层窗口的绑定。
     """
-    app = gui_app(_build, DemoArchiveService(delay=0))
-    _pump(app)
     combo = app._home_page._page_size_box
     combo.configure(values=list(_MANY_VALUES))
     canvas = combo._canvas
@@ -181,10 +196,8 @@ def test_clicking_the_arrow_opens_the_dropdown() -> None:
     _pump(app)
 
 
-def test_picking_a_row_writes_the_value_and_closes() -> None:
+def test_picking_a_row_writes_the_value_and_closes(app: Any) -> None:
     """点一行 = 写进下拉框 + 触发 CTk 自己的回调 + 收起浮层."""
-    app = gui_app(_build, DemoArchiveService(delay=0))
-    _pump(app)
     combo = app._home_page._page_size_box
     combo.configure(values=list(_MANY_VALUES))
     seen: list[str] = []
@@ -203,7 +216,7 @@ def test_picking_a_row_writes_the_value_and_closes() -> None:
     assert active_dropdown() is None, "选完应该收起浮层"
 
 
-def test_hiding_the_window_closes_the_dropdown() -> None:
+def test_hiding_the_window_closes_the_dropdown(app: Any) -> None:
     """宿主窗口最小化/隐藏时收起浮层.
 
     出处(用户 2026-10-03): "不手动点击软件页面其他处将其关闭的情况下将软件最小化时这个浮窗
@@ -213,8 +226,6 @@ def test_hiding_the_window_closes_the_dropdown() -> None:
     管理器的环境里 ``iconify`` 未必真的发出事件 —— 判据要能在这里站稳(Windows 上最小化
     就是 Unmap, 见 ``_attach_outside`` 的说明)。
     """
-    app = gui_app(_build, DemoArchiveService(delay=0))
-    _pump(app)
     combo = app._home_page._page_size_box
     combo.configure(values=list(_MANY_VALUES))
     popup = _open(combo, app)
@@ -228,7 +239,7 @@ def test_hiding_the_window_closes_the_dropdown() -> None:
     _pump(app)
 
 
-def test_moving_the_window_keeps_the_dropdown_glued_to_the_box() -> None:
+def test_moving_the_window_keeps_the_dropdown_glued_to_the_box(app: Any) -> None:
     """宿主窗口挪动/改尺寸时浮层跟着控件走(别停在旧位置上盖着旁边的程序).
 
     出处(用户 2026-10-03 的截图): 浮层停在打开时的屏幕坐标上, 窗口挪走之后它反而跑到窗口
@@ -237,8 +248,6 @@ def test_moving_the_window_keeps_the_dropdown_glued_to_the_box() -> None:
     这里不"收起"是刻意的: 布局期间宿主自己也会发 ``<Configure>``, 一收就会被误踢(实测
     四条用例因此变成"下拉没打开")。
     """
-    app = gui_app(_build, DemoArchiveService(delay=0))
-    _pump(app)
     combo = app._home_page._page_size_box
     combo.configure(values=list(_MANY_VALUES))
     popup = _open(combo, app)
@@ -254,10 +263,8 @@ def test_moving_the_window_keeps_the_dropdown_glued_to_the_box() -> None:
     _pump(app)
 
 
-def test_clicking_elsewhere_closes_the_dropdown() -> None:
+def test_clicking_elsewhere_closes_the_dropdown(app: Any) -> None:
     """点窗口里别处就收起(与原生菜单一致), 且浮层随控件销毁一起走."""
-    app = gui_app(_build, DemoArchiveService(delay=0))
-    _pump(app)
     combo = app._home_page._page_size_box
     combo.configure(values=list(_MANY_VALUES))
     popup = _open(combo, app)

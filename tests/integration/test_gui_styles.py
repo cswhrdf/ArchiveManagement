@@ -25,7 +25,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gui_support import gui_app
+from ui_sharing import SharedUiRegistry, demo_app
 
 try:
     import customtkinter as ctk
@@ -49,7 +50,6 @@ from archive_management.services.hotkeys import (
 from archive_management.ui import dialogs
 from archive_management.ui import schedule_window as sched_mod
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import ArchiveApp
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
@@ -216,13 +216,13 @@ def _hook(window: Any, *_args: Any, **_kwargs: Any) -> None:
 
 
 @pytest.fixture
-def app() -> Any:
-    """主窗口(模态框的量点被换到 ``wait_window`` 上)."""
-    application = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(application)
-    _STATE["palette"] = application.p
-    application.wait_window = _hook
-    return application
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 模态框量点换到 ``wait_window`` 上, 退出时由池还原该钩子)."""
+    with ui_shared.test_scope(demo_app, patched_attrs=("wait_window",)) as application:
+        _pump(application)
+        _STATE["palette"] = application.p
+        application.wait_window = _hook
+        yield application
 
 
 def sequence(*steps: Callable[[], Any]) -> Callable[[], None]:

@@ -23,7 +23,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gui_support import gui_app
+from ui_sharing import SharedUiRegistry
 
 try:
     import customtkinter as ctk
@@ -218,14 +219,21 @@ def _hook(window: Any, *_args: Any, **_kwargs: Any) -> None:
     _record(_STATE["case"], window)
 
 
+def _shared_app() -> ArchiveApp:
+    """长文案共享池的工厂: 本模块的窗口共用一个长文案后端(长文案不是用例改的状态)."""
+    return _new_app(_LongTextService())
+
+
 @pytest.fixture
-def app() -> Any:
-    """主窗口(模态框的量点被换到 ``wait_window`` 上, 数据全是长文案)."""
-    application = gui_app(_new_app, _LongTextService())
-    _pump(application)
-    _STATE["palette"] = application.p
-    application.wait_window = _hook
-    return application
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 模态框量点换到 ``wait_window`` 上, 数据全是长文案)."""
+    with ui_shared.test_scope(
+        _shared_app, patched_attrs=("wait_window",)
+    ) as application:
+        _pump(application)
+        _STATE["palette"] = application.p
+        application.wait_window = _hook
+        yield application
 
 
 def sequence(*steps: Callable[[], Any]) -> Callable[[], None]:
