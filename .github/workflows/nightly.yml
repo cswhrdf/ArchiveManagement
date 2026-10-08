@@ -1,0 +1,66 @@
+name: Nightly
+
+# nightly 只做两件事: 判断 "dev 昨天有没有人干活", 有就**调用 ci.yml** 跑一轮全量 + 报告。
+#
+# 为什么这样拆(2026-10-09): 全量分片、覆盖率门槛、逐平台报告与汇总全都只有一份定义
+# (ci.yml), 这里不复制任何作业 —— 也就没有"两份文件各写一遍分片矩阵与报告链, 改一处
+# 忘了另一处"的问题。这里独有的, 只是"今晚要不要跑"这一个判断。
+#
+# 为什么看 dev 而不是默认分支: 合并都进 dev, 默认分支只由 dev 经 PR 合入。"每天一跑"的
+# 节奏下, dev 的 tip 提交年龄 < 24h 与"过去 24h 内有过 push 或 PR 合入"等价(边界差不到
+# 一小时, 不影响结论), 而且不用查 workflow 运行历史(那要 API 往返与空结果处理)。
+# 上一轮 nightly 以来 dev 没动, 再跑一轮不产生新证据, 只烧 runner。
+#
+# 被调用的那一轮测的是 **dev 的代码**(见 ci.yml 里每个 checkout 的 `inputs.ref`), 报告里
+# 的提交号也是 dev 的; 工作流名仍是 CI, 所以报告历史链与 push / PR 那两轮共用同一条曲线。
+on:
+    schedule:
+        - cron: "0 19 * * *" # UTC 19:00 = 北京时间次日凌晨 3 点
+    # 手工补跑(例如刚合入 dev 但当晚的 nightly 已经跑过), 同样受 24h 门把关。
+    workflow_dispatch:
+
+permissions:
+    contents: read
+    actions: read
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    gate:
+        name: 判断 dev 自上一轮以来有没有新提交
+        runs-on: ubuntu-latest
+        outputs:
+            run: ${{ steps.decide.outputs.run }}
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v7
+              # 直接检出 dev(而不是默认分支): 下面的提交时间要读的就是 it 自己的 tip。
+              with:
+                  ref: dev
+                  fetch-depth: 1
+
+            - name: Decide whether tonight's full run is worth it
+              id: decide
+              shell: bash
+              run: |
+                  dev_ts=$(git log -1 --format=%ct)
+                  age=$(( $(date +%s) - dev_ts ))
+                  echo "dev_age_seconds=$age" >> "$GITHUB_OUTPUT"
+                  if [ "$age" -lt 86400 ]; then
+                    echo "run=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "run=false" >> "$GITHUB_OUTPUT"
+                    echo "::notice::dev 在 24h 内没有新提交, 今晚不跑(上一轮的结论与报告仍然有效)"
+                  fi
+
+    full-run:
+        name: 全量 + 报告
+        needs: [gate]
+        # 门说不用跑就整个跳过 —— 被调用的工作流里没有"要不要跑"的判断, 全量 + 报告是它的
+        # 全部职责(报告链在 ci.yml 里的条件是"不是 push 就跑", 这一轮的事件是 schedule)。
+        if: needs.gate.outputs.run == 'true'
+        uses: ./.github/workflows/ci.yml
+        with:
+            ref: dev

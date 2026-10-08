@@ -72,7 +72,7 @@ def required_environment_ids() -> tuple[str, ...]:
     为什么盯的是 id: 质量门比的是每条结果的 ``environment``, 那是环境身份里的 **id**
     (``environments`` 的键, 小写)。写成平台显示名("Windows")**一个都比不上** —— 症状是
     门禁一次报全三个"未被测试", 而三条平台的用例其实都交齐了(2026-10-04 的汇总报告就是
-    这么红的; 本地用三平台最小结果复现过, 见 PLAN.md §48.6)。
+    这么红的; 本地用三平台最小结果复现过)。
     """
     gate = _ALLURE_CONFIG.read_text(encoding="utf-8").split("qualityGate:", 1)[1]
     matched = re.search(r"environmentsTested:\s*\[([^\]]+)\]", gate)

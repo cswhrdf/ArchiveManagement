@@ -7,7 +7,7 @@ name: wiki
 #   2. 在 Wiki 里随便保存一页（例如 Home）—— GitHub 是在"第一次保存页面"时才创建
 #      `<repo>.wiki` 仓库的，之前 clone 会失败。
 #
-# 之后每次 push 到 dev/master 且 wiki/ 有变化时自动同步，也可以在 Actions 页手动触发。
+# 之后每次 push 到 dev/main 且 wiki/ 有变化时自动同步，也可以在 Actions 页手动触发。
 # 同步是**镜像语义**：先清掉 Wiki 里的页面文件再整体复制，因此改名与删除也会同步过去。
 #
 # 为什么用 git 直推而不是别的办法：Wiki 本身就是个 git 仓库，只有这一条官方支持的写入路径；
@@ -15,7 +15,7 @@ name: wiki
 
 on:
     push:
-        branches: [dev, master]
+        branches: [dev, main]
         paths:
             - "wiki/**"
             - ".github/workflows/wiki.yml"

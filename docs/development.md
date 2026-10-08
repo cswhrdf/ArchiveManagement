@@ -145,7 +145,7 @@ CI 的 pytest 作业是**分片执行**的（Linux 3 片、Windows 2 片并行�
 - `wiki/`：**面向用户的使用手册**，按章节拆分（`Home.md` 是目录、`_Sidebar.md` 是侧边栏、其余是 `NN 标题.md`）。它是手册的**唯一内容源**，改手册就改这里。
 - `docs/`：**面向开发与实现**的说明（界面结构、平台差异、测试体系、打包发布、CI 优化）。
 
-同步机制：`.github/workflows/wiki.yml` 在 `wiki/**` 变化时（push 到 `dev`/`master`）或手动触发时，把 `wiki/*.md` **镜像**推送到 GitHub Wiki 的 git 仓库。两点注意：
+同步机制：`.github/workflows/wiki.yml` 在 `wiki/**` 变化时（push 到 `dev`/`main`）或手动触发时，把 `wiki/*.md` **镜像**推送到 GitHub Wiki 的 git 仓库。两点注意：
 
 1. **首次需要人工在网页上开一次**：仓库 Settings → Features 勾选 Wikis，并在 Wiki 里保存过至少一页 —— GitHub 是在"第一次保存页面"时才创建 `<repo>.wiki.git`，之前工作流会 clone 失败（报错信息里直接写了这一步）。
 2. 页面里的仓库链接用 `{{REPO_URL}}` 占位符（由工作流替换成真实地址），**不要写仓库相对链接**（Wiki 与仓库不在同一棵目录树里，相对链接会变成"不存在的页面"且不报错）。这两条与"章节编号/侧边栏链接齐全/镜像语义"一起由 `tests/unit/test_wiki_sync.py` 守住。
@@ -165,5 +165,5 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
 ## 发布
 
-- 自动构建在 `dev` 或 `bugfix/**` 分支的 Pull Request 合并到 `master` 后触发，也支持在Actions 中手动指定分支或提交重新构建。
+- 自动构建在 `dev` 或 `bugfix/**` 分支的 Pull Request 合并到 `main` 后触发，也支持在Actions 中手动指定分支或提交重新构建。
 - 正式 GitHub Release 的触发条件与版本生成方式尚未确定，当前不会由该流程自动创建 Release。可选方案是提交时手动维护源码版本，或由 CI 生成不写回源码的构建版本。

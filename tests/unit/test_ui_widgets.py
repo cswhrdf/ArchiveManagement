@@ -288,7 +288,7 @@ def test_buttons_painted_by_each_style(kit: widgets.UiKit) -> None:
 def test_destructive_styles_stay_inside_the_danger_range(palette: Any) -> None:
     """ "危险操作的颜色范围"就是这两种样式, 而且两套主题下都真的带危险色.
 
-    这条把 I-2 那句"删除类按钮的颜色必须落在危险色范围内"钉在 `widgets` 层:
+    这条把"删除类按钮的颜色必须落在危险色范围内"钉在 `widgets` 层:
     范围变了 (例如把主色也算进去) 会立刻变红。
     """
     assert set(DESTRUCTIVE_STYLES) <= set(BUTTON_STYLES)
@@ -299,7 +299,7 @@ def test_destructive_styles_stay_inside_the_danger_range(palette: Any) -> None:
 
 
 def test_every_action_kind_maps_to_its_own_style(kit: widgets.UiKit) -> None:
-    """动作性质与样式**一一对应**, 且 ``kind=`` 真的按性质取色(I-10).
+    """动作性质与样式**一一对应**, 且 ``kind=`` 真的按性质取色.
 
     两个性质共用一种样式的话, "从实测颜色反推性质"这条判据就不再成立(守卫靠的就是这个反推),
     所以这里把一一对应本身钉住; 顺便验一下 `UiKit.button(kind=...)` 与 `style=` 等价。

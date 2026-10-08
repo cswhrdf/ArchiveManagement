@@ -359,7 +359,7 @@ def _scheduler_threads() -> list[str]:
 def test_a_real_backend_does_not_outlive_its_window(tmp_path: Path) -> None:
     """回归: 真后端(带调度器)不能活过它的窗口 —— 那是 macOS 分片被整片带走的根子.
 
-    出处(2026-10-05, PLAN §39.4): macOS 的崩溃现场里同时挂着约 30 个
+    出处(2026-10-05): macOS 的崩溃现场里同时挂着约 30 个
     ``apscheduler..._main_loop`` 线程 —— ``BackgroundScheduler()`` 构造时就 ``start()``,
     但释放入口只有一个: 只有 ``_on_close()``(用户点关闭)会放掉它, 而界面用例的收尾走的是
     ``destroy()``。用例里有 40 多处是“建一个真后端 + 建窗口 + ``finally: app.destroy()``”,

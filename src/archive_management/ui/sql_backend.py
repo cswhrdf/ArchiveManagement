@@ -1510,7 +1510,7 @@ class SqlArchiveService:
         """按分支树删除备份: 同线路节点让后续上移, 分支根节点连带子分支."""
         _game, gid = self._game_ref(game_id)
         node = self._require_backup(gid, backup_id)
-        # 名字要在删之前取: 结果文案要说清"删的是哪一份"(I-7).
+        # 名字要在删之前取: 结果文案要说清"删的是哪一份".
         title = self._node_title(node)
         plan = self._backups.delete_node(gid, int(backup_id), cascade=True)
         self._touch()

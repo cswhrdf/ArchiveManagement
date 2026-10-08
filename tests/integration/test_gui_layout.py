@@ -615,8 +615,8 @@ def test_a_long_state_column_does_not_push_the_fixed_columns() -> None:
     每一行的每个固定列都与表头落在同一个 (屏幕 x, 宽度) 上。
 
     **它咬的是高 DPI 现场**: 100% 缩放下物理=逻辑, 改前改后的行为本来就一样(CI 因此一直
-    绿); 本机 125% 下改前必红 —— 咬合验证的做法是把 ``home_page`` 的改动单独撤掉(见
-    PLAN 25.2), 那一行的固定列会跟表头差 46px、状态列宽也超出设计值。
+    绿); 本机 125% 下改前必红 —— 咬合验证的做法是把 ``home_page`` 的改动单独撤掉,
+    那一行的固定列会跟表头差 46px、状态列宽也超出设计值。
     """
     app = gui_app(_long_name_app, tags=_MANY_TAGS)
     assert _wait_mapped(app)

@@ -16,6 +16,9 @@ from pathlib import Path
 # 仓库根目录: 本文件在 tests/ 下, 差一级.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+# 定时那轮只有"门 + 调用"(见 nightly.yml 顶部): 不含任何作业定义的副本 —— 全量链与报告链
+# 只有 ci.yml 一份, 免得两份文件各写一遍分片矩阵, 改一处忘了另一处。
+NIGHTLY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly.yml"
 # 发布工作流也要守同一批不变式(依赖分组、uv run 的隐式 sync)。
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 

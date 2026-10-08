@@ -229,11 +229,11 @@ def close_apps(apps: list[Any]) -> list[str]:
     for app in reversed(apps):
         # 记下这条用例**开始时**的调度线程数(建窗口那一刻记在窗口上, 见 gui_app): 收尾的判据是
         # "这条用例有没有攒下活的调度器", 而不是"进程里一个都不能有" —— 同一个进程里还会跑非 GUI
-        # 的集成用例, 它们建的真后端一样会起 scheduler(实测有一条会漏, 见 PLAN §15.9), 绝对判据
+        # 的集成用例, 它们建的真后端一样会起 scheduler(实测有一条会漏), 绝对判据
         # 会把别人的存量算到这条用例头上。
         baselines.append(int(getattr(app, "_scheduler_baseline", 0)))
         # **先**放后台资源再拆控件: 一个活着的调度器随时可能在自己的线程里回调到界面, 而 Tk
-        # 正在被拆 —— macOS 上从非主线程碰已销毁的 Tk 是已知的段错误源(PLAN §39.4)。方法幂等,
+        # 正在被拆 —— macOS 上从非主线程碰已销毁的 Tk 是已知的段错误源。方法幂等,
         # 已经走过 `_on_close()` 的窗口再调一次是空操作。
         _release_background(app)
         close_child_windows(app)
@@ -267,7 +267,7 @@ def close_apps(apps: list[Any]) -> list[str]:
         _discard_stray_root(stray, phase="收尾时")
     # 后台资源也得不留: 一个进程里跑完整套界面用例会攒下几十个活着的 `APScheduler` 线程, 而
     # Tk 解释器早被销毁 —— 那正是那次 macOS SIGTRAP 现场里挂着的东西(约 30 个
-    # `apscheduler..._main_loop`, 见 PLAN §39.4)。判据是**相对**的(见上面 baselines 的说明):
+    # `apscheduler..._main_loop`)。判据是**相对**的(见上面 baselines 的说明):
     # 收尾之后不得超过"这条用例开始时"那个数, 超了就是这条用例攒下的。
     # 这条用例压根没建自己的窗口(baselines 为空)时**不判**: 没有可归因的对象, 而进程里的存量
     # 可能是别人留下的 —— 界面文件里有一批用例只建真后端不建窗口(`SqlArchiveService(...)` 直接
@@ -322,7 +322,7 @@ def _scheduler_threads() -> list[str]:
     """还活着的后台调度线程(``apscheduler`` 的调度线程名字里带 ``APScheduler``).
 
     为什么这么认: 一个活着的 scheduler 恰好一个这样的线程, 而它崩在 macOS 上的栈就是
-    ``apscheduler/schedulers/blocking.py::_main_loop``(PLAN §39.4 的现场)。名字里带
+    ``apscheduler/schedulers/blocking.py::_main_loop``(macOS 崩溃现场里挂着的那个栈)。名字里带
     ``APScheduler`` 的只有它, 不会误伤 pytest / uv / 线程池那些线程。
     """
     return [

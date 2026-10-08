@@ -56,7 +56,7 @@ pytestmark = [
 def test_default_view_is_branch_tree_and_hides_old_auto_backups() -> None:
     """默认展示分支树; 分支树只保留最新一份自动备份, 时间线展示全部.
 
-    分支视图自 I-9 起是**图画布**(不再建卡片), 所以"这一屏显示了几个节点"要量
+    分支视图自改成**图画布**后(不再建卡片), 所以"这一屏显示了几个节点"要量
     ``app._tree_view.node_ids``; 时间线仍然用卡片。
     """
     from archive_management.ui.demo_backend import DemoArchiveService

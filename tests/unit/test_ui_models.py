@@ -551,7 +551,7 @@ def test_location_item_fields() -> None:
     assert item.is_primary is True
 
 
-# --------------------------------------------------------- 本地游戏探测(E-1)
+# --------------------------------------------------------- 本地游戏探测
 
 
 def _candidate() -> CandidateItem:
@@ -668,7 +668,7 @@ def test_scan_summary_detail_omits_empty_parts_and_reports_errors() -> None:
     assert tr("discovery.scan_errors", count=1) in broken.detail
 
 
-# --------------------------------------------------------- 统一游戏主页(E-2)
+# --------------------------------------------------------- 统一游戏主页
 
 _HOME_NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 

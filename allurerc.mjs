@@ -121,7 +121,7 @@ export default {
   //    夹具收尾期、或异常被别的异常包住时)。加上 layer 限定是为了掐掉一个会误判的形态:
   //    我们自己的守卫用例(tests/unit/test_gui_retry.py)在失败信息里**会打印整份症状清单**,
   //    不限定层就会把"单测失败"说成"Tk 环境问题"。
-  // 2. 数据库瞬时读失败 —— 全量跑里出现过一次的已知偶发(见 PLAN.md)。
+  // 2. 数据库瞬时读失败 —— 全量跑里出现过一次的已知偶发。
   // 3. 工程门禁未通过 —— 脚本写入的质量检查结果带 testCategory=quality, 它们失败时
   //    不该混进"用例失败"(那是"代码没过门禁", 不是"哪条用例坏了")。
   //
@@ -229,7 +229,7 @@ export default {
       // scripts/merge_allure_results.py 写、各平台作业上传、由
       // scripts/verify_allure_report.py --manifest 与最终条数对齐(见 docs/testing.md 第 6 节)。
       //
-      // macOS 已于 2026-09-30 恢复(见 PLAN.md 第 11.9 节): 这里要求三个平台, 与 CI 的三个
+      // macOS 已于 2026-09-30 恢复: 这里要求三个平台, 与 CI 的三个
       // 矩阵(pytest / pytest-report / security)及汇总作业的 --expect-platforms 必须一致
       // —— tests/unit/test_report_verification.py 会核对这四处的集合。
       //
@@ -238,7 +238,7 @@ export default {
       // "Windows"/"macOS"/"Linux" 会**一个都比不上** —— 症状是门禁一次报全三个
       // `The following environments were not tested: "Windows", "macOS", "Linux"`,
       // 而用例其实三条平台都交齐了(汇总报告里 `quality-gate.json` 的 `testResults: []`
-      // 就是"过滤后一条都没剩"的痕迹)。本地用三平台最小结果实测(见 PLAN.md §48.6):
+      // 就是"过滤后一条都没剩"的痕迹)。本地用三平台最小结果实测:
       // 期望写 id 通过、写名字必失败; 删掉某个平台的结果后, 规则会**只**报那一个 id 缺失
       // (说明规则本身是有效的, 不是被过滤条件掐空)。守卫:
       // `tests/unit/test_report_verification.py` 会核对这里的 id 都在 `environments` 里

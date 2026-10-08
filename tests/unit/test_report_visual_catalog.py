@@ -192,7 +192,7 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
     ② 它要**真实显示**: runner 上先装 xvfb, 命令走 ``xvfb-run`` —— Tk 在无头环境里起不来,
        而"起不来"绝不能被记成"画面没问题";
     ③ 它**不按平台展开**: 基线图入库、只在 Linux 采, 三个平台各采一套会把"字体度量不同"
-       变成一堆假红(见 PLAN.md 17.4 的落地结论);
+       变成一堆假红;
     ④ 结论项带 ``env=common`` + ``testCategory=quality``: 前者让它落进报告里显式声明的
        Common 环境(而不是某个平台), 后者让运行总账的质量检查表与"工程门禁:质量检查未通过"
        分类都能看见它 —— 这就是"视觉回归也要体现到报告里"的落点。
@@ -259,10 +259,10 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
     assert 0 <= module.MAX_HASH_DISTANCE <= 64, "哈希距离上限要在 64 位以内"
     assert 0.0 < module.MIN_SSIM <= 1.0, "SSIM 下限要在 0~1 之间"
     # 阈值必须落在"实测噪声"与"真要人看的变化"之间(太紧会把 runner 镜像更新变成随机红,
-    # 太松等于没判据)。2026-10-05 的 CI 实测(run 37270928260, 见 PLAN §18.4): 同渲染噪声
+    # 太松等于没判据)。2026-10-05 的 CI 实测(run 37270928260): 同渲染噪声
     # **= 0**(四张与基线逐位相同, SSIM 1.0000); 最小真实变化 = SSIM **0.9819** / 哈希 **4**;
     # 已知真缺陷 = SSIM **0.9722**(11px 行高错)。这里守的是"那个窗口还在", 不是具体数字 ——
-    # 调数字请连着那份实测一起改(并把新分布写回 §18.4)。
+    # 调数字请连着那份实测一起改(并把新分布写进这条注释)。
     assert module.MIN_SSIM > 0.9722, "门槛不能高过已知的真缺陷(否则那一类会漏过)"
     assert module.MIN_SSIM < 1.0, "门槛不能等于 1.0: 同渲染也要留一点余量"
     assert 1 <= module.MAX_HASH_DISTANCE < 4, (

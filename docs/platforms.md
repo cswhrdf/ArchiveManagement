@@ -41,14 +41,14 @@
 上表里的 ✅ 分两类证据，**没证据的写"待观察"而不是打勾**：
 
 - **CI 跑全量**：`pytest` / `pytest-report` / `security` 三个矩阵都按平台展开（Linux 3 片、Windows 2 片、
-  macOS 1 片 —— macOS 按 ×10 计价所以少开片，见 `PLAN.md` 第 11.9 节），所以"单元 + 集成 + 安全"
+  macOS 1 片 —— macOS 按 ×10 计价所以少开片），所以"单元 + 集成 + 安全"
   在每个平台都是真的执行过的结论，报告里按环境分开呈现。macOS 于 2026-09-30 恢复，**首次运行待观察**。
 - **人工实测（本机 Windows，2026-09-30）**：真 `pynput` 后端注册两个默认全局快捷键（都 `registered=True`）；
   回收站删除后能在 `$Recycle.Bin` 里找到那个文件且内容逐字节一致（不存在时抛 `StorageError`，不会静默成功、
   也不会回退成永久删除）；`dangerous_target_reason` 在真盘上逐条验过（盘符根 / 用户主目录 / 受保护目录三种
   形态都拒，`protect_subpaths=False` 时"安装目录内的存档"放行）；界面评审时抓了 29 张截图并**逐张人眼过**
   （含受最近改动影响的列表对齐与批量导入弹窗）。
-- **未验证并写明原因**：打包产物（onedir/onefile）的视觉一致性 —— 需要阶段 J/K 的发布流水线，而当前
+- **未验证并写明原因**：打包产物（onedir/onefile）的视觉一致性 —— 需要发布流水线，而当前
   `release.yml` 只做 Windows、macOS 的 `.app` 未纳入；截图脚本是导入源码跑的，对打包版跑要另写
   "启动 exe + 按窗口句柄抓图"的入口（`crash_capture.grab_png(window=hwnd)` 已具备这条能力）。
 

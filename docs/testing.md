@@ -32,7 +32,7 @@ tests/
 > 三个平台的矩阵（`pytest` / `pytest-report` / `security`）、`allurerc.mjs` 的 `environmentsTested`
 > 与汇总作业的 `--expect-platforms` 现在都是 Windows/macOS/Linux，四处由守卫核对着一致；
 > macOS 只给 **1 片**（3 个 macOS 实例：pytest / pytest-report / security），拉长墙钟还是省额度
-> 的取舍写在 `PLAN.md` 第 11.9 节。
+> 的取舍见 CI 矩阵那一段注释（`.github/workflows/ci.yml`）。
 
 ### 严重等级（失败影响面）
 
@@ -178,7 +178,7 @@ allure-summary (合并全部 allure-results-* → 写入环境信息与质量/�
                最终报告**)
 ```
 
-**作业数量也是额度**：push / nightly 一轮 CI 是 **16 个作业实例**（PR 按层跳过后更少：报告链 4 份不跑、纯 UI PR 还跳过 `security` 3 份 —— 被跳过的作业不占 runner）（两个轻量门禁 `changes` / `required-check` 各 1 + `quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1；原来独立的 `deploy-pages` 已于 2026-09-30 并进 `allure-summary`，**2026-10-06 整个发布环节已移除** —— 汇总作业不再需要 `pages: write` / `id-token: write`，也没有 `github-pages` 环境，报告只作为 `allure-report-final` 产物上传）。**平台集合三处一致**（`allurerc.mjs` 的 `environmentsTested`、`--expect-platforms`、报告自检），但**每个作业跑不跑已与事件、层挂钩**（2026-10-07）：`changes` 作业在 `should_run` 之外再给出 `ui` / `backend` 两个层输出——`ui` 层是 `src/archive_management/ui/**`、`tests/integration/test_gui_*.py`、视觉基线，外加共享基础设施（`pyproject.toml` / `uv.lock` / `tests/conftest.py` / `tests/sharding.py` / `tests/ci_workflow.py` / `.github/workflows/ci.yml`，它们同时命中两层，等于全跑）；`backend` 层是"除文档与 UI 专属路径外的一切"（兜底 `**`：分不清归哪层的改动宁可多跑不漏跑）。PR 上四段 pytest 步骤按层放行：`-m "not ui"` 段看 `backend`，`-m "ui"` 段看 `ui`（冒烟用例全挂在 `test_gui_*` 上、`smoke`+`ui` 双标记，UI 层天然含冒烟；非 UI 冒烟在 `not ui` 段里）；`security`（纯后端语义：越权/路径逃逸/副作用防护）归 `backend` 层；`quality`（静态检查 + 性能基准 + 视觉回归 + CLI 冒烟）不分层照旧。两层都不命中的纯文档 PR 整个跳过 `pytest` 作业——与 `should_run` 跳过重量级作业同一个模式，必需检查由 `required-check` 兜底。**`pytest-report` 与 `allure-summary`（覆盖率门槛 `fail_under=100` 与完整 Allure 报告都在这条链上）只在 push 到 dev/main 与 nightly（`schedule`，UTC 19:00 = 北京次日凌晨 3 点）跑**：PR 不再出合并报告与覆盖率判定，PR 的证据是分片作业的日志与分片产物（`allure-results-<os>-<shard>` / `coverage-data-*`）；合并后那轮 push 本来就是全量，证据一条不少。nightly 只做"次日复验"且**不白跑**：定时触发在默认分支上执行、没有"与哪个提交比路径"可言，所以 `changes` 作业在 `schedule` 下跳过 dorny，由 freshness 步（HEAD 提交年龄 < 24h ≈ 自上一轮以来有合并/推进）决定 `should_run`——默认分支没动就按纯文档 PR 的同一条路径整轮跳过重量级作业，不烧 runner；push 与 nightly 永远两层全跑（各段 `if:` 的 `github.event_name != 'pull_request' ||` 前缀）。守卫：`tests/unit/test_ci_workflow.py::test_pr_selects_layers_by_changed_paths_and_full_runs_after_merge`。`security` 的 macOS 曾经只在 push 到默认分支时跑（矩阵 `exclude` 里的降频，省一个按 10 倍计价的实例），**2026-10-02 已撤销**：降频期间 PR 与 `dev` 上没有任何东西验 macOS 的路径/权限语义，而汇总报告会因此少一份 `Security findings(macOS)` —— 总账把它报成"缺失"，可读的人分不出那是设计还是事故（**假警报比不报更坏**）。现场与取代它的守卫记在 `PLAN.md` 第 15.2 节。每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”，见 `PLAN.md` 第 11.10 节）；纯文档改动不跑重量级作业，但**两条触发器用的办法不同** —— push 用 `paths-ignore`（命中就整轮不触发）；PR 不能直接用它（命中时整条工作流不触发，分支保护里的必需检查会永远停在 pending），改成轻量的 `changes` 作业判路径、重量级作业按它的输出 `if:` 跳过，另加一个总是给结论的 `required-check` 作为必需检查。完整的优化清单与取舍记在 `PLAN.md` 第 11 节。
+**作业数量也是额度**：PR / nightly 一轮 CI 是 **16 个作业实例**（push 按层跳过后更少：报告链 4 份不跑、纯 UI 的 push 还跳过 `security` 3 份 —— 被跳过的作业不占 runner）（两个轻量门禁 `changes` / `required-check` 各 1 + `quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1；原来独立的 `deploy-pages` 已于 2026-09-30 并进 `allure-summary`，**2026-10-06 整个发布环节已移除** —— 汇总作业不再需要 `pages: write` / `id-token: write`，也没有 `github-pages` 环境，报告只作为 `allure-report-final` 产物上传）。**平台集合三处一致**（`allurerc.mjs` 的 `environmentsTested`、`--expect-platforms`、报告自检），但**每个作业跑不跑已与事件、层挂钩**（2026-10-09 换向）：`changes` 作业在 `should_run` 之外再给出 `ui` / `backend` 两个层输出——`ui` 层是 `src/archive_management/ui/**`、`tests/integration/test_gui_*.py`、视觉基线，外加共享基础设施（`pyproject.toml` / `uv.lock` / `tests/conftest.py` / `tests/sharding.py` / `tests/ci_workflow.py` / `.github/workflows/ci.yml` / `.github/workflows/nightly.yml`，它们同时命中两层，等于全跑）；`backend` 层是"除文档与 UI 专属路径外的一切"（兜底 `**`：分不清归哪层的改动宁可多跑不漏跑）。push 上四段 pytest 步骤按层放行：`-m "not ui"` 段看 `backend`，`-m "ui"` 段看 `ui`（冒烟用例全挂在 `test_gui_*` 上、`smoke`+`ui` 双标记，UI 层天然含冒烟；非 UI 冒烟在 `not ui` 段里）；`security`（纯后端语义：越权/路径逃逸/副作用防护）归 `backend` 层；`quality`（静态检查 + 性能基准 + 视觉回归 + CLI 冒烟）不分层照旧。两层都不命中的纯文档 push 整个跳过 `pytest` 作业——与 `should_run` 跳过重量级作业同一个模式，必需检查由 `required-check` 兜底。**`pytest-report` 与 `allure-summary`（覆盖率门槛 `fail_under=100` 与完整 Allure 报告都在这条链上）在 PR 与 nightly 都跑**（nightly 由 `nightly.yml` 在 `dev` 24h 内有过合入时带 `ref: dev` 调用 `ci.yml`，UTC 19:00 = 北京次日凌晨 3 点）：push 不出合并报告与覆盖率判定，它的证据是分片作业的日志与分片产物（`allure-results-<os>-<shard>` / `coverage-data-*`）—— 那一轮只跑选中层，而切片的覆盖率天生偏低，在那里判门槛等于自造假红。nightly 拆在 `nightly.yml` 且**不白跑**：它只有"门 + 调用"两件事 —— `gate` 作业检出 `dev`、读它的 tip 提交年龄（**< 24h** ≈ 过去 24h 内有合入或推送），不满足就整轮不调用；满足则带 `ref: dev` 调用 `ci.yml`（全量链与报告链只有那一份定义，被调用时 `event_name` 仍是 `schedule`，`changes` 作业跳过 dorny 并由 `decide` 直接放行全层）；PR 与 nightly 永远两层全跑（各段 `if:` 的 `github.event_name != 'push' ||` 前缀）。守卫：`tests/unit/test_ci_workflow.py::test_pr_and_nightly_run_full_while_push_selects_layers`。`security` 的 macOS 曾经只在 push 到默认分支时跑（矩阵 `exclude` 里的降频，省一个按 10 倍计价的实例），**2026-10-02 已撤销**：降频期间 PR 与 `dev` 上没有任何东西验 macOS 的路径/权限语义，而汇总报告会因此少一份 `Security findings(macOS)` —— 总账把它报成"缺失"，可读的人分不出那是设计还是事故（**假警报比不报更坏**）。现场与取代它的守卫见 `tests/unit/test_report_manifest.py` 里那族"按平台展开的结论"用例。每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”）；纯文档改动不跑重量级作业，但**两条触发器用的办法不同** —— push 用 `paths-ignore`（命中就整轮不触发）；PR 不能直接用它（命中时整条工作流不触发，分支保护里的必需检查会永远停在 pending），改成轻量的 `changes` 作业判路径、重量级作业按它的输出 `if:` 跳过，另加一个总是给结论的 `required-check` 作为必需检查。完整的优化清单与取舍就落在这一族的守卫里（`tests/unit/test_ci_workflow.py`，每一条都有对应断言）
 
 每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
 
@@ -235,7 +235,7 @@ GUI 用例的环境守卫会把建窗口期的 `TclError` 写成 `pytest.skip("t
 - **前提写成强制断言，不要写成 `if`**：`if font.measure(...) > width: assert …` 在前提不成立时会**一条断言都不执行** —— 用例永远绿的，等于没测。上面第一条假红就是这么来的（本机也从未执行过那两条断言）。
 - **期望值不能与被测值同源**：`budget = label.winfo_width()` 看着像"真实宽度"，可面板一旦**没被摆放**，标签就是按内容自适应宽度 —— 实测 `width` 恰等于整条路径的度量值（1407px），于是 `measure(shown) <= width` 永远成立，把裁剪函数改成 `return text` 也照样绿。夹具必须给容器一个**被框定的宽度**（`CTkFrame(width=…)` + `grid_propagate(False)` + `place()`；注意 CTk 的 `place` 不接受 `width`/`height`，尺寸要给构造函数），否则"放不下就该裁"根本不存在。
 
-三条合起来才让"咬合验证"有落点：改坏 `discovery_page._clip_path`（→`return text`）必须报 `assert 1407 <= 658`，改坏 `models.chips_lines`（→ 不换行只裁剪）必须报 `assert '\n' in 'Steam · 已备份 · very-long-tag-01 · very…'`；恢复后两条都绿。（第二条的现场在 2026-10-02 改了口径：状态列现在是 `models.status_lines` —— 状态一行、标签一行，见 PLAN 26.1；当时的现场与数字照旧留在这一句里。）
+三条合起来才让"咬合验证"有落点：改坏 `discovery_page._clip_path`（→`return text`）必须报 `assert 1407 <= 658`，改坏 `models.chips_lines`（→ 不换行只裁剪）必须报 `assert '\n' in 'Steam · 已备份 · very-long-tag-01 · very…'`；恢复后两条都绿。（第二条的现场在 2026-10-02 改了口径：状态列现在是 `models.status_lines` —— 状态一行、标签一行；当时的现场与数字照旧留在这一句里。）
 
 ### 同一路径只有一条位置：判重靠"落库即规范化"
 
@@ -294,7 +294,7 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 
 - **`wraplength` 断不开没有空格的中日韩文本**。Tk 只在空格处断行，把一整段没有空格的 CJK 文字放进 `wraplength=891` 的标签里，实测它仍然被摆在 **1038px 的一行**（而标签只有 815px），照样硬裁。要"先断行再补省略号"就得自己算：`fit_text(text, font, width, max_lines=N)`（`ui/textfit.py`），卡片类的多行正文走这条。
 - **裁剪的宽度要取被拉伸的容器，不能取标签自己**。`pack(side="left")`、`grid(sticky="w")` 的标签宽度**等于文字宽度** —— 按它裁会让文字变短、标签跟着变窄、下一轮又裁得更短，越裁越短。被 `fill`/`sticky="ew"` 拉伸的那个容器宽度与文本无关，才算得稳。共享实现是 `widgets.track_fit(容器, 标签, 行, inset=..., path=..., max_lines=...)`：按容器宽度裁剪、宽度变化时重裁、宽度没变就不动（避免"改文本 → 新事件 → 再裁"互相追）。测试要验证"裁剪后没溢出"时，**期望值用同一个裁剪函数按实测宽度算**（比文本不比像素），另外用一段**纯拉丁**的长文本当"必须被裁"的前提（缺中日韩字体的机器也能量出宽度）。
-- **量不到的东西别急着归咎于量法：先看那块区域在不在清单里（2026-09-29 更正）**。I-1 那轮的判据比的是"文字宽 vs **控件自己**宽"，超长备份名下确实会成立（实测「选中备份」的备份名 `reqwidth = 981`、实得宽度被父容器夹到 **301**）—— 这条判据本身没问题，漏的是**那块面板从来不在量测清单里**（`_areas` 只覆盖列表与表格），而那三个标签既没有省略号也没有提示机制。所以补的半边是"把面板加进清单 + 让标签走 `fit_label`"，而不是"换一条量法"。
+- **量不到的东西别急着归咎于量法：先看那块区域在不在清单里（2026-09-29 更正）**。那一轮的判据比的是"文字宽 vs **控件自己**宽"，超长备份名下确实会成立（实测「选中备份」的备份名 `reqwidth = 981`、实得宽度被父容器夹到 **301**）—— 这条判据本身没问题，漏的是**那块面板从来不在量测清单里**（`_areas` 只覆盖列表与表格），而那三个标签既没有省略号也没有提示机制。所以补的半边是"把面板加进清单 + 让标签走 `fit_label`"，而不是"换一条量法"。
 - **会自己换行的标签要按断行后的宽度判**。`wraplength > 0` 的标签不能拿"整段文字的宽度"去比：Tk 已经按 `wraplength` 断过行了，该比的是断行之后最宽的那一行，也就是控件自己的 `winfo_reqwidth()`。实测右侧栏那条说明整段 **413px**、控件 240px，但断行后最宽的一行只有 **240px** —— 一个字都没被裁，拿整段比就是假红。修法是 `_needed_width()`：有 `wraplength` 用 `reqwidth`，没有才用文字实测宽度。
 - **`CTkLabel` 的 `wraplength` 是逻辑像素，而 `winfo_width()` 是物理像素（2026-10-02 追加）**。CTk 自己会把 `wraplength` 乘上窗口缩放（实测写 284，内层 Tk 标签拿到的是 355 = 284 × 1.25；见 `ctk_label.py` 里的 `_apply_widget_scaling`）。于是"把量到的宽度写进 `wraplength`"这一手法在 125% 的屏上会让标签按 1.25 倍的宽度折行 —— 文字行比标签本身还宽，Tk 直接硬裁且不补省略号（实测设置窗口两条说明：标签 **284** 宽、折出来的行宽 **345/375**）。写之前过一层 `widgets.wrap_budget(window, width)`；`inset` / `minimum` / `initial` 这类**设计**尺寸本来就是逻辑像素，不要换。
 - **行/卡片会被重渲染销毁，"等一会儿再量"的引用必须当场重新取（2026-10-01 追加）**。主页有两条整页重建路径：`_render_games`（异步封面/译名落地 → `refresh_artwork` 触发）与延后 60ms 的 `_schedule_list_sync`，两者都先把旧行 `destroy` 再重建 `_rows`/`_row_parts`。于是"先抓一份行 → 再等各列对齐（最多 3s，一直在泵事件）→ 最后用那份快照去量"的写法会抛 `_tkinter.TclError: bad window path name`，而那句报错**与布局对不对毫无关系**（实测 2026-10-01：Windows 分片 0 只红这一条，`test_long_game_name_does_not_widen_the_list_rows`）。修法是量的那一刻从 `page._rows` 重新取（`_live_row`，先 `winfo_exists()` 把失效引用变成一句能照着做的断言），并把"贴右"这类**由延后任务算出来**的不变量写成"等到成立"（`_wait_for_the_fixed_block_to_hug_the_right`）而不是量一次。反过来，**要量"刚渲染/刚设的状态"就别在中间泵事件** —— 悬停判定就是靠这一点（`_set_hover(None)` 之后立刻读，中间多一次 `_pump` 就可能被延后重排复位）。
@@ -352,7 +352,7 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 
 ### 间距/圆角/字号的判据：页面只许用刻度上的值
 
-"同一个角色在不同页面用了不同的数字"（同样"面板内边距"，主页写 18、设置窗口写 16；同样"卡片圆角"，一处 8 一处 11 一处 12）**能量出来**：把界面模块的源码读成 ast，统计每个 `padx` / `pady` / `corner_radius` / `CTkFont(size=...)` 的取值频次，一眼就能看出哪些数字是"伸手写的"。本轮（I-5）实测：`padx` 341 处、`pady` 436 处、`corner_radius` 73 处、字号 173 处，其中**不在刻度上的**分别是 93 / 7 / 8 处 —— 这 108 处就是收敛清单。刻度收在 `src/archive_management/ui/metrics.py`（间距、圆角）与 `typography.py`（字号阶梯）：
+"同一个角色在不同页面用了不同的数字"（同样"面板内边距"，主页写 18、设置窗口写 16；同样"卡片圆角"，一处 8 一处 11 一处 12）**能量出来**：把界面模块的源码读成 ast，统计每个 `padx` / `pady` / `corner_radius` / `CTkFont(size=...)` 的取值频次，一眼就能看出哪些数字是"伸手写的"。本轮实测：`padx` 341 处、`pady` 436 处、`corner_radius` 73 处、字号 173 处，其中**不在刻度上的**分别是 93 / 7 / 8 处 —— 这 108 处就是收敛清单。刻度收在 `src/archive_management/ui/metrics.py`（间距、圆角）与 `typography.py`（字号阶梯）：
 
 - 间距 10 档（0/2/4/6/8/10/12/16/20/24）：12 以内步长 2（控件内部要靠得紧），12 以上步长 4（区块之间要拉开）；
 - 圆角 5 档：`RADIUS_NONE`(0, 整页容器) / `RADIUS_PILL`(4, 高度 2×半径的进度条) / `RADIUS_SM`(6, 内嵌小块) / `RADIUS_MD`(8, 按钮与输入框) / `RADIUS_LG`(10, 卡片与面板)；
@@ -371,7 +371,7 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 
 - **具名常量是允许的出口，但要留注释。** 像"勾选行下面那行提示与复选框文字对齐"这种**量出来**的缩进（24 正文边 + 22 方框宽与间距）没法落在刻度上，写成模块级常量 `_CHECK_HINT_PAD`（守卫只解析字面量，名字看得到、能 grep 到）。允许出口的代价是"藏数字"变得容易，所以兜底那条用"站点数相等"兜住：真把一批数字挪进常量，站点数会跟着掉，测试立刻红。
 - **改值要按角色改，不能取"最近的那个数"。** 18 → 16（面板内边距，与设置/管理/定时窗口看齐）与 18 → 20（对话框按钮行距底，与 22/20/14 那三套里的 20 看齐）是**同一个数字的两种去处**，取最近的数会把不一致原样换个地方。取值理由写在 `metrics.py` 的模块文档里。
-- **收敛是视觉变更，必须重抓截图人工过一遍。** 与 I-1/I-3 同一条纪律：重抓一套截图之后逐张看（本轮实测哪些页面/元素动了位，记在当时的逐页评审记录里 —— 那是阶段 I 的本地材料，已随该阶段收尾删除）。
+- **收敛是视觉变更，必须重抓截图人工过一遍。** 与前面几轮同一条纪律：重抓一套截图之后逐张看（本轮实测哪些页面/元素动了位，记在当时的逐页评审记录里 —— 那是界面评审的本地材料，已随那次收尾删除）。
 
 ### 卡片/列表行的判据：选中 > 悬停 > 常规，只有一条规则
 
@@ -411,11 +411,11 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 两个坑都是实测踩出来的：
 
 1. **"引用名存在吗"不能拿全表做子串比对**：引号里的名字本来就写在它自己那条文案里，用全表比会对**任何**名字都成立（实测：把 `{button}` 换成写死的「恢复到某节点」，守卫照样绿）。判据要比**自己以外的**文案。
-2. **夹具必须真的造出"必须截断"的文本，而且要断言它造出来了**：演示数据的名字都很短，一处省略号都不会有 —— 那时"截断必带提示"这条判据是空的（夹具里因此有一条 `>= 3 处省略号` 的前提断言）。这与 I-1 的"长内容后端"是同一条教训。
+2. **夹具必须真的造出"必须截断"的文本，而且要断言它造出来了**：演示数据的名字都很短，一处省略号都不会有 —— 那时"截断必带提示"这条判据是空的（夹具里因此有一条 `>= 3 处省略号` 的前提断言）。这与"长内容后端"那条是同一条教训。
 
 顺带记一个真 bug 的形状：**进过"按可用性重绘"登记表的控件，如果被渲染重建销毁了，下一轮重绘会去碰一个不存在的控件**（`TclError: bad window path name ...`）。空状态里的按钮正是这种（每次渲染都重建），修法是销毁时摘掉登记 + 重绘时跳过已销毁项。
 
-### 对比度判据：三档阈值 + 装饰性描边的边界（I-6）
+### 对比度判据：三档阈值 + 装饰性描边的边界
 
 "这行字看得清吗"必须能算出数值来，否则只能靠人眼与显示器。算法收在新模块 `ui/contrast.py`（WCAG 2.1 的相对亮度与对比度两条公式，纯算术、不碰 Tk），阈值与逐对登记表在 `tests/unit/test_ui_contrast.py`：
 
@@ -433,10 +433,10 @@ Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable ini
 
 - **`.tmp` 探针量出来的表要比守卫的登记表更全**：本轮先量了"文字 × 全部底色"与"非文字配对"两张全表，再决定哪些进判据。第一次量的时候探针引用了已经删掉的 token（`item_active`）直接报错 —— 探针也要跟着调色板走。
 - **别把装饰性描边塞进 3:1**：`card_border` 在卡片上只有 1.45:1（深色 1.54:1）。若强行拉到达标，浅色主题的卡片框会变成一圈深灰。判据的写法是把"不要求"这件事**也登记下来**（1.2:1 下限 + 理由），而不是直接不管它。
-- **“不要求”与“要求”写在不同档位里就要拆 token（2026-10-01，I-6 落地）**：装饰性描边 1.2:1 那条判据曾把输入框边界一起盖住了 —— 输入框与面板**共用** `border`，于是“面板不用达 3:1”变成了“输入框也不用”。拆出 `input_border` 后只动输入控件（21 个创建点 + 2 处重绘），面板/卡片那二十多处一律不动。两个量出来的教训：① 候选色要对**全部**表面色量，只量前 5 个会漏掉最差的那个 —— `#7f8892` 看着是 3.19:1，对 `disabled_bg` 只有 **2.996:1**（换成 `#7b848f` = 3.158:1）；② “颜色对了”不等于“边界画出来了”，先量了 CTk 的默认 `border_width`（Entry/ComboBox 都是 **2**，线确实画着）才动手。守住这件事的是两条：读 AST 的完整性守卫（`tests/unit/test_ui_input_border.py`，扫到的输入控件数钉在 21）与切主题后的重绘守卫（`test_gui_theme_repaint` 把输入控件单独挑出来量 —— 通用的“颜色属不属于当前调色板”判据分不出 `border` 与 `input_border`）。
-- **悬停底色也是文字底色，必须一起登记（2026-09-29，G5）**：`SURFACES` 原来有 `card` 却没有 `card_hover`／`item_hover` —— 鼠标划过来时卡片/列表行换的是底色、上面的文字**没跟着变**，于是"悬停态的文字对比度"从来没被算过。登记进去立刻量出一个**既有缺陷**：深色主题的 `card_hover`（`#223657`，比常规卡片**提亮**一档）上 `text_muted` 只有 **3.80:1**、`text_disabled` **2.20:1**（都低于自己定的 4.5/2.5 下限）。卡片上本来就摆着 `text_muted` 的元数据，所以修法是**把悬停改成比常规底色暗一档**（`#152238`：`text_muted` 4.99:1、`text_disabled` 2.89:1），这同时让深色主题与浅色主题、与列表行的 `item_hover` 方向一致（都是"悬停略暗"）—— 提亮那条路在这套调色板下**走不通**：`text_muted` 在常规卡片上已经只有 4.57:1，任何提亮都会把它压到 4.5:1 以下。
+- **“不要求”与“要求”写在不同档位里就要拆 token（2026-10-01 落地）**：装饰性描边 1.2:1 那条判据曾把输入框边界一起盖住了 —— 输入框与面板**共用** `border`，于是“面板不用达 3:1”变成了“输入框也不用”。拆出 `input_border` 后只动输入控件（21 个创建点 + 2 处重绘），面板/卡片那二十多处一律不动。两个量出来的教训：① 候选色要对**全部**表面色量，只量前 5 个会漏掉最差的那个 —— `#7f8892` 看着是 3.19:1，对 `disabled_bg` 只有 **2.996:1**（换成 `#7b848f` = 3.158:1）；② “颜色对了”不等于“边界画出来了”，先量了 CTk 的默认 `border_width`（Entry/ComboBox 都是 **2**，线确实画着）才动手。守住这件事的是两条：读 AST 的完整性守卫（`tests/unit/test_ui_input_border.py`，扫到的输入控件数钉在 21）与切主题后的重绘守卫（`test_gui_theme_repaint` 把输入控件单独挑出来量 —— 通用的“颜色属不属于当前调色板”判据分不出 `border` 与 `input_border`）。
+- **悬停底色也是文字底色，必须一起登记（2026-09-29）**：`SURFACES` 原来有 `card` 却没有 `card_hover`／`item_hover` —— 鼠标划过来时卡片/列表行换的是底色、上面的文字**没跟着变**，于是"悬停态的文字对比度"从来没被算过。登记进去立刻量出一个**既有缺陷**：深色主题的 `card_hover`（`#223657`，比常规卡片**提亮**一档）上 `text_muted` 只有 **3.80:1**、`text_disabled` **2.20:1**（都低于自己定的 4.5/2.5 下限）。卡片上本来就摆着 `text_muted` 的元数据，所以修法是**把悬停改成比常规底色暗一档**（`#152238`：`text_muted` 4.99:1、`text_disabled` 2.89:1），这同时让深色主题与浅色主题、与列表行的 `item_hover` 方向一致（都是"悬停略暗"）—— 提亮那条路在这套调色板下**走不通**：`text_muted` 在常规卡片上已经只有 4.57:1，任何提亮都会把它压到 4.5:1 以下。
 
-### 键盘可用性的判据：Tab 走得通、焦点看得见、Esc/回车接得上（I-6）
+### 键盘可用性的判据：Tab 走得通、焦点看得见、Esc/回车接得上
 
 CustomTkinter 在这三件事上有**实测出来的缺口**（Tk 8.6 + CTk 6.0）：按钮/单选/复选/开关画在 Canvas 上且内层 `takefocus` 是空串（Tk 对 Canvas 的默认规则是"不进 Tab 链"），聚焦时 `border_color` 与聚焦前**一模一样**，Canvas 也没有空格/回车绑定。补法在 `ui/keyboard.py`（类级补丁，随 `widgets` 导入安装）；守卫 `tests/integration/test_gui_keyboard.py` 逐界面量：
 
@@ -446,7 +446,7 @@ CustomTkinter 在这三件事上有**实测出来的缺口**（Tk 8.6 + CTk 6.0�
    - **恒用强调色不行**（12 号实测）：实底按钮底色就是强调色，实测 **1.00:1** —— "选中时的边框和部分按钮颜色一样，分不出哪个被选中"。
    - **从语义色里挑对比最高仍不够**：落到 `text_primary`（深色主题 `#092329`），3.3:1 达标，但凹在实底按钮里像"按钮缩小了一圈"。
    - **一套主题里单色无解**：普通底色与实底要求的明度相反，合并后最优也只有 **1.87:1（深色）/ 3.67:1（浅色）**；分开后普通底色 **9.50 / 16.87:1**、实底 **6.76 / 4.58:1**。于是定成两个专用 token（`focus_ring` / `focus_ring_on_fill`），取对比更高的那一档（不能取"第一个达标的"：浅色主题的深环在主色实底上恰好 3.1:1、刚过线却看不出）。
-   - **用户第三次实测：实底按钮上那两档仍是"当前主题里不显眼的颜色"**（深色主题用深青黑、浅色主题用近白），而且外圈实现不了（实测 CTk 的 `bg_color` 只在圆角外露出四个角，不是一圈）。**最终做法是换色**：实底按钮聚焦时改成软底 + **那一档抢眼的环色** —— 深色主题 `#8ee6ff` 对软底 **10.5:1**、浅色主题 `#0d1b2a` 对软底 **15:1 以上**，于是**两套主题各自只剩一个抢眼的环色**，文字也仍然是软底上的高对比文字（≥4.5:1，同一条守卫）。肉眼复核材料是当时放大的焦点环对照图（两组主题 × 主色/危险色，各放大 5 倍；阶段 I 的本地材料，已随该阶段收尾删除）。
+   - **用户第三次实测：实底按钮上那两档仍是"当前主题里不显眼的颜色"**（深色主题用深青黑、浅色主题用近白），而且外圈实现不了（实测 CTk 的 `bg_color` 只在圆角外露出四个角，不是一圈）。**最终做法是换色**：实底按钮聚焦时改成软底 + **那一档抢眼的环色** —— 深色主题 `#8ee6ff` 对软底 **10.5:1**、浅色主题 `#0d1b2a` 对软底 **15:1 以上**，于是**两套主题各自只剩一个抢眼的环色**，文字也仍然是软底上的高对比文字（≥4.5:1，同一条守卫）。肉眼复核材料是当时放大的焦点环对照图（两组主题 × 主色/危险色，各放大 5 倍；界面评审的本地材料，已随那次收尾删除）。
 4. **键盘操作不了的控件不进 Tab 链**：`CTkComboBox` / `CTkOptionMenu` 的值只能用鼠标从列表里选，让 Tab 停在它上面等于告诉用户"这里能按"（12 号实测）。它们既不进链也不画环，见 `keyboard.UNOPERABLE_TYPES`。
 5. **Esc = 取消 / 回车 = 主操作，且只属于抓取式对话框**：Window 级绑定，主操作靠"实测底色等于 `accent`（否则 `danger`）"定位 —— **不能只看样式名**，因为实测有四个对话框的主按钮是就地创建、直接写 `fg_color=palette.accent` 的。常驻工作窗口（设置、定时任务）调 `_present(..., modal=False)`：不许绑这两个键、也不许自动定焦 —— 实测设置窗口按 Esc 直接把窗口关了（用户要的是"退出快捷键录制"）、按回车触发了"切换主题"、一打开就把焦点定在"界面字号"下拉框上。
 6. **空格按下焦点所在的按钮**；输入框里回车提交（输入框自己的绑定先处理并 `break`，不会重复提交）。
@@ -475,7 +475,7 @@ CustomTkinter 在这三件事上有**实测出来的缺口**（Tk 8.6 + CTk 6.0�
 - **一次量不到不算数，但也绝不放过真缺陷**：界面自己在跑（忙碌收尾 / 延后重排）时，实测偶尔某一次聚焦就是没生效。`_focus_and_read()` 于是**试三次**、每次读得尽量早（中间不再多跑事件循环），而"三次都画不出来"还分两种情况：拿一个**对照控件**（那个 1px 的焦点黑洞，它自己也接焦点环）当煤鸟 —— 煤鸟画得上就说明"聚焦→画环"这条路是通的，那就是**真缺陷**（报红）；煤鸟也画不出才是环境（记进 `_UNMEASURED` 并附在失败信息里）。这样既不冤枉实现，也不会把"根本没实现环"当成量不出来。
 - **把 CI 的时序搬回本地的办法**：临时插件包住 `dialogs._present`，在原调用之后再跑 3 轮 `update()`（焦点事件因此会在用例开始测量前就被处理）。靠它把 styles/keyboard 的假红在本地逐条搬回来，修完再跑同一个插件确认全绿，最后删掉插件。
 
-### 分支图的判据：item 账目 + 几何 + 漫游（I-9）
+### 分支图的判据：item 账目 + 几何 + 漫游
 
 分支视图从"卡片流"换成"`Canvas` 图画布"之后，判据也跟着换了两条**确定性数字**：
 
@@ -499,13 +499,13 @@ CustomTkinter 在这三件事上有**实测出来的缺口**（Tk 8.6 + CTk 6.0�
 
 #### 2026-09-29 复核：图上文字的"回看"、画布的焦点环、箭头的正面证据
 
-I-9 上线后回头核对"前面几轮的证据还成不成立"，图上多出来的三类量测对象补齐了（PLAN 的复核表 G1/G3/G4）：
+分支图上线后回头核对"前面几轮的证据还成不成立"，图上多出来的三类量测对象补齐了：
 
 - **一个画布里的多个悬停目标，提示得由视图自己管**。`widgets.attach_tooltip` 的触发点是控件自己的 `<Enter>`/`<Leave>`，而鼠标在画布内从框 A 移到框 B **不会**再来一次 `<Enter>` —— 提示会一直挂着 A 的文案（比没有提示更糟）。所以新增 `widgets.HoverTip`：调用方给"文案 + 屏幕坐标"，它自己管建窗/换文案/收起，样式常量（底色/描边/留白/间距）与 `attach_tooltip` 共用同一组，保证全应用的提示长得一样。`tree_view` 在 `set_hovered` 里挂/收，`set_items` 时直接收掉（旧节点的全文不能留着）。判据：被裁的框悬停时 `tip` 里是**完整**标题、没被裁的框与没悬停时都不许挂。
-- **画布的焦点环用 Tk 自带的 `highlightthickness`/`highlightcolor`**。画布是普通 `tkinter.Canvas`、**不在** `keyboard.PATCHED_TYPES` 里（它甚至不是 CTk 控件），所以 I-6 那套补丁碰不到它；但它的 `takefocus=1` —— Tab 能停在它身上却看不出焦点。改法是给画布 3px 的 highlight 环：`highlightcolor=focus_ring`、`highlightbackground=well`（失焦时与底色同色 = 看不见环），随 `redraw(palette)` 一起画。实测聚焦时画布边缘像素 `#8ee6ff`（= `DARK.focus_ring`）、失焦 `#0c1524`（= `DARK.well`），与"环对底色 ≥ 3:1"（`keyboard.FOCUS_RING_MINIMUM`）一起进守卫。
+- **画布的焦点环用 Tk 自带的 `highlightthickness`/`highlightcolor`**。画布是普通 `tkinter.Canvas`、**不在** `keyboard.PATCHED_TYPES` 里（它甚至不是 CTk 控件），所以键盘可用性那套补丁碰不到它；但它的 `takefocus=1` —— Tab 能停在它身上却看不出焦点。改法是给画布 3px 的 highlight 环：`highlightcolor=focus_ring`、`highlightbackground=well`（失焦时与底色同色 = 看不见环），随 `redraw(palette)` 一起画。实测聚焦时画布边缘像素 `#8ee6ff`（= `DARK.focus_ring`）、失焦 `#0c1524`（= `DARK.well`），与"环对底色 ≥ 3:1"（`keyboard.FOCUS_RING_MINIMUM`）一起进守卫。
 - **收起的控件拿不到焦点**（Tk 事实，实测）：`place_forget()` 掉的箭头 `winfo_manager() == ''`、`winfo_ismapped()` 为假，`focus_set()` 之后 `focus_get()` **不是**它；而露出来的箭头这些都成立。于是"箭头真的收起来了"除了读摆放管理器，还能用"焦点给不到它"再钉一次（Tk 的 Tab 遍历同样只走已映射的控件）。反过来也有一个操作上的坑：**合成按键只送给有焦点的控件** —— `inner.event_generate("<space>")` 之前必须先 `inner.focus_set()`，否则回调不会被触发（这条在 `test_gui_keyboard` 里也是同一个写法）。
 
-### 折叠/展开的判据：空折叠 == 旧行为、藏起来必须留痕（I-9.5）
+### 折叠/展开的判据：空折叠 == 旧行为、藏起来必须留痕
 
 折叠拆成"纯函数 → 绘制 → 交互"三层，每层都有确定性数字（`tests/unit/test_ui_tree_layout.py`、`tests/integration/test_gui_branch_graph.py`）：
 
@@ -519,7 +519,7 @@ I-9 上线后回头核对"前面几轮的证据还成不成立"，图上多出�
 
 实测踩到的两个坑：① **测试 helper 的坐标换算方向写反**（拿 `canvasx(画面坐标)` 去凑控件坐标）—— 没滚动时两者恰好相等，"点标记折叠"那条一滚动就点空；② **折叠痕迹的判定必须先问"这个框是不是折叠着"**，否则每个有后代的框都会被当成"藏着东西"（子树里总有节点是选中项），展开状态下标记全亮。
 
-### 反馈文案的判据：失败给下一步、结果给去处与计数（I-7）
+### 反馈文案的判据：失败给下一步、结果给去处与计数
 
 长动作的**机制**（忙碌态、取消按钮、`FeedbackKind`）与**文案**是两件事：机制齐全不代表用户看得懂。判据落在文案上（`tests/unit/test_ui_feedback_copy.py`，纯 i18n 数据）：
 
@@ -527,9 +527,9 @@ I-9 上线后回头核对"前面几轮的证据还成不成立"，图上多出�
 - **登记的 `result.*` 必须带占位符**：`{file}`/`{path}`（去哪儿了）、`{count}`/`{files}`/`{size}`/`{skipped}`（几条）。"已删除该备份"这种没说删了哪一份的会被点名。
 - **兜底**：没进登记表的 `result.*` 必须在豁免清单里写明理由（新加一条结果文案却没人判它会红）；两套语言的键一一对应；信号词表本身要真的命中全部 `error.*`（表写错会让第一条空转）。
 
-### 重要功能键的配色索引：按回调名登记"允许的性质"（I-10）
+### 重要功能键的配色索引：按回调名登记"允许的性质"
 
-与破坏性动作（I-2）同一手法，只是范围扩到"重要功能"：`tests/integration/test_gui_styles.py` 里的 `_IMPORTANT_ACTIONS` 登记**回调名 → 允许的动作性质集合**，实测颜色反推出来的性质必须落在集合里，另外**每个登记项至少要有一条可用态的观察**（禁用态的颜色是禁用色，反推不出本色）。判定不看文案，所以改了文案、挪了位置仍管得住。
+与破坏性动作同一手法，只是范围扩到"重要功能"：`tests/integration/test_gui_styles.py` 里的 `_IMPORTANT_ACTIONS` 登记**回调名 → 允许的动作性质集合**，实测颜色反推出来的性质必须落在集合里，另外**每个登记项至少要有一条可用态的观察**（禁用态的颜色是禁用色，反推不出本色）。判定不看文案，所以改了文案、挪了位置仍管得住。
 
 两点经验：
 
@@ -632,7 +632,7 @@ OperationalError: unsupported file format
 
 ### 分片执行与结果合并
 
-套件变长后，CI 的墙钟时间几乎全压在 pytest 上（2026-09 实测：Windows 298s / macOS 260s / Linux 132s，整次工作流约 9 分钟）。现在每个平台把用例拆成几片并行跑（Linux 3 片、Windows 2 片、macOS 1 片 —— macOS 按 ×10 计价，所以少开片省额度，见 `PLAN.md` 第 11.9 节），再由 `pytest-report` 把各片结果合并成一份——墙钟时间只取决于最慢的那一片。
+套件变长后，CI 的墙钟时间几乎全压在 pytest 上（2026-09 实测：Windows 298s / macOS 260s / Linux 132s，整次工作流约 9 分钟）。现在每个平台把用例拆成几片并行跑（Linux 3 片、Windows 2 片、macOS 1 片 —— macOS 按 ×10 计价，所以少开片省额度），再由 `pytest-report` 把各片结果合并成一份——墙钟时间只取决于最慢的那一片。
 
 - **分片规则**在 `tests/sharding.py`：权重**三级取值**——每条用例的实测耗时（`tests/durations.json`）优先，没有实测的退回目录经验权重（集成 2s、安全 0.6s、单元 0.05s，未知目录 0.3s），再“最慢的优先”贪心装箱（LPT）。实测值是必须的：同一模块内单条用例能差 8 倍（2026-10-07 实测 `test_gui_home.py`：1.5s~12.1s），只按目录单价装箱等于按**条数**装箱，慢用例会堆在同一片；纯单价时代实测三片 71s / 81s / 81s（理想 77s）。数据一条命令刷新：`uv run python scripts/run_tests_local.py -- --record-durations=tests/durations.json`（双片各记一份、结束后自动合并，重叠取中位数；记录/加载/合并的约定与失败形态见 `tests/durations.py`，守卫在 `tests/unit/test_durations.py`）。
 - **参数**是 `--shard-count` / `--shard-index`（默认 `1`/`0` 即不分片），过滤发生在**严重等级过滤之后**：本地 `--min-severity=critical` 选出的子集也能分片跑。三条性质由 `tests/unit/test_sharding.py` 锁住：不重不漏（各片并集 == 全集）、同输入同分片、各片权重接近理想值。

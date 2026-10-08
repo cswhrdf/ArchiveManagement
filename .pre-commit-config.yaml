@@ -60,7 +60,7 @@ repos:
         # (tests/unit/test_ui_contrast.py ↔ ui/contrast.py), 钩子不抄第二份会漂移的副本。
         # 同一份用例里还请了**第三方库**再算一遍(``color-contrast`` 包的 check_contrast):
         # 它只返回布尔值、报不出"差多少", 所以不拿它当引擎; 但"实现是别人写的"这点让
-        # 它可以给我们的公式当第二把算尺(分工与理由见 PLAN §17.3)。
+        # 它可以给我们的公式当第二把算尺(分工与理由见 docs/testing.md 的对比度判据一节)。
         name: color-contrast (WCAG 对比度)
         entry: uv run --no-sync pytest tests/unit/test_ui_contrast.py -q
         language: system

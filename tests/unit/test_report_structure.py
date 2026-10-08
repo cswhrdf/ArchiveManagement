@@ -171,7 +171,7 @@ def test_required_platforms_match_the_ci_matrix() -> None:
 
     这三处一旦不一致就会变成两种错法: 矩阵里跑了而没要求 -> 那个平台的产物丢了没人发现;
     要求了而矩阵里没跑 -> 报告必然不完整, 门禁无意义地红。
-    macOS 曾在开发阶段屏蔽(省额度), 2026-09-30 恢复后三处一起加回来(见 PLAN.md 第 11.9 节)。
+    macOS 曾在开发阶段屏蔽(省额度), 2026-09-30 恢复后三处一起加回来。
 
     汇总脚本自己也吃同一份清单(``create_allure_summary.py --expect-platforms``): 它决定运行
     总账末节「证据核对」里"应有"的那些每平台项 —— 少列一个平台, 那个平台整族的结论(用例/
@@ -183,7 +183,7 @@ def test_required_platforms_match_the_ci_matrix() -> None:
 
     required = set(required_platforms())
     assert required == {"Windows", "macOS", "Linux"}, (
-        "要求哪几个平台要有用例: 恢复/屏蔽某个平台时这一条要跟着改(见 PLAN.md 第 11.9 节)"
+        "要求哪几个平台要有用例: 恢复/屏蔽某个平台时这一条要跟着改"
     )
 
     summary = workflow.split("name: Check every platform contributed tests", 1)[1]

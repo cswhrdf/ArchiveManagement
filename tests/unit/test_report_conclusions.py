@@ -232,7 +232,7 @@ def test_coverage_item_without_the_raw_file_has_no_attachment(
 
 
 def test_the_coverage_conclusion_is_published() -> None:
-    """覆盖率结论必须**单独上传** —— 合并后的 ``allure-results/`` 不再上传(见 PLAN §41).
+    """覆盖率结论必须**单独上传** —— 合并后的 ``allure-results/`` 不再上传.
 
     2026-10-04 实测: 少了这一份, 汇总报告里三个平台全部报“缺少结论: Coverage report”,
     而报告作业自己是绿的 —— 这类“漏了个消费者”在作业状态上看不出来, 只能靠守卫钉。

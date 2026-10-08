@@ -298,7 +298,7 @@ def publish(result_id: str, directory: Path) -> None:
     """把这条结论的文件(结果 JSON + 附件)复制一份到 ``directory``.
 
     为什么要单独一份: 在 pytest-report 作业里, 这条结论写进的是**整份合并结果集**
-    (``allure-results/``), 而那个目录从 2026-10-04 起不再上传(见 PLAN §41) —— 少了这一份,
+    (``allure-results/``), 而那个目录从 2026-10-04 起不再上传 —— 少了这一份,
     汇总报告里三个平台全部报"缺少结论: Coverage report", 而报告作业自己是绿的, 作业状态
     上看不出任何异常。附件与结果一起复制: 报告里那一条要能直接下载原始 ``coverage.xml``。
     """

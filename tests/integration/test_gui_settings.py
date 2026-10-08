@@ -309,7 +309,7 @@ def test_auto_activation_polls_only_when_switched_on(
     db.migrate()
     game = GameRepository(db).add(Game(name="Demo", enabled=True))
     assert game.id is not None
-    # 没有存档位置的游戏不参与监控(见 PLAN 的 G-8), 这里必须给上一条路径。
+    # 没有存档位置的游戏不参与监控, 这里必须给上一条路径。
     SaveLocationRepository(db).add(SaveLocation(game_id=game.id, path="C:/Saves/Demo"))
     service = SqlArchiveService(
         db, backup_root=tmp_path / "backups", process_provider=provider
