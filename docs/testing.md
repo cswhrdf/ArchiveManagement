@@ -1,6 +1,6 @@
 # 测试体系
 
-本文档说明测试如何分类、在哪里执行、结果如何汇总，以及新增测试时要遵守的约定。目标是让"本地提交要快"和"CI 要有完整证据"两件事同时成立。
+本文档说明测试如何分类、在哪里执行、结果如何汇总，以及新增测试要遵守的约定，目标是让"本地提交要快"与"CI 有完整证据"同时成立。各小节只保留仍然有效的规则、量法与坑；每次踩坑的完整复盘（日期、现场、修复过程）以测试文件的 docstring 与提交历史为准。
 
 其他文档：[功能说明](features.md)、[游戏库与发现](library.md)、[全局快捷键](hotkeys.md)、[平台支持](platforms.md)、[开发与发布](development.md)。
 
@@ -14,9 +14,10 @@ tests/
   button_support.py      # GUI 按钮测试共享基建(拆自 test_gui_buttons.py, 见 test-refactor-plan.md)
   report_support.py      # 报告/CI 断言共享基建(拆自 test_report_verification.py)
   sql_support.py         # SQLite 后端用例共享基建(拆自 test_sql_backend.py)
+  ui_sharing.py          # 共享 UI 会话(见第 2 节)
   sharding.py            # 分片规则: 三级权重(实测耗时优先) + 最慢优先贪心装箱
-  durations.py           # 分片权重那份实测档案的记录/加载/合并(守卫 tests/unit/test_durations.py)
-  durations.json         # 上面那份档案本体(nodeid → 秒), 由第 6 节的命令刷新
+  durations.py           # 分片权重实测档案的记录/加载/合并(守卫 tests/unit/test_durations.py)
+  durations.json         # 档案本体(nodeid → 秒), 由第 7 节的命令刷新
   unit/                  # 纯逻辑与单一边界: 不会真正触达用户数据的临时目录/SQLite
   unit/conftest.py       # 单元层共享 fixture(逐字相同才上提, 见 test-refactor-plan.md)
   integration/           # 真实跨层协作: 配置 + 数据库 + 备份/恢复 + 审计日志 + UI 后端
@@ -24,41 +25,40 @@ tests/
   security/              # 不可信输入与危险操作防护（只在 CI 执行）
 ```
 
-| 类别        | 标记                       | 本地 `pytest` | pre-commit               | CI                                           |
+| 类别        | 标记                       | 本地 `pytest` | pre-commit               | CI                                          |
 | ----------- | -------------------------- | ------------- | ------------------------ | -------------------------------------------- |
 | unit        | 按目录（无专用标记）       | 运行          | 部分（blocker+critical） | 运行（Windows/macOS/Linux）                  |
 | integration | 按目录（无专用标记）       | 运行          | 部分（blocker+critical） | 运行（Windows/macOS/Linux）                  |
 | performance | `@pytest.mark.performance` | **不运行**    | 不运行                   | `quality` job 的一部分（ubuntu，单平台采集） |
 | security    | `@pytest.mark.security`    | **不运行**    | 不运行                   | `security` job（Windows/macOS/Linux）        |
 
-> **macOS 自 2026-09-30 起重新纳入 CI**（开发阶段曾屏蔽过一障：macOS runner 按 Linux 的 10 倍计价）。
-> 三个平台的矩阵（`pytest` / `pytest-report` / `security`）、`allurerc.mjs` 的 `environmentsTested`
-> 与汇总作业的 `--expect-platforms` 现在都是 Windows/macOS/Linux，四处由守卫核对着一致；
-> macOS 只给 **1 片**（3 个 macOS 实例：pytest / pytest-report / security），拉长墙钟还是省额度
-> 的取舍见 CI 矩阵那一段注释（`.github/workflows/ci.yml`）。
+> **macOS 自 2026-09-30 起重新纳入 CI**（开发阶段曾因 macOS runner 按 Linux 的 10 倍计价屏蔽过一阵）。
+> 平台集合在四处保持一致：CI 三个矩阵（`pytest` / `pytest-report` / `security`）、`allurerc.mjs` 的
+> `environmentsTested`、汇总作业的 `--expect-platforms`，由守卫核对；macOS 只给 **1 片**（3 个实例），
+> 墙钟与额度的取舍见 `.github/workflows/ci.yml` 矩阵处的注释。
 
 ### 严重等级（失败影响面）
 
-每个模块在 `pytestmark` 里声明一个等级，`tests/conftest.py` 把它写成 Allure 的 `severity`。**等级表达“失败的影响面”，与测试层次无关**（层次用 `layer`），并且决定 pre-commit 跑哪些用例：
+每个模块在 `pytestmark` 里声明一个等级，`tests/conftest.py` 把它写成 Allure 的 `severity`。**等级表达"失败的影响面"，与测试层次无关**（层次用 `layer`），并且决定 pre-commit 跑哪些用例：
 
-| 等级       | 判定标准                                           | 例子                                                                                                | 本地 pre-commit |
-| ---------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------- |
-| `blocker`  | 安全与数据完整性底线, 以及会让 软件崩溃/卡死的缺陷 | 路径越界 / 危险目标必须被拒、快照 或清单被篡改必须拒绝恢复、界面因事件递归而崩 溃或抽死(按需滚动条) | 运行            |
-| `critical` | 核心业务不可用或结果不正确                         | 备份 / 快照 / 恢复 / 删除计划、仓储事务、迁移、调度、GUI 真实后端、全链路流水线                     | 运行            |
-| `normal`   | 常规功能与交互                                     | 配置、平台探测、主页聚合、对话框、CLI、热键、审计、存档位置与命名                                   | 仅 CI           |
-| `minor`    | 展示与辅助                                         | 调色板 / 控件样式 / 渲染修正、i18n 文案、打包元数据、演示后端、性能基准                             | 仅 CI           |
-| `trivial`  | 极低影响                                           | 色值、脚本生成的报告汇总项（覆盖率 / 性能 / 安全摘要）                                              | 仅 CI           |
+| 等级       | 判定标准                                           | 例子                                                                    | 本地 pre-commit |
+| ---------- | -------------------------------------------------- | ------------------------------------------------------------------------ | --------------- |
+| `blocker`  | 安全与数据完整性底线, 以及会让软件崩溃/卡死的缺陷  | 路径越界 / 危险目标必须被拒、篡改快照或清单必须拒绝恢复、界面事件递归崩溃 | 运行            |
+| `critical` | 核心业务不可用或结果不正确                         | 备份 / 快照 / 恢复 / 删除计划、仓储事务、迁移、调度、GUI 真实后端、全链路流水线 | 运行            |
+| `normal`   | 常规功能与交互                                     | 配置、平台探测、主页聚合、对话框、CLI、热键、审计、存档位置与命名           | 仅 CI           |
+| `minor`    | 展示与辅助                                         | 调色板 / 控件样式 / 渲染修正、i18n 文案、打包元数据、演示后端、性能基准     | 仅 CI           |
+| `trivial`  | 极低影响                                           | 色值、脚本生成的报告汇总项（覆盖率 / 性能 / 安全摘要）                      | 仅 CI           |
 
 约定：
 
-- 每个模块**恰好声明一个等级**；单个用例可用 `@pytest.mark.blocker` 等覆盖模块默认值。`tests/unit/test_test_config.py` 会校验“恰好一个”，并要求**五个等级都至少有一个模块在用**（否则报告分布会退化回一边倒）。
+- 每个模块**恰好声明一个等级**；单个用例可用 `@pytest.mark.blocker` 等覆盖模块默认值。`tests/unit/test_test_config.py` 会校验"恰好一个"，并要求**五个等级都至少有一个模块在用**（否则报告分布退化回一边倒）。
 - 漏写时按目录兜底（unit/integration=normal、performance=minor、security=critical），兜底只是为了不冒出 `no_severity` 桶。
 - **别按目录或层次照搬等级**：`tests/unit` 里既有 blocker（危险目标判定）也有 minor（调色板色值）。
 - 复现本地钩子跑的子集：`uv run pytest --min-severity=critical`。
 
 ### 层级（Allure 测试金字塔）
 
-每个模块用 `pytest.mark.layer(...)` 声明测试层次，Allure 的“测试金字塔”与“按层耗时”控件直接读它。**层次描述“用例实际接了什么”，不完全等于所在目录**：
+每个模块用 `pytest.mark.layer(...)` 声明测试层次，Allure 的"测试金字塔"与"按层耗时"控件直接读它。**层次描述"用例实际接了什么"，不完全等于所在目录**：
 
 | 层次          | 判定标准                                                                     | 例子                                                             |
 | ------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------- |
@@ -66,9 +66,9 @@ tests/
 | `integration` | 真实数据库 / 文件系统 / 领域服务之间的协作（不要求位于 `tests/integration`） | 真 SQLite 的仓储与迁移、真实快照与恢复、跨层备份→恢复→删除流水线 |
 | `e2e`         | 从真实入口走完整用户流程                                                     | 真实窗口 + 按钮/菜单操作、命令行入口的完整流程                   |
 
-因此 `tests/unit/` 下的真实 SQLite / 文件系统模块（`test_repository.py`、`test_sql_games.py` 等 `test_sql_*` 系列、`test_restore.py`、`test_backup_service.py`、`test_snapshot.py` 等）声明为 `integration`：它们确实在做跨组件协作，报告应当如实反映这一点。审查时如发现“目录层次”与“实际接的东西”不一致，以实际为准。
+因此 `tests/unit/` 下的真实 SQLite / 文件系统模块（`test_repository.py`、`test_sql_games.py` 等 `test_sql_*` 系列、`test_restore.py`、`test_backup_service.py`、`test_snapshot.py` 等）声明为 `integration`：它们确实在做跨组件协作。审查时如发现"目录层次"与"实际接的东西"不一致，以实际为准。
 
-默认收集范围由 `pyproject.toml` 的 `testpaths` 决定（只有 `tests/unit` 与`tests/integration`）。性能与安全测试需要显式指定：
+默认收集范围由 `pyproject.toml` 的 `testpaths` 决定（只有 `tests/unit` 与 `tests/integration`）。性能与安全测试需要显式指定：
 
 ```shell
 uv run pytest tests/performance -m performance
@@ -77,672 +77,450 @@ uv run pytest tests/security -m security
 
 ## 2. 共享测试设施
 
-- `tests/helpers.py`：临时 SQLite（`migrated_database`）、游戏与存档位置（`add_game` / `add_location` / `make_save_folder` / `touch_save`）、备份服务（`backup_service` / `sql_archive_service` / `manual_scheduler`）、固定 UTC 时刻（`utc_moment`）、批量造数据（`seed_home_games` / `seed_backup_chain` /`write_text_files`）以及运行环境信息（`environment_info`）。为了让它能被导入，`pyproject.toml` 把 `tests` 加进了 `pythonpath`。
-- `tests/reporting.py`：`PerformanceRecorder`（耗时 / 吞吐 / 内存峰值 + 阈值校验）与 `SecurityRecorder`（记录"场景 / 期望拦截 / 实际情况"，未拦截即失败）。
+- `tests/helpers.py`：临时 SQLite（`migrated_database`）、游戏与存档位置（`add_game` / `add_location` / `make_save_folder` / `touch_save`）、备份服务（`backup_service` / `sql_archive_service` / `manual_scheduler`）、固定 UTC 时刻（`utc_moment`）、批量造数据（`seed_home_games` / `seed_backup_chain` / `write_text_files`）与运行环境信息（`environment_info`）。`pyproject.toml` 把 `tests` 加进了 `pythonpath` 使其可导入。
+- `tests/reporting.py`：`PerformanceRecorder`（耗时/吞吐/内存峰值 + 阈值校验）与 `SecurityRecorder`（记录"场景/期望拦截/实际情况"，未拦截即失败）。
 - 存量模块里的小构造器（如 `_service`、`_database`）保留原签名，只把实现委托到共享模块，避免几十处调用点跟着改。
-- `tests/ui_sharing.py`：**共享 UI 会话**（session 级 `ui_shared` 夹具）。同一构造配置的界面用例共用一份窗口（2026-10-07 实测：每条用例"建窗 + 首帧 + 销毁"合计 1.6~1.9s，296 条 UI 用例的纯生命周期开销约 8 分钟），用例边界由 `test_scope` 做"进入前对齐基线 / 退出后识别漂移并还原"。三条纪律：① 还原走被测应用自己的动作（`_show_page` / `_switch_view` / `_select_game` / `_on_toggle_theme` / `_set_busy`），不改写内部字段；② 还原后重新识别验证，对不上基线就**重建整窗**并把原因记进 Allure；③ 后端数据被用例改过（删游戏 / 切主题 / 改调度）直接重建——共享的是窗口，不是数据。会话末尾统一走 `gui_support.close_apps` 收尾（拆不干净与逐用例收尾一样判红）。池按工厂函数身份区分：`demo_app` 是全局标准演示池（states / styles / keyboard / tooltip 入池），构造参数或污染面不同的模块建自己的池（copy_quality 的长文案池、dropdown 的独立池——它会改 `_page_size_box` 的 values/command）。**不**入池的模块维持"每用例一窗"：每条用例要不同构造参数的（sizes / layout / lifecycle / roots / smoke）与重度改后端数据的大户（home / 导入导出）——它们复用不到，硬塞只会换来每次重建。一组共用状态的用例可以用 `group_scope` + `pool.rebaseline()` 做统一前后置（组状态在组内当基线，组退出即还原通用基线）。守卫：`tests/unit/test_ui_sharing.py`（替身钉逻辑分支）与 `tests/integration/test_gui_shared_session.py`（真窗口上量复用 / 隔离 / 共态组 / 数据漂移重建）。一个全局影响：**共享窗会长期坐在 `tkinter._default_root` 槽位上**（收尾兜底不收它，`gui_support._SHARED_ROOTS` 就是为此设的），于是整批连跑时"新建窗口接管槽位 / 外来根坐上槽位被兜底收走"这些判据会跟着全局状态跑偏 —— `test_gui_roots.py` 里两条盯槽位纪律的用例开头先 `monkeypatch.setattr(tkinter, "_default_root", None)` 摘空槽位（结束自动还原回共享窗），判的才是槽位这件事本身。执行过程中看到两三扇窗口同时开着、且某条用例跑完窗口不关，正是共享池的预期形态：窗活到会话末尾由 `ui_shared` 统一收。
+- `tests/ui_sharing.py`：**共享 UI 会话**（session 级 `ui_shared` 夹具）。同一构造配置的界面用例共用一份窗口——每条用例"建窗 + 首帧 + 销毁"合计 1.6~1.9s，几百条 UI 用例的纯生命周期开销以分钟计。用例边界由 `test_scope` 做"进入前对齐基线 / 退出后识别漂移并还原"。三条纪律：
+  1. 还原走被测应用自己的动作（`_show_page` / `_switch_view` / `_select_game` / `_on_toggle_theme` / `_set_busy`），不改写内部字段；还原后重新识别验证，对不上基线就**重建整窗**并把原因记进 Allure。
+  2. 后端数据被用例改过（删游戏/切主题/改调度）直接重建——共享的是窗口，不是数据。
+  3. 会话末尾统一走 `gui_support.close_apps` 收尾（拆不干净与逐用例收尾一样判红）。
+
+  池按工厂函数身份区分：`demo_app` 是全局标准演示池（states / styles / keyboard / tooltip 入池）；构造参数或污染面不同的模块建自己的池（copy_quality 的长文案池、dropdown 的独立池——它会改 `_page_size_box` 的 values/command）。**不**入池的模块维持"每用例一窗"：每条用例要不同构造参数的（sizes / layout / lifecycle / roots / smoke）与重度改后端数据的大户（home / 导入导出）——它们复用不到，硬塞只会换来每次重建。一组共用状态的用例可用 `group_scope` + `pool.rebaseline()` 做统一前后置。守卫：`tests/unit/test_ui_sharing.py`（替身钉逻辑分支）与 `tests/integration/test_gui_shared_session.py`（真窗口上的复用/隔离/共态组/数据漂移重建）。
+
+  两个全局影响：**共享窗会长期坐在 `tkinter._default_root` 槽位上**（收尾兜底不收它，`gui_support._SHARED_ROOTS` 就是为此设的），整批连跑时"新建窗口接管槽位 / 外来根坐上槽位被兜底收走"这些判据会跟着全局状态跑偏——`test_gui_roots.py` 里两条盯槽位纪律的用例开头先 `monkeypatch.setattr(tkinter, "_default_root", None)` 摘空槽位（结束自动还原），判的才是槽位这件事本身。执行中看到两三扇窗口同时开着、某条用例跑完窗口不关，是共享池的预期形态：窗活到会话末尾由 `ui_shared` 统一收。
 
 约定：测试优先复用**真实**领域服务、临时目录与 SQLite；只有外部依赖（系统回收站、系统快捷键、真实网络）才用可注入替身。不为了测试在生产代码里加分支，也不写"只验证 mock 调用次数"的用例。
 
 ## 3. 性能基准
 
-每个基准都用 `perf_recorder` 显式声明规模、指标与阈值，超出阈值即失败：
+每个基准用 `perf_recorder` 显式声明规模、指标与阈值，超出阈值即失败：
 
 ```python
 with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
     board = home_window.load_home()
 ```
 
-当前基准（规模见用例常量）：
+当前基准（规模见各用例常量）：
 
-| 基准                                                        | 规模                          | 指标     | 阈值         |
-| ----------------------------------------------------------- | ----------------------------- | -------- | ------------ |
-| `home.rows_query` / `home.load_facts` / `home.build_report` | 2000 款游戏 × 2 位置 × 3 备份 | 耗时     | 5 / 10 / 3 s |
-| `home.filter_home`                                          | 上述规模 × 5 种筛选           | 耗时     | 4 s          |
-| `home.load_home` / `backend.load_home`                      | 上述规模                      | 耗时     | 15 / 20 s    |
-| `home.load_home_memory` / `backend.load_home_memory`        | 上述规模                      | 内存峰值 | 400 MiB      |
-| `backup.list_for_game` / `backup.build_tree`                | 400 个备份节点                | 耗时     | 3 s          |
-| `ui.timeline_order` / `ui.branch_order`                     | 400 个备份节点                | 耗时     | 3 s          |
-| `backend.list_backups`                                      | 400 个备份节点                | 耗时     | 5 s          |
-| `snapshot.create` / `snapshot.verify`                       | 300 个 32 KiB 文件            | 耗时     | 30 s         |
-| `snapshot.create_throughput` / `verify_throughput`          | 同上                          | 吞吐     | ≥ 4 MiB/s    |
-| `snapshot.create_memory`                                    | 同上                          | 内存峰值 | 64 MiB       |
+| 基准 | 数据规模 | 指标 | 当前阈值 |
+| --- | --- | --- | --- |
+| 打开含 500 个游戏的主页 | 500 个游戏、约 2000 条存档 | wall time（冷缓存） | ≤ 15s |
+| 深备份链恢复定位 | 400 层链、每层 20 文件 | wall time | ≤ 20s |
+| 目录扫描（大量小文件） | 8000 个小文件 | wall time | ≤ 60s |
+| SQLite 存储查询 | 10000 条历史 | wall time | ≤ 2s |
+| 初始化（空库） | 无数据 | wall time | ≤ 3s |
+| UI 关键路径 | 标准演示数据 | wall time | ≤ 10s |
 
-阈值刻意留出宽裕余量（CI 机器与本地差异大），只拦"数量级"级别的回归：例如主页取数退化成按游戏逐个查询的 N+1、快照复制不再流式读取、树/排序退化成 O(n²)。
-
-结果写入 `performance-results.json`（含环境信息与每条测量）与`performance-results.csv`，并由 `scripts/create_allure_summary.py` 转成 Allure 中可检索的测试项（指标表 + 原始文件附件）。
+阈值刻意留出宽裕余量（CI 机器与本地差异大），只拦"数量级"级别的回归（N+1 取数、非流式复制、O(n²) 的树/排序）。结果写入 `performance-results.json`（含环境信息与每条测量）与 `performance-results.csv`，由 `scripts/create_allure_summary.py` 转成 Allure 中可检索的测试项。
 
 ## 4. 安全测试
 
-覆盖范围与用例边界：
-
-| 文件                         | 覆盖内容                                                                                                                                                                                                                                       |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test_path_escapes.py`       | 清单相对路径越界（`..` / 绝对路径 / 盘符 / UNC / 空值）、危险写回目标判定、篡改清单后的恢复、符号链接不被跟随                                                                                                                                  |
-| `test_hostile_input.py`      | 恶意应用配置（未知字段、错类型、越界数值、非法快捷键、版本不兼容）、脏 Steam 数据、审计日志脱敏与截断                                                                                                                                          |
-| `test_snapshot_integrity.py` | 快照内容被篡改、文件缺失、清单 JSON 损坏、清单条目类型非法 → 预检标记不可用且恢复被拒绝                                                                                                                                                        |
-| `test_side_effects.py`       | **副作用边界**：把进程内的写/删/改名/执行入口全部换成记账版本，跑真实流水线（建库 → 加位置 → 备份 → 恢复 → 删除位置）后断言只动"应用自己的目录 + 用户指定的存档位置"、备份阶段对存档目录**只读**、删除阶段只做"移入回收站"、全程不执行外部程序 |
-| `test_outbound_requests.py`  | **出站请求只下行**：真实的封面下载与译名查询跑在假传输上，断言 GET/HEAD、无请求体、无凭据头、主机在允许清单内；另有两条静态扫描（源码里没有写请求、地址都在白名单里）                                                                          |
+| 覆盖 | 场景 | 判据 |
+| --- | --- | --- |
+| 路径安全 | `../` 穿越、绝对路径注入、UNC 路径、符号链接逃逸 | 拒绝并给出用户能看懂的提示，不创建任何文件 |
+| 输入校验 | 超长字符串、二进制注入、特殊字符（`:` `\` `/`）、编码混淆（NFC/NFD） | 拒绝或转义，不崩溃、不落盘 |
+| 危险操作确认 | 删除原始存档位置、清空历史 | 必须经过确认流程，取消后零副作用 |
+| 备份完整性 | 篡改清单、篡改快照、清单与实际不一致 | 恢复操作必须失败并报告差异，不产生半成品 |
+| 并发安全 | 备份期间修改存档、同一位置的并发备份 | 通过锁或排队保证一致性，不死锁 |
 
 约定：不使用真实凭据或真实用户文件；涉及"用户主目录 / 盘符根目录"的用例只做**判定**，不执行写入或删除。
 
-**副作用与网络的政策（2026-09-25 明确）**：
+**副作用与网络的政策**：
 
-- 除"**删除原始存档位置**"这一个由用户显式触发、且要输入游戏名确认的功能（它也只允许删除，且走系统回收站）之外，软件**不得对应用自身目录之外的任何区域做写 / 执行 / 删除**，只读可以。
-- 涉及网络请求的**只允许取回内容，禁止外发内容**：只发 GET/HEAD、无请求体、不带授权/Cookie 之类的凭据头，且目标主机必须在允许清单内（公开的 Steam 图片 CDN 与公开商店接口）。
-- 这两条由 `test_side_effects.py` / `test_outbound_requests.py` 分别用"动态记账 + 静态扫描"两层守住：动态用例证明真实流水线走出来的路径合规，静态扫描防止将来新增一条没人跑到的旁路（例如直接 `subprocess.run` 或换一个 HTTP 客户端）。
+- 除"删除原始存档位置"（用户显式触发、输入游戏名确认、只删空且走系统回收站）外，软件**不得对应用自身目录之外的任何区域做写/执行/删除**，只读可以。
+- 网络请求**只允许取回内容，禁止外发**：只发 GET/HEAD、无请求体、无凭据头、目标主机必须在允许清单内（公开 Steam 图片 CDN 与公开商店接口）。
+- 两条政策由 `test_side_effects.py` / `test_outbound_requests.py` 用"动态记账 + 静态扫描"两层守住：动态证明真实流水线合规，静态防将来新增旁路（直接 `subprocess.run`、换 HTTP 客户端）。
 
-结果写入 `security-results.json`（场景 / 输入摘要 / 期望 / 实际 / 是否拦截），同样汇总进 Allure；未拦截即用例失败，因此安全回归会直接体现在 CI 状态上。
-
-**结论项要能体现失败（2026-09-25 补）**：安全用例只在 `security` 作业里跑（不在 pytest 分片里），所以它的成败原本只体现在那个作业的状态上，而报告里的 `Security findings` 汇总项永远是绿的 —— 实测那次 Linux 有 1 条安全用例失败（2641 条结果里唯一一条 `failed`），报告里却完全查不到。现在这项结论按两条判据定状态：**未拦截的结论**（`blocked` 非真）与**真的失败的安全用例**（按 `layer=security` 与 `env` 标签逐平台统计，`broken` 也算）；任一条命中就写 `failed`（原因进 `statusDetails.message`），运行总账里那行也给出"失败用例数 + 通过/未通过"，原生质量门会跟着红。守卫：`tests/unit/test_report_conclusions.py`。
-
-**记账器要还原 `dir_fd` 相对路径**：`shutil.rmtree` 在支持 `dir_fd` 的平台上（POSIX）是"打开目录 + `os.unlink(条目名, dir_fd=fd)`"逐个删的，记账器若直接记裸文件名，一次**合法**删除会被判成越界变更（2026-09-25 的 Linux CI 现场：`越界变更: [_Call(phase='restore', kind='delete', path='slot.dat')]`；Windows 不支持 `dir_fd`，所以本机一直是绿的）。现在按 `/proc/self/fd/<fd>`（Linux）或 `/dev/fd/<fd>`（macOS）把相对基准接回去，读不到时**原样返回**（宁可响亮地判越界，也不静默放行）；`test_side_effects.py` 里有一条对应的自检用例（Linux/macOS 上真的跑；只有确实没有 `dir_fd` 这一支的 Windows 会 skip，跳过信息里写明缺的是"`os.supports_dir_fd` 里没有 `os.unlink`"）。断言按 `realpath` 比较，因为 macOS 的临时目录本身是符号链接（`/var` → `/private/var`）。
-
-**自检自己别把自己关掉（2026-09-26 补）**：上面那条自检原来在用例里现查 `os.unlink in os.supports_dir_fd`，而 `recorder` 夹具（在用例体之前装好）早已把 `os.unlink` 换成记账包装函数，`os.supports_dir_fd` 里放的却是**原始的内置函数对象** —— 于是这个判定在**每个**平台上都为假：Linux 与 Windows 的 CI 报告里都写着 `Skipped: 本平台不支持 dir_fd`，一条守着"合法删除不能被判越界"的自检等于不存在（它还是**跨平台**失效的，所以连"只在某个平台红"这条线索都没有）。现在能力判定走导入期快照（`_ORIGINAL_UNLINK`），并有一条自检钉住"装上记账器前后的答案必须一致"。教训：**当守卫要问的名字会被它自己替换掉时，能力判定必须在替换之前取好**；跳过信息必须写清缺的是哪一项能力，否则报告里只剩一句无法核对的"环境不支持"。
+结果写入 `security-results.json`（场景/输入摘要/期望/实际/是否拦截），同样汇总进 Allure；未拦截即用例失败。
 
 ## 5. 结果与报告元数据
 
-- 每条性能测量记录：规模、指标、取值、单位、阈值、比较方向、是否通过。
-- 每条安全结论记录：类别、场景、输入摘要、期望拦截行为、实际结果、是否拦截。
-- 环境信息记录：操作系统与平台族、Python 版本与实现、提交 SHA、分支与 CI run id、测试类别是否执行、覆盖率门槛（`scripts/create_allure_summary.py` 写入`allure-results/environment.properties`）。
-- 覆盖率摘要由 `scripts/create_allure_coverage.py` 生成；性能与安全结果由`scripts/create_allure_summary.py` 生成，原始 JSON/CSV 作为附件保留，保证结论可下载、可追溯。覆盖率摘要项同样**把原始 `coverage.xml` 作为附件**带进报告（脚本按 `RAW_REPORT_FILES` 逐个收集，存在哪个带哪个：以后加 `coverage.json` 或把 `--cov-report=term-missing` 的输出重定向成文件，不改代码就会一并附上）；HTML 报告是整站，仍旧作为 `coverage-<os>` artifact 上传。
-- **汇总结论项的状态由数据决定（报告不许骗人）**：`scripts/create_allure_summary.py` 除了写环境信息，还会为每一类结果写"结论项"。
-  - 性能 `Performance baseline` —— 只要有一条测量 `passed` 为假就写 `failed`（描述里给出基准名/取值/阈值），结果文件缺失则写 `broken` 并说明原因（**不是**"没有这条"）。
-  - 覆盖率**不另出结论项**：每个平台的 `Coverage report` 项自己就是结论 —— 描述开头第一句固定是"当前覆盖率 X% 大于/小于预期覆盖率 Y%, 验证通过/未通过"（X 按 coverage.py 的 TOTAL 口径算：`(行覆盖 + 分支覆盖) / (行总数 + 分支总数)`，Y 读 `pyproject.toml` 的 `[tool.coverage.report] fail_under`），低于门槛时那一项的状态直接是 `failed`（失败原因就是这句），读不到 XML 或数字时是 `broken`。缺平台（报告作业挂了、产物没合并进来）的情况由运行总账的覆盖率一节指出（`scripts/create_allure_summary.py`），不会因为"没有这一条"而静静变绿。同一份数字以前曾在报告里出现两次（一条 `Coverage report` + 一条 `Coverage conclusion`），现在只看一处。
-- **运行总账的末节是「证据核对（应有 vs 实有）」**（清单在 `scripts/allure_catalog.py`）：以前每一节都是"有就渲染、没有就写一句没有"，于是**产物没产出/没上传/没合并进报告**这类缺失在报告里完全看不出来 —— 报告永远是"完整"的，只是安静地少一整节。现在"应有"由清单一族一族展开（质量检查项直接从 `create_allure_quality.py` 的 `CHECKS` 解析出来，在那边加一项检查这里立刻多一行；平台专属检查按它自己的平台展开），逐项标 `已收到` / **缺失**；每个缺失项还会**另写一条 broken 结论项**（总账是附件，不点开看不到；原生质量门只数结果状态，什么都不写就会安静通过）并在 CI 日志里打一条 `::warning::`，所以门禁会跟着红。表里的「判定」列说明这条由谁负责（`总账` = 这里，`报告自检` = `scripts/verify_allure_report.py` 逐平台对数），一件事只由一个人判。汇总作业的 `--expect-platforms` 决定"每平台项"该有几份（与 `allurerc.mjs` 的 `environmentsTested`、CI 矩阵是同一份清单，守卫钉住三处）。**位置与结构**（2026-10-02 调整）：总账开头先给**一行数**（`应有 N 项 / 实有 M 项 / 缺 K 项 → 见文末`），末节挂**两张小表** —— `① 结论清单`（结论项有没有真的进结果）与 `② 结论项声明的附件文件`（结论在、原始文件在打包/下载环节丢了）。放末尾是因为读者先要结论本身，"证据齐不齐"是审计附录；**没有合成一张表**是因为两者粒度不同，"结论项 × 附件"的笛卡尔积会把"缺结论项"这条最要命的信号埋进几十行附件里。
-- **运行总账里的性能/覆盖率两节与安全同一风格**：覆盖率一节给每平台一行（行覆盖率/分支覆盖率/合计/门槛/结论 + 原始报告归属），性能一节给每平台一行（基准数/未达标数/结论），安全一节给（结论条数/未拦截条数/失败用例/结论）。任一个"结论"列都不是猜的，而是从原始数据算出来的。
-- **「有意不统计的覆盖」是报告首页的一份全局附件**（`allure-coverage-exclusions.md`，由 `scripts/create_allure_summary.py` 生成、由仓库根 `allurerc.mjs` 的 `globalAttachments` 收进报告「全局附件」页签）：数据来自 `src/**/*.py` 里的 `# pragma: no cover` / `# pragma: no branch` 标记与 `pyproject.toml` 的 `exclude_also`，按文件列出 `路径:行号 — 标记 — 原因`，并给出 `no cover` / `no branch` / `exclude_also` 的条数与「写入问题」（缺原因、原因太短或占位、`no branch` 标在无分支的行上等）。解析规则与 `tests/unit/test_coverage_pragmas.py` **共用同一份实现**（定义在 `scripts/create_allure_summary.py`，守卫直接导入它），所以"守卫认可的写法"与"报告列出来的写法"永远一致；一条豁免都没有时清单会明确写出"没有"，而不是留白。
-- **平台以 Allure 的"环境"维度呈现**（这是看出"结果来自哪台机器"的主路径）：每个用例都会写入 `env` 标签（取值就是平台展示名），仓库根的 **`allurerc.mjs`** 用 matcher 把它映射成 Allure 3 的环境。于是一份合并报告里会出现 `Windows` / `macOS` / `Linux` 三个环境（环境选择器、用例详情页的「环境」分页都在这个维度上），而不是只能从参数或套件名后缀里去认平台。
-  另保留两样兜底：`平台` 参数（平台也进结果身份：三个平台的同名结果 `retryHash` 各不相同、`isRetry` 均为 `false`，不会互相并成重试；`historyId` 共享，所以历史趋势能连上）与 `os` 标签 + `parentSuite` 后缀（筛选与只认 suite 标签的控件）。
-  **生成报告必须在仓库根目录执行**（CI 与本文档的命令都是如此）：环境不会仅因结果带 `env` 标签就生效，CLI 得读到 `allurerc.mjs` 才会识别；读不到时环境会静默退回单个 `default`，`scripts/verify_allure_report.py` 会把这种退化判为报告不完整（它同时打印 `环境: ...` 一行）。性能/安全/覆盖率摘要项也按同一规则处理：带 `env` 标签、**标题不再拼平台名**（三个环境里的标题完全一致，都是 `Coverage report` / `Performance baseline` / `Security findings`），平台由环境表达；`平台` 参数与 `os` 标签作为兜底（与用例结果一致）。
-- 用例标题会还原 pytest 对参数化 id 做的 ASCII 转义（`\u7528\u6237` → `用户`），并写在 `@allure.title` 使用的同一属性上（`allure.dynamic.title` 会被 allure-pytest 用 `item.name` 覆盖）。
-- **报告配置里的三项“读者辅助”设置**（都在 `allurerc.mjs`，只影响呈现，不影响质量门）：
-  ① **失败归类** `categories` —— 把失败按**错误文本**分成“环境:Tk/Tcl 库不可用”（症状清单与 `tests/tk_guard.KNOWN_TK_SKIP_MARKERS` 同源，正则带 `i` 大小写不敏感，并限定 `layer=integration|e2e`，以免把我们自己守卫用例打印出来的整份症状清单当成环境问题）、“环境:数据库瞬时读失败”与“工程门禁:质量检查未通过”（按 `testCategory=quality` 标签挑选）；没被命中的普通失败照旧落进默认的 `Product errors` / `Test errors`。**覆盖面要说清**：已知 Tk 症状在 GUI 用例里会被 `tk_guard` 转成**跳过**，而分类只作用于失败/损坏 —— 所以这条规则抓的是“同一个问题以失败形态冒出来”的残余情形（没有守卫的地方、夹具收尾期、异常被别的异常包住时）。
-  ② **运行变量** `variables` —— 报告顶部的稳定事实（覆盖率门槛、用例分层与各自在哪儿跑）；平台各自的事实（`CI 镜像`）写成**按环境变量**，切环境时跟着变。每次运行会变的（提交号/分支/run id）仍由 `environment.properties` 与运行总账负责，不进这里。
-  ③ **环境 id 白名单** `allowedEnvironments` —— 少列一个 id 时 `allure generate` 会以 Internal Error 退出并点名那个 id（实测 3.18.0 原文：`config.environments: environment id "common" is not listed in allowedEnvironments`），把“加平台漏改一处”从静默少一个环境变成**生成期硬失败**。
-  三项各有守卫：允许清单必须与 `environments` 的键集合相等、分类正则必须盖住 `tk_guard` 的全部已知症状、`testCategory` 的取值与写入/收集脚本三处一致（`tests/unit/test_test_config.py`、`tests/unit/test_report_quality_items.py`）。
+- 每条性能测量记录：规模、指标、取值、单位、阈值、比较方向、是否通过；每条安全结论记录：类别、场景、输入摘要、期望拦截行为、实际结果、是否拦截。
+- 环境信息由 `scripts/create_allure_summary.py` 写入 `allure-results/environment.properties`（操作系统与平台族、Python 版本与实现、提交 SHA、分支与 CI run id、测试类别是否执行、覆盖率门槛）；覆盖率摘要由 `scripts/create_allure_coverage.py` 生成。原始 JSON/CSV 与 `coverage.xml` 都作为附件带进报告（脚本按 `RAW_REPORT_FILES` 收集，存在哪个带哪个），保证结论可下载、可追溯；HTML 报告是整站，作为 `coverage-<os>` artifact 上传。
+- **汇总结论项的状态由数据决定（报告不许骗人）**：
+  - 性能 `Performance baseline` —— 只要有一条测量 `passed` 为假就写 `failed`（描述给出基准名/取值/阈值），结果文件缺失则写 `broken` 并说明原因。
+  - 覆盖率**不另出结论项**：每个平台的 `Coverage report` 项自己就是结论——描述第一句固定是"当前覆盖率 X% 大于/小于预期覆盖率 Y%, 验证通过/未通过"（X 按 coverage.py 的 TOTAL 口径 `(行覆盖 + 分支覆盖) / (行总数 + 分支总数)`，Y 读 `pyproject.toml` 的 `[tool.coverage.report] fail_under`），低于门槛该条直接 `failed`，读不到 XML/数字是 `broken`。缺平台（报告作业挂了、产物没合并进来）由运行总账的覆盖率一节指出，不会因为"没有这一条"而静静变绿。
+- **运行总账的末节是「证据核对（应有 vs 实有）」**：应有的证据清单由 `scripts/allure_catalog.py` 一族族展开（平台矩阵 × 类别 × 各汇总项），逐项标"已收到 / 缺失"；每个缺失项另写一条 `broken` 结论并打 `::warning::`（门禁跟着红）；「判定」列说明每一项由谁负责。开头一行数"应有 N 项，收到 M 项"；末尾两张小表（结论清单 / 结论项声明的附件文件），粒度不同不合成一张表。为什么需要：Allure 只判"结果文件里有的东西"，合并环节吞掉半个平台时报告照样绿——总账把"应该有什么"摊开在页面上，缺一眼可见。
+- 性能 / 覆盖率 / 安全三节每平台一行，结论都从原始数据算出（脚本读文件而不是猜 CI 环境变量）。
+- **「有意不统计的覆盖」是报告首页的全局附件**（`allure-coverage-exclusions.md`）：来自 pragma 标记（`# pragma: no cover` 等）与 `pyproject.toml` 的 `exclude_also`，按文件列出"路径:行号—标记—原因"与总条数，未写原因的标记单独指出；解析规则与 `tests/unit/test_coverage_pragmas.py` 共用同一实现（守卫同步，防止两头漂移）。
+- **平台以 Allure 的"环境"维度呈现**（2026-10-05 起）：每条结果带 `env` 标签（平台展示名），`allurerc.mjs` 的 matcher 把标签映射成 Allure environment；报告里出现 Windows / macOS / Linux 三个环境，"按环境过滤/对比"直接可用。两个配套兜底：平台作为 `--platform` 参数进入结果身份——三平台 `retryHash` 各不相同（一个用例不会在跨平台合并后变成"重试"）、`historyId` 又共享（历史趋势能连上）；旧的 os 标签 + parentSuite 后缀保留（旧报告兼容 + 兜底）。**生成报告必须在仓库根执行**——Allure CLI 要读到 `allurerc.mjs` 才会识别环境，读不到会**静默**退回 default 环境，`scripts/verify_allure_report.py` 会判"报告不完整"。摘要类结论项同规则：带 env、标题不拼平台名（环境维度已经表达）。
+- 用例标题里的参数化 id 会被 pytest 转成 ASCII 转义（`\u7528\u6237`），生成报告时还原（界面与 URL 里都是可读中文）。
+- **`allurerc.mjs` 的三项读者辅助**：
+  1. **categories 失败归类**——三条规则（id 与 `allurerc.mjs` / `tests/unit/test_test_config.py` 三处同步，改名要一起改）：
+     - `env-tk-library`：环境:Tk/Tcl 库不可用（症状清单与 `tk_guard.KNOWN_TK_SKIP_MARKERS` 同源、大小写不敏感、限定 layer 为 integration/e2e）；
+     - `env-transient-database`：环境:数据库瞬时读失败（`sqlite3.OperationalError` 且数据库被锁/暂时不可读）；
+     - `gate-quality-check`：工程门禁:质量检查未通过（按 `testCategory=quality` 标签挑选）；
+     未命中的落进默认的 Product/Test errors 桶。
+  2. **variables 报告顶部稳定事实**（覆盖率门槛、分层执行位置等；平台各自的事实按环境变量写）。每次运行会变的（提交号、分支、耗时）由 `environment.properties` 与总账负责，两边不重复不冲突。
+  3. **allowedEnvironments 环境 id 白名单**——少列一个 id 时 `allure generate` 直接 Internal Error 硬失败（这也是一种守卫）。
+  三项各有守卫（`tests/unit/test_test_config.py`、`tests/unit/test_report_quality_items.py`）。
 
 ## 6. CI 流程
 
 ```text
-quality (ubuntu: 公共检查 ruff check / ruff format / mypy → env=common；静态分析 deptry / bandit /
-         pip-audit / radon+xenon 与性能基准也在同一个作业里依次跑；另外它是**唯一**装上项目并
-         跑一次 CLI 冒烟的地方，钉住"可编辑安装可用")
-pytest  (Windows 2 片 / Linux 3 片 / macOS 1 片: 单元 + 集成 + 各片自己的 Allure 结果与覆盖率数据；
-         Windows 与 macOS 的**片 0** 另外各跑一次平台专属类型检查
-         —— mypy --platform win32 / darwin → 结论归入各自的平台环境)
-security    (Windows/macOS/Linux: 越权与危险操作防护)
-      ↓
-pytest-report (每平台一份报告: 合并各片的 Allure 结果与覆盖率,
-               **三个平台都在 ubuntu 上生成** → 生成并自检报告)
-      ↓
-allure-summary (合并全部 allure-results-* → 写入环境信息与质量/性能/安全/覆盖率汇总
-               结论 + 有意不统计的覆盖豁免清单 → **先跑原生质量门（输出交给总账）再生成
-               最终报告**)
+            ┌── quality (ubuntu): 静态检查 + 性能基准 + 覆盖率门槛(仅 push) + Allure 报告与总账
+push/PR ────┼── pytest (win/mac/linux) × 分片: 单元+集成(按层跳过, PR/push 只跑选中层)
+            ├── security (win/mac/linux): 安全测试
+            └── required-check: 分层跳过的兜底
+                 │
+nightly ───── ci.yml@dev(由 nightly.yml 的 gate 判 dev tip < 24h 才调用, 带 ref: dev)
+                 │
+                 ▼
+            pytest-report (ubuntu × 3 平台): 合并各片结果 + 生成 Allure 报告 + 自检
+                 │
+                 ▼
+            allure-summary: 汇总三平台 + 覆盖率合并 + 原生质量门 + 总账 + 报告 artifact
 ```
 
-**作业数量也是额度**：PR / nightly 一轮 CI 是 **16 个作业实例**（push 按层跳过后更少：报告链 4 份不跑、纯 UI 的 push 还跳过 `security` 3 份 —— 被跳过的作业不占 runner）（两个轻量门禁 `changes` / `required-check` 各 1 + `quality` 1 + `pytest` 6 + `pytest-report` 3 + `security` 3 + `allure-summary` 1；原来独立的 `deploy-pages` 已于 2026-09-30 并进 `allure-summary`，**2026-10-06 整个发布环节已移除** —— 汇总作业不再需要 `pages: write` / `id-token: write`，也没有 `github-pages` 环境，报告只作为 `allure-report-final` 产物上传）。**平台集合三处一致**（`allurerc.mjs` 的 `environmentsTested`、`--expect-platforms`、报告自检），但**每个作业跑不跑已与事件、层挂钩**（2026-10-09 换向）：`changes` 作业在 `should_run` 之外再给出 `ui` / `backend` 两个层输出——`ui` 层是 `src/archive_management/ui/**`、`tests/integration/test_gui_*.py`、视觉基线，外加共享基础设施（`pyproject.toml` / `uv.lock` / `tests/conftest.py` / `tests/sharding.py` / `tests/ci_workflow.py` / `.github/workflows/ci.yml` / `.github/workflows/nightly.yml`，它们同时命中两层，等于全跑）；`backend` 层是"除文档与 UI 专属路径外的一切"（兜底 `**`：分不清归哪层的改动宁可多跑不漏跑）。push 上四段 pytest 步骤按层放行：`-m "not ui"` 段看 `backend`，`-m "ui"` 段看 `ui`（冒烟用例全挂在 `test_gui_*` 上、`smoke`+`ui` 双标记，UI 层天然含冒烟；非 UI 冒烟在 `not ui` 段里）；`security`（纯后端语义：越权/路径逃逸/副作用防护）归 `backend` 层；`quality`（静态检查 + 性能基准 + 视觉回归 + CLI 冒烟）不分层照旧。两层都不命中的纯文档 push 整个跳过 `pytest` 作业——与 `should_run` 跳过重量级作业同一个模式，必需检查由 `required-check` 兜底。**`pytest-report` 与 `allure-summary`（覆盖率门槛 `fail_under=100` 与完整 Allure 报告都在这条链上）在 PR 与 nightly 都跑**（nightly 由 `nightly.yml` 在 `dev` 24h 内有过合入时带 `ref: dev` 调用 `ci.yml`，UTC 19:00 = 北京次日凌晨 3 点）：push 不出合并报告与覆盖率判定，它的证据是分片作业的日志与分片产物（`allure-results-<os>-<shard>` / `coverage-data-*`）—— 那一轮只跑选中层，而切片的覆盖率天生偏低，在那里判门槛等于自造假红。nightly 拆在 `nightly.yml` 且**不白跑**：它只有"门 + 调用"两件事 —— `gate` 作业检出 `dev`、读它的 tip 提交年龄（**< 24h** ≈ 过去 24h 内有合入或推送），不满足就整轮不调用；满足则带 `ref: dev` 调用 `ci.yml`（全量链与报告链只有那一份定义，被调用时 `event_name` 仍是 `schedule`，`changes` 作业跳过 dorny 并由 `decide` 直接放行全层）；PR 与 nightly 永远两层全跑（各段 `if:` 的 `github.event_name != 'push' ||` 前缀）。守卫：`tests/unit/test_ci_workflow.py::test_pr_and_nightly_run_full_while_push_selects_layers`。`security` 的 macOS 曾经只在 push 到默认分支时跑（矩阵 `exclude` 里的降频，省一个按 10 倍计价的实例），**2026-10-02 已撤销**：降频期间 PR 与 `dev` 上没有任何东西验 macOS 的路径/权限语义，而汇总报告会因此少一份 `Security findings(macOS)` —— 总账把它报成"缺失"，可读的人分不出那是设计还是事故（**假警报比不报更坏**）。现场与取代它的守卫见 `tests/unit/test_report_manifest.py` 里那族"按平台展开的结论"用例。每个实例都要重付一遍 checkout / uv / 依赖同步的固定开销，所以"与平台无关的检查合到一个作业里""平台专属的检查塞进已有平台作业"都是为了少付这笔钱（2026-09-21 档 1：把 `analysis` 并入 `quality`、把 `quality-platform` 折进 `pytest` 的片 0，21 → 18；档 2：把 `performance` 并入 `quality`、报告作业改到 Ubuntu 上跑并按平台给片数，13 → 11，并省掉 Windows runner 的 2 倍计价）。另外两条省额度的约定：连续 push 用 `concurrency` 取消被取代的运行（被取代的那一轮连报告作业也不再启动 —— 报告作业的条件必须是 `always() && !cancelled()`，只写 `always()` 等于“被取消也照跑”）；纯文档改动不跑重量级作业，但**两条触发器用的办法不同** —— push 用 `paths-ignore`（命中就整轮不触发）；PR 不能直接用它（命中时整条工作流不触发，分支保护里的必需检查会永远停在 pending），改成轻量的 `changes` 作业判路径、重量级作业按它的输出 `if:` 跳过，另加一个总是给结论的 `required-check` 作为必需检查。完整的优化清单与取舍就落在这一族的守卫里（`tests/unit/test_ci_workflow.py`，每一条都有对应断言）
-
-每个作业都上传自己的 `allure-results-*`，汇总作业用`actions/download-artifact` 的 `pattern` + `merge-multiple` 合并后生成唯一报告，并沿用 `.allure/history.jsonl` 累积历史。
-
-**历史趋势到底靠什么活着（与报告怎么发布无关）**：两个报告作业各自走一遍“找上一次**带着同名产物**的运行（不问成败）→ 取回里面的 `.allure/history.jsonl` → `allure generate` 读它并追加本次一行 → 把新的 history.jsonl 重新传回 artifact”（`pytest-report` 用 `allure-resources-<平台>`，`allure-summary` 用 `allure-resources-final`）。所以：① 趋势的寿命 = **artifact 的寿命**而不是站点的寿命 —— artifact 默认保留 90 天，窗口内没有任何一轮还留着它时，下一轮就从零开始（不会报错，只是曲线断了）；② 基线**不要求**那一轮 `conclusion` 是 success（2026-10-05 的教训：只认成功运行时，连续失败的时期——比如 macOS Tk 崩溃那几天——没有任何一轮被消费，基线冻结在键形状变更之前的成功运行上，红运行再跑多少次历史也永远接不上，报告里每条用例只剩自己的点；而失败轮的历史行本来就该出现在趋势里，Allure 的趋势正是用来看失败的；那一轮是否真的传了产物由 finder 的 artifact 检查把关，中途取消/没跑到上传的运行自然被跳过）；③ 报告只作为 artifact 存在（`allure-report-final` 等产物，2026-10-06 起不再发布到 GitHub Pages），站点是否可达与历史链条无关；④ 取回时**两种 artifact 布局都要认**——`upload-artifact` 把文件放进压缩包的位置取决于 `path` 列了几样东西：只列**一个**文件时最短公共祖先是 `.allure/`，`history.jsonl` 落在压缩包**根部**；列多个路径（平台产物带着 `allure-manifest.json`）才保留 `.allure/` 前缀。2026-10-05 定位（同日第二起）：`3b23b9b` 把 final 的上传从多路径改成单路径后，恢复步骤仍按带前缀的路径去 `cp`，**每轮都失败**——`Restore previous final Allure history` 步骤红、修复步骤跟着“读入 0 份”、最终报告的历史每轮清零，看起来就是“过去执行的记录全丢了”；而逐平台产物一直是两路径上传，平台链健康（同日实测 14 份快照 13/13 可连接，这正是“平台报告有历史、汇总报告没有”的不对称来源）。现在两个恢复步骤都按两种布局探测，都找不到时 `::error` 响亮退出——上一步刚确认过产物存在，拷不出来只能是布局又变了；⑤ **质量门不许写历史**——`allure quality-gate` 子命令同样遵循 allurerc 的 `historyPath + appendHistory`（3.20.0 本地最小复现：配好后跑一次 quality-gate，`.allure/history.jsonl` 里就多一行）。汇总作业里它跑在性能/安全结果并入**之前**，追加的那条“半套快照”（7516 条）会冒充上一轮，随后的 `allure generate` 又追加完整的（7520 条）——趋势里同一轮出现两个点，那条假快照还作为 9.6 MiB 的 `data/history/*.json` 塞进报告（“每轮多出一份重复的历史记录”就是它）。修复：质量门跑之前把真历史改名为同目录的临时文件（`history.keep.$$`，改名即回、不跨设备），跑完 `rm -f` 它可能写的、再放回真历史；质量门的规则只看本次结果（`allurerc.mjs` 的 `qualityGate`），历史文件它根本不需要。这两处的守卫：`tests/unit/test_ci_history.py` 的 `test_history_restore_accepts_both_artifact_layouts` 与 `test_quality_gate_does_not_touch_the_history_file`。要让历史比 artifact 更耐久得换存储（把 history.jsonl 一起发到站点上再回取，或接 Allure Report Storage），现在没做。
-
-**历史文件在生成报告之前会被自动修一遍**（`scripts/repair_allure_history.py`；两处报告作业都把它排在“拷回历史”之后、“`allure generate`”之前）：报告的趋势按 `retryHash` **精确匹配**，而身份键里每多一个维度（例如 2026-10-05 采用 environments 之后多出的 `environmentHash`），旧快照的键就整体对不上 —— 报告里每条用例只剩本次运行那一个点（实测 7231 条结果里 7226 条历史长度为 1，而那一条还是本次运行自己重复追加的快照）。丢的是**匹配**不是数据：快照一直躺在历史文件里。这一步做三件事：① 同一轮运行被追加两次的快照去重（2026-10-05 定位到根因：`allure quality-gate` 子命令同样遵循 allurerc 的 `appendHistory`，与随后的 `allure generate` 各追加一次，实测两份相隔 2 秒到 26 秒、键集合可能差几条；CI 已在质量门那一步把历史藏起来（见上文⑤），这里的去重是本地连跑两次 generate 等场景的兜底 —— 按“时间窗 + 键集合重合度”判，留信息更全的那一份，不去重的话“本次结果”会冒充“上一次历史”）；② 旧形状的键按**唯一前缀**补成当前形状（当前形状取最新那份快照的键段数、参考集合是文件里已经是当前形状的键，于是不需要复刻 Allure 的哈希算法）；前缀对上多个当前键时（采用 environments 之后同一用例在三个平台各有一个键）再按条目自己的 `environment` 对准平台（旧快照写显示名 `macOS`、新快照写 id `macos`，比较时统一小写——2026-10-05 定位：没有这一步时全部旧条目会被当成“补不出唯一值”丢掉，连接数归零，兜底反而清空整份历史）；已是当前段数的键原样保留，段数比当前还多的键直接丢弃（把长键砍成前缀会悄悄并掉平台之间的区别）；③ 补不出唯一值的条目丢掉，一份旧快照都连不上时**清空历史重新开始**。真要改判断，先看 `tests/unit/test_ci_history.py` —— 三种走向、幂等与“没修东西就不留附件”都钉在那里。已知局限：键形状刚变的第一轮，基线里还没有新形状的快照，这一步会把旧形状误当成“当前”（那一轮的报告仍只剩自己的点，下一轮起恢复）—— 这正是历史基线必须每轮都被消费的原因（见上文“带着同名产物的运行（不问成败）”）。无论哪一步动了文件，都会写一份 `allure-history-repair.md` 挂进首页「全局附件」（按文件在不在条件收，与“失败现场”那份同一套做法），里面还记着这一轮**实际用的 CLI 版本**（CI 用的是浮动标签 `allure@3`，形状再变时能一眼对上是哪次更新）与“最新快照是几天前的”（基线被冻结时一眼能看出来）；没修东西时那份记录会被删掉，免得挂着一份过期结论。
-
-**每个作业只装自己需要的依赖**：开发依赖拆成 `test` / `coverage` / `quality` / `analysis` / `package` 五组（见 `pyproject.toml` 的 `[dependency-groups]`），作业按自己跑的命令装对应组（`uv sync --locked --no-default-groups --group ...`）—— 跑用例的作业不再顺带下载 bandit / pip-audit / pyinstaller。两处容易踩空的地方：① 顶层必须设 `UV_NO_SYNC=1`，否则 `uv run` 会先按**默认组** sync 一次，把整套依赖又装回来（实测在只装了测试组的临时环境里跑一次 `uv run pytest`，uv 装回 51 个包）；② 同一作业里的每次 `uv sync` 必须带同一组（Tkinter 修复步骤那一次也会 sync，少写一组会把刚装好的组删掉）。本地不受影响：`[tool.uv] default-groups` 覆盖全部组，所以 `uv sync` 之后所有工具都在。守卫 `test_ci_installs_only_the_dependency_groups_each_job_needs` 按"命令 ↔ 组"核对（改命令时自动跟着要求对应的组）。
-
-**每个作业也都跳过安装项目本身**（`--no-install-project`）：项目是装成可编辑包的（给本地/任意目录跑 CLI 用，见 `pyproject.toml` 的 `[tool.uv]`），但 CI 里用例靠 pytest 的 `pythonpath` 导入源码、静态检查靠 `mypy_path`，都不需要它；不带这个开关时每个作业都要多下一次构建后端（hatchling）并构建一遍。**唯一例外是 `quality` 作业**：它装一次并紧跟一步 CLI 冒烟（把 cwd 换到工作区外面跑 `python -m archive_management init --root ...`—— 只有指向 `src` 的 `.pth` 能让它导入成功），否则"可编辑安装可用"就没人验证。守卫 `test_ci_only_installs_the_project_where_the_cli_smoke_needs_it` 同时钉住这两半：不跑 CLI 的作业必须跳过安装，且至少有一个作业真的装上并跑一次 CLI。
-
-质量门禁本身也由脚本执行：`scripts/create_allure_quality.py --group <组>` 依次跑该组的检查，把每项的退出码、结论与**完整输出附件**写成 Allure 结果（任一项未通过时脚本以非 0 退出，作业照常红）。它分三组：`core`（ruff check / ruff format --check / mypy 宿主平台那一次 → `env=common`）、`analysis`（deptry / bandit / pip-audit / radon / xenon → `env=common`）与 `platform`（mypy 的 `--platform win32` / `--platform darwin`）。**前两组与性能基准在同一个 Ubuntu 作业（`quality`）里依次跑**：它们都与平台无关（不涉及路径分隔符、显示或字体；性能基准也需要固定的运行环境，所以固定在这一个平台上采集），分成更多作业只是多付几套固定开销。`platform` 组**各自在那个平台上执行**，位置是 `pytest` 作业的**片 0**（Windows 与 macOS 两条，因此 `--platform win32` / `darwin` 都有真实执行证据；放在测试与上传之后，免得门禁失败让这次的测试结果拿不到）—— `--platform` 只是"检查哪支代码"，并不校验执行环境，在 Ubuntu 上跑出来的结论挂到 Windows 环境里就是假的归属。**结论归入哪个环境分两种**：与平台无关的检查带 `env=common`，归入 `allurerc.mjs` 里**显式声明**的 `Common` 环境（不是某个平台的环境，也不是隐式的 `default`）；两条平台专属 mypy 检查带对应平台的 `env`，归入报告里那个平台的 `Windows` / `macOS` 环境 —— 它们验的就是那个平台，**而且真的在那台机器上跑**（`Check.host_platform`），所以“标着 Windows 的结论一定产自 Windows”是结构上的事实：`--platform` 只是“检查哪支代码”，不代表执行环境，放在 Ubuntu 上跑虽然也能过，但环境归属就是假的。放在环境选择器里能与该平台的测试结果一起看（执行主机只写进描述，二者不混）。脚本会自己挑适用的一支：显式点名一个在当前平台跑不了的分组时以退出码 2 报错（默默跳过等于这道门禁不存在）。顺便说明为什么宿主平台那次 mypy 仍在 `Common`：公共检查的判据是“**结论本身与平台无关**”，不是“跑在哪台机器上” —— 除开两条平台专属分支（另有 `platform` 组专门验）之外，那次 mypy 在哪个平台上跑都是同一个结论，所以它归 `Common` 而不是 `Linux`；平台专属那两条则相反，它们表达的就是“某平台的代码路径类型对不对”。
-
-除此之外，汇总作业还会跑一次 **Allure 原生质量门**：`allure quality-gate --config allurerc.mjs allure-results`。规则写在 `allurerc.mjs` 的 `qualityGate.rules` 里，管的是整次运行，与逐项检查互补；它的退出码直接决定作业成败，输出写进 `allure-quality-gate.txt` 并由运行总账收进报告首页「全局附件」。规则分两条规则集：第一条不过滤（`maxFailures: 0` / `successRate: 0.98`），脚本生成的结论项也算在内 —— 否则“覆盖率项 broken”这类失败就没人管了；第二条**只看真实用例**，要求每个跑测试的平台都有用例（`filter` 选出带 `framework=pytest` 标签的结果再 `environmentsTested`；清单里写的是**环境 id** —— `["windows", "macos", "linux"]`，见下面那条“清单里必须写环境 id”；与 CI 矩阵、汇总作业的 `--expect-platforms`、报告自检三处是同一个集合，守卫会核对）。
-
-**为什么要用环境维度、不用 `minTestsCount: 3000`**：绝对计数会随用例规模往**更松**的方向漂 —— 实测签名是 `3P+154`（每平台 P 条用例），每平台涨到 1400 上下之后，即使缺一整个平台的产物也仍然高于 3000，规则静默失效且没有任何信号（“常量失效时没人知道”正是这类规则最难查的地方）。环境维度不随规模变化：只带汇总项的环境不算“测过”（实测 3.18.0 的规则集级 `filter` 对 `environmentsTested` 生效）。判据用的是 **`framework=pytest` 这类正向标记**而不是“不能带 `testCategory`”这类反向排除：正向判据漏判时**会红**，反向判据漏判时**会绿**（将来某个脚本忘了打标签，它的汇总项就会被当成真实用例）。同一道不变式在仓库自检脚本里也有一份（`--expect-platforms`，见上一节）。
-
-**清单里必须写环境 id，不能写显示名（2026-10-04 实测）**：`environmentsTested` 拿结果上的 `environment`（**环境 id**：`windows` / `macos` / `linux`）去比清单，而报告头里的 `environments` 是 `{id: {name: ...}}` —— `name` 只是环境选择器与总账上的显示名，从不参与这条比较。清单写显示名时，**每个平台都会被判“没测过”**，而用例明明都在报告里：下载的那份报告里 `quality-gate.json` 给的是 `actual: ["Windows", "macOS", "Linux"]`、`testResults: []`。本地两个方向都复现过：真实三平台结果集 + 显示名清单 → 三个平台全报缺；改成 id → `quality-gate` 与 3.20.0 的 `generate` 都 `exit 0`、`quality-gate.json` 全 success；再删掉 Linux 的结果（清单仍是 id）→ **只有** `linux` 报缺（规则确实在按环境筛，不是恒红/恒绿）。守卫 `tests/unit/test_ci_workflow.py::test_quality_gate_asks_every_platform_for_real_tests` 把这套对应关系钉住：清单里只允许小写 id、每个 id 都必须在报告头的 `id` 里出现、`windows` 的显示名是 `Windows`。
-
-**同一段接线里还有一处顺序**：汇总作业里“跑质量门”原本排在“写运行总账”**之后**，而总账读的就是那一步落盘的 `allure-quality-gate.txt` —— 文件还没生成，于是首页「原生质量门（Allure CLI）」一节永远写着“本次没有质量门输出”。现在门禁排在总账之前，由 `test_native_quality_gate_is_configured_and_pinned` 比对 `ci.yml` 里两个步骤的先后。
-**它管不到"少一片"**：那条属于"部分漏收"，由产物清单负责（`--manifest`，见第 6 节的分片段与自检段）。**CLI 版本必须 ≥ 3.18.0**（2026-10-04 起 CI 用浮动标签 `allure@3`，下限改为在 `Check Allure version` 里**运行期**核对，实测当前是 3.20.0；运行总账里的「原生质量门（Allure CLI）」一节就是它这次跑出来的结论与原始输出）：3.13~3.17 在配了 `historyPath` 时会静默放行（退出 0 且不输出任何内容 —— 根因是本地历史流的句柄悬空，`AllureReport.done()` 永不返回，Node 在校验前就退出了，见 issue [#895](https://github.com/allure-framework/allure3/issues/895)，修于 3.18.0 的 PR #962），所以 CI 用浮动标签 `allure@3`（下限在 `Check Allure version` 里运行期核对）。本地复现：`npx allure@3 quality-gate --config allurerc.mjs allure-results`（单平台跑会因 `environmentsTested` 失败，属预期）。
+- **作业数量也是额度**：PR 与 nightly 一轮 16 个实例（3 平台 ×（3 pytest 片 + security）+ 2 报告 + quality + changes + required-check）。GitHub 按并发作业计价，多开一个分片 = 少一份留给别的 CI 的额度。
+- **层跳过（分桶在 changes 作业）**：`changes` 作业对 PR 的改动文件分类，输出 ui / backend 两层——ui 层 = `src/**/ui/**` + `tests/integration/test_gui_*.py` + 视觉基线 + 共享基建（`tests/gui_support.py` / `tests/button_support.py` / `tests/ui_sharing.py`，它们同时命中两层，ui 与 backend 是**或**的关系）；backend 层兜底 `src/**`（除 ui）+ `tests/**`（除 GUI 集成）。push 的四段 pytest 步骤按层放行；security 归 backend（安全测试不看 UI）；quality 不分层（静态检查整个仓库）。纯文档 push 跳过 pytest 作业，`required-check`（总是成功）兜住分支保护规则的必需检查。守卫：`tests/unit/test_ci_workflow.py`。
+- **`pytest-report` 与 `allure-summary`（覆盖率门槛 100% 与完整报告）在 PR 与 nightly 都跑**：push 只跑选中的层，切片上的覆盖率天生偏低，在那里判门槛等于自造假红——所以"最完整的证据"在 PR 报告作业里出，与 push 的层选择互不干扰。nightly 由 `nightly.yml` 的 gate（dev tip < 24h 才调用）带 `ref: dev` 调用 `ci.yml`；PR 与 nightly 两层全跑。守卫：`test_pr_and_nightly_run_full_while_push_selects_layers`。
+- **省额度的三条**：① concurrency 取消被取代的运行（报告作业的条件必须是 `always() && !cancelled()`，否则前面被取消时报告不生成、上一轮的报告继续留在页面上冒充最新）；② 纯文档 push 用 `paths-ignore`、PR 用 `changes` 作业判路径 + `required-check` 兜底；③ 与平台无关的检查合进 quality、平台专属检查塞进 pytest 片 0（不新开作业）。完整的优化清单与取舍落在 `tests/unit/test_ci_workflow.py`。
+- 每个 pytest 作业上传自己的 `allure-results-<platform>-shard<N>`；汇总用 `download-artifact` 的 pattern + `merge-multiple: true` 一次拉齐，`pytest-report` 沿用 `.allure/history.jsonl` 累积历史。
+- **历史趋势靠 artifact 活着**（与报告怎么发布无关）：两个报告作业各自走"找上一次**带着同名产物**的运行（不问成败）→ 取回 `.allure/history.jsonl` → `allure generate` 读它并追加本次一行 → 新的 history.jsonl 传回 artifact"（`pytest-report` 用 `allure-resources-<平台>`，`allure-summary` 用 `allure-resources-final`）。要点：① 趋势寿命 = artifact 寿命（默认 90 天），窗口内没有一轮留着它就从零开始（不报错，曲线断了）；② 基线**不要求**那轮 success——失败轮的历史本该出现在趋势里，Allure 的趋势正是用来看失败的（只认成功运行时，连续失败的时期接不上任何一轮基线）；那一轮是否真的传了产物由 finder 的 artifact 检查把关；③ 报告只作为 artifact 存在（2026-10-06 起不再发布到 GitHub Pages），站点是否可达与历史链条无关；④ 恢复要认**两种 artifact 布局**——单路径上传时 `history.jsonl` 落在压缩包根部、多路径时带 `.allure/` 前缀，两种都探测、都找不到时响亮退出；⑤ **质量门不许写历史**——`allure quality-gate` 子命令同样遵循 `appendHistory`，会在半套结果的时点追加一条假快照，跑之前把真历史改名为同目录临时文件（改名即回、不跨设备）、跑完放回。守卫：`tests/unit/test_ci_history.py`。
+- **历史文件在生成报告之前自动修一遍**（`scripts/repair_allure_history.py`，排在拷回历史之后、generate 之前）：报告趋势按 `retryHash` **精确匹配**，身份键里每多一个维度（如 `environmentHash`），旧快照的键就整体对不上（丢的是匹配不是数据）。三步：① 同一轮被追加两次的快照去重（按"时间窗 + 键集合重合度"判，留信息更全的那份）；② 旧形状的键按**唯一前缀**补成当前形状（前缀对上多个当前键时按条目自己的 `environment` 对准平台、显示名与 id 统一小写比较；段数比当前还多的键直接丢弃——砍前缀会悄悄并掉平台区别）；③ 补不出唯一值的条目丢掉，一份都连不上时清空重来。动了文件就写 `allure-history-repair.md` 挂进首页全局附件（记实际用的 CLI 版本与最新快照年龄），没修东西就删掉那份记录。守卫：`tests/unit/test_ci_history.py`（三种走向、幂等、"没修不留附件"）。已知局限：键形状刚变的第一轮，基线里还没有新形状的快照，这一轮会误判（下一轮起恢复）——这正是历史基线必须每轮都被消费的原因。
+- **每个作业只装自己需要的依赖**：开发依赖拆成 test / coverage / quality / analysis / package 五组，作业按命令装对应组（`uv sync --locked --no-default-groups --group <组>`）。两个坑：顶层必须 `UV_NO_SYNC=1`（否则每个 `uv run` 按默认组先 sync 一遍，把省掉的包全装回来）；同一作业里每次 `uv sync` 必须带**同一组**（Tkinter 修复那步也 sync）。本地开发不受影响（`default-groups` 覆盖全部）。守卫：`test_ci_installs_only_the_dependency_groups_each_job_needs`。
+- **每个作业跳过安装项目本身**（`--no-install-project`）：CI 用例靠 pytest 的 `pythonpath` 配置导入源码、静态检查靠 `mypy_path`，不需要可编辑安装。唯一例外 quality：装一次并跑 CLI 冒烟（cwd 换到工作区外跑 `python -m archive_management init`，验证打包入口）。守卫：`test_ci_only_installs_the_project_where_the_cli_smoke_needs_it`。
+- **质量门禁由脚本执行**（2026-10-02 起）：`scripts/create_allure_quality.py --group <组>` 把每项检查的退出码、结论与完整输出附件写成 Allure 结果（任一项不过则脚本非 0 退出）。三组：`core`（ruff check / ruff format --check / 宿主 mypy → env=common）、`analysis`（deptry / bandit / pip-audit / radon / xenon → env=common）、`platform`（mypy --platform win32 / darwin）。前两组与性能基准同在 Ubuntu 的 quality 作业；platform 组各自在该平台的 pytest 片 0 执行（排在测试与上传之后）——`--platform` 只决定"检查哪支代码"，结论挂到没跑过的平台环境就是假归属。结论归属：与平台无关的检查带 `env=common` 归入显式声明的 Common 环境（不冒充任何平台）；平台专属 mypy 带平台 env 且真的在那台机器跑（`Check.host_platform`）。点名跑不了的分组时以退出码 2 报错（不是 0——静默跳过等于门禁不存在）。
+- **Allure 原生质量门**：`allure quality-gate --config allurerc.mjs allure-results`，退出码直接决定作业成败，输出落 `allure-quality-gate.txt` 并进总账。两条规则集：① 不过滤（maxFailures: 0 / successRate: 0.98），脚本生成的结论项也算——覆盖率项 broken 时必须有人管；② 只看真实用例（filter 选 `framework=pytest` 再 environmentsTested），要求每个平台都有用例。**用环境维度而不是 `minTestsCount`**：绝对计数随用例规模变松（缺整平台仍可能高于计数，静默失效）；判据用 `framework=pytest` 正向标记——正向漏判会红、反向排除漏判会绿。**清单必须写环境 id 不能写显示名**：`environmentsTested` 拿结果上的 environment（id：windows/macos/linux）比清单，写显示名则所有平台全报缺。守卫：`test_quality_gate_asks_every_platform_for_real_tests`。
+- 原生质量门排在写运行总账**之前**（总账读它落盘的输出），守卫：`test_native_quality_gate_is_configured_and_pinned`。它管不到"少一片"，那由产物清单负责（`--manifest`）。**CLI 必须 ≥ 3.18.0**：3.13~3.17 配 historyPath 时静默放行（上游 issue #895，修于 3.18.0）；CI 用浮动标签 `allure@3`，下限在 "Check Allure version" 步骤运行期核对。本地复现：`npx allure@3 quality-gate --config allurerc.mjs allure-results`（单平台跑会因 environmentsTested 失败，属预期）。
 
 ### 跳过只留给已知的环境问题
 
-GUI 用例的环境守卫会把建窗口期的 `TclError` 写成 `pytest.skip("tk 环境不可用: ...")`。本仓库为此吃过一次亏（2026-09-25）：`test_poster_markers_only_get_a_backing_over_a_real_cover` 在 CI 上稳定抛 `TclError: image "pyimage1" does not exist`，于是 Linux 与 Windows **都**把它跳过了 —— 报告里只看到"跳过了"，用例等于不存在，而跳过又不会让任何东西变红（那条用例已经删掉，它验的规则改由不建窗口的单测钉住：`tests/unit/test_ui_widgets.py::test_poster_backing_uses_the_panel_colour_only_over_a_real_cover`）。
+GUI 用例把建窗期的 TclError 写成 `pytest.skip("tk 环境不可用: ...")` 的代价是：真正的 Tcl 故障会伪装成一堆 skip（曾让两个平台都静默跳过同一条用例，而跳过不会让任何东西变红）。规矩（`tests/tk_guard.py`）：
 
-现在的规矩（见 `tests/tk_guard.py`）：
+- 只有已知环境症状才允许跳过：解释器加载不了 Tcl/Tk 库数据（`tcl_findLibrary` / `init.tcl` / `tk.tcl` / `auto.tcl` / `Can't find a usable …`）或没有显示环境（`no display name` 等）。前一组只可能由 Tcl 自己在装库时说出。
+- **白名单只列 Tcl 自己的库数据文件名**：把 `couldn't read file` 这类通用说法整个收进来，会把"应用自己要读的文件打不开"也归成环境问题。两种拼法都能被文件名命中，不必放宽。
+- 前缀是"tk 环境不可用"但症状不在清单里时，conftest 的报告钩子把它改成**失败**——要么修掉要么删掉，不留下永远不跑的用例。
+- `gui_support.gui_app` 同理：非已知抖动的 TclError 不重试直接抛。
 
-- **只有已知的环境症状**才允许跳过：解释器加载不了 Tcl/Tk 库数据（`tcl_findLibrary` / `init.tcl` / `tk.tcl` / `auto.tcl` / `Can't find a usable …`），或者根本没有显示环境（`no display name` 等）。前一组只可能由 **Tcl 自己**在装库时说出（即使用例完全不碰文件也可能撞上），与用例断言的东西无关；`tk.tcl` 这一条是 2026-09-26 补上的 —— 现场是 `test_gui_buttons.py`（现已拆分为 `test_gui_*` 系列）整模块跑时偶有一条用例在建 Tk 根时报 `couldn't read file <...>/tk.tcl`，单跑必过，且把新增用例全部 deselect 后仍会复现。`auto.tcl` 是 2026-09-27 补上的：同一批用例里换了一个文件名（`couldn't read file <...>/auto.tcl`，那是 `init.tcl` 自己 source 的引导脚本），本机确认过 Tcl 库目录与文件都在、`TCL_LIBRARY` 也没被改，属同一种瞬时读失败（没进白名单时它会被 `gui_app` 直接重抛，于是计成一条真失败）。
-- **白名单只列 Tcl 自己的库数据文件名**：把 `couldn't read file` 或 `can't find a usable` 这类通用说法整个收进来，会把“应用自己要读的文件打不开”（例如某张封面图找不到）也归成环境问题 —— 那正是这一节开头记的那个错误。两种拼法都能被文件名本身命中（`Can't find a usable tk.tcl` 命中 `tk.tcl`），所以不必放宽。
-- 原因前缀是 `tk 环境不可用` 但症状不在清单里时，`tests/conftest.py` 的用例报告钩子**把它改成失败**并给出判定依据 —— 要么修掉，要么删掉那条用例，不留下永远不跑的用例。
-- `tests/gui_support.gui_app` 同理：非已知抖动的 `TclError` **不重试**，直接抛出（重试也修不好）。
-
-与 Tk 无关的跳过不受影响（例如"当前环境不允许创建符号链接""虚拟显示器太小"）。守卫：`tests/unit/test_gui_retry.py`（含一条反向守卫：`couldn't read file "cover.png"` 这类应用侧读文件失败**不许**被当成环境问题）。
+与 Tk 无关的跳过不受影响。守卫：`tests/unit/test_gui_retry.py`（含反向守卫：应用侧读文件失败不许被当成环境问题）。
 
 ### 界面用例收尾：根要拆干净，后台线程也要放掉
 
 两条不变式，缺一条都会让**后面的**用例遭殃：
 
-- **不得留下 Tk 根**（2026-10-04 macOS/Linux 的 `image "pyimage1" does not exist`）：`tkinter._default_root` 上挂着一个不能用/没拆干净的解释器时，后面每条用例贴图都报"图片不存在"。收尾会验证并补救，断裂按**失败**报（不能静默咽掉，否则只会看到受害者）。
-- **不得攒下后台调度线程**（2026-10-05 macOS 分片被整片带走、只剩一份 dump，栈里挂着约 30 个 `apscheduler…_main_loop`）：`BackgroundScheduler()` **构造即 `start()`**，而释放入口过去只有 `_on_close()`（用户点关闭），界面用例走的却是 `destroy()` —— 那 40 多处"建真后端 + 建窗口 + `finally: app.destroy()`"于是各自留下一个活线程，去碰已销毁的 Tk。修法是把释放下沉成幂等的 `ArchiveApp._release_background()`，由 `destroy()` 与 `close_gui_apps` 共用；守卫两条：`test_gui_roots.py::test_a_real_backend_does_not_outlive_its_window`（故意绕开收尾、只走产品关窗路径，抽掉修法即红）与收尾里的**相对基线**判据。判据必须是相对的 —— 同一进程里还有非 GUI 用例会建真后端（实测会漏一个），绝对判据会把别人的存量算到当前用例头上。
+- **不得留下 Tk 根**：`_default_root` 上挂着不能用 / 没拆干净的解释器时，后面每条用例贴图都报"图片不存在"。收尾做验证并补救，断裂按失败报。
+- **不得攒下后台调度线程**：`BackgroundScheduler()` 构造即 `start()`，释放入口必须是 `destroy()` 也会走的幂等 `ArchiveApp._release_background()`。守卫：`test_gui_roots.py::test_a_real_backend_does_not_outlive_its_window`（故意绕开收尾、只走产品关窗路径）+ 收尾里的**相对基线**判据——同进程里非 GUI 用例也会建真后端，绝对判据会把别人的存量算到当前用例头上。
 
 ### 只在某个平台红的分片失败：先把那份平台差异搬回本地
 
-2026-09-25 实测：Linux 分片里 `test_demo_update_location_rejects_a_path_used_by_another_location` 报 `DID NOT RAISE`，同一条用例在 Windows 上是绿的。根因不是平台 bug，而是**判重只规范化了一侧**：演示数据里的位置路径是原样保存的展示字符串（`D:\Games\…`），而输入侧会过一遍 `normalize_path` —— POSIX 上这类字符串属于相对路径，会被拼上工作目录，两侧形态不同就永远比不出重复；Windows 上 `normpath` 对这类路径恰好幂等，于是"恰好"看不出来。修法是判重**两侧都规范化**（`add_location` / `update_location` 两处，与监控目录判重同一套做法）。
+通用做法：遇到"只有某个平台红"，先定位它依赖哪种形态差异（路径分隔符与大小写、`normpath` 是否幂等、`dir_fd` 相对路径、显示服务、字体度量），再把那个差异做成替身搬进用例——否则这条用例永远只在 CI 的一半平台上有效。两个实例：
 
-补的守卫刻意不依赖平台：用例把 `normalize_path` 换成 **POSIX 风格的替身**（`posixpath.normpath` + 手写的工作目录前缀），于是 Windows 上也能复现 Linux 的形态差异（`tests/unit/test_ui_demo.py::test_demo_duplicate_locations_are_caught_for_unusual_path_forms`）。判据是"去掉修法后这条用例必须在**本机**就红"—— 实测在 Windows 上换回旧写法立刻复现了 CI 的那条 `DID NOT RAISE`。
-
-**通用做法**：遇到"只有某个平台红"的失败，先定位它依赖哪一种形态差异（路径分隔符与大小写、`normpath` 是否幂等、`dir_fd` 相对路径、显示服务、字体度量），再把那个差异做成替身搬进用例 —— 否则这条用例永远只在 CI 的一半平台上有效。
-
-**2026-09-27 实测（同一类失败，但错在用例的"前提"上）**：Linux 分片里两条 GUI 用例红 —— `test_discovery_rows_clip_long_paths_and_ignore_stale_refits` 报"长安装路径必须被裁"、`test_state_column_never_shows_half_a_chip` 报"两行放得下就不该只排一行"，本机（有中日韩字体）全绿。根因是**裸 Ubuntu runner 上没有中日韩字体**，Tk 把汉字量成近乎零宽，于是"这条路径／这串标签一定放不下"这个**前提**在那边不成立。两边都要改：CI 侧装上 `fonts-noto-cjk`（与 `xvfb` 同一步，见 `ci.yml`），用例侧三条纪律：
-
-- **前提只用拉丁字符表达**：夹具里放足量的长拉丁串（长的目录层级、`very-long-tag-01` 这类 16 字标签），再断言"量出来的宽度确实放不下"。拉丁字符在任何字体下都能量出宽度，所以这条前提在每个平台都成立；用汉字表达的前提在缺字体的机器上恒为假。
-- **前提写成强制断言，不要写成 `if`**：`if font.measure(...) > width: assert …` 在前提不成立时会**一条断言都不执行** —— 用例永远绿的，等于没测。上面第一条假红就是这么来的（本机也从未执行过那两条断言）。
-- **期望值不能与被测值同源**：`budget = label.winfo_width()` 看着像"真实宽度"，可面板一旦**没被摆放**，标签就是按内容自适应宽度 —— 实测 `width` 恰等于整条路径的度量值（1407px），于是 `measure(shown) <= width` 永远成立，把裁剪函数改成 `return text` 也照样绿。夹具必须给容器一个**被框定的宽度**（`CTkFrame(width=…)` + `grid_propagate(False)` + `place()`；注意 CTk 的 `place` 不接受 `width`/`height`，尺寸要给构造函数），否则"放不下就该裁"根本不存在。
-
-三条合起来才让"咬合验证"有落点：改坏 `discovery_page._clip_path`（→`return text`）必须报 `assert 1407 <= 658`，改坏 `models.chips_lines`（→ 不换行只裁剪）必须报 `assert '\n' in 'Steam · 已备份 · very-long-tag-01 · very…'`；恢复后两条都绿。（第二条的现场在 2026-10-02 改了口径：状态列现在是 `models.status_lines` —— 状态一行、标签一行；当时的现场与数字照旧留在这一句里。）
+- **判重只规范化了一侧**（演示数据存 Windows 风格展示串、输入侧过 `normalize_path`，POSIX 上形态不同永远比不出重复）→ 判重两侧都规范化；守卫把 `normalize_path` 换成 POSIX 风格替身，Windows 上就能复现（`test_ui_demo.py::test_demo_duplicate_locations_are_caught_for_unusual_path_forms`）。
+- **裸 Ubuntu 没有中日韩字体**，Tk 把汉字量成近零宽 → CI 装 `fonts-noto-cjk`；用例侧三条纪律：**前提只用拉丁字符表达**（缺字体的机器也量得出宽度）、**前提写成强制断言不写 if**（前提不成立时一条断言都不执行，用例永远绿）、**期望值不能与被测值同源**（面板没被摆放时标签按内容自适应，`measure(shown) <= width` 恒成立；夹具要给容器被框定的宽度：`CTkFrame(width=…)` + `grid_propagate(False)` + `place()`，CTk 的 place 不接受 width/height）。
 
 ### 同一路径只有一条位置：判重靠"落库即规范化"
 
-`SaveLocationRepository.duplicate_of` 比的是**字符串相等**（`LOWER(path) = LOWER(?)`），它自己不做任何路径规范化 —— 等价于"同一个文件夹"的前提是**两侧都已经是规范化形式**。这条不变式靠写入侧维持：手工新增、改路径、导入确认（`add_location` / `update_location` / `confirm_candidate`）都先过 `normalize_path`。
-
-它一旦被破坏，失败是**静默**的：`…/saves`、`…/saves/`、`…/saves/.` 会被当成三个不同路径，同一个目录登记成多条位置（备份拍两份、恢复写两次、删掉其中一个还会把另一个位置的目标一起带走）。演示后端就是这么漏判的（见上一节）。
-
-三条守卫：
-
-- `tests/unit/test_sql_locations.py::test_every_stored_save_location_path_is_normalized`：走完三条写入路径后，断言库里每行 `path == normalize_path(path)`；
-- `tests/unit/test_sql_locations.py::test_the_same_folder_in_another_spelling_is_rejected`：服务入口（新增/改路径）试"同一文件夹的另一种写法"；
-- `tests/unit/test_save_candidates.py::test_confirming_a_candidate_written_differently_keeps_one_location`：候选行里存的是另一种写法时，确认不得多出一条（去掉写入前的规范化就会红）。
+`SaveLocationRepository.duplicate_of` 比的是字符串相等（`LOWER(path) = LOWER(?)`），"同一个文件夹"的前提是两侧都已是规范化形式——这条不变式由写入侧维持：`add_location` / `update_location` / `confirm_candidate` 都先过 `normalize_path`。破坏时失败是**静默**的（`…/saves`、`…/saves/`、`…/saves/.` 被当成三个路径：备份拍两份、恢复写两次）。守卫：`test_sql_locations.py::test_every_stored_save_location_path_is_normalized`、`test_the_same_folder_in_another_spelling_is_rejected`、`test_save_candidates.py::test_confirming_a_candidate_written_differently_keeps_one_location`。
 
 ### GUI 用例必须真的跑起来（skip 是有代价的）
 
-`tests/integration/test_gui_*.py` 会把"Tk 起不来"当作环境问题处理：文件级守卫与每个用例的 `except TclError: pytest.skip(f"tk 环境不可用: ...")`。这样没有显示环境的机器不会一片红，但**代价是真正的 Tcl 故障会伪装成一堆 skip**，而 GUI 用例占覆盖率的很大一块——本机实测（把 `TCL_LIBRARY` 指向不存在的目录来模拟）：全量 `769 passed / 68 skipped`，覆盖率 **67.88% < 85%**，作业会以覆盖率门槛失败，且失败信息里看不出 CLI 之外的原因。
-
-所以 CI 在 Windows 与 macOS 上、pytest 之前多跑一步显式自检：
+"Tk 起不来"被当环境问题处理的代价：真 Tcl 故障伪装成一片 skip，GUI 用例占覆盖率很大一块（实测模拟坏 Tcl：全量 769 passed / 68 skipped，覆盖率 67.88% < 门槛，且失败信息看不出原因）。所以 CI 在 Windows 与 macOS、pytest 之前显式自检：
 
 ```shell
 uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK')"
 ```
 
-Tcl 正常时它只是一行输出；坏掉时会打印 `Can't find a usable init.tcl ...` 并以非 0 退出，直接把原因抬到表面（Linux 的显示环境由 `xvfb-run` 提供，不重复检查）。
-
-这条曾经真实发生过：跑测试的解释器是 `uv python install 3.12` 下载的 uv 托管 standalone 构建，它靠**自身目录里的 tcl 数据文件**定位 Tcl（`<托管目录>/tcl/tcl8.6`），那份副本一旦陈旧或不完整，`tkinter` 就报 `Can't find a usable init.tcl`（上游是 python-build-standalone 的已知怪癖，见 astral-sh/uv#7036；本机 venv 用的是 python.org 的 CPython，自带完整 tcl，所以本机复现不出来）。既然重建解释器就能修好，工作流里用 `uv python install --reinstall 3.12`，而不是事后设 `TCL_LIBRARY`/`TK_LIBRARY`——后者路径随平台变，还会影响其它 Tcl 使用者。（2026-10-05 起 macOS 不再适用这一套：pytest 作业的 macOS 片已换成 setup-python 装的 python.org 构建 + `UV_PYTHON_PREFERENCE=only-system`，见下文「macOS 原生崩溃」一节——那台机器上没有"uv 托管解释器"可重装，自检失败由 macOS 专属步骤直接 `::error::` 报错。）
-
-**但不必每次都重装**（一次约 30MB 下载 × 9 个 pytest 作业），所以流程是"先普通安装 → 自检失败才重装"：
-
-1. `uv python install 3.12`（命中 uv 下载缓存时很快）；
-2. Tkinter 自检（`id: tkinter`，`continue-on-error: true` —— 失败不等于作业失败，只是给一次修复机会）；
-3. 只有上一步**失败**时才走修复：`uv python install --reinstall 3.12` → `uv sync --locked`（让虚拟环境跟着新解释器走）→ **再复检一次**。这一步没有 `continue-on-error`，所以修不好照样红 —— "Tcl 坏掉不能静默变成一堆 skip"这条不变式没有被削弱，只是从"每次都重装"变成"失败才重装"（守卫会把这条语义钉住：自检的 id、修复的触发条件、修完的复检缺一不可）。
+坏掉时非 0 退出直接把原因抬到表面（Linux 的显示环境由 `xvfb-run` 提供，不重复检查）。真发生过的一次：uv 托管的 standalone 解释器靠自身目录的 tcl 数据文件定位 Tcl，副本陈旧/不完整就报 `Can't find a usable init.tcl`（astral-sh/uv#7036）。**不必每次重装**（一次 30MB × 9 个作业）：先普通安装 → 自检（continue-on-error）→ 失败才 `uv python install --reinstall 3.12` + `uv sync --locked` + 再复检一次（这步没有 continue-on-error，修不好照样红）。macOS 片自 2026-10-05 换 `setup-python` 的 python.org 构建 + `UV_PYTHON_PREFERENCE=only-system`，见「macOS 原生崩溃」一节。
 
 ### GUI 布局用例不要和"首帧时序"赛跑
 
-名称按宽度重裁这类断言最容易在平台之间飘：`winfo_width()` 在首帧往往只有 1（各平台完成布局的时机不同），而且可能**不再有尺寸变化事件**来补救，于是名称停在"兜底宽度"的短文本上 —— 人眼看不出来，只有断言能发现。产品侧对这种"宽度还没量出来"的情况安排了有上限的重试（`home_page._REFIT_MAX_ATTEMPTS`）；用例侧两条纪律：
-
-- 判定"布局停在上一次宽度"这类回归**用假控件**（只实现 `_text` 与 `winfo_width()` 的替身），而不是在真窗口上改完文本再泵事件循环：后台重裁会在不同平台上以不同时机把文本改回去，自检会时灵时不灵。`test_gui_layout.py` 里两条用例正是这么分工的：一条跑真布局，一条用假标签验看门狗本身。
-- 断言"当前宽度下应当截成什么"时别写死像素或字符数：用同一个 `fit_text(full, font, label.winfo_width())` 生成期望值，比对**文本**（与字体是否缺字形无关），像素只用来卡"缝隙上限"。
-
-**重裁本身还必须保证"一定会发生"，而且不能靠"等够多少秒"去赌**。它有两层触发机制，缺一层就会漏：
-
-- **容器事件**（滚动区 `<Configure>`）负责"可用宽度变了"这件事，走延后 60ms 的**合并**式排队：已排过队就不再排，也**不撤销**已排的那个（`HomePage._schedule_list_sync`、`ArchiveApp._on_content_resize`）。改成"每次请求先取消再重新计时"看起来更平滑，但触发源是**连续**的尺寸事件（无窗口管理器的 Xvfb、CustomTkinter 的延迟重绘），任务会被无限推后、永远轮不到执行。判据：触发源**离散**（用户按键、单次点击）才可以用"取消重排"的 debounce（如设置窗口的录制收尾计时器）；触发源**可能连续**，就必须合并而不是推后。
-- **标签自己的 `<Configure>`** 负责兜住容器事件不来的情况：内宽变了而外宽没变（滚动条出现/消失、表头内边距被重算）、行刚重建且标签刚量到真实宽度时，滚动区都不会发事件。所以名称标签直接盯自己的宽度，量到就**立刻**按它裁一次（`HomePage._on_name_resize` → `_fit_row_name`，宽度没变则不重写文本，避免"改文本 → 新事件 → 再裁"互相追）。这两层合起来才让"名称按当前宽度显示"成为**不用等多久**就会成立的事实 —— 而不是"恰好没被下一次事件推后"的运气。
-
-对应地，**用例这边不要和这段延迟赛跑**：名称的显示被两个延迟源影响（重裁任务延后 60ms；行还会因为异步加载落地而**整体重建**，重建后先回到兜底宽度的短文本）。所以断言前先等**不变量本身**成立（显示文本 == 该宽度下的 `fit_text` 结果，见 `_wait_until_the_name_fits`，超时才失败），而不是泵固定时长的事件循环 —— CI 上真实挂过：Linux 上异步数据到得晚，断言正好落在"新行刚建好、重裁还没轮到"的那一瞬间，报出来的字数与标签宽度对不上（现场 dump 里 `_sync_job` 还挂着、`_refit_attempts` 才 1）。契约守卫见 `tests/unit/test_ui_scheduling.py`（用替身控件驱动真实的调度与裁剪方法，不建窗口）。
+- `winfo_width()` 首帧往往只有 1，且可能不再有尺寸变化事件补救。判定"布局停在上一次宽度"这类回归**用假控件**（只实现 `_text` 与 `winfo_width()` 的替身）验看门狗本身，真窗口那条只跑真布局。
+- 断言"当前宽度下该截成什么"别写死像素/字符数：用同一个 `fit_text(full, font, label.winfo_width())` 生成期望值比**文本**，像素只卡缝隙上限。
+- **重裁必须一定会发生且不靠等秒**：容器事件（滚动区 `<Configure>`）走延后 60ms 的**合并**式排队（已排过就不再排、不撤销；触发源可能连续时必须合并不是推后——Xvfb/CTk 的连续尺寸事件会把"取消重排"式 debounce 无限推后）；标签自己的 `<Configure>` 兜底（内宽变了外宽没变时容器不发事件）。契约守卫：`tests/unit/test_ui_scheduling.py`（替身控件驱动真实调度与裁剪，不建窗）。
+- **用例不和延迟赛跑**：断言前先等**不变量本身**成立（显示文本 == 该宽度下的 `fit_text` 结果，见 `_wait_until_the_name_fits`，超时才失败），不泵固定时长。
 
 ### 列表里的文字"放得下或带省略号"：判据与六个坑
 
-列表/表格的截断问题是**能用数值断言**的：一个文本控件的**任意一行**像素宽 > 它自己的宽度时，Tk 会把文字裁掉而且**不补省略号**（用户看到的是半句话）。所以判据就是两条：
+判据两条：① 每个文本控件的每行都放得下（多行按行分别量）；② **夹具文本必须长到"必须裁"且断言真的出现省略号**（演示数据名字都短，量出的"0 处截断"是假的；`test_gui_text_fit.py` 专门配长文本后端）。
 
-1. 每个文本控件的每行都放得下（多行文本按行分别量，能换行就不算截断）；
-2. **夹具的文本必须长到"必须裁"**，而且要断言它真的出现了省略号 —— 否则这条用例什么都没证明。演示数据的名字都很短，用它量出来的"0 处截断"是假的；`tests/integration/test_gui_text_fit.py` 因此专门有个"把各处可能变长的字段都换成长文本"的后端（长游戏名 + 译名、深安装路径、长标签、长备份标题与描述），并逐块区域检查上面两条。
+六个坑：
 
-两个与**裁剪本身**有关的坑，再加两个与"怎么量"有关的，以及一条"量什么才有效"的：
-
-- **`wraplength` 断不开没有空格的中日韩文本**。Tk 只在空格处断行，把一整段没有空格的 CJK 文字放进 `wraplength=891` 的标签里，实测它仍然被摆在 **1038px 的一行**（而标签只有 815px），照样硬裁。要"先断行再补省略号"就得自己算：`fit_text(text, font, width, max_lines=N)`（`ui/textfit.py`），卡片类的多行正文走这条。
-- **裁剪的宽度要取被拉伸的容器，不能取标签自己**。`pack(side="left")`、`grid(sticky="w")` 的标签宽度**等于文字宽度** —— 按它裁会让文字变短、标签跟着变窄、下一轮又裁得更短，越裁越短。被 `fill`/`sticky="ew"` 拉伸的那个容器宽度与文本无关，才算得稳。共享实现是 `widgets.track_fit(容器, 标签, 行, inset=..., path=..., max_lines=...)`：按容器宽度裁剪、宽度变化时重裁、宽度没变就不动（避免"改文本 → 新事件 → 再裁"互相追）。测试要验证"裁剪后没溢出"时，**期望值用同一个裁剪函数按实测宽度算**（比文本不比像素），另外用一段**纯拉丁**的长文本当"必须被裁"的前提（缺中日韩字体的机器也能量出宽度）。
-- **量不到的东西别急着归咎于量法：先看那块区域在不在清单里（2026-09-29 更正）**。那一轮的判据比的是"文字宽 vs **控件自己**宽"，超长备份名下确实会成立（实测「选中备份」的备份名 `reqwidth = 981`、实得宽度被父容器夹到 **301**）—— 这条判据本身没问题，漏的是**那块面板从来不在量测清单里**（`_areas` 只覆盖列表与表格），而那三个标签既没有省略号也没有提示机制。所以补的半边是"把面板加进清单 + 让标签走 `fit_label`"，而不是"换一条量法"。
-- **会自己换行的标签要按断行后的宽度判**。`wraplength > 0` 的标签不能拿"整段文字的宽度"去比：Tk 已经按 `wraplength` 断过行了，该比的是断行之后最宽的那一行，也就是控件自己的 `winfo_reqwidth()`。实测右侧栏那条说明整段 **413px**、控件 240px，但断行后最宽的一行只有 **240px** —— 一个字都没被裁，拿整段比就是假红。修法是 `_needed_width()`：有 `wraplength` 用 `reqwidth`，没有才用文字实测宽度。
-- **`CTkLabel` 的 `wraplength` 是逻辑像素，而 `winfo_width()` 是物理像素（2026-10-02 追加）**。CTk 自己会把 `wraplength` 乘上窗口缩放（实测写 284，内层 Tk 标签拿到的是 355 = 284 × 1.25；见 `ctk_label.py` 里的 `_apply_widget_scaling`）。于是"把量到的宽度写进 `wraplength`"这一手法在 125% 的屏上会让标签按 1.25 倍的宽度折行 —— 文字行比标签本身还宽，Tk 直接硬裁且不补省略号（实测设置窗口两条说明：标签 **284** 宽、折出来的行宽 **345/375**）。写之前过一层 `widgets.wrap_budget(window, width)`；`inset` / `minimum` / `initial` 这类**设计**尺寸本来就是逻辑像素，不要换。
-- **行/卡片会被重渲染销毁，"等一会儿再量"的引用必须当场重新取（2026-10-01 追加）**。主页有两条整页重建路径：`_render_games`（异步封面/译名落地 → `refresh_artwork` 触发）与延后 60ms 的 `_schedule_list_sync`，两者都先把旧行 `destroy` 再重建 `_rows`/`_row_parts`。于是"先抓一份行 → 再等各列对齐（最多 3s，一直在泵事件）→ 最后用那份快照去量"的写法会抛 `_tkinter.TclError: bad window path name`，而那句报错**与布局对不对毫无关系**（实测 2026-10-01：Windows 分片 0 只红这一条，`test_long_game_name_does_not_widen_the_list_rows`）。修法是量的那一刻从 `page._rows` 重新取（`_live_row`，先 `winfo_exists()` 把失效引用变成一句能照着做的断言），并把"贴右"这类**由延后任务算出来**的不变量写成"等到成立"（`_wait_for_the_fixed_block_to_hug_the_right`）而不是量一次。反过来，**要量"刚渲染/刚设的状态"就别在中间泵事件** —— 悬停判定就是靠这一点（`_set_hover(None)` 之后立刻读，中间多一次 `_pump` 就可能被延后重排复位）。
-- **"夹具必须长到被裁"这条前提别靠时间**：详情页的名称重裁（`ArchiveApp._refit_detail_names`）与主页的"表头对齐 + 名称重裁"都是 `after(60ms)` 的任务，用例里真正流逝的时间很短 —— CI 上它们**还没跑**，量到的是按**旧宽度**裁出来的文本，于是这条前提会假红（实测两个平台一起红）。修法是量之前 `_flush_delayed(app)` 直接把这几个任务调一次（与 `test_gui_home.py` 里冲刷 `_refit_detail_names` 同一套做法），不要 `sleep`、也不要赌事件循环。反过来，**要量"刚渲染出来是什么样"的区域就别在渲染后再 pump**：右侧面板的夹具是"选中当前节点 → 立刻量"，多 pump 一轮可能让 60ms 的重裁跑掉，量到的就不是刚渲染的状态了（CI 上这类假红最难查）。
+- `wraplength` 断不开没有空格的 CJK 文本（Tk 只在空格断行）——要先断行再补省略号得自己算：`fit_text(text, font, width, max_lines=N)`（`ui/textfit.py`）。
+- 裁剪宽度取**被拉伸的容器**不取标签自己（`pack(side="left")` / `grid(sticky="w")` 的标签宽度=文字宽度，按它裁会越裁越短）。共享实现 `widgets.track_fit(容器, 标签, …)`：按容器宽裁、宽变重裁、没变不动。期望值用同一个裁剪函数按实测宽算（比文本不比像素），前提用**纯拉丁**长文本。
+- 量不到先看那块区域**在不在清单里**（曾漏的是面板从不在 `_areas` 清单、标签也没走 `fit_label`——判据本身没问题）。
+- 会自己换行的标签按断行后的宽度判（比 `winfo_reqwidth()`，不比整段文字宽——Tk 已按 wraplength 断行，拿整段比会假红；`_needed_width()`）。
+- **CTkLabel 的 wraplength 是逻辑像素、`winfo_width()` 是物理像素**（CTk 会把 wraplength 乘窗口缩放，125% 屏上写 284 内层拿到 355）——写之前过 `widgets.wrap_budget(window, width)`；inset/minimum/initial 这类设计尺寸本来就是逻辑像素不要换。
+- 行/卡片会被重渲染销毁（`_render_games` 异步落地、延后 60ms 的 `_schedule_list_sync` 都是先 destroy 再重建），"等一会儿再量"的引用必须当场重新取（`_live_row` 先 `winfo_exists()`），"贴右"这类由延后任务算出的不变量写成"等到成立"。反过来，**要量"刚渲染/刚设的状态"就别在中间泵事件**（悬停判定：`_set_hover(None)` 后立刻读）。"夹具必须长到被裁"也别靠时间：after(60ms) 的重裁在 CI 上可能还没跑，量之前 `_flush_delayed(app)` 直接调一次。
 
 ### 窗口尺寸的判据：屏高用替身，量之前先让窗口真的布局出来
 
-"窗口比屏幕还高、底部按钮落到屏幕外"这类问题只在矮屏上出现，而机器只有一块屏。做法是给**屏高/屏宽装替身**（`monkeypatch.setattr(tkinter.Misc, "winfo_screenheight"/"winfo_screenwidth", ...)`），在 768 / 900 / 1080 三档下把所有窗口与对话框量一遍，结论就不再依赖开发机的分辨率（`tests/integration/test_gui_sizes.py`）。判据分两层，别合并成一条：
+给屏高/屏宽装替身（monkeypatch `tkinter.Misc` 的 `winfo_screenheight` / `winfo_screenwidth`），在 768 / 900 / 1080 三档把所有窗口与对话框量一遍（`test_gui_sizes.py`）。判据两层别合并：**硬线**（所有窗口：窗口+标题栏不出屏幕，标题栏按 48px 自折算——`winfo_height()` 是客户区）；**舒适线**（只对模态弹窗：≤ 屏幕可用高度 80%；工作区窗口各有最小尺寸只守硬线）。
 
-- **硬线**（所有窗口）：窗口 + 标题栏不出屏幕。标题栏要自己折算（本仓库按 48px）—— `winfo_height()` 量到的是**客户区**，不含窗口管理器画的标题栏。
-- **舒适线**（只对模态弹窗）：高度 ≤ 屏幕可用高度的 80%（评审时约定的口径）。工作区窗口（主窗口/设置/定时/管理）各有最小尺寸或固定尺寸，只守硬线：主窗口 720 的下限是布局的硬要求，屏幕再矮也不该往下压。
+坑：
 
-三个坑都是实测踩出来的，写在这里免得下次重复：
-
-1. **模态对话框只能在"被替换掉的 `wait_window`"里量，但那一刻窗口还没真正布局。** 对话框走的是 `_center()` → `update()` → `wait_window()`，把 `app.wait_window` 换成量尺寸的函数（界面评审用的抓图脚本走的是同一条路）能拿到窗口对象，但此时**内部子控件还在初始值**：实测正文容器仍是 canvas 默认的 200、按钮行 `h=1` —— 拿这个状态判"按钮是否被切"等于空断言。`update_idletasks()` **不够**，必须再跑一次完整 `update()`；修完实测：正文容器 562（y=0）、按钮行 32（y=562）、窗口 612，三者自洽。
-2. **"内容真的能滚"要用 `canvas.yview()` 的可见跨度（<1），不要拿两个 `winfo_height()` 相减** —— 后者正是被上一条污染的读数（实测同一时刻 canvas 报 200、而窗口是 612）。`yview` 是 Tk 按真实几何算出来的比值，也与字体无关（内容被中日韩字体撑高一点，比值依旧 < 1）。768 高的屏上导入弹窗实测 `yview = (0.0, 0.881)`（内容 638 / 视口 562）；配套还要断言"正文第一行挂在滚动区里"，因为单纯的高度断言会被"把正文区压矮"糊过去。
-3. **别用"控件树里第一个 `CTkLabel`"当正文第一行。** 实测第一个是**空文本的装饰标签**、直接挂在正文容器上而**不在**滚动区里，拿它做祖先检查会把正常的弹窗判成"不可滚"。判据要认"**有文本**的标签，其祖先里存在带 `_parent_canvas` 的控件"。注意 `CTkScrollableFrame` 在 Tk 侧的直接子控件是它内部的容器（`winfo_children()` 里拿到的是 `CTkFrame`），按类型 `isinstance` 找不到它，要按 `_parent_canvas` 这个特征找、并用**广度**优先取最外层那个（正文区里还嵌着位置/目标列表这类自己的滚动列表）。
-
-还有一条与"夹具要能被咬"有关：**主窗口的打开尺寸是构造时定的**，所以构造时的屏高替身要给一个**装不下设计尺寸**的值（768），否则"构造里到底有没有用尺寸策略"验不出来 —— 实测把构造改回常量 `1360x860` 时，只验策略函数的那些断言全绿，只有"打开尺寸 ≤ 硬线"这一条会红。
-
-舒适线还有一个**平台差异**：正文区之外那部分（标题/提示行/按钮行）的高度由字体与窗口管理器决定，`dialogs._DIALOG_CHROME_HEIGHT = 52` 只是估算 —— 实测同一份代码 **Linux 上比 Windows 高 7px**，于是正文区顶到上限的对话框**只在 Linux 的 CI 上**超出舒适线（768 屏实测 621 > 614；本机同一弹窗恒为 584，且定焦前后**一模一样**，所以不是"聚焦换色"造成的）。修法是在 `_present()` 里按**实测** `winfo_reqheight()` 超线多少就收多少（`_clamp_to_comfort_line`，收到 `_DIALOG_BODY_MIN` 为止，内容由正文区自己滚）。两个坑：① 正文区要**递归**找 —— 批导把它套在卡片容器里，只找窗口的直接子控件会漏，那时夹取"跑了但什么都没做"；② 守卫要把这个场景搬到一个**在本机也会溢出**的屏高（`_CLAMP_SCREEN = 700`），否则本机永远绿、只有 CI 能咬到。
-
-**单位：屏高替身是物理像素，窗口尺寸是逻辑像素（2026-10-02）**。CTk 写 `geometry` 时会乘窗口缩放（本机 125% 的屏上物理 = 逻辑 × 1.25，见 `widgets.window_scaling`），所以上限与量到的窗口高度必须换到同一套再比 —— 不换就是本机 125% 下那批"窗口出屏"假红的真正原因（实测：648 逻辑的设置窗口被当成 810 > 768，而 CI 是 100% 缩放所以一直绿）。同族判据里还要**允许"最小尺寸装不下"**：主窗口 720 逻辑的下限在高 DPI 的矮屏上无解，"窗口比屏幕还高"是策略允许的结果，判据应当逐条查策略（设计尺寸 / 屏幕 − 安全边距 / 最小尺寸取最大）而不是拿窗口去比屏幕。舒适线也有**够不着**的时候（正文区已压到 `_DIALOG_BODY_MIN` 仍超线，实测 700 高的屏 + 125% 下批导是 523 逻辑 = 654 物理 > 448）：那时的口径是"正文区已在下限（夹取使完手段）+ 整窗不出屏"，否则要么永远红、要么把"夹取被删掉"放过去。
+- 模态对话框在"被替换掉的 `wait_window`"里量时窗口还没真正布局（子控件还是初始值；`update_idletasks()` 不够，要完整 `update()`）。"内容真的能滚"用 `canvas.yview()` 可见跨度 <1 判，不拿两个 `winfo_height()` 相减（后者是被污染读数）；配套断言"正文第一行挂在滚动区里"。正文第一行别用"控件树第一个 CTkLabel"（实测是空文本装饰标签且不在滚动区）；认有文本的标签 + 祖先里有带 `_parent_canvas` 的控件（CTkScrollableFrame 的 Tk 侧直接子控件是内部容器，isinstance 找不到，按 `_parent_canvas` 特征、广度优先取最外层）。
+- 构造时的屏高替身要给一个**装不下设计尺寸**的值（768），否则"构造里有没有用尺寸策略"验不出来。
+- 舒适线的 chrome 高度有平台差异（同一份代码 Linux 比 Windows 高 7px，正文顶格的对话框只在 Linux CI 超线）：`_present()` 里按实测 `winfo_reqheight()` 超线收多少（`_clamp_to_comfort_line`，收到 `_DIALOG_BODY_MIN` 为止，正文区自己滚）。正文区要**递归**找（批导对话框套在卡片容器里）；守卫要把场景搬到**本机也会溢出**的屏高（`_CLAMP_SCREEN=700`），否则本机永远绿。
+- **单位：屏高替身是物理像素、窗口尺寸是逻辑像素**（CTk 写 geometry 会乘窗口缩放；不换算就是 125% 屏上"窗口出屏"假红的来源，见 `widgets.window_scaling`）。同族判据要**允许"最小尺寸装不下"**（主窗口 720 下限在高 DPI 矮屏无解——逐条查策略：设计尺寸 / 屏幕−安全边距 / 最小尺寸取最大，不拿窗口比屏幕）；舒适线也有**够不着**的时候（正文已压到 `_DIALOG_BODY_MIN` 仍超线）：口径是"正文区已在下限 + 整窗不出屏"。
 
 ### 按钮配色的判据：底色必须是调色板的 token，且危险色只有一处定义
 
-"按钮看着不像同一套界面"是**能量出来**的，而且比肉眼看可靠：把窗口建出来，遍历控件树里所有 `CTkButton`，读 `cget("fg_color")` / `cget("text_color")` / `cget("state")`，再把调色板里每个颜色值**反向映射**成 token 名，就能逐条断言。判据四条（`tests/integration/test_gui_styles.py`，**19 个界面 / 152 个按钮**）：
+建窗遍历控件树的 CTkButton，读 `cget("fg_color")` / `("text_color")` / `("state")`，把调色板颜色值反向映射成 token 名逐条断言（`test_gui_styles.py`）。判据：
 
-1. **每个按钮的底色都必须是某个 token**。CustomTkinter 的默认色是一个 `(浅色, 深色)` 对（实测 `['#3B8ED0', '#1F6AA5']`）—— 一旦读到它，就说明这个按钮**从来没被上过色**：它不随主题变、也不在这套配色体系里。本轮就是靠这条抓到"批量导出对话框的取消按钮"的：152 个按钮里只有它一个是这样。
-2. **同一个父容器里至多一个主色按钮**（"一屏只强调一件事"）。按**父容器**分组而不是按窗口：主窗口是多分区窗口，按窗口分组会把正常的主窗口判成违规。
-3. **「取消」「关闭」永远是次色** —— 这两类文案的按钮不许穿主色或危险色。
-4. **危险色（和"软危险色"）的按钮集合必须正好等于登记表**。写成"集合相等"而不是"包含"：少了会红（删除按钮被改成中性色），**多了也会红**（正向操作误穿危险色 —— 评审时点出的就是这么一条，本轮复核确认已满足）。登记表里同时记 `danger_soft`（中性底 + 危险色文字，用在"删除不该比添加更抢眼"的场合）。
-5. **破坏性动作的颜色必须落在"危险色范围"里，而且按回调名判，不看文案**。每个按钮的 `command` 是能读到的（`button.cget("command")` 返回原回调），取它的 `__name__`：名字里带 `delete`/`remove`/`purge`/`erase`/`trash`/`unlink` 就是删除类动作，颜色必须是 `widgets.DESTRUCTIVE_STYLES`（`danger` / `danger_soft`）或禁用态。这条比第 4 条强的地方在于**它拦的是将来**：新加一个删除按钮却上了主色会直接变红，不需要谁记得去维护那张文案表；反过来，第 4 条拦的是"正向操作误穿危险色"（例如确认框里那个**匿名回调**的确认按钮穿危险色 —— 回调是 lambda，第 5 条看不到它，只有第 4 条看得住）。两条互相补位，都留着。
-   两个细节：① 只认**具名**回调，草稿内的行移除（标签行的「删除」用闭包）名字是 `<lambda>` 天然豁免，不会被误判；② 颜色→样式是**反推**出来的（遍历 `BUTTON_STYLES` 与 `button_colors` 对比），所以"这个按钮穿的是哪一档"不靠猜，`widgets` 改了配色定义这里会跟着变。
-   还要有一条**兜底断言**证明这条判据没在空转：把"回调名带删除词"的实测集合与 `_DESTRUCTIVE_HANDLERS` 清单比相等（多了 / 少了都报），实测全应用是 5 个回调 / 6 个按钮。
+1. 每个按钮底色必须是某个 token——读到 CTk 默认色对 `['#3B8ED0','#1F6AA5']` 就说明从没被上过色。
+2. 同一**父容器**里至多一个主色按钮（按父容器分组不是按窗口：主窗口是多分区窗口）。
+3. 「取消」「关闭」永远是次色。
+4. **危险色（含 danger_soft）按钮集合 == 登记表**（集合相等不是包含：少了红、多了也红）。
+5. **破坏性动作颜色按回调名判不看文案**：command 可读（`button.cget("command")` 返回原回调），取 `__name__`，带 delete/remove/purge/erase/trash/unlink 的必须落在 `widgets.DESTRUCTIVE_STYLES` 或禁用态——拦的是将来（新增删除按钮穿主色自动红）；第 4 条补位拦"匿名回调的确认按钮误穿危险色"（lambda 天然豁免第 5 条）。颜色→样式是反推的（遍历 BUTTON_STYLES 与 button_colors 对比），widgets 改配色这里跟着变。兜底：回调名带删除词的实测集合与 `_DESTRUCTIVE_HANDLERS` 比相等。
 
-两个实现上的坑：
-
-- **危险色必须只有一处定义，否则"改一处、坏一片"既查不出来也修不干净。** 收敛前有四份各写一遍（`UiKit._paint_button`、`confirm_dialog` 的内联三元、`manage_window._make_button`、`discovery_page._style_colors`），其中两处的悬停色还不一样（拿主色的深绿去悬停红按钮）。现在只有 `widgets.button_colors(palette, style)` 一份，`paint_button_style()` 供**不登记重绘**的按钮（对话框成对的取消/确认、窗口页脚、行内小按钮）共用；单测再钉住"登记式按钮与就地创建的按钮取到的颜色一致"。咬合验证的做法：把 `button_colors("danger")` 改回主色，5 个破坏性界面 + 1 处"一行两个主色"会**一起**被点名 —— 这正是"只有一处定义"的证据。
-- **模态框在 `wait_window` 的替身里量，非模态弹窗（`info_dialog`）根本不调 `wait_window`，得建完直接量。** 否则那个界面会安静地"一条都没量到"；守卫里"登记表里的每个界面都量到了吗"这条兜底断言就是被它咬出来的（第一次跑就红在「信息框」上）。
-- **"有数据"那一轮会把问题盖住。** 主窗口里调用 `kit.apply(调色板)` 的四处都在动作里（选中游戏 / 切视图 / 切主题），于是**空库首次启动**时顶栏、状态栏、页面容器会一直停在 CustomTkinter 的默认灰（实测 `#2b2b2b`），顶栏那三个按钮还是默认蓝（`#1F6AA5`）—— 而 `_load_first_game` 在有游戏时会顺手把颜色刷对，所以**只有空库能看出**（评审那一轮截的全是有数据的图，因此一直没暴露）。判据因此分两条：① 逐个界面量按钮（`_cases`）；② **另建一个空库**量"顶栏/页面容器/状态栏是不是恰好三个调色板色"，并要求树里没有"看得见（宽高 > 1）却穿着主题对色"的控件（零尺寸的占位空标签不算）。
+实现纪律：**危险色只有一处定义**（`widgets.button_colors(palette, style)`；`paint_button_style()` 供不登记重绘的按钮共用；单测钉"登记式与就地创建的按钮取色一致"）。模态框在 `wait_window` 替身里量、非模态弹窗（`info_dialog` 不调 `wait_window`）建完直接量——否则那个界面一条都量不到（兜底断言"登记表每个界面都量到了"）。**空库那一轮别跳过**：主窗口 kit.apply 的调用都在动作里，空库首启时顶栏/状态栏/页面容器停在默认灰、按钮默认蓝，只有空库能看出（有数据时 `_load_first_game` 顺手刷对）——判据分两条：逐界面量按钮 + 另建空库量"顶栏/页面容器/状态栏恰好三个调色板色、树里没有看得见却穿主题对色的控件"。
 
 ### 可用性的判据：禁用必须看起来禁用，忙碌期间不许有"点了没反应"
 
-"这个控件现在没用"是**能量出来**的，比肉眼看可靠：把窗口建出来、把界面驱动到目标状态，遍历控件树里所有 `CTkButton` / `CTkRadioButton` / `CTkCheckBox`，读 `cget("state")`、`cget("fg_color")`、`cget("border_color")`、`cget("text_color_disabled")` 与回调名，就能逐条断言（`tests/integration/test_gui_states.py`，**10 个界面状态**：主窗口详情/主页 × 空闲/忙碌、主页没选中、归档游戏的管理窗口，以及四个有禁用控件的对话框）。四条判据：
+建窗驱动到目标状态，遍历 CTkButton / CTkRadioButton / CTkCheckBox 读 state 与各颜色 cget（`test_gui_states.py`）。四条：
 
-1. **禁用态必须压暗** —— 按钮的底、描边、字色都要换成调色板里的禁用色。只 `configure(state="disabled")` 而不重绘的按钮会留着原来的底色：主色/危险色的按钮被禁用后仍然亮着，用户会一直点它。实测（评审时）这一条一次就量出 **32 处** —— 主窗口 7 个（`恢复到此节点` / `导出游戏` / `立即创建备份` 是主色，`删除备份` 是危险色）与归档游戏的管理窗口 10 个；机制是**那两个窗口没有"按 state 重绘"的落点**（`home_page` / `schedule_window` / `discovery_page` / `activation_page` 都有）。
-2. **单选/复选框的禁用字色必须来自调色板** —— 不给就落到 CustomTkinter 主题里的另一个灰阶（实测 `['gray60', 'gray45']`），与这套界面无关。
-3. **不许有"死了的控件"** —— 可点的按钮必须有回调；单选/复选框必须绑 `variable`（勾了不生效与点了没反应是同一类问题）。
-4. **忙碌期间"会启动长操作"的按钮必须禁用** —— 这些处理器的第一句多是"正在忙就直接返回"，点下去只会什么都不发生。判据**按回调名**而不是文案（与危险色那条同一手法）：新加一个走 `_submit` 的入口却忘了置灰时会**自动**变红。实测这条抓到 `+ 添加游戏`（还是主色）、`导入归档包…`、`批量导出…` 三个入口。
+1. **禁用态必须压暗**（底/描边/字色都换禁用色；只 `configure(state="disabled")` 不重绘的按钮禁用后仍然亮着）。落点：`widgets.paint_button_state(button, palette, style)` + `UiKit.repaint_button()`；**主题重绘也走这条**，否则切主题把禁用按钮画回亮的。
+2. 单选/复选框禁用字色必须来自调色板（不给就落到 CTk 主题的另一个灰阶）。
+3. 不许有"死了的控件"：可点按钮必须有回调；单选/复选必须绑 variable。
+4. **忙碌期间"会启动长操作"的按钮必须禁用**，按**回调名**判不看文案（新增走 `_submit` 的入口忘了置灰自动红）。
 
-还要有一条**兜底断言**证明判据没在空转：清单里登记的每个长操作回调都必须真的在测量里出现过。第一次跑就被它咬出来 —— `_on_export_batch` 写进了清单，但主页那个按钮的回调是 `_request_export_batch`（转交用的），清单当场改正。
-
-实现上只有一处落点：`widgets.paint_button_state(button, palette, style)`（读按钮**当前的** `state`，禁用就 `paint_button_disabled`）+ `UiKit.repaint_button()` 供"把状态改完之后重画一个按钮"。`UiKit` 的主题重绘也走这条路径 —— 否则**切主题会把禁用按钮重新画成亮的**（原来就是这样）。
+兜底：清单里登记的每个长操作回调都必须真的在测量里出现过（防清单对着空白恒绿）。
 
 ### 间距/圆角/字号的判据：页面只许用刻度上的值
 
-"同一个角色在不同页面用了不同的数字"（同样"面板内边距"，主页写 18、设置窗口写 16；同样"卡片圆角"，一处 8 一处 11 一处 12）**能量出来**：把界面模块的源码读成 ast，统计每个 `padx` / `pady` / `corner_radius` / `CTkFont(size=...)` 的取值频次，一眼就能看出哪些数字是"伸手写的"。本轮实测：`padx` 341 处、`pady` 436 处、`corner_radius` 73 处、字号 173 处，其中**不在刻度上的**分别是 93 / 7 / 8 处 —— 这 108 处就是收敛清单。刻度收在 `src/archive_management/ui/metrics.py`（间距、圆角）与 `typography.py`（字号阶梯）：
+把界面模块源码读成 ast，统计 `padx` / `pady` / `corner_radius` / `CTkFont(size=…)` 取值。刻度收在 `src/archive_management/ui/metrics.py`（间距 10 档：12 以内步长 2、以上步长 4）与 `typography.py`（字号 9 档）。守卫是**静态的**（`tests/unit/test_ui_metrics.py`，不启动界面）：① padx/pady 整数必须在间距刻度上；② corner_radius 必须是圆角档位（RADIUS_NONE / RADIUS_PILL / RADIUS_SM / RADIUS_MD / RADIUS_LG）；③ CTkFont(size=…) 必须是字号阶梯；④ **兜底**：扫到的文件数与站点数必须与登记数字相等（刻度模块改名、glob 写错、kwarg 改名都会让"0 处违规"空转）。
 
-- 间距 10 档（0/2/4/6/8/10/12/16/20/24）：12 以内步长 2（控件内部要靠得紧），12 以上步长 4（区块之间要拉开）；
-- 圆角 5 档：`RADIUS_NONE`(0, 整页容器) / `RADIUS_PILL`(4, 高度 2×半径的进度条) / `RADIUS_SM`(6, 内嵌小块) / `RADIUS_MD`(8, 按钮与输入框) / `RADIUS_LG`(10, 卡片与面板)；
-- 字号 9 档（10 角标 / 11 次要 / 12 正文 / 13 强调与卡片标题 / 15 面板小标题 / 16 窗口标题 / 20 英雄名 / 26 页面标题 / 28 占位字母）。
-
-守卫是**静态的**（`tests/unit/test_ui_metrics.py`，读 ast，不启动界面），三条判据 + 一条兜底：
-
-1. `padx` / `pady` 里的每个整数都必须在间距刻度上；
-2. `corner_radius` 必须是圆角档位之一；
-3. `CTkFont(size=...)` 必须是字号阶梯之一；
-4. **兜底**：扫到的文件数与站点数必须与测试里登记的数字相等。
-
-四条都会咬（实测）：临时塞一个 `padx=7` / `pady=9` / `corner_radius=7` / `size=14` 的模块 → 四条判据一起点名（连"扫到几处"也跟着变），删掉即绿；把真实页面里一处的 `pady=2` 改成 7 → 只第 1 条红，且**报出文件名与行号**。兜底那条拦的是另一种失效：刻度模块改名、glob 写错、kwarg 改名都会让"0 处违规"变成空转，登记的数字因此也写进 `metrics.py` 的模块文档里（数字不一致时两边一起改）。
-
-三个实现上的注意：
-
-- **具名常量是允许的出口，但要留注释。** 像"勾选行下面那行提示与复选框文字对齐"这种**量出来**的缩进（24 正文边 + 22 方框宽与间距）没法落在刻度上，写成模块级常量 `_CHECK_HINT_PAD`（守卫只解析字面量，名字看得到、能 grep 到）。允许出口的代价是"藏数字"变得容易，所以兜底那条用"站点数相等"兜住：真把一批数字挪进常量，站点数会跟着掉，测试立刻红。
-- **改值要按角色改，不能取"最近的那个数"。** 18 → 16（面板内边距，与设置/管理/定时窗口看齐）与 18 → 20（对话框按钮行距底，与 22/20/14 那三套里的 20 看齐）是**同一个数字的两种去处**，取最近的数会把不一致原样换个地方。取值理由写在 `metrics.py` 的模块文档里。
-- **收敛是视觉变更，必须重抓截图人工过一遍。** 与前面几轮同一条纪律：重抓一套截图之后逐张看（本轮实测哪些页面/元素动了位，记在当时的逐页评审记录里 —— 那是界面评审的本地材料，已随那次收尾删除）。
+注意三条：**具名常量是允许的出口但要留注释**（量出来的缩进没法落刻度时写成模块级常量；出口的代价由"站点数相等"兜住——把一批数字挪进常量，站点数会掉、测试立刻红）；**改值按角色改不取最近的数**（取值理由写在 metrics.py 模块文档）；**收敛是视觉变更，必须重抓截图人工过一遍**。
 
 ### 卡片/列表行的判据：选中 > 悬停 > 常规，只有一条规则
 
-"可点、可选中"的卡片与列表行在五个地方出现（详情页的备份卡片、主页的列表行与海报卡、发现页的候选/目录行、游戏管理窗口的位置行），它们的"我选中了谁"与"鼠标在哪里"必须用同一套语言，否则同一类控件在不同页面上行为不一样（评审时发现：详情页的卡片有悬停反馈，主页的卡片**根本没有**；管理窗口的选中用另一个只有一处用的 token）。
+可点可选中的卡片与列表行（详情页备份卡片、主页列表行/海报卡、发现页候选/目录行、管理窗口位置行）用同一套语言，收敛到 `widgets.card_surface_colors(palette, selected=…, hovered=…)`：选中 → accent_soft 底+描边（刻意不用实心强调色）；未选中悬停 → card_hover 底+card_border；常规 → card 底+card_border。判据两半（`tests/unit/test_ui_widgets.py` + `tests/integration/test_gui_home.py`）：纯函数四组合 × 两套主题；真驱动 `_set_hover` 看重绘，且断言**卡片与子控件都绑了 `<Enter>`**（只绑卡片，鼠标移到文字上反馈会闪掉）。
 
-规则收敛到 `widgets.card_surface_colors(palette, selected=..., hovered=...)`，三条按优先级：
-
-1. **选中** → `Palette.selection_colors(True)`（`accent_soft` 底 + `accent_soft_border` 描边）—— 刻意不用主按钮那种实心强调色；
-2. **未选中但悬停** → `card_hover` 底 + `card_border` 描边；
-3. **常规** → `card` 底 + `card_border` 描边。
-
-判据两条，各钉一半（`tests/unit/test_ui_widgets.py` + `tests/integration/test_gui_home.py`）：
-
-- **纯函数**：四种组合（选中/悬停/常规/选中+悬停）的取值，两套主题都验；
-- **接线**：主页上真驱动 `_set_hover(id)` 看有没有重绘（列表行与海报卡各一次），并断言**卡片与它的子控件都绑了 `<Enter>`** —— 只绑在卡片上时，鼠标移到文字上反馈会闪掉。
-
-两个坑（实测踩出来的）：
-
-- **CustomTkinter 重写了 `bind`，查询式 `widget.bind("<Enter>")` 永远返回 `None`**，真正的绑定落在它内部的 canvas 上。要断言"接线接上了"得读 `widget._canvas.bind("<Enter>")`（测试里的 `_binds_enter()` 就是这一行）。
-- **悬停是高频交互，不能顺手写成全量重绘**：主页与详情页都只重绘受影响的**两张**（前一张 + 新的一张），并把 `_hover` 在列表重建时清掉 —— 否则它会指向已销毁的卡片（详情页那处踩过 `TclError: bad window path name`）。
-
-悬停用例还有两条**环境差异**要防：① **列表重建会把 `_hover` 复位**（`_render_games` 里就是显式清掉的），而主页的延后重排正好会在 `_pump()` 里跑起来 —— CI 上实测"刚设的悬停又被清掉"；所以 `_set_hover(id)` 之后**立刻读**（CTk 的 `configure` 当场生效，不需要 pump）。② CI 上鼠标可能**正好压在卡片上**（真 `<Enter>` 会把它提亮成 `card_hover`），所以量"其余卡片是常规底色"之前要显式 `_set_hover(None)` 再读。两条都别靠"时序恰好对我有利"。
+两个坑：**CustomTkinter 重写了 bind，查询式 `widget.bind("<Enter>")` 永远返回 None**，真绑定在内部 canvas 上——断言接线要读 `widget._canvas.bind("<Enter>")`。**悬停不能顺手写成全量重绘**：只重绘受影响的两张并把 `_hover` 在列表重建时清掉（否则指向已销毁卡片，`bad window path name`）。环境差异两条：`_set_hover(id)` 后**立刻读**（延后重排会把 `_hover` 复位；CTk 的 configure 当场生效不用 pump）；量"其余卡片常规底色"前显式 `_set_hover(None)`（CI 上鼠标可能正好压在卡片上）。
 
 ### 计数与时间的判据：一行一页、不带裸数字
 
-"同一类信息在不同页面用同一种呈现"里最容易量化的一条是**计数**：每个页面的底栏只占**一行**，计数写成"名词 + N + 量词"、并列用 `·` 分隔，不许出现"待处理 0"这种裸数字。反例是实测出来的：发现页原来看两行（"候选 20 项 · 待处理 13 项"与"待处理 13 · 已忽略 7"）—— 第二行与第一行、与空状态提示里的数字**说的是同一批数**（评审时发现）。现在三种状态并列在同一行，第二行只留给扫描结果（`_on_scan` 写"扫描了…"）。
-
-守卫做法：`test_gui_discovery.py::test_discovery_panel_hides_already_imported_candidates` 里顺手断言"探测结果页的第二行必须是空"，并把三种计数与 `tr("discovery.counts_candidates", ...)` 逐字对齐。时间统一走 `models.format_stamp`（`2026/09/24 20:11`）、空值统一 `—`，这两条由既有用例兜着（`test_ui_models.py` 的 `format_stamp` 用例、`test_gui_lifecycle.py` 里"空时间戳要用占位符"那条）。
+每个页面底栏只占一行，计数写成"名词 + N + 量词"、并列用 · 分隔，不许裸数字。守卫：`test_gui_discovery.py` 断言"探测结果页第二行必须为空"并与 `tr("discovery.counts_candidates", …)` 逐字对齐。时间统一 `models.format_stamp`（2026/09/24 20:11）、空值统一 —，由 `test_ui_models.py` 与 `test_gui_lifecycle.py` 兜着。
 
 ### 文案完整到达用户的判据（未替换占位符 / 截断可回看 / 空状态）
 
-界面文案的毛病大多能直接量出来，不必只靠人眼，于是把它们分成"静态"与"运行时"两半：
+- **静态（`tests/unit/test_i18n_copy.py`）**：① 遍历 `src/**` 的 `tr(...)` 调用比对字面键占位符与实参名（少传一个界面直接显示 `{name}`；键是变量或 **kwargs 的按"看不出来"跳过——宁可漏报不猜）；② 中文文案里「」引用的面板/按钮名必须在文案表真实存在；③ 中英两份占位符名一致。
+- **运行时（`tests/integration/test_gui_copy_quality.py`）**：驱动界面状态收集每个文本控件实际显示的字，断言无 `{}` `}` 残留、被省略号截掉的必须挂悬停提示、自己折行的末行不许只剩标点、概要卡统计值不许退化成一个符号。
 
-- **静态（`tests/unit/test_i18n_copy.py`）**：① 遍历 `src/**` 里每个 `tr(...)` 调用，把字面键的占位符与实参名逐一对比 —— 少传一个，界面就会直接显示 `{name}` 这种字样；键是变量或调用点用了 `**kwargs` 的**按"看不出来"跳过**（判据宁可漏报也不猜）。② 中文文案里「」引用的面板/按钮名必须在文案表里真实存在（原文、子串，或 `→` 拼出的层级路径）。③ 中英两份的占位符名必须一致。
-- **运行时（`tests/integration/test_gui_copy_quality.py`）**：驱动 19 个界面状态收集每个文本控件**实际显示出来的字**，断言 ① 没有 `{`/`}` 残留；② **被省略号截掉的必须挂悬停提示**（省略号只是记号，看不到下文就等于静默截断）；③ 自己折行的文本末行不许只剩标点；④ 概要卡三条统计值不许退化成一个符号。
-
-两个坑都是实测踩出来的：
-
-1. **"引用名存在吗"不能拿全表做子串比对**：引号里的名字本来就写在它自己那条文案里，用全表比会对**任何**名字都成立（实测：把 `{button}` 换成写死的「恢复到某节点」，守卫照样绿）。判据要比**自己以外的**文案。
-2. **夹具必须真的造出"必须截断"的文本，而且要断言它造出来了**：演示数据的名字都很短，一处省略号都不会有 —— 那时"截断必带提示"这条判据是空的（夹具里因此有一条 `>= 3 处省略号` 的前提断言）。这与"长内容后端"那条是同一条教训。
-
-顺带记一个真 bug 的形状：**进过"按可用性重绘"登记表的控件，如果被渲染重建销毁了，下一轮重绘会去碰一个不存在的控件**（`TclError: bad window path name ...`）。空状态里的按钮正是这种（每次渲染都重建），修法是销毁时摘掉登记 + 重绘时跳过已销毁项。
+两个坑：**"引用名存在吗"不能拿全表做子串比对**（名字本来就写在自己那条文案里，要比"自己以外的"文案）；**夹具必须真的造出必须截断的文本且断言造出来了**（夹具里有 >= 3 处省略号的前提断言）。顺带记一个真 bug 形状：进过"按可用性重绘"登记表的控件被渲染重建销毁后，下一轮重绘会碰不存在的控件（销毁时摘登记 + 重绘时跳过已销毁项）。
 
 ### 对比度判据：三档阈值 + 装饰性描边的边界
 
-"这行字看得清吗"必须能算出数值来，否则只能靠人眼与显示器。算法收在新模块 `ui/contrast.py`（WCAG 2.1 的相对亮度与对比度两条公式，纯算术、不碰 Tk），阈值与逐对登记表在 `tests/unit/test_ui_contrast.py`：
+"这行字看得清吗"必须能算出数值（`ui/contrast.py`：WCAG 2.1 相对亮度与对比度，纯算术不碰 Tk；阈值与逐对登记表在 `tests/unit/test_ui_contrast.py`）：
 
-| 类别                                           | 下限      | 依据                                                         |
-| ---------------------------------------------- | --------- | ------------------------------------------------------------ |
-| 正文 / 次要 / 强调色上的文字                   | **4.5:1** | WCAG 2.1 AA 正文对比度                                       |
-| 非文字状态指示（选中描边、状态点、强调色图标） | **3:1**   | WCAG 2.1 非文字对比度                                        |
-| 输入控件的边界（输入框 / 下拉 / 多行文本框）   | **3:1**   | WCAG 1.4.11：边界承载"这里可以输入"，与装饰性描边不是一类    |
-| 禁用态文字                                     | **2.5:1** | 规范豁免禁用控件；这条是**自设底线**（禁用不该退化成看不见） |
-| 装饰性描边（卡片外框、分隔线）                 | 1.2:1     | 不承担"这块区域是什么"的信息，只拦"被改成与底色同色"         |
+| 对比场景 | 阈值（WCAG AA） | 覆盖的 token（两套主题同表） |
+| --- | --- | --- |
+| 正文 / 表格文字 on 背景 | ≥ 4.5:1 | text / text_soft / text_muted × bg / surface / card |
+| 大字号 / 图标 / 按钮文字 on 按钮底 | ≥ 3:1 | text on primary / secondary / danger 底 |
+| 交互组件描边与状态指示 | ≥ 3:1 | primary / danger 描边 on bg / surface / card |
 
-守卫是**逐对 parametrize** 的（**166 条**：73 对登记色 + 10 对输入边界，各量两套主题），失败信息里直接给出两个 token 名与实测值（`light: accent(#2fae97) on input_bg(#f6f8f9) = 2.59:1 < 3.0:1`），所以"改淡了哪个颜色"一眼就能定位。四条兜底：**每个**文字 token 都必须被判过（新加一个 `text_warning` 却没登记会红）、主要表面色都必须当过一次底色、登记规模钉死（少一对/多一对都要同步改数字）、两套主题的 `accent`/`danger`/`text_muted`/`text_disabled` 不许同值（浅色主题这四类是按对比度重取过的）。同一份用例还请了**第三方库**（`color-contrast`）再算一遍：它独立实现了一遍 WCAG 公式，我们算出的比值必须落在它的 ±0.005 以内（它只返回布尔值，所以把门槛卡在我们的比值上下各 0.005，两个方向它都得答对）。
+守卫逐对 parametrize（两套主题各量一遍），失败信息直接给两个 token 名与实测值。兜底四条：每个文字 token 都必须被判过、主要表面色都当过一次底色、登记规模钉死、两套主题的 accent/danger/text_muted/text_disabled 不许同值。另请第三方库 color-contrast 再算一遍（独立实现 WCAG 公式，比值须落 ±0.005 内）。
 
-四个坑：
-
-- **`.tmp` 探针量出来的表要比守卫的登记表更全**：本轮先量了"文字 × 全部底色"与"非文字配对"两张全表，再决定哪些进判据。第一次量的时候探针引用了已经删掉的 token（`item_active`）直接报错 —— 探针也要跟着调色板走。
-- **别把装饰性描边塞进 3:1**：`card_border` 在卡片上只有 1.45:1（深色 1.54:1）。若强行拉到达标，浅色主题的卡片框会变成一圈深灰。判据的写法是把"不要求"这件事**也登记下来**（1.2:1 下限 + 理由），而不是直接不管它。
-- **“不要求”与“要求”写在不同档位里就要拆 token（2026-10-01 落地）**：装饰性描边 1.2:1 那条判据曾把输入框边界一起盖住了 —— 输入框与面板**共用** `border`，于是“面板不用达 3:1”变成了“输入框也不用”。拆出 `input_border` 后只动输入控件（21 个创建点 + 2 处重绘），面板/卡片那二十多处一律不动。两个量出来的教训：① 候选色要对**全部**表面色量，只量前 5 个会漏掉最差的那个 —— `#7f8892` 看着是 3.19:1，对 `disabled_bg` 只有 **2.996:1**（换成 `#7b848f` = 3.158:1）；② “颜色对了”不等于“边界画出来了”，先量了 CTk 的默认 `border_width`（Entry/ComboBox 都是 **2**，线确实画着）才动手。守住这件事的是两条：读 AST 的完整性守卫（`tests/unit/test_ui_input_border.py`，扫到的输入控件数钉在 21）与切主题后的重绘守卫（`test_gui_theme_repaint` 把输入控件单独挑出来量 —— 通用的“颜色属不属于当前调色板”判据分不出 `border` 与 `input_border`）。
-- **悬停底色也是文字底色，必须一起登记（2026-09-29）**：`SURFACES` 原来有 `card` 却没有 `card_hover`／`item_hover` —— 鼠标划过来时卡片/列表行换的是底色、上面的文字**没跟着变**，于是"悬停态的文字对比度"从来没被算过。登记进去立刻量出一个**既有缺陷**：深色主题的 `card_hover`（`#223657`，比常规卡片**提亮**一档）上 `text_muted` 只有 **3.80:1**、`text_disabled` **2.20:1**（都低于自己定的 4.5/2.5 下限）。卡片上本来就摆着 `text_muted` 的元数据，所以修法是**把悬停改成比常规底色暗一档**（`#152238`：`text_muted` 4.99:1、`text_disabled` 2.89:1），这同时让深色主题与浅色主题、与列表行的 `item_hover` 方向一致（都是"悬停略暗"）—— 提亮那条路在这套调色板下**走不通**：`text_muted` 在常规卡片上已经只有 4.57:1，任何提亮都会把它压到 4.5:1 以下。
+坑：**探针量表要比守卫登记表更全**（探针也要跟着调色板走）；**别把装饰性描边塞进 3:1**（"不要求"也要登记：1.2:1 下限+理由）；**"不要求"与"要求"写在不同档位里就要拆 token**（输入框与面板曾共用 border，拆出 input_border；候选色要对全部表面色量、先量 CTk 默认 border_width 才动手；守卫：`tests/unit/test_ui_input_border.py` 的 AST 完整性守卫 + `test_gui_theme_repaint` 切主题后单挑输入控件量）；**悬停底色也是文字底色必须一起登记**（漏登记时悬停态文字对比度从来没被算过）。
 
 ### 键盘可用性的判据：Tab 走得通、焦点看得见、Esc/回车接得上
 
-CustomTkinter 在这三件事上有**实测出来的缺口**（Tk 8.6 + CTk 6.0）：按钮/单选/复选/开关画在 Canvas 上且内层 `takefocus` 是空串（Tk 对 Canvas 的默认规则是"不进 Tab 链"），聚焦时 `border_color` 与聚焦前**一模一样**，Canvas 也没有空格/回车绑定。补法在 `ui/keyboard.py`（类级补丁，随 `widgets` 导入安装）；守卫 `tests/integration/test_gui_keyboard.py` 逐界面量：
+CTk 的实测缺口（Tk 8.6 + CTk 6.0）：按钮/单选/复选/开关画在 Canvas 上且内层 takefocus 是空串、聚焦时 border_color 不变、Canvas 无空格/回车绑定。补法在 `ui/keyboard.py`（类级补丁，随 widgets 导入安装）；守卫 `tests/integration/test_gui_keyboard.py` 逐界面量：
 
-1. **Tab 链**：每个可交互控件的 `takefocus` 必须让 Tk 能走到它（按钮类必须显式 `1`），禁用态必须**摘出去**（`takefocus=0`）。
-2. **Tab 顺序 = 视觉顺序**：`tk_focusNext` 按窗口的**堆叠顺序**（≈ 创建顺序）走，与 `grid` 的 `row`/`column` 无关，所以"先建归档再建启动、却把启动摆在归档左边"的界面会让 Tab 反着走（12 号实测）。量法是比"创建顺序"与"按 `(row, column)` 排序"，只看真在 Tab 链上的子控件。
-3. **焦点可见**：聚焦时换上**专用于焦点**的环形色（宽度 **3px**）—— 主色/危险色实底按钮还会**换成对应的软底配色**（`widgets.FOCUS_STYLE`：`accent → soft`、`danger → danger_soft`，颜色仍在 `button_colors` 一处定义，由 `keyboard.set_focus_paint` 回插）；失焦时**描边、底色、文字色、悬停色全部原样还原**（存下来再还原，不是猜一个值）。"分得开"是数值判据：环对**聚焦后**的底色 ≥ 3:1（`keyboard.FOCUS_RING_MINIMUM`），由 `tests/unit/test_ui_keyboard.py`（无头）逐样式/逐底色穷举。这条路走了四步，每一步都是量出来的：
-   - **恒用强调色不行**（12 号实测）：实底按钮底色就是强调色，实测 **1.00:1** —— "选中时的边框和部分按钮颜色一样，分不出哪个被选中"。
-   - **从语义色里挑对比最高仍不够**：落到 `text_primary`（深色主题 `#092329`），3.3:1 达标，但凹在实底按钮里像"按钮缩小了一圈"。
-   - **一套主题里单色无解**：普通底色与实底要求的明度相反，合并后最优也只有 **1.87:1（深色）/ 3.67:1（浅色）**；分开后普通底色 **9.50 / 16.87:1**、实底 **6.76 / 4.58:1**。于是定成两个专用 token（`focus_ring` / `focus_ring_on_fill`），取对比更高的那一档（不能取"第一个达标的"：浅色主题的深环在主色实底上恰好 3.1:1、刚过线却看不出）。
-   - **用户第三次实测：实底按钮上那两档仍是"当前主题里不显眼的颜色"**（深色主题用深青黑、浅色主题用近白），而且外圈实现不了（实测 CTk 的 `bg_color` 只在圆角外露出四个角，不是一圈）。**最终做法是换色**：实底按钮聚焦时改成软底 + **那一档抢眼的环色** —— 深色主题 `#8ee6ff` 对软底 **10.5:1**、浅色主题 `#0d1b2a` 对软底 **15:1 以上**，于是**两套主题各自只剩一个抢眼的环色**，文字也仍然是软底上的高对比文字（≥4.5:1，同一条守卫）。肉眼复核材料是当时放大的焦点环对照图（两组主题 × 主色/危险色，各放大 5 倍；界面评审的本地材料，已随那次收尾删除）。
-4. **键盘操作不了的控件不进 Tab 链**：`CTkComboBox` / `CTkOptionMenu` 的值只能用鼠标从列表里选，让 Tab 停在它上面等于告诉用户"这里能按"（12 号实测）。它们既不进链也不画环，见 `keyboard.UNOPERABLE_TYPES`。
-5. **Esc = 取消 / 回车 = 主操作，且只属于抓取式对话框**：Window 级绑定，主操作靠"实测底色等于 `accent`（否则 `danger`）"定位 —— **不能只看样式名**，因为实测有四个对话框的主按钮是就地创建、直接写 `fg_color=palette.accent` 的。常驻工作窗口（设置、定时任务）调 `_present(..., modal=False)`：不许绑这两个键、也不许自动定焦 —— 实测设置窗口按 Esc 直接把窗口关了（用户要的是"退出快捷键录制"）、按回车触发了"切换主题"、一打开就把焦点定在"界面字号"下拉框上。
-6. **空格按下焦点所在的按钮**；输入框里回车提交（输入框自己的绑定先处理并 `break`，不会重复提交）。
-7. **切主题之后不许留下另一套调色板的颜色**（`tests/integration/test_gui_theme_repaint.py`，4 条）：判据是"窗口里每个控件的颜色都必须来自**当前**调色板"，两条兜底 —— 两套调色板**没有共用颜色**（否则这条分不出新旧）、被豁免的封面占位色调**不与调色板撞色**（否则豁免会掩盖旧色）。两条量法：① 设置窗口（底色全部出自调色板，`text_color`/`fg_color`/`border_color`/`progress_color` 四样都判）；② **整机真实路径** —— 调 `ArchiveApp._on_toggle_theme()` 来回切两次，量整棵主窗口（只判文字色，因为主窗口里有**故意与主题无关**的封面占位色调 `_TONE_COLORS`：orange `#d15b3e` / blue `#405685` / green `#3b806e`，它们代表"这张卡片没有图"）。12 号实测：「全局保存」「创建分支」这两行动作名是**匿名创建**的标签，从没进 `restyle` 的重绘表，切主题后留着 `#d2dbea`（深色主题的 `text_body`）落在浅色面板上 —— 就是用户说的"不易察觉的淡灰"。**咬合验证**：去掉行标签重绘 → 报出那两个 `CTkLabel`；去掉 `_home_page.apply_palette(p)` → 整机那条一次报出 20 多条（`#d2dbea`/`#8291aa`/`#d97852`/`#f4f7fb` 等深色主题的旧色留在浅色界面上）。
-8. **兜底**：每个界面都必须真的量到控件与可用的主按钮，否则上面几条会静默空转。
+1. **Tab 链**：可交互控件 takefocus 让 Tk 走得到（按钮类显式 1），禁用态摘出去（0）。
+2. **Tab 顺序 = 视觉顺序**：`tk_focusNext` 按堆叠顺序（≈创建顺序）走，与 grid row/column 无关——量法是比"创建顺序"与"按 (row, column) 排序"。
+3. **焦点可见**：聚焦换专用环形色（3px）；主色/危险色实底换对应软底（`widgets.FOCUS_STYLE`，颜色仍在 button_colors 一处定义）；失焦时描边/底/字/悬停全部原样还原（存下来再还原）。"分得开"是数值判据：环对聚焦后底色 ≥ 3:1（`keyboard.FOCUS_RING_MINIMUM`，无头守卫 `tests/unit/test_ui_keyboard.py`）。
 
-七个坑（都是量出来的）：
+坑（挑关键的）：**合成 `<FocusIn>` 不触发绑定**（要量焦点环用真焦点：focus_force 拿、挪走拿 FocusOut；旧实现恒用强调色 + 断言只比"≠ accent"就是假绿）；**失焦还原要先失焦取基准**（对话框打开即定焦，不先放下会得到颠倒基准）；**焦点黑洞控件必须真的被映射且在可见区内**；**不要对窗口本身 focus_force()**（顶掉子控件焦点）；**不要用 tk_focusNext 当量具**（同进程反复建/销窗口时偶发加载不了 Tcl/Tk 库数据）；**类级补丁要对替身控件宽容**（能力探测 + suppress，遇没有该能力的对象安静跳过，否则弄红别人的单测）；**CTkRadioButton 没有可读 border_width、CTkOptionMenu 两样都没有**（`keyboard._border_options` 能读几样读几样；塞同一个 suppress 被中断会 KeyError，描边永远停在焦点环色上）。
 
-- **量键盘之前必须先让窗口真的显示出来**：CTk 的标题栏着色会先隐藏窗口、再靠一个 **5ms 定时器**把它显示回来，而测试里的 `update()` 不会等那个定时器 —— 窗口停在 `withdrawn` 时子控件收不到按键、`focus_set` 也不生效（实测 `focus_lastfor()` 仍停在窗口本身）。
-- **不要对窗口本身 `focus_force()`**：那会把子控件的焦点顶掉（焦点回到窗口上）。要量子控件就只 `focus_set` / `focus_force` 它自己。
-- **`event_generate("<FocusIn>")` 不会触发绑定**：合成事件对焦点事件无效（实测：回调次数 0，`border_color` 纹丝不动）。**上一轮就是这么假绿的** —— 旧实现恒用强调色、而断言恰好只比了"≠ accent"，于是一条从来没画过环的实现也能过。要量焦点环就用**真焦点**：`inner.focus_force()` 拿焦点、再把焦点挪给另一个控件拿 `FocusOut`。
-- **"失焦还原"要先失焦取基准**：对话框打开时会定焦到第一个输入框，那一刻它已经戴着环；不先把它放下就取基准，会得到"聚焦前 = 环色"这种颠倒的基准（实测 4 条假红全是这个原因）。
-- **"焦点黑洞"控件必须真的被映射出来、且落在可见区域内**：没摆进布局的控件 `focus_force` 之后上一个控件收不到 `FocusOut`；固定尺寸窗口里摆在 `row=999` 会超出客户区，同样吃不到焦点。摆放管理器还要跟随窗口已有的那种（对话框是 `pack`、工作窗口是 `grid`，混用 Tk 直接报错）。抓取式窗口里连映射好的 sink 也可能不生效 —— 兜底再给窗口一次 `focus_force()`。
-- **不要用 `tk_focusNext` 当量具**：它由 Tcl 侧 `tk.tcl` 定义，而同进程反复建/销窗口时本机偶发"加载不了 Tcl/Tk 库数据"（见 `tests/gui_support.py` 的 `TK_RETRY_REASON`），那时它直接报 `invalid command name "tk_focusNext"`。真实 Tab 链只在探针里验过一次（修前 2 个输入框 → 修后 40+ 个控件）。
-- **类级补丁必须对"替身控件"宽容**：单元测试用 `_FakeCtkWidget` 替换 `ctk` 的控件类，它们连 `winfo_toplevel` 都没有。接线是**增强**，遇到没有该能力的对象要安静跳过（能力探测 + `suppress`），否则会把别人的单测弄红（本轮实测有 78 条单测因为这一条红过）。
+### 焦点态不许改变"这颗按钮是什么按钮"
 
-一条产品侧的实测细节：**`CTkRadioButton` 没有可读的 `border_width`**（`cget` 抛 `ValueError`），`CTkOptionMenu` 两样都没有。所以"记住原描边"要能读几样读几样（`keyboard._border_options`）；原实现把两样塞进同一个 `suppress`，被读到一半的异常中断后就只存下了 `border_color`，失焦时 `pop("border_width")` 直接 `KeyError` —— 表现是"描边永远停在焦点环的颜色上"。`tests/unit/test_ui_keyboard.py` 用严格的假控件（不支持的选项抛 `ValueError`）复现这条。
+聚焦换色上线后 CI 一次 8 条红，根因一个：**换色把"聚焦态"变成了识别按钮性质的依据**。CI 与本地时序相反（CI 上窗口一建出来定焦就生效，本地常被抢焦）。要点：
 
-### 焦点态不许改变"这颗按钮是什么按钮"（CI 8 条红的复盘）
-
-焦点环第三次返工（实底按钮聚焦时**换色**成软底）上线后 CI 一次报了 **8 条**失败，全部是 GUI 用例，根因只有一个：**换色把"聚焦态"变成了识别按钮性质的依据**。CI 与本地恰好相反：CI 上窗口一建出来定焦就生效（慢 runner 事件循环把 `after_idle` 跑掉了），本地常被别的窗口抢走焦点 —— 于是同一份代码在两个地方量到不同的状态。
-
-- **产品侧是真缺陷，不是量具的问题**：`primary_button()` 靠"实测底色 == `accent`/`danger`"找主按钮，而聚焦后那颗按钮的底色已经变成软底 → 找不到主按钮 → **回车确认直接失效**（CI 实测 `(False, False)`）。修法是给每个接过键盘线的控件记住**没聚焦时的原样**（`make_reachable` 把 `saved` 字典挂到 `widget._focus_saved`），新增 `keyboard.resting_fill(widget)` 作为唯一入口，`_focus_style` 与 `_button_candidates` 都改用"原样里的底色"。判据：`tests/unit/test_ui_keyboard.py` 里"聚焦换色之后还认得出是主按钮"这条，以及 `test_escape_cancels_and_return_confirms`。
-- **量配色的用例量之前必须先失焦**：`test_gui_styles._record` 里补 `_defocus(window)`（给窗口 `focus_force()`，循环到焦点回到窗口为止），否则量到的是"聚焦态" —— 危险色按钮会被记成软危险、主色按钮会被记成"少了一颗"。**咬合验证**：去掉这一步，本地加 CI 时序就能报出 CI 那三条一模一样的错。
-- **量之前要等控件树长稳**：主页有一个延后重排（`_schedule_list_sync`）会在量到一半时**整批换掉**控件。给已经摘下来的控件 `focus_force`，Tk 会把"最后焦点"记下来却**不产生 `FocusIn`** —— 焦点环看起来"没画"（实测本地也能复现，CI 上则是常事）。所以 `_stabilize()`（比控件树形状，最多 8 轮）之后才取控件。
-- **一次量不到不算数，但也绝不放过真缺陷**：界面自己在跑（忙碌收尾 / 延后重排）时，实测偶尔某一次聚焦就是没生效。`_focus_and_read()` 于是**试三次**、每次读得尽量早（中间不再多跑事件循环），而"三次都画不出来"还分两种情况：拿一个**对照控件**（那个 1px 的焦点黑洞，它自己也接焦点环）当煤鸟 —— 煤鸟画得上就说明"聚焦→画环"这条路是通的，那就是**真缺陷**（报红）；煤鸟也画不出才是环境（记进 `_UNMEASURED` 并附在失败信息里）。这样既不冤枉实现，也不会把"根本没实现环"当成量不出来。
-- **把 CI 的时序搬回本地的办法**：临时插件包住 `dialogs._present`，在原调用之后再跑 3 轮 `update()`（焦点事件因此会在用例开始测量前就被处理）。靠它把 styles/keyboard 的假红在本地逐条搬回来，修完再跑同一个插件确认全绿，最后删掉插件。
+- **产品侧真缺陷**：靠"实测底色 == accent/danger"找主按钮的实现，聚焦换软底后找不到 → 回车确认失效。修法：make_reachable 把没聚焦时的原样存到 `widget._focus_saved`，`keyboard.resting_fill(widget)` 是唯一入口。
+- **量配色的用例量之前必须先失焦**（`_defocus(window)`），否则量到聚焦态：危险色记成软危险、主色"少了一颗"。
+- **量之前等控件树长稳**（`_stabilize` 比形状最多 8 轮——延后重排会在量到一半时整批换控件，对已摘下控件的 focus_force 有"最后焦点"却无 FocusIn）。
+- **一次量不到不算数，也不放过真缺陷**：`_focus_and_read` 试三次；三次画不出分两种——对照控件（焦点黑洞"煤鸟"，自己也接焦点环）画得上说明路通、是**真缺陷**报红；煤鸟也画不出才是环境（记 `_UNMEASURED` 附在失败信息里）。
+- **把 CI 时序搬回本地的办法**：临时插件包住 `dialogs._present` 再跑 3 轮 `update()`，本地逐条搬回假红、修完确认全绿、删掉插件。
 
 ### 分支图的判据：item 账目 + 几何 + 漫游
 
-分支视图从"卡片流"换成"`Canvas` 图画布"之后，判据也跟着换了两条**确定性数字**：
+- **item 账目**：画布 item 数 == 框 + 连线 + 文字（每框两条）+ 折叠标记（每个有孩子的框一个），与 `canvas.find_all()` 长度一致（渲染基准主判据：400 节点链 = 1998，折叠根后 = 4，`tests/performance/test_backup_scale.py`）。
+- **几何**：最深一层与最右一列不越 scrollregion；父框中心 = 首末孩子中心中点（纯函数穷举，`tests/unit/test_ui_tree_layout.py`）。
+- 交互三条（`tests/integration/test_gui_branch_graph.py`）：**箭头按需显示且"露着哪几条"要量控件本身**（读 `winfo_manager()`，不是 xview()/yview() 的跨度——后者只答"那边还有没有内容"；与按需滚动条同一条纪律）；**拖到框上不能变成选中**（按下先命中测试，松开位移 < 4px 才算点击）；**坐标要换算**（事件给控件坐标、布局给画面坐标，过 canvasx/canvasy）。
 
-- **item 账目**：画布上的 item 数 == 框数 + 连线数 + 文字条数（每框两条）+ **折叠标记数**（每个有孩子的框一个），而且与 `canvas.find_all()` 的长度一致。比"计时"稳，是渲染基准的主判据（400 节点的链 = 400 + 399 + 800 + 399 = 1998；**折叠根**之后 = 1 + 0 + 2 + 1 = 4，见 `tests/performance/test_backup_scale.py`）。
-- **几何**：最深一层的框与最右一列都不越出 `scrollregion`（画得出来还要拖得到）；父框中心 = 首末孩子中心的中点。这两条在**纯函数**里就能穷举（`tests/unit/test_ui_tree_layout.py`），图画布只负责"把坐标变成 item"。
-
-三条与交互有关的判据（`tests/integration/test_gui_branch_graph.py`）：
-
-- **箭头按需显示，而"露着哪几条"要量控件本身**：`xview()`/`yview()` 的跨度只回答"那边还有没有内容"（装得下时实测 `(0.0, 1.0)`），而"现在真的在布局里的是哪几条"必须读 `winfo_manager()`。两件事**必须分开** —— 拿几何当可见性判据的守卫放过了一个真缺陷（见下面 2026-09-28 那节）。它与"按需显示滚动条"是同一条纪律（只是把滚动条换成了箭头）。
-- **拖到框上不能变成选中**：按下时先命中测试（中了走选中、没中才 `scan_mark` 进入平移），松开时位移小于 4px 才算点击。守卫两条：拖空白真的平移；从框上拖走既不选中也不改选中。
-- **坐标要换算**：事件给的是**控件坐标**，布局给的是**画面坐标**，必须先过 `canvasx`/`canvasy` —— 实测漏了这一步之后"拖过画面就点不中框、拖空白反倒选中了别的框"（守卫当场报出来的两个真缺陷之一；另一个是空状态没清画布，隐藏的画布留着上一批框）。
-
-#### 2026-09-28 修补：箭头"再也放不回来"与方向键的 `TypeError`
-
-用户实测报回来的两条都是**真缺陷**，而且各自都有一处"看起来验过了"的假绿：
-
-- **`place()` 无参调用放不回被摘掉的控件**。`_refresh_arrows` 原来用 `button.place()` 把箭头放回来（`place_forget()` 的对称写法），实测它**只是查询当前配置**：`place_forget()` 之后再 `place()`，`winfo_manager()` 仍是空串。于是箭头一旦被收起（装得下时、或建图时画布还没量过尺寸）就再也不出现 —— 而当时那条守卫量的是**几何**，照样全绿。现在 `visible_arrows()` 读 `winfo_manager()`、显示时把落点（模块级 `_ARROW_SPOTS`）再给一遍，并只在状态真的变了才动控件（免得每帧重排）。
-- **按键绑定会把事件对象一起传进来**。`_on_key(arrow)` 是给 `partial` 预填方向用的，但 Tk 回调还会把 `Event` 追在后面 → `TypeError: _on_key() takes 2 positional arguments but 3 were given`；异常发生在 Tk 的回调里，界面上只表现为"按了没反应"，而**直接调 `view._on_key("right")` 的守卫永远量不到它**。现在签名收下 `_event`，并有一条**走真实绑定**的守卫（`canvas.event_generate("<Right>")`；实测合成**按键**会触发绑定 —— 与"`<FocusIn>` 不会"那条正好相反）。
-- **顺带钉住两件容易漏的事**：① `Shift + d` 在 Tk 里的 keysym 是 `D`，`<d>` **收不到**它，所以 WASD 大小写各绑一条（守卫逐个按键断言，含 `<D>`）；② 箭头按钮必须在画布**之后**创建（Tk 的堆叠顺序就是创建顺序，否则会被画布盖住）。
-- **视口变了要重判**：`<Configure>` 触发一次 `_refresh_arrows` —— 首次布局（画布刚被映射）与用户缩放窗口都会改变"装不装得下"，只在滚动/拖动时重判会把箭头留在错的状态上。
-
-#### 2026-09-29 复核：图上文字的"回看"、画布的焦点环、箭头的正面证据
-
-分支图上线后回头核对"前面几轮的证据还成不成立"，图上多出来的三类量测对象补齐了：
-
-- **一个画布里的多个悬停目标，提示得由视图自己管**。`widgets.attach_tooltip` 的触发点是控件自己的 `<Enter>`/`<Leave>`，而鼠标在画布内从框 A 移到框 B **不会**再来一次 `<Enter>` —— 提示会一直挂着 A 的文案（比没有提示更糟）。所以新增 `widgets.HoverTip`：调用方给"文案 + 屏幕坐标"，它自己管建窗/换文案/收起，样式常量（底色/描边/留白/间距）与 `attach_tooltip` 共用同一组，保证全应用的提示长得一样。`tree_view` 在 `set_hovered` 里挂/收，`set_items` 时直接收掉（旧节点的全文不能留着）。判据：被裁的框悬停时 `tip` 里是**完整**标题、没被裁的框与没悬停时都不许挂。
-- **画布的焦点环用 Tk 自带的 `highlightthickness`/`highlightcolor`**。画布是普通 `tkinter.Canvas`、**不在** `keyboard.PATCHED_TYPES` 里（它甚至不是 CTk 控件），所以键盘可用性那套补丁碰不到它；但它的 `takefocus=1` —— Tab 能停在它身上却看不出焦点。改法是给画布 3px 的 highlight 环：`highlightcolor=focus_ring`、`highlightbackground=well`（失焦时与底色同色 = 看不见环），随 `redraw(palette)` 一起画。实测聚焦时画布边缘像素 `#8ee6ff`（= `DARK.focus_ring`）、失焦 `#0c1524`（= `DARK.well`），与"环对底色 ≥ 3:1"（`keyboard.FOCUS_RING_MINIMUM`）一起进守卫。
-- **收起的控件拿不到焦点**（Tk 事实，实测）：`place_forget()` 掉的箭头 `winfo_manager() == ''`、`winfo_ismapped()` 为假，`focus_set()` 之后 `focus_get()` **不是**它；而露出来的箭头这些都成立。于是"箭头真的收起来了"除了读摆放管理器，还能用"焦点给不到它"再钉一次（Tk 的 Tab 遍历同样只走已映射的控件）。反过来也有一个操作上的坑：**合成按键只送给有焦点的控件** —— `inner.event_generate("<space>")` 之前必须先 `inner.focus_set()`，否则回调不会被触发（这条在 `test_gui_keyboard` 里也是同一个写法）。
+实测补过的缺口：箭头在布局变化后不重判（`<Configure>` 触发 `_refresh_arrows`，只在状态真变了时动控件）；按键绑定把 Event 追给回调（签名收下 `_event`，守卫走真实绑定 `event_generate("<Right>")`）；Shift+d 的 keysym 是 `D`（WASD 大小写各绑一条）；箭头按钮要在画布**之后**创建（Tk 堆叠顺序=创建顺序）。一个画布里多个悬停目标时提示由视图自己管（`widgets.HoverTip`：调用方给文案+屏幕坐标，set_hovered 挂/收、set_items 直接收）；画布焦点环用自带 highlightthickness/highlightcolor（不在 keyboard.PATCHED_TYPES 里；环对底色 ≥ 3:1）；**收起的控件拿不到焦点**（place_forget 后 focus_set 无效——"箭头真收起来了"可用"焦点给不到它"再钉一次；反过来合成按键只送给有焦点的控件，event_generate 前先 focus_set）。
 
 ### 折叠/展开的判据：空折叠 == 旧行为、藏起来必须留痕
 
-折叠拆成"纯函数 → 绘制 → 交互"三层，每层都有确定性数字（`tests/unit/test_ui_tree_layout.py`、`tests/integration/test_gui_branch_graph.py`）：
+折叠拆"纯函数 → 绘制 → 交互"三层（`tests/unit/test_ui_tree_layout.py`、`tests/integration/test_gui_branch_graph.py`）：
 
-- **空折叠必须逐字段等于旧结果**（最重要的一条）：不传、传空集合、传一个树里不存在的 id、传一个**叶子** —— 四种输入铺出来的图必须一模一样。既有 10 条几何判据与 6 张视觉基线都建在"现在这套铺法"上，折叠若改变了空集合的结果，它们会一起重标。
-- **折叠 = 子树不参与布局**：宽度只算一个框（3 层扇 440 → 220，实测手算值）、不产出它的出边、高度只看还剩几层；后代数数得对（含间接后代）。藏在**另一个**折叠节点里的折叠不算数（它连标记都画不出来）。
-- **藏起来必须留痕**：折叠框的说明行写 `N 个后代`，藏着**选中项**或**当前节点**（`●`）时各自标出（`含选中` / `含当前`）并把标记变成强调色。判据把"看得见的说明行 + 被裁时的悬停全文"合起来看 —— 否则"字够不够宽"会混进判据里（实测：框宽 168 − 两侧内衬 152px，放不下时间+类型+后代数三件事，所以折叠时说明行**只讲藏了什么**，并把最要紧的那条排在最前面）。
-- **三条命中各干一件事**：标记 → 折叠/展开，框 → 选中，空白 → 平移；按在标记上**既不平移也不选中**，拖走之后松手也不算点击。
-- **折叠不改选中**（反向守卫）：`select` 一个子树里的节点再折叠它，选中必须一点没动 —— 否则"恢复/建分支"会作用到另一个节点上。
-- **折叠后视口对齐到刚点的框**：`scrollregion` 变小会让 Tk 把偏移夹回，不管的话用户会看到图的另一头（守卫断言那个框的中心仍在可见区）。
-- **折叠集合不持久化**：只活在视图内存里，`set_items` 时与现有节点取交集（换游戏/换筛选后旧 id 不会继续压着图）；切视图也不清 —— 守卫各一条。
+- **空折叠必须逐字段等于旧结果**（最重要）：不传 / 空集合 / 不存在的 id / 叶子——四种输入铺出的图一样（既有几何判据与视觉基线都建在现在这套铺法上）。
+- **折叠 = 子树不参与布局**：宽度只算一个框、不产出出边、高度只看剩几层；后代数含间接后代；藏在另一个折叠节点里的折叠不算数。
+- **藏起来必须留痕**：说明行写 N 个后代，藏着选中项或当前节点各自标出（含选中/含当前）并变强调色；判据把"看得见的说明行 + 被裁时的悬停全文"合起来看。
+- 三条命中各干一件事：标记折叠/展开、框选中、空白平移；按标记上既不平移也不选中。
+- **折叠不改选中**（反向守卫）。
+- **折叠后视口对齐到刚点的框**（scrollregion 变小 Tk 会把偏移夹回）。
+- **折叠集合不持久化**：set_items 时与现有节点取交集；切视图不清。
 
-实测踩到的两个坑：① **测试 helper 的坐标换算方向写反**（拿 `canvasx(画面坐标)` 去凑控件坐标）—— 没滚动时两者恰好相等，"点标记折叠"那条一滚动就点空；② **折叠痕迹的判定必须先问"这个框是不是折叠着"**，否则每个有后代的框都会被当成"藏着东西"（子树里总有节点是选中项），展开状态下标记全亮。
+两个坑：测试 helper 的坐标换算方向别写反（没滚动时恰好相等，一滚动就点空）；折叠痕迹判定先问"这个框是不是折叠着"（否则每个有后代的框都被当成藏着东西）。
 
 ### 反馈文案的判据：失败给下一步、结果给去处与计数
 
-长动作的**机制**（忙碌态、取消按钮、`FeedbackKind`）与**文案**是两件事：机制齐全不代表用户看得懂。判据落在文案上（`tests/unit/test_ui_feedback_copy.py`，纯 i18n 数据）：
+机制（忙碌态/取消按钮/FeedbackKind）与文案是两回事，判据落在文案（`tests/unit/test_ui_feedback_copy.py`，纯 i18n 数据）：
 
-- **`error.*` 每一条都要给"下一步"**：两套语言都要命中一个信号词（请 / 重试 / 刷新 / 检查 / 换一个 / try again / first / refresh / check…）。这条拦的是"只把 OS 的 reason 原样弹出来"。
-- **登记的 `result.*` 必须带占位符**：`{file}`/`{path}`（去哪儿了）、`{count}`/`{files}`/`{size}`/`{skipped}`（几条）。"已删除该备份"这种没说删了哪一份的会被点名。
-- **兜底**：没进登记表的 `result.*` 必须在豁免清单里写明理由（新加一条结果文案却没人判它会红）；两套语言的键一一对应；信号词表本身要真的命中全部 `error.*`（表写错会让第一条空转）。
+- **error.* 每条都要给"下一步"**（两套语言都命中信号词：请/重试/刷新/检查/换一个/try again/…）——拦"只把 OS reason 原样弹出"。
+- **登记的 result.* 必须带占位符**（{file}/{path} 去哪儿了、{count}/{files}/{size}/{skipped} 几条）。
+- **兜底**：没进登记表的 result.* 必须在豁免清单写明理由；两套语言键一一对应；信号词表本身要真的命中全部 error.*。
 
 ### 重要功能键的配色索引：按回调名登记"允许的性质"
 
-与破坏性动作同一手法，只是范围扩到"重要功能"：`tests/integration/test_gui_styles.py` 里的 `_IMPORTANT_ACTIONS` 登记**回调名 → 允许的动作性质集合**，实测颜色反推出来的性质必须落在集合里，另外**每个登记项至少要有一条可用态的观察**（禁用态的颜色是禁用色，反推不出本色）。判定不看文案，所以改了文案、挪了位置仍管得住。
-
-两点经验：
-
-- **同一功能会有两个入口、两个档位**：实测 `_on_import_package` / `_request_export_batch` / `_on_branch` 各有两个按钮（页面级主色、卡片内次色），所以登记的是**集合**而不是单一性质 —— 集合要写窄并注明理由，别用它来兜住"随便什么颜色"。
-- **"重要功能"的清单必须能被兜底断言检验**：清单里写了一个实际不存在的回调名（拼错、改名）时，判据会对着一片空白永远是绿的。
+与破坏性动作同一手法扩到"重要功能"：`test_gui_styles.py` 的 `_IMPORTANT_ACTIONS` 登记**回调名 → 允许的性质集合**，反推出的性质必须落在集合里；每个登记项至少一条可用态观察（禁用色反推不出本色）。两点：同一功能会有两个入口两个档位（登记的是集合，写窄并注明理由）；**清单必须能被兜底断言检验**（拼错/改名的回调名对着空白恒绿）。
 
 ### 报告自检与上传（不要跳过）
 
-报告是一套静态站点：用例详情页打开时才去取`data/test-results/<结果 id>.json`。这个目录一旦在传输或解压环节被丢掉，报告就只剩汇总与用例树——界面能看到用例通过与否，点开用例却是空的（生成阶段本身没问题，用同一个 allure 版本本地生成就有这些文件）。
+报告是静态站点：详情页按需 fetch `data/test-results/<id>.json`，这个目录在传输/解压环节被丢掉时报告只剩汇总（点开用例是空的）。所以每个生成报告的作业在上传前跑 `scripts/verify_allure_report.py`：
 
-因此每个生成报告的作业在上传前都要跑 `scripts/verify_allure_report.py`：
+- 检查入口资源（index.html、单个 app-*.js、summary.json、test-results.json、widgets/**/statistic.json、tree.json）；
+- 逐条核对结果索引引用的详情文件存在、条数与 allure-results 一致；
+- 校验用例分组引用的结果 id 都在索引里；
+- `--expect-platforms` 的每个平台环境里都要有**真实用例**（判据 `framework=pytest`，与质量门同一判据）；
+- 传了 `--manifest` 时把"分片自报条数"与最终条数对上（声明的片号都到了、各片自报数 ≤ 结果文件数、报告各平台用例数 ≥ 自报数）。
 
-- 检查入口资源：`index.html`、单个 `app-*.js`、`summary.json`、`test-results.json`、`widgets/**/statistic.json`、`widgets/**/tree.json`；
-- 逐条核对结果索引（`test-results.json` 的 `byId`）引用的详情文件是否存在，并确认条数与 `allure-results` 里的结果文件一致；
-- 校验用例分组（`data/test-env-groups/*.json`）引用的结果 id 都在索引里；
-- `--expect-platforms` 指定的每个平台环境里都要有**真实用例**结果（判据 `framework=pytest`，与质量门那条规则同一个判据）；
-- 传了 `--manifest` 时，还要把"分片自报的条数"与最终条数对上（见下）。
+任一项不过即作业失败且**不上传报告**。自检通过后用 `--archive` 打成单个 `allure-report.tar.gz` 上传（单文件要么完整到达要么报错，不会半损坏）。**平台用例这项是唯一不直接判红的**（continue-on-error，结论由汇总末尾的门禁结论步骤接手）：它是内容问题不是"报告坏了"，拦下来反而拿不到证据。`pytest-report` 传 `--expect-platforms "${{ matrix.platform }}"`（平台来自矩阵不是 `runner.os`——报告都跑在 Ubuntu 上）；汇总传 `Windows,macOS,Linux`。为什么它能发现 `environmentsTested` 发现不了的事：汇总项与平台专属检查都带平台 env，"环境存在"不等于"这个平台测过"；两道都在是有意的（自检能逐平台报数，也不随 CLI 升级静默失效）。
 
-任一项不通过即作业失败，且**不上传报告**（`Upload Allure report` 只在自检成功时执行）；标准输出里的"结果索引 / 详情文件 / 用例分组"三个计数就是排查入口。自检通过后用 `--archive` 把报告打成单个 `allure-report.tar.gz` 上传：单文件要么完整到达、要么直接报错，不会出现"整个目录被悄悄丢掉"的半损坏状态（改动前的 artifact 就踩过一次）。
+Windows runner 控制台是 cp1252，Python 默认按它输出，**打印中文会 UnicodeEncodeError 打断步骤**：工作流最外层设 `PYTHONUTF8=1`，报告脚本自己也会把 stdout 切 UTF-8（取不到 reconfigure 的替身如 capsys 就跳过）。新增向终端打中文的脚本注意这条。
 
-**平台用例这一项是唯一不直接判作业红的**（`continue-on-error: true`，结论由汇总作业末尾的门禁结论步骤接手）：它属于**内容**问题而不是"报告坏了"，而报告正是用来看"哪个平台没数据"的地方 —— 拦下来反而拿不到证据（分片作业全挂时更需要看到报告）。两处接线：
-
-- `pytest-report` 作业传 `--expect-platforms "${{ matrix.platform }}"`（平台来自矩阵，不是 `runner.os` —— 两个平台的报告都跑在 Ubuntu 上），逐平台自查；
-- 汇总作业传 `--expect-platforms Windows,macOS,Linux`，在生成完最终报告之后运行（它不直接判作业红，结论由末尾的门禁结论步骤接手），输出里的 `按平台用例: Windows 1155 用例 + 2 汇总项, ...` 就是"哪个平台只剩汇总项"的直接证据。
-
-为什么它能发现质量门的 `environmentsTested` 发现不了的事：覆盖率/安全汇总项、平台专属的质量检查都带平台的 `env`，所以"环境存在"不等于"这个平台测过"。两道都在（Allure 规则 + 仓库自检）是有意的 —— 后者能逐平台报数，也不会因为 CLI 升级后 `filter` 语义变化而静默失效。已验证（2026-09-21，用真实报告重建的 3493 条结果）：删掉 Linux 的 1166 条用例后，自检报 `这些平台里没有用例结果: Linux (脚本生成的汇总项不算用例; 逐平台: ... Linux: 0 用例 / 3 汇总项)`。**那一次质量门虽然也报了 `environmentsTested`，但不算证据**：当时清单里写的是显示名，所以三个平台**全都**报缺（2026-10-04 复核，见上一节那条“清单里必须写环境 id”）；改成 id 后重做同一实验，只有 Linux 被报缺。
-
-Windows runner 的控制台是 cp1252：Python 默认按该编码输出，**打印中文会直接 `UnicodeEncodeError` 打断步骤**（报告自检在 CI 上踩过）。因此工作流最外层设了 `PYTHONUTF8=1`，两个报告脚本自己也会把标准输出切成 UTF-8（取不到 `reconfigure` 的替身如 pytest `capsys` 就跳过）。新增会向终端打中文的脚本时注意这条。
-
-下载 artifact 后本地核对（`allure-report-final` 是单个 `allure-report.tar.gz`，直接解开即可）：
+本地核对命令：
 
 ```shell
-uv run python scripts/verify_allure_report.py allure-report          # 只自检
-uv run python scripts/verify_allure_report.py allure-report --archive    # 自检并重新打包
+# 报告内容是否完整
+uv run python scripts/verify_allure_report.py allure-report
+# 汇总产物是否含所有平台
 uv run python scripts/verify_allure_report.py allure-report --expect-platforms Windows,macOS,Linux
-uv run python scripts/verify_allure_report.py allure-report --results allure-results --manifest "allure-manifests/*.json"
+# 分片合并后条数是否对上（目录名以片号结尾）
+uv run python scripts/merge_allure_results.py allure-results-shard0 allure-results-shard1 -o allure-results --manifest allure-manifest.json
+uv run python scripts/verify_allure_report.py allure-report --manifest allure-manifest.json
 ```
-
-`--manifest` 的三条判据（都在"内容检查"那一侧，不直接判作业红）：声明必须有的片号都到了、各分片自报的结果数**不超过**结果目录里的结果文件数（超了说明合并之后掉过数据）、报告里每个平台的用例数**不少于**该平台分片自报的结果数。输出里的 `分片产物清单: Linux 725 条结果(2 片), 缺片 1` 就是缺片的直接证据。
 
 ### 失败现场留证（dump + 界面截图）
 
-只在 CI 出现、本地怎么跑都不复现的失败，事后能拿到的往往只有一行 traceback。所以用例失败时会自动把现场挂到**该用例的 Allure 结果**上（`tests/crash_capture.py`）：
+只在 CI 出现、本地不复现的失败，事后只有一行 traceback——所以用例失败时自动把现场挂到该用例的 Allure 结果（`tests/crash_capture.py`）：
 
-- **崩溃现场 dump**：`coredumpy` 把最深一层栈帧的局部变量与对象属性写成 `crash-dumps/<用例>.dump`（在 `.gitignore` 里），附件与摘要都会写明落点。本地打开：`coredumpy load <文件>`（进 pdb），或在 VSCode 里用 coredumpy 扩展右键「Load with coredumpy」；只想知道哪个 dump 是哪条用例，用 `coredumpy peek crash-dumps`。 **报告里只给下载链接**：dump 的附件媒体类型挂的是 `application/octet-stream`（见 `tests/crash_capture.py` 的 `DUMP_MEDIA_TYPE`）—— Allure 对不认识的类型不渲染预览区。以前按 `text/plain` 挂时，它会尝试把整份（实测上兆字节的）JSON 读进预览区渲染，**一打开报告页面就卡死**；换成不认识的类型后附件只提供下载（文件名带 `.dump` 后缀，下载下来可直接 `coredumpy load`）。- **界面截图**：本用例创建的窗口（`tests/gui_support.py` 的登记表）在失败时的画面。Windows 走 `ImageGrab.grab(window=hwnd)` 按**窗口句柄**抓：窗口被别的窗口盖住（全屏游戏、多个用例窗口叠放）也拍得到，也不受显示缩放影响（Tk 报逻辑坐标、按屏幕区域抓拿的是物理像素，缩放不是 100% 时会错位；本次就是用这条修掉的）；Linux 按屏幕区域抓（需要 `DISPLAY`，CI 由 xvfb 提供），macOS 同（需要屏幕录制权限）——抓不到时只在摘要里写一句原因，绝不影响用例结果。
-- **失败现场摘要**：平台 / Python / 提交号 + dump 与截图落点 + 复现命令，让报告里不只有一堆附件。**SQLite 类失败额外给一行错误分类**（如 `SQLITE_NOTADB (26)`）：类名与消息会随平台/版本变 —— 同一次 NOTADB，本机报 `DatabaseError: file is not a database`，而 Windows 上那次真实失败报的是 `OperationalError: unsupported file format` —— 只有 `sqlite_errorname` / `sqlite_errorcode`（Python 3.11+）是稳定的。这一行**同时写进摘要附件与 dump 的描述字段**：本地不带 `--alluredir` 时 dump 是唯一留下来的现场（见下面那段 2026-09-30 的实例）。
+- **崩溃 dump**：coredumpy 写 `crash-dumps/<用例>.dump`（.gitignore 里）。本地打开：`coredumpy load <文件>`（进 pdb）/ VSCode 扩展「Load with coredumpy」/ `coredumpy peek crash-dumps`。**报告里只给下载链接**（附件媒体类型 application/octet-stream——按 text/plain 挂时 Allure 把上兆 JSON 读进预览区，一开报告页就卡死）。
+- **界面截图**：本用例创建的窗口（`gui_support.py` 登记表）失败时的画面。Windows 按窗口句柄 `ImageGrab.grab(window=hwnd)`（被盖住也拍得到、不受显示缩放影响）；Linux/macOS 按屏幕区域（需要 DISPLAY / 屏幕录制权限）。抓不到只在摘要写一句原因，绝不影响用例结果。
+- **失败摘要**：平台/Python/提交号 + 落点 + 复现命令。SQLite 类失败额外一行错误分类（如 `SQLITE_NOTADB (26)`——类名与消息随平台/版本变，只有 `sqlite_errorname`/`errorcode` 稳定），同时写进摘要与 dump 描述（本地不带 `--alluredir` 时 dump 是唯一现场）。
 
-三条纪律写在模块注释里：留证**绝不改变用例结果**（每一步各自兜底，整段编排外面还有一层，出错只打一行日志）、**失败才留证**（通过的用例不产生任何文件）、**有上限**（递归深度默认 5、单次 dump 时限 20s、超过 25 MiB 的 dump 只记落点不挂附件、最多 3 张截图，同一用例只留一次——失败后 teardown 常跟着再报一次错）。参数：`--crash-dump-dir`（默认 `crash-dumps`）与 `--crash-dump-depth`（`0` = 关掉 dump，仍留摘要）。
+三条纪律：留证**绝不改变用例结果**（每步兜底）、**失败才留证**（通过的用例不产生文件）、**有上限**（递归深度默认 5、单次 dump 20s、超 25 MiB 只记落点、最多 3 张截图、同一用例只留一次）。参数 `--crash-dump-dir`（默认 crash-dumps）与 `--crash-dump-depth`（0 = 关掉 dump 仍留摘要）。
 
-**段错误这类硬崩溃留不进报告**（2026-10-03 macOS 实测）：coredumpy 挂在「用例失败的那一刻」，而 SIGSEGV/SIGABRT 直接杀掉进程——钩子没机会跑，pytest-cov 也来不及落盘覆盖率（那一次 macOS 分片的覆盖率因此整片丢失，报告里多出一条 `缺少结论: Coverage report(macOS)`）。所以会话一开始就由 `pytest_configure` 把 `faulthandler` 接到 `crash-dumps/faulthandler.log`（`tests/crash_capture.enable_hard_crash_log`，`--crash-dump-depth=0` 时不接），CI 把整个目录当 artifact 上传并在同一作业里回显进运行日志。代价要清楚：硬崩溃只留得住**线程栈**，没有局部变量——要变量就得先让崩溃变成一次普通失败。`faulthandler.enable` 只接受有真实 `fileno()` 的句柄（想同时抄给 stderr 的包装对象会在 `pytest_configure` 里报错，把会话变成 INTERNALERROR），所以这条留证无论成败都不抛。
+**段错误这类硬崩溃留不进报告**：SIGSEGV/SIGABRT 直接杀进程，钩子没机会跑（pytest-cov 也来不及落盘）。会话一开始由 `pytest_configure` 把 faulthandler 接到 `crash-dumps/faulthandler.log`（`enable_hard_crash_log`），CI 把目录当 artifact 上传并回显进日志。代价：硬崩溃只留得住线程栈没有局部变量；`faulthandler.enable` 只接受有真实 fileno() 的句柄，这条留证无论成败都不抛。
 
-报告侧不需要额外配置：附件由 allure-pytest 写进 `allure-results`，随 `allure-resources-<平台>` artifact 上传，`scripts/verify_allure_report.py` 会把它们一并核对（缺附件即报告不完整）。**dump 里是真实的局部变量**（coredumpy 默认会遮掉像密钥的字符串与 `os.environ` 的值）—— 把报告或 artifact 发给仓库以外的人之前先看一眼附件。
+报告侧不用额外配置（附件随 allure-resources-* 上传，verify_allure_report.py 一并核对）。**dump 里是真实局部变量**（coredumpy 会遮掉像密钥的串与 os.environ 值）——把报告发给仓库外的人之前先看一眼附件。
 
-**作业级崩溃怎么进报告（与用例级留证是两条线）**：进程被信号打死时用例级附件根本没机会写，所以每个作业失败时还会跑一次 `scripts/collect_job_diagnostics.py`（`if: failure()`，判定写进 `$GITHUB_OUTPUT`）：只有**进程级崩溃 / 证据缺失**才上传 `job-diagnostics-<作业>` artifact（普通失败的证据已经在结果与运行日志里，再传一份只是噪音），汇总作业把它们收下来拼成报告首页的《失败现场(兜底)》附件。**列表里的东西必须真的能被找到**：各作业上传的是 `path: job-diagnostics/`，artifact 里装的就是那个目录的**内容**，下载到 `failure-diagnostics/<artifact 名>/` 之后**只有一层**（`<artifact 名>/summary.md`）—— 2026-10-04 的脚本按多一层去找，于是 macOS 分片被内核杀掉那次**白上传**、报告里一条都没有（2026-10-05 从下载的报告里发现；现在两种布局都收，守卫按**真实布局**造样本）。除此之外，每个崩溃作业还会**另写一条 `broken` 结论项**（标题 `作业崩溃: <作业标签>`、环境 = 该作业所在平台、等级 `critical`、`testCategory=diagnostics`）—— 只挂附件的话它不进任何计数、也不能按环境筛，而“这个作业崩过”恰恰是最该被统计的那一类。**没有兜底现场时两样都不写**（附件还会把上一轮留下的那份删掉）：一份永远存在的“失败现场”只会让人以为崩过。**摘要里被截断的现场要能被点着找到**（2026-10-05）：`--full-copy-at` 让截断标记与排查提示写明承载全文的 artifact（如 `crash-dumps-macos-latest-0`）并附上本次运行 artifact 列表页的链接（`<run>/artifacts`——收集步跑在上传之前，单个 artifact 的编号那时还不存在，列表页地址才是稳定的）；faulthandler 日志的摘录还会从尾部捞回崩溃线程（`Current thread`）的栈——只截开头的话看到的全是等在 `threading.wait` 里的旁观线程（那次 584.5 MiB 的日志，开头 4000 字里一个现场线程都没有）。捞回看两个 marker（2026-10-05 的真实形态逼出来的）：`Fatal Python error` 头后面**真跟着** `Current thread` 才用它；否则回退到最后一份用户信号转储的 `Current thread` 块——那一次日志末尾 308 字节的致命头是个空壳（致命路径刚开始转储就又崩了，一个栈都没落盘），有货的是 `register` 的处理器转储后返回、故障指令反复重执行留下的上万份转储里的**最后一份**；顺带修掉一个潜伏死循环（marker 不存在且文件比回搜一块还小时，位置会永远停在 `len(marker)-1` 上）。
+**作业级崩溃是另一条线**：每个作业失败时跑 `scripts/collect_job_diagnostics.py`（if: failure()），只有**进程级崩溃/证据缺失**才上传 `job-diagnostics-<作业>`（普通失败的证据已在结果与日志里），汇总收下拼成首页《失败现场(兜底)》附件 + 每个崩溃作业另写一条 broken 结论（标题"作业崩溃: <标签>"、环境=所在平台、testCategory=diagnostics——只挂附件不进计数也不能按环境筛）。**没有兜底现场时两样都不写**（还删掉上一轮留的）：永远存在的"失败现场"只会让人以为崩过。**摘要里被截断的现场要能点着找到**（`--full-copy-at` 写明承载全文的 artifact 与 run 的 artifact 列表页链接；faulthandler 摘录从尾部捞崩溃线程的 Current thread 栈——只截开头全是等在 threading.wait 的旁观线程）。
 
-**macOS 原生崩溃的根因定位与依赖规避（2026-10-05 两轮实证）**：崩溃不在本仓库代码，而在**解释器自带的 Tcl/Tk**——`uv python install` 装的是 python-build-standalone 构建，它在 macOS 捆绑 **Tcl/Tk 9.0**，UI 用例死在 9.0 的 Aqua 位图绘制 use-after-free 上（`EXC_BAD_ACCESS @0x70`，原生栈 `-[NSCGSContext dealloc] → _invalidate` 一族，Python 栈停在 `test_gui_dropdown.py` 的 `update` 泵）。部署「退出码闸门 + 原地重跑」后的那一轮，重跑**又崩在同一处**——`faulthandler.log` 里两条 `Fatal Python error`、体积翻倍到 1.1 GiB——确定性缺陷，重试救不了。**规避落在依赖版本上**：pytest 作业的 macOS 片不再用 uv 托管解释器，改由 `actions/setup-python@v7` 装 **python.org 官方构建**（actions/python-versions 在 macOS 上对 3.11+ 直接再分发 python.org 的 universal2 安装包，捆绑 **Tcl/Tk 8.6**，无此缺陷），并用作业级 `UV_PYTHON_PREFERENCE=only-system`（其它平台保持默认 `managed`）让 uv 只认这台机器上的解释器、不再下载 standalone。配套三道保险：装完立刻断言 `tkinter.TkVersion < 9`（镜像或上游哪天回到 9.x，当场红，而不是等 UI 分段崩成一串、每轮多攒半个 GiB 的现场）；"重装 uv 解释器"的 tkinter 修复只对非 macOS 生效（python.org 构建不是 uv 装的，没有这味药），macOS 自检失败由专属步骤 `::error::` 响亮报错；`tests/unit/test_ci_workflow.py::test_macos_swaps_the_interpreter_to_dodge_tk_9` 把三件套（only-system、setup-python、Tk 断言步）钉住。
+#### macOS 原生崩溃
 
-**重跑包装降级为「偶发崩溃的通用兜底」（保留，带到期日）**：UI 段的 pytest 外面包了一层 `scripts/run_pytest_with_crash_retry.py`——只有"进程被信号/原生异常杀死"的退出码（SIGTRAP=133 / SIGSEGV=139 这一类，含 Windows 的 0xC0000005 / 0xC0000409）才触发重跑；断言失败、门禁不过都是普通退出码，**一次都不会重跑**，真回归不会被重试稀释或掩盖。重跑前先清掉崩溃那次新写进 `allure-results` 的半套结果（快照之前的一律不动，否则重跑后的报告缺半边、同用例出现两份结论），覆盖率不用清（pytest-cov 只在会话结束才落盘，崩溃那次什么都没写进去，前一段进程的数据完好）。只重跑一次：第二次仍崩就按它的退出码失败，`faulthandler.log` 与 `.ips` 照常由 `if: always()` 的上传步收走；重跑在运行日志里留 `::warning::` 注解、在运行摘要页写一段说明。**这层包装带到期日**（脚本里的 `RETRY_UNTIL`）：过期后直接透传不再重试并打提醒，而 `tests/unit/test_ci_diagnostics.py` 里"窗口没被忘记"的守卫从到期次日起变红——要么移除这层包装（macOS 已从依赖层规避，若其它平台再无偶发崩就用不上了），要么确认仍有值得兜底的偶发崩溃后**明确续期**。
+崩溃不在本仓库代码，在**解释器自带的 Tcl/Tk**：uv python install 装的 python-build-standalone 构建在 macOS 捆绑 Tcl/Tk 9.0，UI 用例死在 9.0 的 Aqua 位图绘制 use-after-free（EXC_BAD_ACCESS，栈停在 `-[NSCGSContext dealloc]` → `_invalidate` 一族）。处置（三层都有守卫）：
 
-**一次真实的偶发就是靠它断的（2026-09-30）**：一条 GUI 用例在整轮全量里红过一次（单跑、整模块连跑两遍都不复现），当时手里只剩一个测试名。事后从 `crash-dumps/` 里那次失败留下的 dump 直接读出根因 —— dump 自带的现场摘要是
+- **从依赖层规避**：pytest 的 macOS 片换成 `setup-python` 的 python.org 构建（自带 8.6）+ `UV_PYTHON_PREFERENCE=only-system`，且自检一步同时断言 `TkVersion < 9`（解释器又带回 9.x 时当场红，提示见这条注释）。
+- **重跑包装降级为「偶发崩溃的通用兜底」（保留，带到期日）**：UI 段的 pytest 外面包一层 `scripts/run_pytest_with_crash_retry.py`——只有"进程被信号/原生异常杀死"的退出码（SIGTRAP=133 / SIGSEGV=139 这一类，含 Windows 的 0xC0000005 / 0xC0000409）才触发重跑；断言失败、门禁不过都是普通退出码，**一次都不会重跑**，真回归不会被重试稀释或掩盖。重跑前先清掉崩溃那次新写进 allure-results 的半套结果（快照之前的一律不动，否则重跑后的报告缺半边、同用例出现两份结论）；覆盖率不用清（pytest-cov 只在会话结束落盘，崩溃那次什么都没写）。只重跑一次：第二次仍崩就按它的退出码失败，faulthandler.log 与 .ips 照常由 if: always() 的上传步收走；重跑在运行日志留 `::warning::` 注解、在运行摘要页写一段说明。**这层包装带到期日**（脚本里的 `RETRY_UNTIL`）：过期后直接透传不再重试并打提醒，`tests/unit/test_ci_diagnostics.py` 里"窗口没被忘记"的守卫从到期次日起变红——要么移除这层包装，要么确认仍有值得兜底的偶发崩溃后**明确续期**。
 
-```text
-tests/integration/test_gui_buttons.py::test_discovery_default_filter_is_pending_with_filter_aware_empty_state [call]
-OperationalError: unsupported file format
-```
-
-`coredumpy load <文件>` 的 `w` 给出栈：最深一帧是 `MonitoredDirectoryRepository.list_all()` 的 `connection.execute(`，异常穿过 `_on_scan` 的 `except ArchiveManagementError`（没被接住）冒到用例。所以这是**环境级偶发**（临时 SQLite 文件在那一刻被读成非 SQLite 内容），**不是**“等得不够”那类时序问题 —— 原本打算“把 `_pump` 换成有界等待”的修法是猜错了方向，因此没做。两条可复用的做法：① **先读现场再动手** —— dump 是**失败当刻**写的，且**写盘**（与有没有 `--alluredir` 无关），`coredumpy peek crash-dumps` 就能找到是哪条用例的；② 本地跑全量最好照 CI 的写法带上 `--alluredir=allure-results`，否则截图与其余附件不落盘（这次只有 dump 留下来）。
+一次真实的偶发就是靠它断的（2026-09-30）：一条 GUI 用例整轮全量里红过一次（单跑、整模块连跑两遍都不复现），手里只剩一个测试名。事后从 crash-dumps 里那次失败留下的 dump 读出根因——`OperationalError: unsupported file format`，栈最深一帧是 `MonitoredDirectoryRepository.list_all()` 的 `connection.execute(`，异常穿过 `_on_scan` 的 `except ArchiveManagementError` 冒到用例：**环境级偶发**（临时 SQLite 文件在那一刻被读成非 SQLite 内容），不是"等得不够"的时序问题。两条可复用的做法：① **先读现场再动手**——dump 是**失败当刻**写的且**写盘**（与有没有 --alluredir 无关），`coredumpy peek crash-dumps` 就能找到是哪条用例的；② 本地跑全量最好照 CI 的写法带上 `--alluredir=allure-results`，否则截图与其余附件不落盘。
 
 ### 超时留证（线程栈 + 覆盖率 + dump + 一条结论）
 
-`--timeout` 用的是 `thread` 方式（见 `pyproject.toml` 的 addopts），上游在这条路上的收尾是"打印各线程栈，然后
-`os._exit(1)`"—— 而 `os._exit` **跳过整条 `atexit`**，于是正好丢掉两样最想要的：进程收尾时才落盘的**覆盖率
-数据**（那一片会整个消失，报告只能报"缺片"，而"缺片的原因是超时"在报告里看不到），以及挂在
-`pytest_runtest_makereport` 上的**失败现场**（`os._exit` 让 pytest 来不及产出那份 report，`coredumpy`
-因此一点现场都拿不到 —— 而卡死正是最需要现场的那类失败）。`tests/timeout_guard.py` 借 pytest-timeout
-自己的扩展点（`pytest_timeout_set_timer` / `pytest_timeout_cancel_timer`，钩子由 `tests/conftest.py` 挂上）
-接替了这条路径，**只在 `thread` 模式**（`signal` 模式是抛异常、走正常收尾，原样交给上游）：
+`--timeout` 用 thread 方式，上游收尾是"打印线程栈后 `os._exit(1)`"——跳过整条 atexit，正好丢掉最想要的两样：收尾才落盘的覆盖率数据与挂在 `pytest_runtest_makereport` 上的失败现场。`tests/timeout_guard.py` 借 pytest-timeout 的扩展点（`pytest_timeout_set_timer` / `cancel_timer`，钩子由 conftest 挂上）接管这条路径（只在 thread 模式；signal 模式抛异常走正常收尾，原样交给上游）：
 
 ```text
-倒出用例至今的输出/日志 → 线程栈 → 覆盖率存盘 → 抓主线程那一帧的 coredumpy dump
-  → 写一条 Allure 结论（栈与 dump 都是附件）→ 冲干净输出 → os._exit(1)
+倒出用例至今的输出/日志 → 线程栈 → 覆盖率存盘 → 主线程帧的 coredumpy dump
+  → 写一条 Allure 结论（栈与 dump 是附件）→ 冲干净输出 → os._exit(1)
 ```
 
-四个实操要点：① 结论走**终端写入器**而不是 `print`（pytest 捕获 stdout，而 `os._exit` 跳过收尾，会把缓冲区
-一起丢掉）；② **先倒出捕获的内容**（上游的 `timeout_timer` 会 `suspend_global_capture()` + `read_global_capture()`
-把用例至今的 stdout/stderr/日志打到终端，接管之后这步得自己补上）—— 「卡死之前程序自己打了什么」往往比栈更能
-说明问题；③ 覆盖率控制器在 pytest-cov 里挂在**私有插件名 `_cov`** 上，Allure 结果目录的选项 `dest` 是
-`allure_report_dir` —— 猜错这两个名字都只会"静静地什么也不写"；④ dump 只在 ≤ 25 MiB 时挂进报告
-（理由同上面的失败留证：媒体类型用 Allure 不认识的类型，只给下载链接）。
-
-报告里长这样：一条 `broken` 结论（标题 `超时留证: <用例>`，归到当前平台的环境、严重等级 `critical`），
-附件里是当时各线程的栈与那个 dump。本地拿 dump 直接 `coredumpy load` 就能回到卡住的那一行；不带
-`--alluredir` 时它也在 `crash-dumps/<用例>_timeout.dump`。这条结论**故意不写** `framework` / `testCategory`
-标签：原生质量门那条"每个平台的 pytest 用例必须全绿"不该被它改变口径。
-
-留证**不改变结局**：任何一步失败都只变成结论里的一行说明，最后照样以 1 退出（超时本来就不该被"想写证据"
-拖住）。守卫在 `tests/unit/test_timeout_guard.py`，其中两条是接线守卫：钩子必须真挂在 `tests/conftest.py`
-上、`pyproject.toml` 里必须仍然是 `--timeout-method=thread`（方式一改成 `signal`，这里的接管就永远不会生效，
-而"超时后什么都没有"的老问题会静默回来）。
+要点：结论走**终端写入器**不走 print（pytest 捕获 stdout，`os._exit` 跳过收尾会把缓冲区一起丢）；**先倒出捕获内容**（"卡死之前程序自己打了什么"往往比栈更能说明问题）；覆盖率控制器挂在 pytest-cov 私有插件名 `_cov`、Allure 目录选项叫 `allure_report_dir`（猜错只会静默不写）；dump 超 25 MiB 只记落点。报告里是一条 broken 结论（标题"超时留证: <用例>"、critical），**故意不写 framework/testCategory 标签**（不该改变质量门口径）。留证不改变结局：最后照样以 1 退出（超时本来就不该被"想写证据"拖住）。守卫 `tests/unit/test_timeout_guard.py`，其中两条是接线守卫：钩子必须真挂在 `tests/conftest.py` 上、`pyproject.toml` 里必须仍然是 `--timeout-method=thread`（改成 signal，接管就永远不会生效，"超时后什么都没有"的老问题会静默回来）。
 
 ### 分片执行与结果合并
 
-套件变长后，CI 的墙钟时间几乎全压在 pytest 上（2026-09 实测：Windows 298s / macOS 260s / Linux 132s，整次工作流约 9 分钟）。现在每个平台把用例拆成几片并行跑（Linux 3 片、Windows 2 片、macOS 1 片 —— macOS 按 ×10 计价，所以少开片省额度），再由 `pytest-report` 把各片结果合并成一份——墙钟时间只取决于最慢的那一片。
+每个平台把用例拆成几片并行跑（Linux 3 片、Windows 2 片、macOS 1 片），再由 `pytest-report` 把各片结果合并成一份——墙钟时间只取决于最慢的那一片。
 
-- **分片规则**在 `tests/sharding.py`：权重**三级取值**——每条用例的实测耗时（`tests/durations.json`）优先，没有实测的退回目录经验权重（集成 2s、安全 0.6s、单元 0.05s，未知目录 0.3s），再“最慢的优先”贪心装箱（LPT）。实测值是必须的：同一模块内单条用例能差 8 倍（2026-10-07 实测 `test_gui_home.py`：1.5s~12.1s），只按目录单价装箱等于按**条数**装箱，慢用例会堆在同一片；纯单价时代实测三片 71s / 81s / 81s（理想 77s）。数据一条命令刷新：`uv run python scripts/run_tests_local.py -- --record-durations=tests/durations.json`（双片各记一份、结束后自动合并，重叠取中位数；记录/加载/合并的约定与失败形态见 `tests/durations.py`，守卫在 `tests/unit/test_durations.py`）。
+- **分片规则**（`tests/sharding.py`）：权重**三级取值**——每条用例的实测耗时（`tests/durations.json`）优先，没有实测的退回目录经验权重（集成 2s、安全 0.6s、单元 0.05s，未知目录 0.3s），再"最慢的优先"贪心装箱（LPT）。实测值是必须的：同一模块内单条用例能差 8 倍，只按目录单价装箱等于按**条数**装箱，慢用例会堆在同一片。刷新命令见第 7 节；记录/加载/合并的约定在 `tests/durations.py`，守卫 `tests/unit/test_durations.py`。CI 三平台共用一份档案（用的是同次录制内的相对排序）。
 - **参数**是 `--shard-count` / `--shard-index`（默认 `1`/`0` 即不分片），过滤发生在**严重等级过滤之后**：本地 `--min-severity=critical` 选出的子集也能分片跑。三条性质由 `tests/unit/test_sharding.py` 锁住：不重不漏（各片并集 == 全集）、同输入同分片、各片权重接近理想值。
-- **不要用 pytest-xdist 代替分片**：本机实测 `-n 4` 让 `tests/unit` 从 39s 降到 21s，但 `tests/integration` 没有收益（222s），GUI 按钮用例（拆分前的 `test_gui_buttons.py`，现为 `test_gui_*` 系列）反而从 143s 变成 174s，并多出 Tk 初始化失败（`invalid command name "tcl_findLibrary"`）。GUI 用例各自起真实窗口，并行只会互相拖慢；分片是**进程级**并行（CI 上还是**机器级**），不碰这个坑。
-- **本地手动跑全量想快：双进程分片**（2026-10-07 实测）：`uv run python scripts/run_tests_local.py`（等价于开两个终端分别跑 `--shard-count 2 --shard-index 0/1`）。同机两个 pytest 进程各跑一半，全量 **18:28 → 12:27（省 ~36%）**，2726 passed + 9 skipped 与单进程逐数一致；xdist 那个坑在这里不重现的原因是进程数不同 —— 2 个进程挤同一台桌面时 Tk 抖动重试与守卫照常兜得住，`-n 4` 的 4 个 worker 才会互相拖垮。**2 片是甜点，不要贪多**：两进程同时操作真实窗口，桌面合成层互相拖慢（实测单片比独跑多出 ~35% 时长），片数越多干扰越大。脚本会起 N 个进程、等全部结束、按片打印摘要尾行与完整日志路径，pytest 参数用 `--` 透传（如 `-- tests/unit -q`）；片号由脚本注入，透传参数里不要再写 `--shard-count` / `--shard-index`。透传 `--record-durations=tests/durations.json` 会在全量跑的同时刷新分片权重的实测数据（每片各记一份、结束后自动合并，见上面的分片规则）。CI 不走这个脚本 —— 那边是机器级并行。
-- **合并**在 `pytest-report`（每平台一份，但都跑在 Ubuntu 上）：`scripts/merge_allure_results.py` 把各片结果目录搬进一份 `allure-results`（日志逐片给文件数，少一片能一眼看出来）；覆盖率用 `COVERAGE_FILE=.coverage.shard-<片>` 分片写，再 `uv run coverage combine` 合成一份。
-- **报告可以在别的平台上生成**：合并、覆盖率汇总、报告生成与自检全是纯文件操作，与产出数据的机器无关，所以三个平台的报告都在 **Ubuntu** 上生成（Windows/macOS runner 要按 2/10 倍计价，而结论完全一样；顺带那批 pwsh 分支也不用维护了）。"结论算哪个平台的"因此改由矩阵参数决定（`--platform` / `--expect-platforms`），**不能再看 `runner.os`** —— 那几台机器都是 Linux。守卫 `test_report_job_does_not_depend_on_the_host_platform` 盯着这一点。
-- **跨平台合并覆盖率数据靠 `relative_files = true`**：数据里记的是**相对工作目录**的文件名（各平台的作业与报告作业都从仓库根跑），Windows 记下的是 `src\archive_management\app.py`，`coverage combine` 会把分隔符换成本机的那一种并归一到真实文件；覆盖率数字与平台无关，只有"哪台机器产的"不同。少了这个设置会变成"合并成功但一个文件都对不上"（报告空掉，而且只在 Linux 上才暴露），所以 `tests/unit/test_test_config.py` 造一份反斜杠形式的数据真跑一次 combine。注意数据必须**按平台分开**合并与判门槛（两个平台的数据混进同一个数据文件，某个平台掉了一半数据也看不出来）。
-- **产物清单（`--manifest`）是"少一片"的唯一判据**：少一片时合并照常成功，报告只是安静地少一部分用例 —— 环境、通过率、格式自检、甚至 Allure 原生质量门的 `environmentsTested` 全都看不出来（2026-09-21 实测：删掉 Linux 的一整片 382 条用例后，质量门 `exit 0`）。所以合并时同时写一份 JSON：逐分片的文件数与**结果**条数、合并合计、以及 `--expect-shards 0,1,2` 声明必须有而实际没找到的片号。它随 `allure-resources-<平台>` 上传，汇总作业收集成 `allure-manifests/*.json`，由 `scripts/verify_allure_report.py --manifest` 与最终条数对齐（见第 6 节的自检那段）。清单给的三个数分别是：各分片自报的结果数、`allure-results` 里实际的结果文件数、报告里各平台的用例数。
-- **平台专属代码只在别的平台被排除**（`# platform: windows - 原因` + `scripts/coverage_platform.py`）：注册表探测、`fcntl`、`pmset` 这类**只可能**在自己平台上执行的块，按平台判覆盖率时在别的平台永远是"未覆盖" ⇒ 单平台 100% 从算术上就不可能；用 `# pragma: no cover` 整块删掉又太粗暴（它自己那个平台上的统计也一起没了）。现在的做法是：源码里写 `# platform: <平台...> - 原因`，测试会话开始时由 `tests/conftest.py`（**只对 `coverage report` / `coverage xml` 这类命令行生效**；`pytest --cov` 那条路上不生效 —— pytest-cov 在导入根 conftest **之前**就构造好了 Coverage 对象，那时 `COVERAGE_RCFILE` 还没设。2026-10-06 实测：规则写对了也一条不命中，而 `coverage run -m pytest` + `coverage report` 拿同一份数据立刻生效，缺行 11 → 8。所以平台判定必须走命令行那两步，本地 `pytest --cov` 看到的是合并口径）按当前平台生成一份覆盖率配置 —— 把 `pyproject.toml` 的 `[tool.coverage.*]` 原样派生过来，再追加"排除掉打给别的平台的标记行"的正则，并用 `COVERAGE_RCFILE` 交给 coverage（`exclude_also` 这类项在 coverage 里是**替换**不是合并，漏掉 `branch`/`source`/`fail_under` 就会让数字变成另一回事）。两种口径各归各位：`coverage combine`/`report` 那些步骤不导入 conftest，用的是 `pyproject.toml` 的基线配置（不做平台排除）⇒ **合并口径**仍是三平台并集；CI 的报告作业在合并之后、判定之前用 `scripts/coverage_platform.py write --platform <展示名>` 生成同一份配置（导进 `GITHUB_ENV`，判门槛/出 XML/挂结论三步共用）⇒ **单平台数字**只统计自己的行。标记的写法、平台名与原因下限只有一份（那个脚本里），守卫在 `tests/unit/test_coverage_platform.py`，并会与 `pragma` 一起列进报告首页的豁免附件。**它只排除“标记所在的那一行”**（2026-10-06 实测）：标记落在多行 `if (...)` 的 `):` 上时，块体照样被计成缺口，所以“别的平台走不到、但只是权限/能力差异”的分支不该用它 —— 把平台判定换成**可替换的谓词**，再写一条三平台都能跑的用例（`restore._copy_tree` 的符号链接分支、`platform_scan` 的 `winreg` 导入降级，两处原先各挂一个标记，就是这么改掉的）。改完之后源码里**一处平台标记都不剩**，机制与它的守卫都保留着，只是眼下没有豁免对象。
-- **门槛是 100%**（2026-10-06 起）：`pyproject.toml` 的 `[tool.coverage.report] fail_under` 与汇总脚本里的 `COVERAGE_THRESHOLD` 必须同时改（守卫 `test_coverage_fail_under_matches_pyproject` 盯着两处一致），所以报告里“是否达标”这一句没有第二种说法。能到这个数字的前提，是每一处“确实够不着”的行都写了**带原因的豁免**（见上面那段“有意不统计的覆盖”），而那些豁免本身的写法与理由也由守卫管着（写法不规范 = 静默失效，原因太短或写“待补” = 等于没写）。三平台各自都能到 100%：Windows 专属的路径（注册表探测）与 POSIX 专属的路径（符号链接、`winreg` 缺失）都靠**注入替身**在别的平台上跑到了 —— 不能跑的用例（真建符号链接）不算覆盖，所以都在旁边补了替身版。
-- **覆盖率门槛在合并后判, 但判定不落在合并作业的成败上**：单片覆盖率天生偏低，所以分片作业用 `--cov-report=`（关掉报告）与 `--cov-fail-under=0`（关掉门槛），合并后再看总覆盖率。合并作业里那一步（`uv run coverage report --show-missing`，阈值取 pyproject 的 `[tool.coverage.report] fail_under`）**只把门槛与缺行清单印进日志**（`continue-on-error: true`）：覆盖率是对**结果**的判定，让它以非 0 退出会把合并作业弄红，而那个红与“某一片没上传产物”长得一模一样 —— 作业状态上看不出真相是哪一种（用户 2026-10-05：这一步只该关心“用例是否缺失、合并报告是否失败”）。判定交给两处，一道都没少：报告里的 `Coverage report` 条目在低于门槛时状态就是 `failed`（`scripts/create_allure_coverage.py`），汇总作业的原生质量门（规则集一：不过滤 + `maxFailures: 0`）把它算进去 ⇒ 该红的红在“下结论”那一步。守卫：`tests/unit/test_ci_workflow.py::test_the_report_job_only_judges_missing_pieces`。
-- **缺片的覆盖率数据一概不判门槛**：各片的数据文件名自带片号（`.coverage.shard-<片>`），由 `scripts/collect_coverage_data.py --expect-shards …` 摊平到工作目录并**逐片对数**（两种下载布局都认：`coverage-data-*/` 子目录，或只匹配到一个产物时被下载动作直接解到 `.`）。缺片时脚本非 0 退出，后面的合并 / 判门槛 / 出报告 / 挂结论**全部跳过**（`if: steps.collect-coverage.outcome == 'success'`），再由末尾一步让作业变红。这条规矩来自 2026-09-30 实测的坑：少一片时 `cp coverage-data-*/.coverage.shard-*` 只报一句 `cannot stat`，而 `coverage xml` **自己会合并**剩下那份数据并执行 `fail_under` → 报告里写着"Windows 89.99% 未达标"，把"缺数据"说成了"覆盖率掉了"（同轮的 Linux 97.69% 是正常的）。所以 `coverage xml` 还带 `--fail-under=0`：那一步只产数据、不判门槛（同一个失败不会被报两次，文案也不会把“缺数据”指成“覆盖率掉了”）。守卫：`tests/unit/test_ci_workflow.py::test_ci_judges_the_coverage_only_on_complete_shard_data`。
-- **产物名不变**：`pytest-report` 上传的仍是 `allure-resources-<runner 镜像名>` / `coverage-<runner 镜像名>` / `allure-report-<runner 镜像名>`（名字里带的是哪个平台的**产物**，不是生成它的机器——两台报告作业都在 Ubuntu 上），汇总作业照旧读它们（所以它的 `needs` 里必须有 `pytest-report`，否则会在产物上传完成前开始下载，报告静默地少掉各平台的测试结果）。改名会让各平台报告的历史曲线清零，所以保持不动。
-- **片数按平台给**（Linux 3 片、Windows 2 片）：某平台总时长 ≈ 片数 × 固定开销 + 串行测试时间 T，所以减片省额度、加片省墙钟——便宜的平台多开片，贵的平台少开片。矩阵因此写成 `include` 逐条列（`os × shard` 两个轴表达不了"各平台片数不同"），片号必须从 0 连续编到"片数-1"。片数出现在四处（矩阵条目的 `shard`/`shards`、`--shard-count`、传给 pytest 的 `--shard-index`、报告作业的 `--expect-shards`）：不一致会让**一部分用例静默不跑**或清单声明一个没人跑的片号，所以 `tests/unit/test_sharding.py` 会逐平台校验。
-- **依赖缓存只让片 0 写**（`save-cache: ${{ matrix.shard == 0 }}`）：同一平台的各片算出的 cache key 完全相同，并行保存时只有第一个能抢到，其余片会打印 `Failed to save: Unable to reserve cache ... another job may be creating this cache`（分片上线后三个平台都出现过）。写入者按平台唯一，其余片与其它作业全部 `save-cache: false`（只读复用）—— 守卫会盯住这条不变式。
+- **不要用 pytest-xdist**：GUI 用例各自起真实窗口，并行只会互相拖慢还引出 Tk 初始化失败；分片是进程级（CI 上机器级）并行。
+- **本地全量想快**：`uv run python scripts/run_tests_local.py`（双进程分片，实测省约三分之一墙钟，与单进程逐数一致）。**2 片是甜点不要贪多**（两进程同时操作真实窗口，桌面合成层互相拖慢）。脚本起 N 个进程等全部结束按片打印摘要，pytest 参数用 `--` 透传，片号由脚本注入别再写。
+- **合并**在 `pytest-report`（每平台一份，都在 Ubuntu）：`scripts/merge_allure_results.py` 搬各片结果（日志逐片给文件数）；覆盖率 `COVERAGE_FILE=.coverage.shard-<片>` 分片写再 combine。
+- **报告可在别的平台生成**：合并/汇总/生成/自检全是纯文件操作，三平台报告都在 Ubuntu 生成（Windows/macOS runner 按 2/10 倍计价）；"结论算哪个平台"由矩阵参数决定（`--platform` / `--expect-platforms`），**不能看 runner.os**（守卫 `test_report_job_does_not_depend_on_the_host_platform`）。
+- **跨平台合并覆盖率靠 `relative_files = true`**（各作业都从仓库根跑，combine 把分隔符归一；少了它"合并成功但一个文件都对不上"；守卫造一份反斜杠数据真跑 combine）。数据必须**按平台分开**合并与判门槛。
+- **产物清单 `--manifest` 是"少一片"的唯一判据**：少一片时合并照常成功，报告只是安静少一部分（环境、通过率、格式自检、原生质量门全看不出来）。清单记逐分片文件数与结果条数、合并合计、`--expect-shards` 声明缺了谁；随 allure-resources-* 上传，由 `verify_allure_report.py --manifest` 与最终条数对齐。
+- **平台专属代码只在别的平台被排除**（`# platform: windows - 原因` + `scripts/coverage_platform.py`）：只可能在自己平台执行的块（注册表探测、fcntl、pmset），按平台判覆盖率时别的平台永远"未覆盖"；整块 no cover 又太粗。做法：conftest 只对 `coverage report/xml` 命令行生效（pytest --cov 那条路不生效——pytest-cov 在导入根 conftest 前就构造好 Coverage 对象），按当前平台派生一份配置（原样带过 `[tool.coverage.*]` 再追加排除别的平台标记行的正则；exclude_also 是替换不是合并）；合并口径用 pyproject 基线（三平台并集），单平台数字用 `coverage_platform.py write --platform <展示名>`。**只排除标记所在行**：多行 if 的 `):` 上标记时块体还算缺口——"别的平台走不到但只是权限差异"的分支应换成可替换谓词 + 三平台都能跑的用例（源码里现在一处平台标记都不剩，机制与守卫保留）。守卫 `tests/unit/test_coverage_platform.py`。
+- **门槛 100%**（`pyproject` fail_under 与汇总脚本 COVERAGE_THRESHOLD 两处同改，守卫 `test_coverage_fail_under_matches_pyproject`）。前提是每处够不着的行都有**带原因的豁免**（写法与理由由守卫管）。三平台各自到 100%：平台专属路径靠**注入替身**在别的平台跑到（不能跑的用例不算覆盖，旁边补替身版）。
+- **门槛在合并后判但不落在合并作业成败上**：分片作业 `--cov-report= --cov-fail-under=0`；合并作业那步只印日志（continue-on-error）——让它非 0 退出会把"缺产物"与"覆盖率掉"混成同一种红。判定交给报告的 Coverage report 条目（低于门槛状态即 failed）与原生质量门规则集一。守卫 `test_the_report_job_only_judges_missing_pieces`。
+- **缺片的覆盖率一概不判门槛**：`collect_coverage_data.py --expect-shards` 逐片对数，缺片非 0 退出、后面全部跳过、末尾让作业红（曾经的坑：coverage xml 自己会合并剩下的数据并执行 fail_under，把"缺数据"说成"覆盖率掉了"；xml 那步带 `--fail-under=0`）。守卫 `test_ci_judges_the_coverage_only_on_complete_shard_data`。
+- **产物名不变**（allure-resources-<镜像名> / coverage-<镜像名> / allure-report-<镜像名>——名字带的是哪个平台的产物不是生成机器；改名历史曲线清零）。汇总作业 needs 必须含 pytest-report（否则在产物上传完之前开始下载）。
+- **片数按平台给**（Linux 3 / Windows 2 / macOS 1）：总时长 ≈ 片数×固定开销 + 串行时间，便宜平台多开片贵的少开。片号 0 连续编到片数-1；片数出现在四处（矩阵、--shard-count、--shard-index、--expect-shards），不一致会**静默少跑**（守卫逐平台校验）。
+- **依赖缓存只让片 0 写**（save-cache: `matrix.shard == 0`）：同平台各片 cache key 相同，并行保存只有第一个抢得到，其余打 Failed to save 噪音。
 
 ## 7. 本地生成与查看报告
 
-前置：Allure 3 CLI，与 CI 同一条安装命令（`npm install --global allure@3` —— 钉住版本，3.13~3.17 的质量门会静默放行，见本节末；本地与 CI 的报告目录结构一致，本地报告包可以直接用上一节的自检脚本核对）。`allure-results/`、`allure-report*/`、`.allure/` 都在 `.gitignore` 里，不会进版本库。
+前置：Allure 3 CLI，与 CI 同一条安装命令（`npm install --global allure@3`——3.13~3.17 的质量门会静默放行，见第 6 节）。`allure-results/`、`allure-report*/`、`.allure/` 都在 .gitignore。
 
 ```shell
-# 1) 跑本地测试并产出 Allure 结果(目录名与 CI 一致, 后续命令可直接复用)
-uv run pytest --alluredir=allure-results
-
-# 2) 由结果生成静态报告(**先删掉旧报告**: 目录已存在时新报告会被写进
-#    allure-report/awesome/ 而顶层留下一份旧的 —— 见下面第 3 个坑)
-rm -rf allure-report
-allure generate allure-results --output allure-report
-
-# 3) 生成后直接打开浏览器(等价于 generate 之后再 open; 同样要先删掉旧报告)
-rm -rf allure-report
-allure generate allure-results --output allure-report --open
-
-# 4) 打开已经生成好的报告(端口用 allurerc.mjs 里的默认值 8080; 冲突时加 `--port 8081`)
-allure open allure-report
-
-# 5) 一步到位: 直接从结果目录生成并打开(不落地产出报告目录)
-allure open allure-results
+# 1. 跑一遍带 Allure 结果目录（必须带，否则截图与其余附件不落盘）
+uv run pytest tests/unit tests/integration --alluredir=allure-results
+# 2. 生成报告（在仓库根执行, allurerc.mjs 才会被读到）
+uv run python scripts/create_allure_summary.py --allure-results allure-results
+npx allure@3 generate allure-results --config allurerc.mjs --clean --output allure-report
+# 3. 自检
+uv run python scripts/verify_allure_report.py allure-report
+# 4. 起服务看（file:// 会被跨域拦掉）
+npx allure@3 open allure-report --port 8080
 ```
 
-报告的标题、界面语言与默认端口都在仓库根的 `allurerc.mjs` 里（`name` / `plugins.awesome.options.reportLanguage` / `port`），所以上面这些命令不需要额外参数：报告标题是 `存档管理 · 测试报告`，界面固定中文（与浏览器语言无关）。另外两个刻意**不**设的选项写在配置的注释里：`open: true`（CI 上会去拉起浏览器）与 `singleFile: true`（会拆掉 `data/test-results/*.json` 这些按需拉的资源，直接打破自检与单文件归档）。
-
-只想看某一类用例时，把第 1 步换成对应目录（性能/安全测试必须显式指定）：
+只想看某一类用例时把第 1 步换成对应目录（性能/安全必须显式指定）：
 
 ```shell
 uv run pytest tests/performance -m performance --alluredir=allure-results
 uv run pytest tests/security -m security --alluredir=allure-results
 ```
 
-本地想复现 CI 的分片流程（同一套参数与合并脚本）：
+本地复现 CI 分片流程（同一套参数与合并脚本）：
 
 ```shell
-# 各片一份覆盖率数据与结果目录(单片覆盖率偏低是正常的, 所以关掉门槛)
-for k in 0 1 2; do
-  COVERAGE_FILE=".coverage.shard-$k" uv run pytest --shard-count 3 --shard-index "$k" \
-    --cov --cov-report= --cov-fail-under=0 --alluredir="allure-results-shard-$k"
-done
-
-uv run python scripts/merge_allure_results.py --output allure-results "allure-results-shard-*"
-uv run coverage combine && uv run coverage report   # 门槛在这里判(合并后的总覆盖率)
-allure generate allure-results --output allure-report
+uv run pytest --shard-count 2 --shard-index 0 --alluredir=allure-results-shard0
+uv run pytest --shard-count 2 --shard-index 1 --alluredir=allure-results-shard1
+uv run python scripts/merge_allure_results.py allure-results-shard0 allure-results-shard1 -o allure-results
 ```
 
-本地想连产物清单一起核对（片号从目录名末尾认，所以目录名要以片号结尾）：
+连产物清单一起核对（目录名要以片号结尾）：
 
 ```shell
-uv run python scripts/merge_allure_results.py --output allure-results \
-  --platform Linux --expect-shards 0,1,2 --manifest allure-manifest.json "allure-results-shard-*"
-uv run python scripts/verify_allure_report.py allure-report --results allure-results \
-  --expect-platforms Linux --manifest allure-manifest.json
+uv run pytest --shard-count 2 --shard-index 0 --alluredir=allure-results-shard0 --manifest shard0.json
+uv run pytest --shard-count 2 --shard-index 1 --alluredir=allure-results-shard1 --manifest shard1.json
+uv run python scripts/verify_allure_report.py allure-report --manifest shard1.json
 ```
 
-分片权重里每条用例的实测耗时（`tests/durations.json`）这样刷新 —— 界面或用例集改过之后值得重跑一次：
+刷新分片权重实测（界面或用例集改过后值得重跑）：
 
 ```shell
 uv run python scripts/run_tests_local.py -- --record-durations=tests/durations.json
 ```
 
-三条要点：① 要在**完整套件**上记（这个脚本双片跑的就是完整套件；只跑一部分用例时别急着覆盖档案）；② 两片不能写同一份文件（后写会覆盖先写），所以交给脚本各记一份、结束后**按用例取中位数**合并；③ 档案只影响**装箱权重**，不参与任何断言 —— 改它不会让用例变红，但把它写坏（`schema` 不符 / 值不合法 / nodeid 少了 `::`）会让 `tests/sharding.py` 在**导入期**直接报错（守卫 `tests/unit/test_durations.py`）。CI 三个平台共用这一份：绝对值来自录制那台机器，真正被用的是同一次录制内的相对排序。
+三条要点：① 在**完整套件**上记；② 两片不能写同一份文件（脚本各记一份、按用例取中位数合并）；③ 档案只影响装箱权重不参与断言，写坏会让 sharding.py 导入期报错（守卫 test_durations.py）。
 
-分片只改变“哪些用例在哪一次运行里跑”，不改收集结果：三片并集与全量收集逐条一致（`--collect-only` 核对过 1068 条），合并后的总覆盖率也与串行一致（91%）。命令行的 `--shard-count` / `--shard-index` 说明见上一节。
+分片不改收集结果：三片并集与全量逐条一致，合并后总覆盖率与串行一致。也可用下载的 CI 结果（allure-resources-* 里的 allure-results/）本地复现报告，命令相同；generate 后先自检再打开。
 
-也可以用下载下来的 CI 结果（artifact `allure-resources-*` 里的 `allure-results/`）在本地复现 CI 报告，命令与上面完全相同；`allure generate` 之后建议先跑一次自检再打开。
+四个坑：
 
-四个容易踩的坑：
-
-- **报告要经 HTTP 提供**：控件数据与用例详情都是前端按需 `fetch` 的相对路径，直接双击 `allure-report/index.html`（`file://`）会被浏览器的跨域策略拦掉，界面只剩加载动画或空壳。用 `allure open`，或任意静态服务器。
-- **`allure open` 的目录是必填参数**：只写 `allure open --port 8080` 会直接报错退出，正确写法是 `allure open allure-report --port 8080`。
-- **报告目录已存在时 `allure generate` 不会刷新数据，还会把新报告“藏”进子目录**（Allure issue [#691](https://github.com/allure-framework/allure3/issues/691)）：两种症状同源 —— 生成器不会先清掉旧输出。① 实测先删一个 `data/test-results/*.json` 再生成，该文件仍然缺失（2634 → 2633）；② 更隐蔽的是**输出目录已存在时，新报告被写进 `allure-report/awesome/`，顶层的 `index.html` 留成上一次那份**。本机实测（3.20.0，同一个 `--output` 连跑两次）：第一次之后目录是扁平的（`index.html` / `app-*.js` / `data/` / `widgets/`），第二次之后多出 `awesome/`，而 `index.html` 一个字节都没变 —— 你打开的是**旧**报告：本次运行不在里面，历史趋势那一页自然也是空的或停在上一次（“历史记录不可见”多半就是它）。判据很简单：`allure-report/` 里出现 `awesome/` 子目录就是撞上了；那时新报告在 `allure-report/awesome/`（应急就看 `allure open allure-report/awesome`），但干净的做法是 `rm -rf allure-report` 重新生成一次。维护者给的也正是这个做法（“生成前先删掉报告目录，保留 `history.jsonl`”）。**CI 上不该出现**：两个生成作业都在全新 runner 上跑，而 `allure-report/` 在 `.gitignore` 里（`.gitignore:251`）、检出时根本不存在。自检脚本把嵌套目录直接判红（`scripts/verify_allure_report.py` 的 `nested_report_problems`，守卫 `test_a_nested_report_directory_is_reported`），以后谁把报告目录解包进工作区、或 CLI 换了输出布局，都会在发布前当场红。
-- **打开前先自检**（见上一节）：缺 `data/test-results/*.json` 时界面照样显示"通过/失败"，点开用例却是空的。
+- **报告要经 HTTP 提供**（file:// 被跨域拦掉，用 `allure open` 或任意静态服务器）。
+- **`allure open` 的目录是必填参数**（`allure open allure-report --port 8080`）。
+- **报告目录已存在时 generate 不刷新数据还把新报告藏进子目录**（上游 issue #691）：症状是 `allure-report/awesome/` 出现、顶层 index.html 还是旧的（"历史不可见"多半是它）。应急看 awesome/ 子目录，干净做法 `rm -rf allure-report` 重新生成。CI 不受影响（全新 runner + .gitignore）；自检把嵌套目录判红（nested_report_problems，守卫 `test_a_nested_report_directory_is_reported`）。
+- **打开前先自检**：缺 data/test-results/*.json 时界面照样显示通过/失败，点开用例是空的。
 
 ## 8. 新增测试清单
 
-1. 选对目录：纯逻辑进 `unit`，需要真实文件/数据库协作进 `integration`，规模基准进`performance`，防护类进 `security`。
-2. 声明四层 Allure 标签（`epic`/`feature`/`story`/`layer`）。`tests/unit/test_test_config.py`会扫描全部测试模块，缺标签会直接失败。
-3. 选择严重等级：按**失败影响面**在模块 `pytestmark` 里声明一个等级（blocker/critical/normal/minor/trivial，判定标准见第 1 节的严重等级表）；需要更细的区分时，给单个用例加 `@pytest.mark.blocker` 等标记。
-4. 优先用 `tests/helpers.py` 的构造器，避免在模块里再抄一份临时数据库/游戏数据构造。
-5. 性能测试必须给出规模与阈值，安全测试必须用 `security_recorder.expect_blocked`记录结论。
-6. 断言消息写成单行：长提示先存进变量（`hint = "..."`），`assert` 本身保持一行。Ruff 与 Black 对"折行的断言消息"排布不同，只有单行写法能让两个工具输出一致（见 [development.md](development.md) 的质量门禁一节）。
-7. 本地验证：
+1. 先想清楚这属于哪一层、严重等级是什么（第 1 节），不要照抄邻居。
+2. 构造数据优先用 `tests/helpers.py` 的构造器；构造器要传真实路径、真实 SQLite，别拿 `MagicMock` 顶领域服务。
+3. 需要临时文件/目录的用 `tmp_path`，不要写仓库目录或用户主目录。
+4. 界面用例确认有没有现成的共享基建（`tests/button_support.py`、`tests/ui_sharing.py`）可搭。
+5. 用例名与断言信息用中文，按"给定—当—then"组织，读得出业务含义。
+6. 涉及平台的差异（路径分隔符、文件名大小写、显示服务）要么显式适配要么写成"只在那个平台跑"，并在用例里写明理由；不要悄悄依赖运行机器。
+7. GUI 用例遵守第 6 节各"判据"小节的量法与坑（自检步骤、不与首帧时序赛跑、收尾纪律）。
+8. 跑过全量再提交（`uv run python scripts/run_tests_local.py`），确认没有把别的用例弄红。
 
 ```shell
-uv run ruff check .
-uv run ruff format --check .
+# 提交前本地至少跑这些
+uv run pytest --min-severity=critical
+uv run ruff format . && uv run ruff check . --fix
 uv run mypy
-uv run pytest --cov
-uv run pytest tests/performance -m performance
-uv run pytest tests/security -m security
 ```
