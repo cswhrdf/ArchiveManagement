@@ -743,15 +743,21 @@ def test_pr_and_nightly_run_full_while_push_selects_layers() -> None:
 
     # 定时那条线在 nightly.yml: 它只有"门 + 调用", 不复制任何作业定义。
     nightly = ci_workflow.NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
-    assert re.search(r"^  schedule:\n    - cron: ", nightly, re.M), (
+    # 排版不参与判据: 仓库里两种缩进风格并存(见 tests/ci_workflow.py 的 jobs()), 这里只钉
+    # 结构 —— cron 挂在 schedule 下的列表里、调用 ci.yml 时紧跟 with/ref: dev。
+    schedule = re.search(r"^( *)schedule:\n( *)- cron: ", nightly, re.M)
+    assert schedule is not None, (
         "nightly(schedule)触发丢了: 覆盖率门槛与完整报告要有它兜底"
+    )
+    assert len(schedule.group(2)) > len(schedule.group(1)), (
+        "cron 要挂在 schedule 下那一层列表里, 不是与它同层"
     )
     assert "uses: ./.github/workflows/ci.yml" in nightly, (
         "nightly 要调用 ci.yml, 而不是复制一份流水线(两份分片矩阵迟早漂移)"
     )
-    assert "uses: ./.github/workflows/ci.yml\n    with:\n      ref: dev" in nightly, (
-        "nightly 调用 ci.yml 时必须带 `ref: dev`: 这一轮测的要是 dev 的代码"
-    )
+    assert re.search(
+        r"uses: \./\.github/workflows/ci\.yml\n\s+with:\n\s+ref: dev\b", nightly
+    ), "nightly 调用 ci.yml 时必须带 `ref: dev`: 这一轮测的要是 dev 的代码"
     assert "86400" in nightly, "提交年龄门槛(24h)要与每日一跑的节奏对上"
     assert "if: needs.gate.outputs.run == 'true'" in nightly, (
         "dev 24h 内没动时整个跳过: 没变化的一轮不产生新证据"

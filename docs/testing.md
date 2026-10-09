@@ -14,6 +14,9 @@ tests/
   button_support.py      # GUI 按钮测试共享基建(拆自 test_gui_buttons.py, 见 test-refactor-plan.md)
   report_support.py      # 报告/CI 断言共享基建(拆自 test_report_verification.py)
   sql_support.py         # SQLite 后端用例共享基建(拆自 test_sql_backend.py)
+  sharding.py            # 分片规则: 三级权重(实测耗时优先) + 最慢优先贪心装箱
+  durations.py           # 分片权重那份实测档案的记录/加载/合并(守卫 tests/unit/test_durations.py)
+  durations.json         # 上面那份档案本体(nodeid → 秒), 由第 6 节的命令刷新
   unit/                  # 纯逻辑与单一边界: 不会真正触达用户数据的临时目录/SQLite
   unit/conftest.py       # 单元层共享 fixture(逐字相同才上提, 见 test-refactor-plan.md)
   integration/           # 真实跨层协作: 配置 + 数据库 + 备份/恢复 + 审计日志 + UI 后端
@@ -705,6 +708,14 @@ uv run python scripts/merge_allure_results.py --output allure-results \
 uv run python scripts/verify_allure_report.py allure-report --results allure-results \
   --expect-platforms Linux --manifest allure-manifest.json
 ```
+
+分片权重里每条用例的实测耗时（`tests/durations.json`）这样刷新 —— 界面或用例集改过之后值得重跑一次：
+
+```shell
+uv run python scripts/run_tests_local.py -- --record-durations=tests/durations.json
+```
+
+三条要点：① 要在**完整套件**上记（这个脚本双片跑的就是完整套件；只跑一部分用例时别急着覆盖档案）；② 两片不能写同一份文件（后写会覆盖先写），所以交给脚本各记一份、结束后**按用例取中位数**合并；③ 档案只影响**装箱权重**，不参与任何断言 —— 改它不会让用例变红，但把它写坏（`schema` 不符 / 值不合法 / nodeid 少了 `::`）会让 `tests/sharding.py` 在**导入期**直接报错（守卫 `tests/unit/test_durations.py`）。CI 三个平台共用这一份：绝对值来自录制那台机器，真正被用的是同一次录制内的相对排序。
 
 分片只改变“哪些用例在哪一次运行里跑”，不改收集结果：三片并集与全量收集逐条一致（`--collect-only` 核对过 1068 条），合并后的总覆盖率也与串行一致（91%）。命令行的 `--shard-count` / `--shard-index` 说明见上一节。
 

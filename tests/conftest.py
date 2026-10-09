@@ -574,7 +574,7 @@ def _close_gui_apps() -> Iterator[None]:
 
 @pytest.fixture(scope="session")
 def ui_shared() -> Iterator[ui_sharing.SharedUiRegistry]:
-    """方向② B2: 共享 UI 会话注册表(机制与三条纪律见 ``tests/ui_sharing.py``).
+    """: 共享 UI 会话注册表(机制与三条纪律见 ``tests/ui_sharing.py``).
 
     session 级: 池里的窗口活过整批用例 —— 每条用例前后由 ``test_scope`` 做
     "对齐基线 / 识别漂移并还原(还原不过就重建整窗)"; 会话末尾统一走
