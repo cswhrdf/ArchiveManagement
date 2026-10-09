@@ -293,6 +293,33 @@ def test_native_quality_gate_is_configured_and_pinned() -> None:
     ), "门禁日志先落地, 运行总账才收得到它"
 
 
+def test_every_job_that_drives_the_allure_cli_installs_it() -> None:
+    """跑 `allure` 命令的作业必须有装它的步骤(Node + 全局 CLI): 少了全是 command not found.
+
+    2026-10-10 实测(run 37958738335 的汇总作业): 那个作业里 `Install uv` 与
+    `Set up Node.js` / `Install Allure 3 CLI` 一起不见了, 于是 `uv ...` 与 `allure ...`
+    两类命令**每一步**都以 exit 127 结束 —— 质量门没跑、报告没生成, 而"上传报告"那一步挂
+    在 `steps.verify-report.outcome == 'success'` 上, 于是 `allure-report-final` 这份产物
+    根本不存在, 作业状态却只说"质量门未通过"(0 个产物这件事看不出来)。
+    所以把"用了什么工具就得先装它"钉成不变式: 与 setup-uv 那条守卫同一个道理。
+    """
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    for name, body in ci_workflow.jobs(workflow).items():
+        commands = "\n".join(
+            line for line in body.splitlines() if not line.strip().startswith("#")
+        )
+        if not re.search(
+            r"\ballure (?:generate|quality-gate|open|--version)\b", commands
+        ):
+            continue
+        hint = (
+            f"{name} 里跑了 allure 命令, 却没有装它的步骤"
+            "(要 `actions/setup-node@` + `npm install --global allure@3`)"
+        )
+        assert "actions/setup-node@" in commands, hint
+        assert "npm install --global allure@" in commands, hint
+
+
 def test_quality_gate_asks_every_platform_for_real_tests() -> None:
     """要求三个平台各自都有真实用例, 而不是靠会漂的绝对计数.
 

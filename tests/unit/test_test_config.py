@@ -422,6 +422,35 @@ def test_uv_run_does_not_silently_sync_the_default_groups() -> None:
         assert "UV_NO_SYNC" in head, hint
 
 
+def test_every_uv_job_installs_uv_and_keeps_the_cache_inputs_on_it() -> None:
+    """用了 uv 的作业必须先装 uv; 依赖缓存的开关只能挂在 setup-uv 那一步上.
+
+    2026-10-10 实测: 汇总作业里 `enable-cache` / `save-cache` 被挂到了 ``actions/checkout``
+    下面, 而它的 `Install uv` 步骤整个不见了。这两种错都不会让 CI 红:
+      * GitHub 对**未知输入**只告警不报错(告警里列出的是 checkout 认得的那些键), 于是缓存
+        参数静默失效 —— "缓存热时省不了几秒"这条本来就不指望它, 但"配了个没人读的开关"更糟;
+      * 少了 setup-uv 时, 后面那句 `uv python install` 才会以 "command not found" 挂掉,
+        而那已经是几十行之后的事了。
+    所以这里把两条不变式都钉住: ① 作业正文里出现 uv 命令就必须有 `astral-sh/setup-uv`;
+    ② `enable-cache` / `save-cache` 只许出现在 setup-uv 那一步里。
+    """
+    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+        text = workflow.read_text(encoding="utf-8")
+        for name, body in ci_workflow.jobs(text).items():
+            commands = _without_comments(body)
+            if re.search(r"\buv (?:run|sync|python|pip)\b", commands):
+                hint = f"{name} 里用了 uv 命令, 却没有 astral-sh/setup-uv 这一步"
+                assert "astral-sh/setup-uv" in body, hint
+            for step in re.split(r"\n\s*- (?:name|uses|run):", body):
+                step_text = _without_comments(step)
+                if re.search(r"(?:enable|save)-cache:", step_text):
+                    hint = (
+                        f"{name} 把依赖缓存的开关挂在非 setup-uv 的步骤上了"
+                        f"(GitHub 只告警不报错, 缓存其实没生效): {step_text.strip()[:120]}"
+                    )
+                    assert "astral-sh/setup-uv" in step_text, hint
+
+
 def test_local_sync_still_installs_every_group() -> None:
     """本地 `uv sync` 必须仍然是"全部装上": 分组只是给 CI 省带宽, 不能改变本地用法.
 

@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +40,7 @@ from archive_management.domain import (
     SaveLocation,
     TreeInput,
     TreeNode,
+    VerificationMode,
     auto_prune_ids,
     build_tree,
     plan_deletion,
@@ -60,6 +61,7 @@ from archive_management.services.audit import log_action, log_failure
 from archive_management.services.naming import backup_relpath, game_folder
 from archive_management.services.snapshot import (
     ProgressCallback,
+    SnapshotEntry,
     SnapshotResult,
     SnapshotSource,
     SnapshotVerification,
@@ -436,41 +438,16 @@ class BackupService:
             return 0
         root = self.snapshot_root(node)
         entries = manifest_entries(root)
-        pending = [
-            entry for entry in entries if entry.file_kind == "file" and not entry.sha256
-        ]
+        pending = _pending_hash_entries(entries)
         if not pending:
-            # 没有缺的条目(上一次补齐写完了清单、只是记录没跟上): 只把记录收尾成 sha256,
-            # 免得界面每次都把它当成"还要补齐"。内容哈希按**清单里的**条目重算, 与清单
-            # 保持一致(硬套节点上那个旧的会把两边写成互相矛盾的值)。
-            if node.verify_mode != "sha256":
-                self._backups.record_hashes(
-                    node.id,
-                    {},
-                    content_hash=content_hash_of(entries),
-                    verify_mode="sha256",
-                )
+            # 没有缺的条目: 只把记录收尾(下一次扫描不该再把它当成"还要补齐")。
+            self._settle_hashed_record(node.id, node.verify_mode, entries)
             return 0
-        policy = self.policy()
-        digests = hash_files(
-            [root / entry.relative_path for entry in pending],
-            limit=policy.max_parallel,
-            cancelled=cancelled,
-        )
-        filled = {
-            entry.relative_path: digests[root / entry.relative_path]
-            for entry in pending
-            if root / entry.relative_path in digests
-        }
+        filled = self._digest_pending(root, pending, cancelled)
         if not filled:
             # 缺的条目一个也没算出来(文件在两次扫描之间都被删了): 原样留着, 下次再补.
             return 0
-        updated = [
-            replace(entry, sha256=filled.get(entry.relative_path, entry.sha256))
-            for entry in entries
-        ]
-        content_hash = rewrite_manifest(root, updated)
-        complete = hashes_complete(updated)
+        content_hash, complete = _backfilled_manifest(root, entries, filled)
         self._backups.record_hashes(
             node.id,
             filled,
@@ -485,6 +462,42 @@ class BackupService:
             complete=complete,
         )
         return len(filled)
+
+    def _settle_hashed_record(
+        self,
+        node_id: int,
+        verify_mode: VerificationMode,
+        entries: tuple[SnapshotEntry, ...],
+    ) -> None:
+        """没有缺项时把记录收尾成 sha256; 内容哈希按**清单里的**条目重算.
+
+        硬套节点上那个旧值会把清单与数据库写成互相矛盾的值 —— 而这种"上一次只写完清单、
+        记录没跟上"的现场, 正是这一步要收的尾。
+        """
+        if verify_mode == "sha256":  # 记录本来就对, 不必再写一次
+            return
+        self._backups.record_hashes(
+            node_id, {}, content_hash=content_hash_of(entries), verify_mode="sha256"
+        )
+
+    def _digest_pending(
+        self,
+        root: Path,
+        pending: Sequence[SnapshotEntry],
+        cancelled: Callable[[], bool] | None,
+    ) -> dict[str, str]:
+        """并发算出缺项的内容哈希; 算不出来的条目不在结果里(下次再补)."""
+        policy = self.policy()
+        digests = hash_files(
+            [root / entry.relative_path for entry in pending],
+            limit=policy.max_parallel,
+            cancelled=cancelled,
+        )
+        return {
+            entry.relative_path: digests[root / entry.relative_path]
+            for entry in pending
+            if root / entry.relative_path in digests
+        }
 
     def update_meta(
         self,
@@ -732,3 +745,23 @@ def _file_entries(result: SnapshotResult) -> list[BackupFileEntry]:
         )
         for entry in result.entries
     ]
+
+
+def _pending_hash_entries(
+    entries: Iterable[SnapshotEntry],
+) -> list[SnapshotEntry]:
+    """清单里还缺 sha256 的文件条目(目录与符号链接本来就不记内容哈希)."""
+    return [
+        entry for entry in entries if entry.file_kind == "file" and not entry.sha256
+    ]
+
+
+def _backfilled_manifest(
+    root: Path, entries: tuple[SnapshotEntry, ...], filled: Mapping[str, str]
+) -> tuple[str, bool]:
+    """把补齐到的哈希写进清单, 返回 (内容哈希, 哈希是否已齐)."""
+    updated = tuple(
+        replace(entry, sha256=filled.get(entry.relative_path, entry.sha256))
+        for entry in entries
+    )
+    return rewrite_manifest(root, updated), hashes_complete(updated)

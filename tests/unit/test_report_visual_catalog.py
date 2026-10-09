@@ -247,6 +247,21 @@ def test_visual_regression_runs_in_the_quality_job_and_reaches_the_report() -> N
         "那一份装进独立环境, 别动本作业其余步骤共用的 .venv"
     )
 
+    # 产出这一步的门禁必须与消费它的上传步一致: 上传那一步是 `always()` +
+    # `if-no-files-found: error`, 而这两步原本没写 `if:`(默认 success()) —— 前排的门禁
+    # (xenon)一红, 它们就被整段跳过, 目录从没被创建, 于是报出"没有文件"这种误导性的红
+    # (2026-10-10 run 37958738335: 日志里既没有装 Xvfb 也没有跑视觉回归, 只有那个上传步)。
+    # 同作业的静态分析与性能基准都是"各管各的", 这里跟齐。
+    for step_name in (
+        "Install Xvfb, a CJK font, and the distro Tk 8.6",
+        "Run the visual regression",
+    ):
+        block = job.split(step_name, 1)[1].split("\n      - name:", 1)[0]
+        assert "if: always()" in block, (
+            f"{step_name} 要 `if: always()`: 前面的门禁红了不该整段跳过它, "
+            "否则上传那一步会以「没有文件」红掉(看起来像没产出, 其实是没跑)"
+        )
+
     summary = ci_workflow.job_block(workflow, "allure-summary")
     assert "pattern: allure-results-*" in summary, (
         "汇总作业要把这份结论收进报告(现在是一份 pattern 把各作业的结果一起收全)"

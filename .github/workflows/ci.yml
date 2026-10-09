@@ -78,7 +78,7 @@ jobs:
         # dorny 给不出路径集合, 所以这一步跳过, 由 decide 补"层全绿 + 照跑"的答案。
         # 它若失败, needs: [changes] 的所有作业跟着跳过, 整轮就死了。
         if: github.event_name != 'schedule'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             should_run:
@@ -267,6 +267,11 @@ jobs:
         # 的 CPython 自带的 Tcl/Tk 是 python-build-standalone 自己编的, 在 X11 上只走**核心
         # 位图字体**(符号表里只有 XLoadQueryFont 那套, 没有 fontconfig/FreeType), 装多少 TTF
         # 都画不出汉字。发行版的 Tk 8.6 走 Xft/fontconfig, 与 fonts-noto-cjk 配套。
+        #
+        # 前面几批门禁没过也要装完再走(与性能基准那一步同一个口径): 视觉结论是独立的
+        # 一类。"这一步被跳过"与"它没产出"在下面那一步看起来一模一样(都是没有文件),
+        # 于是报告里少一块结论, 却报成"没有文件"这种误导性的红(2026-10-10 实测)。
+        if: always()
         shell: bash
         run: |
           while IFS= read -r -d '' source; do
@@ -319,6 +324,9 @@ jobs:
         # 脚本自己也会拦: 汉字量不出宽度时它标红**且不产出候选基线**(见 tests/unit/
         # test_report_visual_catalog.py 的守卫), 并把探针(模块与库的实际路径)写进 fonts.txt ——
         # 宁可这一轮没有基线, 也不拿一张看不清的图当"正确"。
+        # 同上: 前面的门禁红了也要把这一轮画面拍出来并写结论 —— 它的上传步是
+        # `always()` + `if-no-files-found: error`, 产出方与消费方的门禁必须一致。
+        if: always()
         env:
           UV_PROJECT_ENVIRONMENT: .venv-visual
         run: |
@@ -1290,6 +1298,14 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install uv
+        # 这一步不能少: 下面每一句都是 `uv ...`, 而 runner 上并不预装 uv —— 少了它要到
+        # 几十行之后才以 "uv: command not found" 挂掉(2026-10-10 实测)。
+        # 缓存开关属于**这个** action: 挂到 checkout 上只会得到一句"未知输入"的告警,
+        # 参数静默失效(见 tests/unit/test_test_config.py 的那条守卫)。
+        uses: astral-sh/setup-uv@v7
+        with:
           # 只读复用依赖缓存(写入交给 pytest 第 0 片).
           enable-cache: true
           save-cache: false
