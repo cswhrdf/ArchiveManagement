@@ -255,6 +255,11 @@ def test_moving_the_window_keeps_the_dropdown_glued_to_the_box(app: Any) -> None
     assert window is not None
     app.geometry("1120x760")
     _pump(app)
+    # 再**显式**发一次 <Configure>: CI 的桌面装不下 1120x760(macOS runner 只有 1024 宽),
+    # 窗口会被窗口管理器夹回原尺寸 ⇒ 尺寸没变就不会有 <Configure> ⇒ 重定位那条路径在那种
+    # 机器上压根不执行(2026-10-10 覆盖率报告: `_follow_anchor` 只在 macOS 上没被覆盖到)。
+    app.event_generate("<Configure>")
+    _pump(app)
     assert active_dropdown() is popup, "窗口尺寸变化不该把浮层踢掉"
     assert int(window.winfo_rootx()) == int(combo.winfo_rootx()), (
         f"浮层没跟着控件走: 浮层 x={window.winfo_rootx()}, 控件 x={combo.winfo_rootx()}"

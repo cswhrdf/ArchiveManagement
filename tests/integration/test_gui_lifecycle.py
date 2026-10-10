@@ -159,7 +159,13 @@ def test_polling_survives_a_transient_database_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """回归: 轮询时数据库报错不得让窗口崩掉(记日志 + 状态栏提示即可)."""
+    """回归: 轮询时数据库报错不得让窗口崩掉(记日志 + 状态栏提示即可).
+
+    轮询**每 5 拍才问一次后端**(见 ``_refresh_task`` 的节流), 而"构造期已经拍了几下"由时序
+    决定 —— 不把计数摆好的话, 这几次轮询可能全落在节流里, 后端一次都没被问到, 而断言靠构造
+    期那次失败照样绿(2026-10-10 的覆盖率报告: 失败分支只在 Windows 上被覆盖到)。所以这里
+    先把计数推到窗口上, 并断言轮询期间真的问过后端。
+    """
     from archive_management.infrastructure.database import Database
     from archive_management.ui.sql_backend import SqlArchiveService
 
@@ -167,8 +173,10 @@ def test_polling_survives_a_transient_database_failure(
     db = Database(tmp_path / "poll.db")
     db.migrate()
     service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+    calls = {"n": 0}
 
     def broken(_game_id: str | None) -> Any:
+        calls["n"] += 1
         raise sqlite3.OperationalError("unsupported file format")
 
     monkeypatch.setattr(service, "task_status", broken)
@@ -178,9 +186,12 @@ def test_polling_survives_a_transient_database_failure(
         pytest.skip(f"tk 环境不可用: {exc}")
     try:
         _pump(app)
+        asked_before = calls["n"]
+        app._task_ticks = 4  # 下一拍正好落在节流窗口上
         for _index in range(3):
             app._poll_messages()
             _pump(app)
+        assert calls["n"] > asked_before, "轮询没真的问过后端: 这条用例没走到失败分支"
         assert _feedback_kind(app) == FeedbackKind.ERROR
         assert "unsupported file format" in app._last_feedback[1]
     finally:

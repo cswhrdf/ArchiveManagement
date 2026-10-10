@@ -1085,6 +1085,13 @@ def test_space_presses_a_focused_button(app: Any) -> None:
         _focus(window, cancel)
         inner = keyboard.focus_target(cancel)
         assert inner is not None
+        # 合成按键在 Tk 里是**按焦点窗口派发的**: 焦点只要不在这个内层控件上, 事件就落到
+        # 别处(实测: 焦点停在对话框顶层时, 那里没有 <space> 绑定, 按键白丢 —— 2026-10-10
+        # CI 上这条就是这么红的)。所以先把焦点真正放上去并**量它**, 量不到就当场报"焦点
+        # 没上去", 而不是把它记成"空格按不动"。
+        focused = _focus_hard(window, inner)
+        hint = f"焦点没落到取消按钮上(现在在 {window.focus_get()}), 空格会白丢"
+        assert focused, hint
         inner.event_generate("<space>", when="now")
         state["closed"] = 0 if window.winfo_exists() else 1
 

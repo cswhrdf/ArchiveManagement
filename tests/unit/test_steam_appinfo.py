@@ -194,6 +194,33 @@ def test_read_cached_does_not_cache_an_empty_table(
     assert steam_appinfo._cache == {}
 
 
+def test_read_cached_reuses_the_parsed_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """命中缓存时不再解析文件(Steam 更新让大小/时间戳变了才会重解析).
+
+    缓存命中那两行在 2026-10-10 的覆盖率报告里是三平台共同的缺口 —— 之前只有
+    "空表不入缓存"与"到上限清空"两条, 谁都没连着读两次同一份文件。
+    """
+    monkeypatch.setattr(steam_appinfo, "_cache", {})
+    appinfo = _write(tmp_path, _entries())
+    parsed = {"calls": 0}
+    original = steam_appinfo.read_clienticons
+
+    def counting(path: Path) -> dict[str, str]:
+        parsed["calls"] += 1
+        return original(path)
+
+    monkeypatch.setattr(steam_appinfo, "read_clienticons", counting)
+
+    first = steam_appinfo._read_cached(appinfo)
+    second = steam_appinfo._read_cached(appinfo)
+
+    assert first, "第一遍就该读出图标"
+    assert first == second, "两次读到的该是同一份解析结果"
+    assert parsed["calls"] == 1, "第二次应当直接命中缓存, 不再解析文件"
+
+
 def test_read_cached_clears_the_cache_at_the_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

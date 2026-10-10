@@ -905,7 +905,6 @@
     "tests/unit/test_domain.py::test_game_rejects_unknown_fields": 0.002,
     "tests/unit/test_domain.py::test_game_requires_nonempty_name": 0.002,
     "tests/unit/test_domain.py::test_save_location_rejects_empty_path": 0.002,
-    "tests/unit/test_domain_and_scan_boundaries.py::test_a_missing_registry_module_is_just_a_degradation": 0.002,
     "tests/unit/test_domain_and_scan_boundaries.py::test_indexing_a_delete_plan_ignores_nodes_without_an_id": 0.001,
     "tests/unit/test_domain_and_scan_boundaries.py::test_listing_children_of_an_unreadable_directory_returns_none": 0.004,
     "tests/unit/test_domain_and_scan_boundaries.py::test_moving_a_tracked_game_to_the_front_clears_its_suppression": 0.001,
