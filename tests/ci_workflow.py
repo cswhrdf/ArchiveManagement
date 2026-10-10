@@ -31,6 +31,8 @@ OS_PLATFORMS = {
 
 # 一行的"键: 值": 值可能是带引号的字符串(内含逗号, 如 "0,1,2")、普通标量或占位符.
 _ENTRY_KEY_VALUE = re.compile(r"([A-Za-z_]\w*):\s*(\"[^\"]*\"|'[^']*'|[^,\n}]+)")
+# 矩阵的"轴": `os: [a, b]` / `shard: [0, 1]` —— 值必须写在一行里(仓库里两种写法都是这么写的).
+_AXIS = re.compile(r"^\s*([A-Za-z_]\w*):\s*\[([^\]]*)\]\s*$", re.MULTILINE)
 # needs 之类的行内列表(或者被编辑器摊成的多行列表).
 _NEEDS = re.compile(r"needs:\s*\[([^\]]+)\]")
 
@@ -92,9 +94,65 @@ def _include_text(block: str) -> str:
     raise AssertionError("矩阵里找不到 include:")
 
 
-def matrix_entries(text: str, job: str) -> list[dict[str, str]]:
-    """取出作业矩阵里 ``include`` 的逐条参数(``os`` / ``platform`` / ``shard`` 等)."""
-    include = _include_text(job_block(text, job))
+def _matrix_axes(block: str) -> dict[str, list[str]]:
+    """取出矩阵的**轴**(``os: [a, b]`` 这类行内列表); 只列 include 的写法返回空表.
+
+    轴只在"各平台片数一致"时才写得出来, 但那时它能省掉一堆重复条目(见
+    :func:`matrix_entries`)。轴声明只可能出现在 ``matrix:`` 与 ``include:`` 之间。
+    """
+    lines = block.splitlines()
+    start = next(
+        (index for index, line in enumerate(lines) if line.strip() == "matrix:"), None
+    )
+    if start is None:  # pragma: no cover - 真实工作流的每个矩阵都这么写
+        return {}
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.strip() == "include:":
+            break
+        body.append(line)
+    return {
+        name: [item.strip().strip("\"'") for item in raw.split(",") if item.strip()]
+        for name, raw in _AXIS.findall("\n".join(body))
+    }
+
+
+def _combinations(axes: dict[str, list[str]]) -> list[dict[str, str]]:
+    """轴的笛卡尔积(每条组合带上轴上的键值)."""
+    combos: list[dict[str, str]] = [{}]
+    for name, values in axes.items():
+        combos = [{**combo, name: value} for combo in combos for value in values]
+    return combos
+
+
+def _apply_include(
+    combos: list[dict[str, str]], entries: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """按 GitHub 自己的 include 语义把条目并进组合.
+
+    官方语义: 条目的每个键值都要与某个组合**相容**(组合里有这个键时值必须相同) —— 相容就
+    合并进那个组合, 一个都配不上时该条目自己成为一条。所以"给某个平台的属性"(展示名、
+    片数)只写一份就够: 另一条轴上该平台的每一片都会拿到它。
+    """
+    merged = [dict(combo) for combo in combos]
+    extra: list[dict[str, str]] = []
+    for entry in entries:
+        hits = [
+            combo
+            for combo in merged
+            if all(combo.get(key, value) == value for key, value in entry.items())
+        ]
+        if not hits:
+            extra.append(dict(entry))
+            continue
+        for combo in hits:
+            combo.update(entry)
+    return merged + extra
+
+
+def _include_entries(block: str, job: str) -> list[dict[str, str]]:
+    """解析 ``include:`` 的逐条参数(行内写法与多行写法都认)."""
+    include = _include_text(block)
     entries: list[dict[str, str]] = []
     # 每条以 ``- `` 开头(行内写法与多行写法都满足), 注释行先去掉再抠键值。
     # 前面补一个换行, 免得第一条(它前面没有换行)被当成"头一段"丢掉。
@@ -110,6 +168,26 @@ def matrix_entries(text: str, job: str) -> list[dict[str, str]]:
         entries.append(entry)
     assert entries, f"{job} 的 include 矩阵是空的"
     return entries
+
+
+def matrix_entries(text: str, job: str) -> list[dict[str, str]]:
+    """取出作业矩阵**展开后**的逐条参数(``os`` / ``platform`` / ``shard`` / ``shards`` 等).
+
+    两种写法都认:
+
+    * **轴 + include 补属性**(各平台片数一致时更短): 两个轴(``os: [...]`` 与
+      ``shard: [0, 1, 2]``)加三条"该平台的展示名与片数", 展开后仍是"每个平台每一片一条";
+    * **只列 include**(各平台片数不同时必需): 原样返回那几条。
+
+    两种写法在 GitHub 上是同一份矩阵, 守卫要的也一直是同一件事 —— "每个平台有哪些片、
+    片数是多少", 所以它不必关心矩阵是怎么写的。
+    """
+    block = job_block(text, job)
+    entries = _include_entries(block, job)
+    axes = _matrix_axes(block)
+    if not axes:
+        return entries
+    return _apply_include(_combinations(axes), entries)
 
 
 def needs_of(text: str, job: str) -> set[str]:

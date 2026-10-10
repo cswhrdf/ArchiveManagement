@@ -35,21 +35,21 @@ uv run python -m archive_management gui --smoke 1            # GUI 冒烟自检(
 
 `pre-commit install` 之后，每次提交自动跑 7 条（配置在 [.pre-commit-config.yaml](.pre-commit-config.yaml)）：
 
-| 钩子 | 干什么 |
-| ---- | ------ |
-| `ruff check (autofix)` | 静态检查并自动修可修的项 |
-| `ruff format` | **就地排版并把结果加回暂存区**（不是只报"哪些文件会被改"） |
-| `compact JSON` | 把 `src/archive_management/resources/` 顶层的固定数据清单压回单行紧凑格式 |
-| `mypy` | 宿主平台上的类型检查（strict） |
-| `deptry` | 依赖卫生：未声明 / 多余 / 传递依赖（依赖清单或导入变了都会重跑） |
-| `color-contrast` | 调色板的对比度守卫（只在调色板/对比度相关文件变动时跑） |
-| `pytest (blocker+critical)` | 最高两档严重等级的用例 = 数据安全 + 核心逻辑 |
+| 钩子                        | 干什么                                                                    |
+| --------------------------- | ------------------------------------------------------------------------- |
+| `ruff check (autofix)`      | 静态检查并自动修可修的项                                                  |
+| `ruff format`               | **就地排版并把结果加回暂存区**（不是只报"哪些文件会被改"）                |
+| `compact JSON`              | 把 `src/archive_management/resources/` 顶层的固定数据清单压回单行紧凑格式 |
+| `mypy`                      | 宿主平台上的类型检查（strict）                                            |
+| `deptry`                    | 依赖卫生：未声明 / 多余 / 传递依赖（依赖清单或导入变了都会重跑）          |
+| `color-contrast`            | 调色板的对比度守卫（只在调色板/对比度相关文件变动时跑）                   |
+| `pytest (blocker+critical)` | 最高两档严重等级的用例 = 数据安全 + 核心逻辑                              |
 
 想手动跑同一套：`uv run --no-sync pre-commit run --all-files`。
 
 ### CI：全量、三平台、分片
 
-- **PR**：三个平台各跑一遍**全量**（Linux 3 片、Windows 2 片、macOS 1 片），分片只影响墙钟，
+- **PR**：三个平台各跑一遍**全量**（三平台各 3 片），分片只影响墙钟，
   不影响结论；静态检查、性能基准、视觉回归也在这轮跑，并出**覆盖率门禁**与**完整 Allure 报告**。
 - **push 到 `dev` / `main`**：只按改动路径跑相关的分片（确认没改坏），**不出报告**。
 - **nightly（UTC 19:00 = 北京次日凌晨 3 点）**：由 `nightly.yml` 判断 `dev` 24h 内有没有新提交，

@@ -429,11 +429,51 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     print(f"[durations] 已记录 {len(_DURATION_SAMPLES)} 条用例的耗时 -> {path}")
 
 
+# 共享一份 UI 会话的模块: 模块路径 → 池名(相同的池名 = 真的共用同一扇窗口与同一个
+# 后端, 见 tests/ui_sharing.py 的池说明)。分片时**同池的用例必须留在同一片** —— 拆开
+# 后每片各自重建一份共享窗口, 复用直接作废(而重建比不复用还贵), 所以 tests/sharding.py
+# 把它们当成一个不可拆开的装箱单元。
+# 池名与 tests/ui_sharing.py 的池键同源: 池是按**工厂函数身份**分的 —— 五个模块共用
+# ``ui_sharing.demo_app`` 这一份(窗口标题与热键禁用原因在那里是统一值; ``test_gui_shared_session``
+# 是验共享会话机制本身的模块, 它取的也是同一个池), 另外两个模块各有一个只服务自己那组
+# 用例的工厂(改过下拉选项 / 换过长文案后端, 污染不出去)。
+# 新增一个共享池模块时在这里登记; 守卫(tests/unit/test_sharding.py)会反过来要求
+# "真的在用共享会话的模块都登记了", 漏登记会让它悄悄退回"每片各建一份"。
+_SHARED_UI_SESSIONS: dict[str, str] = {
+    "tests/integration/test_gui_copy_quality.py": "copy-quality",
+    "tests/integration/test_gui_dropdown.py": "dropdown",
+    "tests/integration/test_gui_keyboard.py": "demo-app",
+    "tests/integration/test_gui_shared_session.py": "demo-app",
+    "tests/integration/test_gui_states.py": "demo-app",
+    "tests/integration/test_gui_styles.py": "demo-app",
+    "tests/integration/test_gui_tooltip.py": "demo-app",
+}
+
+
+def _shared_ui_groups(items: list[pytest.Item]) -> dict[str, str]:
+    """收集期算出"哪些用例必须同片"(nodeid → 池名).
+
+    只看**真的请求了共享会话**的用例: ``ui_shared`` 夹具在 fixturenames 的闭包里,
+    模块内不开窗的用例因此不会被拖进组。
+    """
+    groups: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, pytest.Function):  # 只有函数用例才请求夹具
+            continue
+        if "ui_shared" not in item.fixturenames:
+            continue
+        pool = _SHARED_UI_SESSIONS.get(item.nodeid.partition("::")[0])
+        if pool is not None:
+            groups[item.nodeid] = pool
+    return groups
+
+
 def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
     """按 ``--shard-count`` / ``--shard-index`` 只保留本片要跑的用例.
 
     分片在**严重等级过滤之后**做: 本地 ``--min-severity=critical`` 选出来的子集也
-    能均分成几片跑, 与 CI 的全量分片互不影响。
+    能均分成几片跑, 与 CI 的全量分片互不影响。共享一份 UI 会话的用例整体装箱
+    (见 ``_shared_ui_groups``), 所以它们不会被拆到两片去。
     """
     count = int(config.getoption("--shard-count"))
     index = int(config.getoption("--shard-index"))
@@ -445,13 +485,17 @@ def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
         )
     if count == 1:
         return
-    buckets = sharding.shard_plan([item.nodeid for item in items], count=count)
+    groups = _shared_ui_groups(items)
+    buckets = sharding.shard_plan(
+        [item.nodeid for item in items], count=count, groups=groups
+    )
     mine = set(buckets[index])
     total = sharding.load_of([item.nodeid for item in items])
     planned = sharding.load_of(buckets[index])
     print(
         f"[shard {index + 1}/{count}] 本片 {len(mine)} 个用例, "
         f"预计 {planned:.0f}s / 全量 {total:.0f}s"
+        + (f", 其中共享 UI 会话 {len(groups)} 条" if groups else "")
     )
     deselected = [item for item in items if item.nodeid not in mine]
     items[:] = [item for item in items if item.nodeid in mine]

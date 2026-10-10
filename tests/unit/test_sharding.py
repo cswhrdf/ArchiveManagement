@@ -90,6 +90,58 @@ def test_shard_plan_balances_the_slow_cases() -> None:
     assert loads[-1] <= ideal * 1.1
 
 
+def test_shard_plan_keeps_a_shared_ui_session_in_one_piece() -> None:
+    """共享一份 UI 会话的用例整组进同一片: 拆开等于每片各自重建一份窗口.
+
+    这是 ``tests/conftest.py`` 的 ``_SHARED_UI_SESSIONS`` + ``sharding.shard_plan(groups=...)``
+    这条链的落点: 池按**工厂函数身份**分, 同池的用例靠 ``tests/ui_sharing.py`` 复用同一扇
+    窗口与同一个后端 —— 被拆到两片后各片只能各自建一份, 复用直接作废(而重建比不复用还贵)。
+    没登记分组的用例各自成组, 不受影响。
+    """
+    session = [
+        f"tests/integration/test_gui_states.py::test_case_{index}" for index in range(6)
+    ]
+    others = [f"tests/unit/test_models.py::test_case_{index}" for index in range(30)]
+    groups = {node_id: "demo-app" for node_id in session}
+
+    buckets = sharding.shard_plan(session + others, count=3, groups=groups)
+
+    owners = [len(set(session) & set(bucket)) for bucket in buckets]
+    assert sorted(owners) == [0, 0, len(session)], f"共享会话被拆开: {owners}"
+    merged = [node for bucket in buckets for node in bucket]
+    assert sorted(merged) == sorted(session + others)
+
+
+def test_shard_plan_without_groups_packs_case_by_case() -> None:
+    """没登记分组的用例各自成组: 传空表与不传时的分片完全一致(不改变既有行为)."""
+    assert sharding.shard_plan(_SAMPLE, count=4, groups={}) == sharding.shard_plan(
+        _SAMPLE, count=4
+    )
+
+
+def test_every_module_with_a_shared_ui_session_is_registered() -> None:
+    """真在用共享 UI 会话的模块必须登记在 ``conftest`` 的表里(漏登记是静默的).
+
+    漏登记的后果: 那些用例被当普通用例拆到不同片, 每片各自建一份共享窗口 —— 复用作废
+    且更贵, 而没有任何一步会失败。判据用"模块里真的调用了 ``ui_shared.test_scope`` /
+    ``group_scope``", 与表**恰好相等**: 反过来也要求表里没有已失效的登记。
+    """
+    repo = Path(__file__).resolve().parents[2]
+    conftest = (repo / "tests" / "conftest.py").read_text(encoding="utf-8")
+    registered = set(re.findall(r'"(tests/integration/[\w]+\.py)":', conftest))
+
+    users = set()
+    for path in sorted((repo / "tests" / "integration").glob("test_gui_*.py")):
+        body = path.read_text(encoding="utf-8")
+        if "test_scope(" in body or "group_scope(" in body:
+            users.add(path.relative_to(repo).as_posix())
+
+    assert users == registered, (
+        f"共享 UI 会话的模块与 conftest 的登记对不上: 少了 {sorted(users - registered)}"
+        f", 多了/失效 {sorted(registered - users)}"
+    )
+
+
 def test_shard_plan_rejects_a_bad_count() -> None:
     """分片数必须 ≥ 1: 0 片会让"所有用例都跑不到"变成静默的成功."""
     with pytest.raises(ValueError, match="至少为 1"):
@@ -122,6 +174,54 @@ def _shards_per_platform(text: str) -> dict[str, list[int]]:
     for entry in ci_workflow.matrix_entries(text, "pytest"):
         shards.setdefault(entry["platform"], []).append(int(entry["shard"]))
     return shards
+
+
+def test_matrix_entries_expand_axes_and_include() -> None:
+    """两个轴 + 几条 include 要展开成"每个平台每一片一条"(整片属性按 os 补给三片).
+
+    这是矩阵写法简化的地基: 片数一致时把矩阵写成 ``os`` 与 ``shard`` 两个轴、include 只补
+    "该平台的展示名与片数", 条目从 9 条降到 3 条 —— 守卫看到的仍是展开后的 9 条。
+    配不上的 include 条目按 GitHub 自己的语义单独成一条(否则"给某个组合加特例"没法表达).
+    """
+    text = (
+        "jobs:\n"
+        "  demo:\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        os: [ubuntu-latest, macos-latest]\n"
+        "        shard: [0, 1]\n"
+        "        include:\n"
+        "          - os: ubuntu-latest\n"
+        "            platform: Linux\n"
+        "            shards: 2\n"
+        "          - os: macos-latest\n"
+        "            platform: macOS\n"
+        "            shards: 2\n"
+        "          - os: windows-latest\n"
+        "            platform: Windows\n"
+        "            shard: 0\n"
+        "            shards: 1\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+
+    entries = ci_workflow.matrix_entries(text, "demo")
+
+    assert [entry["os"] for entry in entries] == [
+        "ubuntu-latest",
+        "ubuntu-latest",
+        "macos-latest",
+        "macos-latest",
+        "windows-latest",
+    ]
+    assert [entry["platform"] for entry in entries] == [
+        "Linux",
+        "Linux",
+        "macOS",
+        "macOS",
+        "Windows",
+    ]
+    assert [entry["shards"] for entry in entries] == ["2", "2", "2", "2", "1"]
 
 
 def test_ci_shard_count_matches_the_matrix() -> None:
@@ -369,7 +469,7 @@ def test_single_shard_platform_downloads_into_its_own_shard_directory() -> None:
     """单片平台的产物必须**直接落进那个分片目录名**里.
 
     ``download-artifact`` 只在匹配到**多个**产物时才逐个建"以产物名命名的子目录"; 只匹配到
-    一个时它把内容直接解到 ``path`` 里, 不建那层目录。macOS 只有 1 片, 正好撞上这条:
+    一个时它把内容直接解到 ``path`` 里, 不建那层目录。那时的 macOS 只有 1 片, 正好撞上这条:
     ``path: .`` 时那 12689 个结果文件摊在工作区根, 合并脚本按"分片目录"找就一个都匹配不到
     —— macOS 的结论与覆盖率**全程没进报告** (2026-10-01 run 36754229023 实测: 分片作业自己
     2206 passed、下载也成功且 digest 校验通过, 而合并报"以下模式没匹配到目录")。

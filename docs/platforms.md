@@ -64,8 +64,7 @@
 
 上表里的 ✅ 分两类证据，**没证据的写"待观察"而不是打勾**：
 
-- **CI 跑全量**：`pytest` / `pytest-report` / `security` 三个矩阵都按平台展开（Linux 3 片、Windows 2 片、
-  macOS 1 片 —— macOS 按 ×10 计价所以少开片），所以"单元 + 集成 + 安全"
+- **CI 跑全量**：`pytest` / `pytest-report` / `security` 三个矩阵都按平台展开（三个平台各 3 片），所以"单元 + 集成 + 安全"
   在每个平台都是真的执行过的结论，报告里按环境分开呈现。macOS 于 2026-09-30 恢复，**首次运行待观察**。
 - **人工实测（本机 Windows，2026-09-30）**：真 `pynput` 后端注册两个默认全局快捷键（都 `registered=True`）；
   回收站删除后能在 `$Recycle.Bin` 里找到那个文件且内容逐字节一致（不存在时抛 `StorageError`，不会静默成功、

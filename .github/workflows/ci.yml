@@ -417,45 +417,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 逐个列条目(而不是 os × shard 两个轴): 各平台的**片数不一样**, 而且每个平台的片号
-        # 必须从 0 连续编到“片数-1” —— 只声明一个 shard 轴就没法表达"Linux 三片、Windows 两片",
-        # 而片号缺号或越界会让一部分用例静默不跑(pytest 按 --shard-index 取模选片)。
-        # 片数按固定开销算: 某平台总时长 ≈ 片数 × 固定开销 +
-        # 串行测试时间 T —— 减片省额度、加片省墙钟。
-        # 改片数要同时改这里的 shards 与报告作业的 expect_shards:
+        # **两个轴**(os × shard) + 三条 include: 片数现在三平台一致, 于是矩阵写成轴最省 ——
+        # include 里每条按 ``os`` 匹配, 一次把"该平台的展示名与片数"补给它的三片
+        # (GitHub 的 include 就是"能对上就合并"这个语义, tests/ci_workflow.py 也按它展开)。
+        # 片号必须从 0 连续编到"片数-1": 缺号或越界会让一部分用例静默不跑
+        # (pytest 按 --shard-index 取模选片), 所以轴里就写 0..2。
+        # 片数按固定开销算: 某平台总时长 ≈ 片数 × 固定开销 + 串行测试时间 T ——
+        # 减片省额度、加片省墙钟。**三个平台一视同仁各 3 片**(2026-10-10): 仓库转公开后
+        # Actions 不再计费, 当初"macOS 按 Linux 的 10 倍计价, 只给它 1 片"的理由就消失了
+        # —— 那一条曾是三平台片数不同的唯一原因。
+        # **哪天某个平台的片数又要单独调**, 这里就得退回"逐条 include 列出来"的写法
+        # (两个轴表达不了"各平台片数不同"), 并同时改报告作业的 expect_shards ——
         # tests/unit/test_sharding.py 会核对两边, 产物清单也照它声明"必须有哪几片"。
-        #
-        # macOS 已于 2026-09-30 恢复, 并且只给它 **1 片**:
-        # macOS runner 按 Linux 的 10 倍计价, 片数直接决定多付几整套 setup —— 1 片 = 3 个
-        # macOS 实例(pytest / pytest-report / security), 本平台的 T≈260s 那么单片约 5~6 分钟。
-        # 想缩短墙钟就再加一条 `{ os: macos-latest, platform: macOS, shard: 1, shards: 2 }`,
-        # 并把两条条目的 shards 改成 2、报告作业的 expect_shards 改成 "0,1"(三处由
-        # tests/unit/test_sharding.py 核对着一致)。
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        shard: [0, 1, 2]
         include:
           - os: ubuntu-latest
             platform: Linux
-            shard: 0
-            shards: 3
-          - os: ubuntu-latest
-            platform: Linux
-            shard: 1
-            shards: 3
-          - os: ubuntu-latest
-            platform: Linux
-            shard: 2
             shards: 3
           - os: windows-latest
             platform: Windows
-            shard: 0
-            shards: 2
-          - os: windows-latest
-            platform: Windows
-            shard: 1
-            shards: 2
+            shards: 3
           - os: macos-latest
             platform: macOS
-            shard: 0
-            shards: 1
+            shards: 3
 
     # macOS 片的解释器来源与其它平台不同(见下面 "Set up Python (macOS, ...)" 一步):
     # 只认机器上已装好的解释器, 不许 uv 再去下载 standalone(它捆 Tcl/Tk 9.0, 崩溃记录
@@ -800,12 +785,13 @@ jobs:
         #
         # download_path 是产物**下载落地的目录**, 按平台分开写 —— 因为
         # `download-artifact` 只在匹配到**多个**产物时才逐个建"以产物名命名的子目录",
-        # 只匹配到一个时它把内容直接解到 ``path`` 里, 不建那层目录。macOS 只有 1 片, 正好
-        # 撞上这条: path 写 "." 时那 12689 个结果文件摊在工作区根, 合并脚本按"分片目录"
+        # 只匹配到一个时它把内容直接解到 ``path`` 里, 不建那层目录。macOS 曾经只有 1 片,
+        # 正好撞上这条: path 写 "." 时那 12689 个结果文件摊在工作区根, 合并脚本按"分片目录"
         # 找就一个都匹配不到 —— 于是 macOS 的结论与覆盖率全程没进报告, 合并作业报
         # "以下模式没匹配到目录"、覆盖率报"缺片"(2026-10-01 run 36754229023 实测: 下载成功、
-        # digest 校验通过、macOS 分片作业自己 2206 passed)。所以单片平台的 path 直接写成
-        # 那个分片目录名, 多片平台仍写 "."(各片各自成目录)。
+        # digest 校验通过、macOS 分片作业自己 2206 passed)。所以**单片平台的 path 直接写成
+        # 那个分片目录名**; 现在三个平台都是 3 片, 三处都写 "."(各片各自成目录)。哪天又给
+        # 某个平台只开 1 片, 记得把它改回分片目录名 —— 这条纪律不会因为片数变整齐而失效。
         include:
           - os: ubuntu-latest
             platform: Linux
@@ -813,12 +799,12 @@ jobs:
             download_path: .
           - os: windows-latest
             platform: Windows
-            expect_shards: "0,1"
+            expect_shards: "0,1,2"
             download_path: .
           - os: macos-latest
             platform: macOS
-            expect_shards: "0"
-            download_path: allure-results-macos-latest-0
+            expect_shards: "0,1,2"
+            download_path: .
 
     steps:
       - name: Check out repository

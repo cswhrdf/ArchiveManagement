@@ -16,11 +16,16 @@ CI 会把同一平台的用例拆进多个作业并行跑, 最后把各片的 Al
     uv run python scripts/run_tests_local.py -- --record-durations=tests/durations.json
 
 (双片各记一份, 脚本自动合并; 记录/合并/加载的实现与约定见 ``tests/durations.py``。)
+
+除了逐条装箱, 还支持**不可拆开的组**(``groups``): 共享一份 UI 会话的用例必须留在同一
+片 —— 它们靠 ``tests/ui_sharing.py`` 的池复用同一扇窗口/同一个后端, 拆开后每片各自重建
+一份, 复用的收益全部作废(而且重建本身比不复用更贵)。哪些模块共享哪一个池登记在
+``tests/conftest.py`` 的 ``_SHARED_UI_SESSIONS`` 里。
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import durations
 
@@ -62,19 +67,54 @@ def load_of(node_ids: Sequence[str]) -> float:
     return sum(cost_of(node_id) for node_id in node_ids)
 
 
-def shard_plan(node_ids: Sequence[str], *, count: int) -> list[list[str]]:
+def shard_plan(
+    node_ids: Sequence[str],
+    *,
+    count: int,
+    groups: Mapping[str, str] | None = None,
+) -> list[list[str]]:
     """把用例分成 ``count`` 片, 返回每片的 nodeid(片内按 nodeid 升序).
 
     "最慢的优先"贪心装箱: 用例按(权重降序, nodeid 升序)处理 —— 先安置各自最慢的,
     再依次放进当前**总权重最小**的一片。排序把并列情况也钉死了, 因此同样的输入
     总是得到同样的分片。
+
+    ``groups`` 是"不可拆开的组"(nodeid → 组名): 同一组的用例当成**一个装箱单元**,
+    不会被分到两片。共享一份 UI 会话的用例靠它留在同一片(见模块说明), 没登记在
+    ``groups`` 里的用例各自成组 —— 组内只有一条时, 装箱顺序与结果都与不传 ``groups``
+    逐条装箱时完全相同。
     """
     if count < 1:
         raise ValueError("分片数至少为 1")
     buckets: list[list[str]] = [[] for _ in range(count)]
     loads = [0.0] * count
-    for node_id in sorted(node_ids, key=lambda node: (-cost_of(node), node)):
+    for load, _first, members in _packing_units(node_ids, groups):
         target = min(range(count), key=lambda index: (loads[index], index))
-        buckets[target].append(node_id)
-        loads[target] += cost_of(node_id)
+        buckets[target].extend(members)
+        loads[target] += load
     return [sorted(bucket) for bucket in buckets]
+
+
+def _packing_units(
+    node_ids: Sequence[str], groups: Mapping[str, str] | None
+) -> list[tuple[float, str, list[str]]]:
+    """把用例合成装箱单元 ``(权重, 排序用的首条 nodeid, 成员)``, 并按装箱顺序排好.
+
+    排序键取组内**最小**的 nodeid(而不是"随机某条"): 组的构成只由用例集决定,
+    哪种收集顺序进来都得到同一个计划。
+    """
+    by_group: dict[str, list[str]] = {}
+    for node_id in node_ids:
+        by_group.setdefault(_group_key(node_id, groups), []).append(node_id)
+    units = [
+        (sum(cost_of(node) for node in members), min(members), sorted(members))
+        for members in by_group.values()
+    ]
+    return sorted(units, key=lambda unit: (-unit[0], unit[1]))
+
+
+def _group_key(node_id: str, groups: Mapping[str, str] | None) -> str:
+    """用例所属的组名(没登记分组的用例自己成一组, 组名就是它的 nodeid)."""
+    if groups is None:
+        return node_id
+    return groups.get(node_id, node_id)
