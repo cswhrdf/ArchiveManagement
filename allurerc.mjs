@@ -59,7 +59,7 @@ export default {
   // 各平台自己的事实(CI 镜像)放在 `environments` 里的**按环境变量**中, 切环境时跟着变。
   variables: {
     // 与 pyproject.toml 的 [tool.coverage.report] fail_under 一致(守卫会核对)。
-    覆盖率门槛: "95%",
+    覆盖率门槛: "100%",
     // 本地默认只收集前两类(见 pyproject.toml 的 testpaths): 读报告的人看到没有性能/安全
     // 结果时, 第一反应往往是"漏跑了" —— 这里直接说明那是有意的。
     用例分层: "unit / integration 每次跑 · performance / security 只在 CI",

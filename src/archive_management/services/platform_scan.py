@@ -155,11 +155,13 @@ class WinRegistry:
         # (scripts/coverage_platform.py), 在别的平台上排除。不要为覆盖率往 ``sys.modules``
         # 塞替身模块或换掉本模块看到的 ``importlib`` —— 那只是把导入路径"演"给统计看,
         # 真平台上的行为一点没多验到(2026-10-10 移除过两条这样的用例)。
+        # 非 Windows 上 import_module 先抛 ImportError, 走上面那一支返回:
+        # 于是最后那一行只有 Windows 会执行到。
         try:
             module = importlib.import_module("winreg")
-        except ImportError:  # platform: linux macos - 非 Windows 平台没有 winreg 模块
-            return None  # platform: linux macos - 非 Windows 平台没有 winreg 模块
-        return cast(WinRegModule, module)  # platform: windows - winreg 仅 Windows 提供
+        except ImportError:  # platform: linux macos - 没有 winreg 模块
+            return None  # platform: linux macos - 没有 winreg 模块
+        return cast(WinRegModule, module)  # platform: windows - 非 Windows 走上面一支
 
     @staticmethod
     def _root(hive: str, module: WinRegModule) -> int | None:

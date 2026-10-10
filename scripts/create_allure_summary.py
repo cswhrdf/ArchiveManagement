@@ -689,29 +689,100 @@ def _load_platform_module() -> Any:  # noqa: ANN401 - 按路径加载的脚本, 
 PLATFORM_MODULE = _load_platform_module()
 
 
+@dataclass(frozen=True)
+class _MarkerRow:
+    """豁免清单里的一行平台标记(写法不规范时 ``reason`` 为 None)."""
+
+    relative: str
+    number: int
+    text: str
+    reason: str | None
+    platforms: tuple[str, ...]
+    problems: tuple[str, ...]
+
+
+def _marker_row(module: Path, number: int, text: str, root: Path) -> _MarkerRow:
+    """把一条 ``# platform: ...`` 标记读成记录(解析复用 ``coverage_platform`` 那份规则)."""
+    relative = str(module.relative_to(root))
+    parsed = PLATFORM_MODULE.parse_marker(text)
+    if parsed is None:
+        return _MarkerRow(relative, number, text, None, (), ())
+    platforms, reason = parsed
+    return _MarkerRow(
+        relative,
+        number,
+        text,
+        reason,
+        tuple(platforms),
+        tuple(PLATFORM_MODULE.marker_problems(text)),
+    )
+
+
+def _continues_the_group(previous: tuple[_MarkerRow, int], row: _MarkerRow) -> bool:
+    """``row`` 能不能接在 ``previous`` 后面折叠成一条."""
+    first, last = previous
+    same_platforms = first.platforms == row.platforms
+    same_reason = first.reason is not None and first.reason == row.reason
+    return (
+        same_platforms
+        and same_reason
+        and not first.problems
+        and not row.problems
+        and first.relative == row.relative
+        and last + 1 == row.number
+    )
+
+
+def _collapse_marker_rows(rows: Sequence[_MarkerRow]) -> list[tuple[_MarkerRow, int]]:
+    """把**连续**的同文件/同平台/同原因的行折叠成一条, 返回 (首条, 末行号).
+
+    一处平台差异常占好几行(``except`` 行 + 它的块体 + 另一支的返回): 每行都是 coverage
+    眼里的可执行行, 都得各自标记(少标一行, 它在别的平台就是永久缺口), 而**原因**往往逐字
+    相同 —— 清单里连列三遍一模一样的话, 读起来像复制粘贴出了错, 反而不像"这里有三行、
+    为什么"。折叠只改**呈现**不改统计: 每一行照旧被排除。写法有问题的行不折叠(问题要逐条
+    点名, 不能藏进行号区间里)。
+    """
+    collapsed: list[tuple[_MarkerRow, int]] = []
+    for row in rows:
+        if collapsed and _continues_the_group(collapsed[-1], row):
+            collapsed[-1] = (collapsed[-1][0], row.number)
+            continue
+        collapsed.append((row, row.number))
+    return collapsed
+
+
+def _render_marker_row(row: _MarkerRow, last: int) -> str:
+    """渲染一条标记(折叠后行号写成区间; 写法不规范的另是一种写法)."""
+    where = f"{row.number}" if last == row.number else f"{row.number}-{last}"
+    if row.reason is None:
+        return (
+            f"- `{row.relative}:{where}` — **问题: 写法不规范** — `{_cell(row.text)}`"
+        )
+    detail = f"- `{row.relative}:{where}` — 仅 {', '.join(row.platforms)} — 原因: {row.reason}"
+    if row.problems:
+        detail += f" — **问题: {'; '.join(row.problems)}**"
+    return detail
+
+
 def _platform_marker_section(root: Path) -> list[str]:
-    """列出 ``# platform: ...`` 标记(仅哪个平台 + 原因), 供豁免清单附件用."""
+    """列出 ``# platform: ...`` 标记(仅哪个平台 + 原因), 供豁免清单附件用.
+
+    连续、同文件、同平台、同原因的多行折叠成一条(带行号区间) —— 见
+    :func:`_collapse_marker_rows`。
+    """
     if PLATFORM_MODULE is None:  # pragma: no cover - 同目录的文件一定在
         return []
-    notes = PLATFORM_MODULE.marker_lines(root)
+    rows = [
+        _marker_row(module, number, text, root)
+        for module, number, text in PLATFORM_MODULE.marker_lines(root)
+    ]
     lines = ["## 平台标记(`# platform: ...`)—— 只在**别的**平台被排除", ""]
-    if not notes:
+    if not rows:
         lines += ["没有平台标记: 没有按平台区分的代码。", ""]
         return lines
-    for module, number, text in notes:
-        parsed = PLATFORM_MODULE.parse_marker(text)
-        relative = module.relative_to(root)
-        if parsed is None:
-            lines.append(
-                f"- `{relative}:{number}` — **问题: 写法不规范** — `{_cell(text)}`"
-            )
-            continue
-        platforms, reason = parsed
-        detail = f"- `{relative}:{number}` — 仅 {', '.join(platforms)} — 原因: {reason}"
-        problems = PLATFORM_MODULE.marker_problems(text)
-        if problems:
-            detail += f" — **问题: {'; '.join(problems)}**"
-        lines.append(detail)
+    lines += [
+        _render_marker_row(row, last) for row, last in _collapse_marker_rows(rows)
+    ]
     lines.append("")
     return lines
 

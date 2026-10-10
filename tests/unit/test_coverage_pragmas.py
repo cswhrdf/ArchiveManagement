@@ -149,3 +149,38 @@ def test_no_branch_pragmas_sit_on_lines_without_a_branch() -> None:
             offenders.append(f"{_relative(module)}:{number}: {stripped}")
 
     assert offenders == [], f"`no branch` 标在了没有分支的行上: {offenders}"
+
+
+def test_consecutive_identical_platform_markers_collapse_into_one_line(
+    tmp_path: Path,
+) -> None:
+    """清单里连续、同文件、同平台、同原因的平台标记折叠成一条(带行号区间).
+
+    折叠只改**呈现**: 一处平台差异常占好几行(``except`` 行 + 它的块体 + 另一支的返回),
+    每行都得各自标记(少标一行, 它在别的平台就是永久缺口), 而原因往往逐字相同 —— 连着
+    列三遍一模一样的话, 读起来像复制粘贴出错。写法不规范的行**不**折叠: 问题要逐条点名。
+    """
+    package = tmp_path / "src" / "pkg"
+    package.mkdir(parents=True)
+    reason = "winreg 只随 Windows 版 Python 提供"
+    (package / "mod.py").write_text(
+        "try:\n"
+        f"    ok = import_winreg()  # platform: linux macos - {reason}\n"
+        f"    used = ok  # platform: linux macos - {reason}\n"
+        "except ImportError:\n"
+        "    used = None\n"
+        "back = used  # platform: windows - 非 Windows 上 import_module 先抛 ImportError\n"
+        "odd = 1  # platform: windows 少了分隔符\n"
+        "odd2 = 2  # platform: windows 也少了分隔符\n",
+        encoding="utf-8",
+    )
+
+    section = "\n".join(summary._platform_marker_section(tmp_path / "src"))
+
+    label = str(Path("pkg") / "mod.py")
+    assert f"`{label}:2-3`" in section, section
+    assert f"`{label}:6`" in section, section
+    assert section.count(reason) == 1, f"同一句原因只该出现一次: {section}"
+    assert f"`{label}:7`" in section, section
+    assert f"`{label}:8`" in section, section
+    assert section.count("写法不规范") == 2, section
