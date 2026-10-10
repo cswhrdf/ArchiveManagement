@@ -114,3 +114,14 @@ def test_values_keeps_only_string_pairs(
 
     assert values["InstallDir"] == "value-0"
     assert set(values) == {"InstallDir"}
+
+
+def test_values_returns_empty_for_unknown_hive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """hive 名字不认识时 ``values`` 直接返回空字典, 不尝试打开任何键."""
+    module = _FakeWinReg([])
+    _use(monkeypatch, module)
+
+    assert WinRegistry().values("NOPE", "Software\\Vendor") == {}
+    assert module.opened == []

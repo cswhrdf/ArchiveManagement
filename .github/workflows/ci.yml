@@ -1,19 +1,36 @@
 name: CI
 
+# 分支规则与"纯文档改动"的忽略清单只写一次, push 与 PR 两个触发器共用(YAML 锚点)。
+# **锚点必须挂在 GitHub 认得的键上**: 顶层开一个 `x-ci-*` 键会让整份工作流直接报
+# `Unexpected value 'x-ci-branches'` 而**完全不生效**(2026-10-06 实测, 连"文档改动不跑 CI"
+# 这条都不成立 —— 是没有 CI 可跑), 守卫 test_ci_workflow_only_uses_top_level_keys_github_knows
+# 会把顶层键的集合钉住。
 on:
   push:
-    branches: [main, dev]
-    # 纯文档改动不值得跑整套 CI(一轮约 21 个作业)。**只加在 push 上**: pull_request 若被
-    # 路径过滤跳过, 分支保护里的必需检查会永远停在 pending, PR 反而合不了 —— 需要给 PR
-    # 也省额度就改用"轻量作业 + 条件跳过重量级作业", 而不是让整个工作流不触发。
-    paths-ignore:
+    branches: &ci_branches [main, dev]
+    # 这里保留 `paths-ignore`，因为它只在 push 触发时生效：文档类修改不需要跑整套 CI。
+    # 对 `pull_request` 不能直接用它，否则工作流在路径命中忽略时根本不会出任何 job,
+    # 分支保护里的 required status checks 会永久停在 pending。PR 侧改成轻量 `changes` 作业
+    # 再用条件跳过重量级作业，保证检查结果总能出现。
+    paths-ignore: &ci_ignore_patterns
       - "**/*.md"
       - "docs/**"
       - ".github/instructions/**"
       - ".github/prompts/**"
   pull_request:
+    branches: *ci_branches
+  # 由 nightly.yml 调用(带 `ref: dev`): 全量 + 报告, 只在 dev 24h 内有过合入时跑。
+  # **定时触发不在这里** —— 这一份只描述流水线, "今晚要不要跑"由 nightly.yml 的 gate 作业
+  # 判断; 被调用时 `github.event_name` 仍是调用方的事件(`schedule`)。
+  workflow_call:
+    inputs:
+      ref:
+        description: "要检出并测试的 ref(不传则用本次运行的 SHA)"
+        required: false
+        type: string
 
-# 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(21 个作业)。
+# 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(一轮 16 个作业
+# 实例; push 分层后更少 —— 被跳过的报告作业不占 runner, 而 PR 与 nightly 都是全量)。
 # 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。
 # 注意 `always()` 的语义是“即使被取消也返回 true”: 取消后就不该再启动的作业要用
 # `always() && !cancelled()` 表达(见 pytest-report / allure-summary 的作业条件),
@@ -42,8 +59,104 @@ env:
   UV_NO_SYNC: "1"
 
 jobs:
+  changes:
+    name: Check relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      ui: ${{ steps.decide.outputs.ui }}
+      backend: ${{ steps.decide.outputs.backend }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Detect files that require CI
+        id: filter
+        # 被 nightly 调用时 `event_name` 是 `schedule` —— 定时那轮没有"上一个提交"可比,
+        # dorny 给不出路径集合, 所以这一步跳过, 由 decide 补"层全绿 + 照跑"的答案。
+        # 它若失败, needs: [changes] 的所有作业跟着跳过, 整轮就死了。
+        if: github.event_name != 'schedule'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            should_run:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!.github/instructions/**'
+              - '!.github/prompts/**'
+
+            # push 按改动路径分层(2026-10-09 换向): ui 层 = UI 专属路径 + 共享基础设施;
+            # 冒烟用例全部挂在 test_gui_* 上、带 smoke+ui 双标记, 所以 `-m "ui"` 天然含冒烟。
+            # 共享基础设施(pyproject / uv.lock / conftest / 分片器 / 这份工作流)同时会被
+            # backend 层的兜底 `**` 命中 —— 它们影响所有用例, 只跑一层等于拿半套证据赌合并。
+            ui:
+              - 'src/archive_management/ui/**'
+              - 'tests/integration/test_gui_*.py'
+              - 'tests/visual-baselines/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'tests/conftest.py'
+              - 'tests/sharding.py'
+              - 'tests/ci_workflow.py'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/nightly.yml'
+
+            # backend 层 = "除文档与 UI 专属路径外的一切"(兜底 `**`), 不是白名单:
+            # 分不清归哪层的改动(新目录、杂项文件)都落到这一层, 宁可多跑不漏跑。
+            backend:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!.github/instructions/**'
+              - '!.github/prompts/**'
+              - '!src/archive_management/ui/**'
+              - '!tests/integration/test_gui_*.py'
+              - '!tests/visual-baselines/**'
+
+      - name: Decide which layers to run
+        id: decide
+        # 各作业统一从 decide 取输出: 被 nightly 调用时(filter 步因 `schedule` 被跳过、
+        # 输出为空)要在这里补一个"层全绿 + 照跑"的答案 —— "今晚要不要跑"不归本文件管,
+        # 那是 nightly.yml 的 gate 作业(没变化的一轮根本不会调用到这里)。
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FILTERED_SHOULD_RUN: ${{ steps.filter.outputs.should_run }}
+          FILTERED_UI: ${{ steps.filter.outputs.ui }}
+          FILTERED_BACKEND: ${{ steps.filter.outputs.backend }}
+        run: |
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "ui=true" >> "$GITHUB_OUTPUT"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=$FILTERED_SHOULD_RUN" >> "$GITHUB_OUTPUT"
+            echo "ui=$FILTERED_UI" >> "$GITHUB_OUTPUT"
+            echo "backend=$FILTERED_BACKEND" >> "$GITHUB_OUTPUT"
+          fi
+
+  required-check:
+    name: CI required status
+    needs: [changes]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the CI gate decision
+        shell: bash
+        run: |
+          if [ "${{ needs.changes.outputs.should_run }}" = "true" ]; then
+            echo "Relevant changes detected; full CI will run."
+            exit 0
+          fi
+          echo "No code-impacting changes; heavy CI jobs were skipped, but the required status is still green."
+
   quality:
     name: 质量检查、静态分析、性能基准与视觉回归 (ubuntu-latest)
+    needs: [changes]
+    if: needs.changes.outputs.should_run == 'true'
     # 四批检查在一个作业里依次跑: ruff / ruff format / mypy(宿主平台)、deptry / bandit /
     # pip-audit / radon / xenon、性能基准、界面视觉回归(感知哈希 + SSIM)。它们都与平台无关
     # (不涉及路径分隔符; 视觉回归要显示环境, 但由本作业自己的 xvfb 提供, 截出来的画面在这里
@@ -51,12 +164,14 @@ jobs:
     # 安装 / 依赖同步的固定开销。
     # 平台专属的两次 mypy 不在这个作业里(见 pytest 作业的片 0)。
     # 视觉回归**不按平台展开**: 基线图入库、只在 Linux 采, 多平台会把"字体度量不同"变成
-    # 一堆假红(见 PLAN.md 17.4)。
+    # 一堆假红。
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -152,6 +267,11 @@ jobs:
         # 的 CPython 自带的 Tcl/Tk 是 python-build-standalone 自己编的, 在 X11 上只走**核心
         # 位图字体**(符号表里只有 XLoadQueryFont 那套, 没有 fontconfig/FreeType), 装多少 TTF
         # 都画不出汉字。发行版的 Tk 8.6 走 Xft/fontconfig, 与 fonts-noto-cjk 配套。
+        #
+        # 前面几批门禁没过也要装完再走(与性能基准那一步同一个口径): 视觉结论是独立的
+        # 一类。"这一步被跳过"与"它没产出"在下面那一步看起来一模一样(都是没有文件),
+        # 于是报告里少一块结论, 却报成"没有文件"这种误导性的红(2026-10-10 实测)。
+        if: always()
         shell: bash
         run: |
           while IFS= read -r -d '' source; do
@@ -202,8 +322,11 @@ jobs:
         # ``UV_PROJECT_ENVIRONMENT`` 让它装进独立环境, 不动本作业其余步骤共用的 .venv。
         #
         # 脚本自己也会拦: 汉字量不出宽度时它标红**且不产出候选基线**(见 tests/unit/
-        # test_report_verification.py 的守卫), 并把探针(模块与库的实际路径)写进 fonts.txt ——
+        # test_report_visual_catalog.py 的守卫), 并把探针(模块与库的实际路径)写进 fonts.txt ——
         # 宁可这一轮没有基线, 也不拿一张看不清的图当"正确"。
+        # 同上: 前面的门禁红了也要把这一轮画面拍出来并写结论 —— 它的上传步是
+        # `always()` + `if-no-files-found: error`, 产出方与消费方的门禁必须一致。
+        if: always()
         env:
           UV_PROJECT_ENVIRONMENT: .venv-visual
         run: |
@@ -278,6 +401,13 @@ jobs:
           if-no-files-found: error
 
   pytest:
+    needs: [changes]
+    # PR 与 nightly 跑**全量**(不分层): 合并前要完整证据, nightly 是唯一出报告的那一轮。
+    # **只有 push** 按改动路径选层 —— 合并那一轮只为"确认没改坏", 合并报告留到 nightly。
+    # 纯文档改动在触发层就被挡掉(push 的 `paths-ignore` / PR 的 dorny), should_run=false
+    # 会跳过整个作业(与 quality 作业按 should_run 跳过同一个模式, 必需检查由
+    # required-check 兜底)。作业级不再看事件: 至少有一层命中的保证留在步骤级。
+    if: needs.changes.outputs.should_run == 'true'
     # 套件按平台拆成几片并行跑, 各片只负责自己那部分用例, 由后续的 pytest-report
     # 作业把 Allure 结果与覆盖率数据合并成一份报告 —— 墙钟时间只取决于最慢的一片。
     # 平台专属的 mypy 检查也在这个作业里(片 0 的各平台各跑一次), 不再单独开作业:
@@ -290,12 +420,12 @@ jobs:
         # 逐个列条目(而不是 os × shard 两个轴): 各平台的**片数不一样**, 而且每个平台的片号
         # 必须从 0 连续编到“片数-1” —— 只声明一个 shard 轴就没法表达"Linux 三片、Windows 两片",
         # 而片号缺号或越界会让一部分用例静默不跑(pytest 按 --shard-index 取模选片)。
-        # 片数按固定开销算(见 PLAN.md 第 11.4 节第 9 条): 某平台总时长 ≈ 片数 × 固定开销 +
+        # 片数按固定开销算: 某平台总时长 ≈ 片数 × 固定开销 +
         # 串行测试时间 T —— 减片省额度、加片省墙钟。
         # 改片数要同时改这里的 shards 与报告作业的 expect_shards:
         # tests/unit/test_sharding.py 会核对两边, 产物清单也照它声明"必须有哪几片"。
         #
-        # macOS 已于 2026-09-30 恢复(见 PLAN.md 第 11.9 节), 并且只给它 **1 片**:
+        # macOS 已于 2026-09-30 恢复, 并且只给它 **1 片**:
         # macOS runner 按 Linux 的 10 倍计价, 片数直接决定多付几整套 setup —— 1 片 = 3 个
         # macOS 实例(pytest / pytest-report / security), 本平台的 T≈260s 那么单片约 5~6 分钟。
         # 想缩短墙钟就再加一条 `{ os: macos-latest, platform: macOS, shard: 1, shards: 2 }`,
@@ -337,6 +467,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -470,8 +602,15 @@ jobs:
       #     两段的用例集合互补(一个 not ui、一个 ui), 各平台的片合起来仍是全集, 不重不漏。
       # 第二段的条件带 `always() && !cancelled()`: 第一段有普通红(断言失败)时 UI 段照跑 ——
       # 一半用例的失败不该吞掉另一半的结果; 整轮被取消则不再起新进程。
+      #
+      # 分层(2026-10-09 换向): **只有 push** 上每一段按 changes 作业的层输出放行 ——
+      # backend 层(非 UI 的 src / 测试 / 基础设施)跑 "not ui" 段, ui 层
+      # (src/archive_management/ui、test_gui_*、视觉基线)跑 "ui" 段; PR 与 nightly
+      # 无视层输出、两段全跑(PR 要给合并前的完整证据, nightly 是唯一出报告的那一轮)。
+      # 作业级的 if 只要求 should_run(至少有一层命中), 所以总有一段把结果与覆盖率
+      # 写出来 —— 上传步的 `if-no-files-found: error` 不会因为某段被跳过而误伤。
       - name: Pytest with coverage, non-UI suite first (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (github.event_name != 'push' || needs.changes.outputs.backend == 'true')
         env:
           # 每片写一份自己的覆盖率数据(合并放到 pytest-report 作业里)。
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
@@ -487,13 +626,13 @@ jobs:
       # 窗口一过脚本自动透传不再重试, 守卫测试(tests/unit/test_ci_diagnostics.py)同时变红,
       # 催着人回来移除这层包装或明确续期。
       - name: Pytest with coverage, UI suite in its own process (Linux)
-        if: always() && !cancelled() && runner.os == 'Linux'
+        if: always() && !cancelled() && runner.os == 'Linux' && (github.event_name != 'push' || needs.changes.outputs.ui == 'true')
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         run: xvfb-run -a uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Pytest with coverage, non-UI suite first (Windows/macOS)
-        if: runner.os != 'Linux'
+        if: runner.os != 'Linux' && (github.event_name != 'push' || needs.changes.outputs.backend == 'true')
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         # 单片覆盖率天生偏低, 所以这里关掉报告与门槛(--cov-report= / --cov-fail-under=0):
@@ -501,7 +640,7 @@ jobs:
         run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Pytest with coverage, UI suite in its own process (Windows/macOS)
-        if: always() && !cancelled() && runner.os != 'Linux'
+        if: always() && !cancelled() && runner.os != 'Linux' && (github.event_name != 'push' || needs.changes.outputs.ui == 'true')
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         run: uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
@@ -641,12 +780,15 @@ jobs:
     # 产物名与以前完全一致(allure-resources-/coverage-/allure-report-<runner 镜像名>), 汇总
     # 作业与历史回填都照旧读它们 —— 历史也按平台各一条, 改名会把累计曲线清零。
     name: 合并测试报告 (${{ matrix.platform }})
-    needs: [pytest]
+    needs: [changes, pytest]
     # 分片作业失败也要出报告: 报告正是用来看"哪一片挂了"的。
     # 但**被取代的运行不必再出报告**: 这一条要用 `!cancelled()` 表达, 不能只写 `always()`
     # —— `always()` 连“整轮被取消”也返回 true, 那样旧的那一轮会在取消后照样启动本作业
     # (合并/生成/上传白跑一遍, 而且被取消的作业按已用时长计费)。
-    if: always() && !cancelled()
+    # 并且**不是 push 就跑**(PR 与 nightly 都要出报告): 这两个事件下四段 pytest 都是全量,
+    # 而 push 只跑选中层(切片覆盖率天生偏低, 在那里判门槛等于自造假红) —— 它的证据是
+    # 分片作业的日志与分片产物(allure-results-<os>-<shard> / coverage-data-*)。
+    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -681,6 +823,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -728,7 +872,7 @@ jobs:
         # 版本下限在**运行期**判定: 工作流用的是浮动标签 `allure@3`(2026-10-04 用户按需求改成
         # 动态取最新), 而 3.13~3.17 在配了 historyPath 时会让**质量门静默放行**(退 0 且不输出
         # 任何内容, issue #895; 3.18.0 的 PR #962 修复) —— 那种失效在报告里看不出来, 所以装完
-        # 当场比一次。静态那一条由 tests/unit/test_report_verification.py 守着(只允许浮动标签
+        # 当场比一次。静态那一条由 tests/unit/test_ci_workflow.py 守着(只允许浮动标签
         # 或 ≥ 配置里最低要求的钉住版本)。
         shell: bash
         run: |
@@ -799,6 +943,16 @@ jobs:
         if: steps.collect-coverage.outcome == 'success'
         run: uv run coverage combine
 
+      - name: Write the platform coverage config
+        # 平台专属代码只在**别的**平台被排除(见 scripts/coverage_platform.py 的模块说明)。
+        # 这台机器是 Ubuntu, 而它合并/判定的是**某个平台**的数据 ⇒ 平台名取矩阵里的展示名,
+        # 不取宿主平台。写进 GITHUB_ENV 之后, 下面三步(判门槛 / 出 XML / 挂结论)共用它。
+        if: steps.collect-coverage.outcome == 'success'
+        shell: bash
+        run: |
+          uv run python scripts/coverage_platform.py write .coverage-platform.rc --platform "${{ matrix.platform }}"
+          echo "COVERAGE_RCFILE=$PWD/.coverage-platform.rc" >> "$GITHUB_ENV"
+
       - name: Enforce the coverage threshold
         # 门槛值在 pyproject 的 [tool.coverage.report] fail_under 里(与本地一致)。
         # **这一步不再决定这个作业的成败**(用户 2026-10-05: "这一步应该只关心用例是否缺失,
@@ -836,7 +990,7 @@ jobs:
 
       - name: Upload the coverage conclusion
         # 这条覆盖率结论是这个作业**独有**的产出(别的作业不会写它), 而合并后的
-        # `allure-results/` 从 2026-10-04 起不再上传(见 PLAN §41) —— 少这一份, 汇总报告里
+        # `allure-results/` 从 2026-10-04 起不再上传 —— 少这一份, 汇总报告里
         # 三个平台会全部报“缺少结论: Coverage report”, 而报告作业自己是绿的, 作业状态上看不出
         # 任何异常。目录名以 `allure-results-` 开头, 汇总作业用一份 `pattern: allure-results-*`
         # 就能收走(artifact 名用 matrix.platform: 三个平台的这个作业都跑在 ubuntu 上,
@@ -962,8 +1116,8 @@ jobs:
 
       - name: Verify Allure report
         # 报告是静态站点: 用例详情页要按需取 data/test-results/*.json。这个目录一旦
-        # 在传输/解压环节丢掉, 报告就只剩"通过/失败", 点开用例是空的 —— 所以发布前
-        # 先自检, 并通过 --archive 打成单个文件发布(整目录被静默丢掉的情况不会再出现)。
+        # 在传输/解压环节丢掉, 报告就只剩"通过/失败", 点开用例是空的 —— 所以上传前
+        # 先自检, 并通过 --archive 打成单个文件(整目录被静默丢掉的情况不会再出现)。
         # 打包交给系统的 tar: 本作业在 Ubuntu 上, 一万多个小文件用一个子进程完事; 而
         # 上传时 GitHub 的 artifact 传输**自己**会再压一层 zip, 那一层不是我们套的。
         # --expect-platforms 传的是矩阵里的平台: 要求这份报告里真的有**用例**结果,
@@ -1001,7 +1155,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Allure report
-        # 自检不通过时不发布报告: 宁可让作业红着, 也不要把"打不开详情"的报告发出去。
+        # 自检不通过时不上传报告: 宁可让作业红着, 也不要把"打不开详情"的报告发出去。
         if: always() && steps.verify-report.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
@@ -1037,6 +1191,10 @@ jobs:
           if-no-files-found: error
 
   security:
+    needs: [changes]
+    # 安全用例验的是后端语义(越权 / 路径逃逸 / 副作用防护, 不开窗口), 归 backend 层:
+    # **只有 push** 上按层放行(纯 UI 的 push 跳过它), PR 与 nightly 照跑。
+    if: needs.changes.outputs.should_run == 'true' && (github.event_name != 'push' || needs.changes.outputs.backend == 'true')
     name: 安全测试 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1052,6 +1210,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -1113,10 +1273,14 @@ jobs:
           if-no-files-found: error
 
   allure-summary:
-    # 汇总与发布**合并成一个作业**（2026-09-30）：这两件事本来就是“先生成报告、再发站点”的固定
-    # 顺序，拆成两个作业只是多付一整套 checkout / uv / npm 的固定开销（作业实例 15 → 14）。
-    # 合并的两处代价（写权限与环境只能提到作业级）见下面 permissions / environment 的注释。
-    name: Allure 汇总报告与发布
+    # 只生成一份汇总报告并作为 artifact 上传（2026-10-06 起不再发布到 GitHub Pages）:
+    # 站点发布用的 pages / id-token 权限、github-pages 环境与三个发布步骤一并删除,
+    # 报告的可达性交给 `allure-report-final` 产物。
+    name: Allure 汇总报告
+    needs: [changes, quality, pytest-report, security]
+    # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
+    # 完整报告与原生质量门与 pytest-report 同一条规则(不是 push 就跑)。
+    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
     # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure
@@ -1124,42 +1288,22 @@ jobs:
     # 平台专属检查、静态分析与性能基准现在都跑在 pytest 的片 0 与 quality 作业里, 所以清单里
     # 不再有 quality-platform / analysis / performance: 它们要出的产物都由这两个作业上传,
     # 等它们跑完即可。
-    needs: [quality, pytest-report, security]
-    # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
-    if: always() && !cancelled()
-    # 发布站点要写权限, 与顶层的只读声明不同; 作业级 permissions 是**覆盖**而不是叠加 ——
-    # 所以 `contents: read`(checkout 要它)与 `actions: read`(取本轮的产物)必须一起写上。
-    # 工作流语法里**没有**步骤级 permissions, 所以这两个写权限在 PR 上那一次运行里也存在——
-    # 这个作业只跑仓库自己的脚本(不跑 PR 里的代码), 风险可接受。
+    # 这个作业只跑仓库自己的脚本(不跑 PR 里的代码), 权限与顶层一致即可:
+    # `contents: read`(checkout 要它) + `actions: read`(取本轮的产物)。
     permissions:
       contents: read
       actions: read
-      # 发布 Pages 要它(顶层只给了只读)。
-      pages: write
-      # `deploy-pages` 用 OIDC 令牌换一次性的部署权限, 不必给长期凭据。
-      id-token: write
-    # 站点要挂在 github-pages 环境上(作业 URL 也来自它)。environment 同样只能挂作业级, 于是
-    # **不要**给这个环境配“必需审批”: 那样每次 PR 都会停在这里等批准。
-    #
-    # url **刻意不写兜底**: 原来写的是
-    #   `${{ steps.deploy.outputs.page_url || format('https://{0}.github.io/{1}/', ...) }}`
-    # 想给"没发布的那几次"也留个链接, 结果是**假链接**: `environment.url` 是作业级表达式,
-    # 无条件求值 —— 发布那三步因为 `github.ref != 默认分支` 被整段跳过时, 它照样把那个静态
-    # 字符串显示在运行摘要里, 点进去必然 404(2026-10-01 实测: dev 上的运行摘要挂着
-    # https://cswhrdf.github.io/ArchiveManagement/, 而同一次运行里发布三步一次都没执行)。
-    # 没有 `deploy` 就没有 `page_url` → url 为空 → 摘要不挂链接, 这才是诚实的状态。
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    # 这里**刻意不写**原来那个 `concurrency: group: github-pages`: 汇总是每个 PR 都要跑的作业,
-    # 共用一个组会让并发的几个 PR 互相排队(同组只允许一个 pending, 后来者会把前一个 pending
-    # 取消掉)。而“两次发布撞车”本来就被顶层 concurrency(按 ref、cancel-in-progress)挡住了:
-    # 只有默认分支的 push 会发布, 被取代的那一轮整轮被取消、根本走不到发布步骤。
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
+        # 这一步不能少: 下面每一句都是 `uv ...`, 而 runner 上并不预装 uv —— 少了它要到
+        # 几十行之后才以 "uv: command not found" 挂掉(2026-10-10 实测)。
+        # 缓存开关属于**这个** action: 挂到 checkout 上只会得到一句"未知输入"的告警,
+        # 参数静默失效(见 tests/unit/test_test_config.py 的那条守卫)。
         uses: astral-sh/setup-uv@v7
         with:
           # 只读复用依赖缓存(写入交给 pytest 第 0 片).
@@ -1279,7 +1423,8 @@ jobs:
             });
             const candidates = runs.data.workflow_runs.filter(
               (r) =>
-                r.name === "CI" &&
+                // 与逐平台作业同一理由: 历史链跨 CI / Nightly 两份工作流。
+                ["CI", "Nightly"].includes(r.name) &&
                 r.id !== context.runId &&
                 r.status === "completed",
             );
@@ -1440,7 +1585,7 @@ jobs:
         # 只有把分片自报的条数与最终条数对齐才能看出来。
         # --expect-platforms 要与实际跑的矩阵一致(要求了却没跑, 报告必然不完整、门禁
         # 无意义地红); 守卫会把三处拷在一起。
-        # 这一条不拦发布(`continue-on-error`): 这属于**内容**问题, 而报告正是用来看
+        # 这一条不直接判作业红(`continue-on-error`): 这属于**内容**问题, 而报告正是用来看
         # "哪个平台没数据"的东西, 拦下来反而拿不到证据; 判定交给末尾的门禁结论步骤。
         # 另外它也是仓库自己表达同一道不变式的地方(不只靠 Allure 配置里的 filter)。
         id: verify-platforms
@@ -1463,6 +1608,9 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload final Allure report
+        # 报告不再发布到 GitHub Pages(2026-10-06): 想浏览时下载这份 `allure-report-final` 产物
+        # (单个 tar.gz, `archive: false` 不再多套一层 zip)。自检不通过时不上传: 宁可让作业红着,
+        # 也不给出"打不开详情"的报告。
         if: always() && steps.verify-report.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
@@ -1470,60 +1618,6 @@ jobs:
           path: allure-report.tar.gz
           archive: false # 不打包，直接上传原始文件
           if-no-files-found: ignore
-
-      # -- 发布到 GitHub Pages(只有默认分支的 push 会真的走到) ------------------------------
-
-      - name: Unpack the report for Pages
-        # 触发条件只写在这一步(后面两步跟随它的 `ready` 输出)。四个条件缺一不可:
-        # `always()` —— 步骤的 `if` 默认隐含 `success()`, 而这一步要“不论前面成不成, 都按结论
-        #   决定发不发”; `!cancelled()` —— 整轮被取消就别再启动;
-        # `github.event_name == 'push'` —— 未评审的内容不上站点, 而且来自 fork 的 PR 也拿不到
-        #   `pages: write`(那会变成一条恒红的检查);
-        # `default_branch` —— `dev` 的推送不该把站点来回覆盖(要连 dev 一起发布就把这里换成
-        #   `github.ref_name == 'dev' || ...`, 但两边会互相覆盖, 得自己想清楚);
-        # `steps.verify-report.outcome == 'success'` —— 就是上面 `Upload final Allure report`
-        #   的挂载条件: 没通过自检的报告不发布(宁可这一轮没有站点, 也不把“打不开详情”的报告发出去)。
-        # 直接解工作区里的 `allure-report.tar.gz`: 合并成一个作业之后它就是本作业上一步的产物,
-        # 不必再让 artifact 绕一圈(原来那个“下载 allure-report-final”的唯一用途就是跨作业取文件)。
-        id: unpack
-        if: always() && !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.verify-report.outcome == 'success'
-        # 发布是“给人看的副本”, 不让它决定这一轮的成败: 历史与报告产物在前面几步
-        # 就已经传完, 发布挂掉不该把作业弄红(趋势基线如今不问成败, 见
-        # “Resolve previous run with Allure history”)。
-        # 原来这条 `continue-on-error` 挂在 deploy-pages **整个作业**上, 合并后只能落在发布这三步
-        # 上 —— **不能**挂到作业上, 那会把质量门的结论一起吞掉。
-        continue-on-error: true
-        shell: bash
-        run: |
-          rm -rf site
-          mkdir -p site
-          archive="allure-report.tar.gz"
-          if [ ! -f "$archive" ]; then
-            echo "::warning::没有找到 $archive, 跳过发布(报告可能没通过自检)"
-            exit 0
-          fi
-          # Pages 要的是一个**目录**(站点根就是它): 直接传压缩包的话, 打开网址只会下载一个文件。
-          # 归档里的条目带一层报告目录名(见 scripts/verify_allure_report.py 的打包逻辑),
-          # 所以解开之后就是 site/allure-report/。
-          tar -xzf "$archive" -C site
-          test -f site/allure-report/index.html
-          echo "ready=true" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the report as a Pages artifact
-        if: always() && steps.unpack.outputs.ready == 'true'
-        continue-on-error: true
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site/allure-report
-
-      - name: Deploy to GitHub Pages
-        # 这两个官方 action 用的是各自的**当前主版本**(仓库里没有它们的版本先例 —— 其它 action
-        # 的 `@v7` 是各自的主版本)。首次 push 后若报“找不到该版本/未知 action”, 就按提示改。
-        # 另: 仓库设置里的 Pages → Source 必须选 “GitHub Actions”, 否则这里必然失败。
-        if: always() && steps.unpack.outputs.ready == 'true'
-        continue-on-error: true
-        id: deploy
-        uses: actions/deploy-pages@v4
 
       - name: Collect failure diagnostics
         id: diagnostics

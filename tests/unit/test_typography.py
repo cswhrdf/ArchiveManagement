@@ -141,8 +141,8 @@ def test_each_platform_prefers_a_family_that_really_exists_there() -> None:
 
     - Windows 上必须还是 **Roboto**: customtkinter 自带并私有注册它, 现有界面的字形与
       入库的基线都是照它采的;
-    - Linux 上必须是**中日韩字体**: uv 管的那份 Tk 一个 TTF 都用不了(只走 X11 核心位图字体,
-      见 PLAN §22), 发行版的 Tk 则靠 fontconfig 找字体 —— 而 CI 装的是 fonts-noto-cjk。
+    - Linux 上必须是**中日韩字体**: uv 管的那份 Tk 一个 TTF 都用不了(只走 X11 核心位图字体),
+      发行版的 Tk 则靠 fontconfig 找字体 —— 而 CI 装的是 fonts-noto-cjk。
     """
     assert typography.preferred_candidates("win32")[0] == "Roboto"
     assert typography.preferred_candidates("linux")[0].startswith("Noto Sans CJK")

@@ -1,11 +1,18 @@
 # 提交前质量门禁
 # 通过 uv 运行以保证与开发环境一致的依赖版本.
+#
+# 每条 `uv run` 都带 `--no-sync`(2026-10-08 的现场): 不带时, `pyproject.toml` / `uv.lock`
+# 与 `.venv` 只要有漂移, **提交这条路**就会顺手重建虚拟环境 —— 实测编辑器的 Ruff 扩展
+# 正占着 `.venv\Scripts\ruff.exe`, 复制失败(os error 32), 钩子 exit 2 拦下提交, 而环境
+# 已被卸掉 14 个包、卡在"半装"状态(整套钩子只报了"ruff-check 失败")。关掉隐式 sync
+# 之后: 提交永远不会动你的环境; 依赖真的变了它只会明确报"找不到工具", 那时**先跑一次
+# `uv sync` 再提交**即可。
 repos:
   - repo: local
     hooks:
       - id: ruff-check
         name: ruff check (autofix)
-        entry: uv run ruff check --fix
+        entry: uv run --no-sync ruff check --fix
         language: system
         types: [python]
 
@@ -17,7 +24,7 @@ repos:
         # 一致 ⇒ pre-commit 不算它"弄脏文件", **本次提交直接带上排版好的内容**; 只有
         # 加不进索引时才退回"拦下提交"(见 scripts/ruff_format_and_stage.py)。
         name: ruff format (自动排版并重新暂存)
-        entry: uv run python scripts/ruff_format_and_stage.py
+        entry: uv run --no-sync python scripts/ruff_format_and_stage.py
         language: system
         types: [python]
 
@@ -27,7 +34,7 @@ repos:
         # 脚本改写完会自己 `git add` 暂存: 工作区与索引一起变单行后就不算“弄脏文件”,
         # 本次提交直接带上转换好的内容, 不需要重新 add。
         name: compact JSON (清单转单行)
-        entry: uv run python scripts/compact_json.py
+        entry: uv run --no-sync python scripts/compact_json.py
         language: system
         # 只管 resources 顶层的固定数据清单; resources/i18n/*.json 是给人看/审校的
         # 文案资源, 继续保持多行。
@@ -35,7 +42,7 @@ repos:
 
       - id: mypy
         name: mypy
-        entry: uv run mypy
+        entry: uv run --no-sync mypy
         language: system
         types: [python]
 
@@ -43,7 +50,7 @@ repos:
         # 依赖卫生(未声明 / 多余 / 传递依赖): 全项目检查, 因此不跟着变动的文件逐个跑;
         # 依赖清单变了、或代码的导入变了都要重查一次。
         name: deptry (依赖检查)
-        entry: uv run deptry .
+        entry: uv run --no-sync deptry .
         language: system
         pass_filenames: false
         files: ^(src/|tests/|scripts/|pyproject\.toml$|uv\.lock$)
@@ -53,9 +60,9 @@ repos:
         # (tests/unit/test_ui_contrast.py ↔ ui/contrast.py), 钩子不抄第二份会漂移的副本。
         # 同一份用例里还请了**第三方库**再算一遍(``color-contrast`` 包的 check_contrast):
         # 它只返回布尔值、报不出"差多少", 所以不拿它当引擎; 但"实现是别人写的"这点让
-        # 它可以给我们的公式当第二把算尺(分工与理由见 PLAN §17.3)。
+        # 它可以给我们的公式当第二把算尺(分工与理由见 docs/testing.md 的对比度判据一节)。
         name: color-contrast (WCAG 对比度)
-        entry: uv run pytest tests/unit/test_ui_contrast.py -q
+        entry: uv run --no-sync pytest tests/unit/test_ui_contrast.py -q
         language: system
         pass_filenames: false
         files: ^(src/archive_management/ui/(palette|contrast)\.py|tests/unit/test_ui_contrast\.py)$
@@ -65,7 +72,7 @@ repos:
         # 详见 docs/testing.md 的严重等级表。其余等级交给 CI 全量执行 —— 本地钩子要快,
         # 但"会丢数据"的回归不能漏。
         name: pytest (blocker+critical)
-        entry: uv run pytest --min-severity=critical
+        entry: uv run --no-sync pytest --min-severity=critical
         language: system
         types: [python]
         pass_filenames: false

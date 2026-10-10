@@ -60,11 +60,11 @@ _SEVERITY_MARKERS = ("blocker", "critical", "normal", "minor", "trivial")
 _DEFAULT_SUITES = ("tests/unit", "tests/integration")
 # 只在 CI 执行的测试类别: 目录名与 -m 标记名一致.
 _CI_ONLY_SUITES = ("performance", "security")
-# 不碰 uv 的作业(它们只用 runner 自带的工具: 下载产物、`unzip`、上传)。
-# 2026-09-30: 发布 Pages 的那个作业已与汇总**合成一个**, 而汇总必须 sync(它要跑仓库的
-# 脚本与 Allure CLI), 所以这份清单**现在是空的** —— 机制留着: 以后再加"只用 runner 自带
-# 工具"的作业时按这条登记。列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
-_UV_FREE_JOBS: set[str] = set()
+# 不碰 uv 的作业(它们只用 runner 自带的工具与官方 action: 下产物、路径过滤、上传)。
+# 2026-10-06: 报告不再发布 Pages, 但 PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
+# `dorny/paths-filter`、`required-check` 只 `echo` 一行, 都不需要 Python 环境, 所以
+# 按这条登记; 列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
+_UV_FREE_JOBS: set[str] = {"changes", "required-check"}
 # 跨模块共享的测试辅助模块.
 _SHARED_MODULES = ("helpers.py", "reporting.py")
 
@@ -272,7 +272,7 @@ def _sync_by_environment(job_body: str) -> dict[str, list[str]]:
     """把作业里的 ``uv sync`` 按"这一步装到哪个环境"归类.返回 ``环境名 -> 命令行列表``.
 
     同一个作业可以故意装有**两份环境**: 视觉回归那一步要**换一份 Tk**(uv 托管的那份 Python
-    自带的 Tcl/Tk 在 X11 上只走核心位图字体, 汉字一个都画不出来, 见 PLAN §22), 于是它用
+    自带的 Tcl/Tk 在 X11 上只走核心位图字体, 汉字一个都画不出来), 于是它用
     ``UV_PROJECT_ENVIRONMENT`` 指到另一个目录、只装它需要的那几组。
 
     "每次 uv sync 必须一致"这条规矩守的是"别在**同一个**环境里来回换组"(后一次会把前一次
@@ -304,7 +304,7 @@ def _environments(job_body: str) -> dict[str, _EnvironmentPlan]:
     """按"这一步在哪个环境里跑"归类作业正文.
 
     同一个作业可以故意装有**两份环境**: 视觉回归那一步要**换一份 Tk**(uv 托管的那份 Python
-    自带的 Tcl/Tk 在 X11 上只走核心位图字体, 汉字一个都画不出来, 见 PLAN §22), 于是它用
+    自带的 Tcl/Tk 在 X11 上只走核心位图字体, 汉字一个都画不出来), 于是它用
     ``UV_PROJECT_ENVIRONMENT`` 指到另一个目录并单独 sync 一次。
 
     分开归类之后两条规矩才能各自落到实处: ① "同一个环境里的多次 sync 必须一致"(后一次会把
@@ -420,6 +420,35 @@ def test_uv_run_does_not_silently_sync_the_default_groups() -> None:
             f"{workflow.name} 顶层 env 缺少 UV_NO_SYNC: uv run 会按默认组装回全套依赖"
         )
         assert "UV_NO_SYNC" in head, hint
+
+
+def test_every_uv_job_installs_uv_and_keeps_the_cache_inputs_on_it() -> None:
+    """用了 uv 的作业必须先装 uv; 依赖缓存的开关只能挂在 setup-uv 那一步上.
+
+    2026-10-10 实测: 汇总作业里 `enable-cache` / `save-cache` 被挂到了 ``actions/checkout``
+    下面, 而它的 `Install uv` 步骤整个不见了。这两种错都不会让 CI 红:
+      * GitHub 对**未知输入**只告警不报错(告警里列出的是 checkout 认得的那些键), 于是缓存
+        参数静默失效 —— "缓存热时省不了几秒"这条本来就不指望它, 但"配了个没人读的开关"更糟;
+      * 少了 setup-uv 时, 后面那句 `uv python install` 才会以 "command not found" 挂掉,
+        而那已经是几十行之后的事了。
+    所以这里把两条不变式都钉住: ① 作业正文里出现 uv 命令就必须有 `astral-sh/setup-uv`;
+    ② `enable-cache` / `save-cache` 只许出现在 setup-uv 那一步里。
+    """
+    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+        text = workflow.read_text(encoding="utf-8")
+        for name, body in ci_workflow.jobs(text).items():
+            commands = _without_comments(body)
+            if re.search(r"\buv (?:run|sync|python|pip)\b", commands):
+                hint = f"{name} 里用了 uv 命令, 却没有 astral-sh/setup-uv 这一步"
+                assert "astral-sh/setup-uv" in body, hint
+            for step in re.split(r"\n\s*- (?:name|uses|run):", body):
+                step_text = _without_comments(step)
+                if re.search(r"(?:enable|save)-cache:", step_text):
+                    hint = (
+                        f"{name} 把依赖缓存的开关挂在非 setup-uv 的步骤上了"
+                        f"(GitHub 只告警不报错, 缓存其实没生效): {step_text.strip()[:120]}"
+                    )
+                    assert "astral-sh/setup-uv" in step_text, hint
 
 
 def test_local_sync_still_installs_every_group() -> None:

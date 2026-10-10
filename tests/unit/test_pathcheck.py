@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from archive_management.services.pathcheck import (
     PathSummary,
     dangerous_target_reason,
+    has_any_content,
     is_within,
     is_writable_target,
     normalize_path,
@@ -24,6 +26,47 @@ pytestmark = [
     pytest.mark.story("校验存档路径"),
     pytest.mark.layer("unit"),
 ]
+
+
+def test_has_any_content_is_false_when_the_directory_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录读不到(权限/已删)时当作"没有内容", 而不是把异常抛给调用方."""
+    folder = tmp_path / "saves"
+    folder.mkdir()
+
+    def refuse(self: Path) -> Iterator[Path]:
+        raise OSError("权限不足")
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+
+    assert has_any_content(str(folder)) is False
+
+
+def test_a_path_that_reports_itself_as_a_link_counts_only_the_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """路径被判为符号链接时只算一条链接: 不跟进去数, 也不当作文件/目录.
+
+    用补丁把``is_symlink``限定在这个名字上, 而不是真的建链接 —— 真建链接在 Windows 上
+    需要开发者模式, 用例会跳掉, 这条判据也就没人看着了(2026-10-06: 原先正因如此只能靠
+    ``# platform:`` 标成"别的平台不判", 换成谓词后每个平台都跑得到)。
+    """
+    linked = tmp_path / "linked"
+    linked.write_bytes(b"x" * 8)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "linked")
+
+    assert summarize_path(str(linked)) == PathSummary(symlinks=1)
+    assert has_any_content(str(linked)) is True
+
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / "linked").write_bytes(b"y" * 4)
+    (folder / "real.bin").write_bytes(b"z" * 2)
+
+    summary = summarize_path(str(folder))
+    assert (summary.files, summary.directories, summary.symlinks) == (1, 0, 1)
+    assert summary.total_size == 2, "被当作链接的那份不该计进字节数"
 
 
 def test_is_within_ignores_case_for_drive_paths() -> None:

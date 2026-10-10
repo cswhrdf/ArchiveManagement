@@ -36,7 +36,7 @@ pytestmark = [
 
 
 # 提示文字用一个"没有任何标点"的标记: 这些用例断言的是对齐/宽度/能否提交, 与文案本身
-# 无关。原来写的是文案原文("请输入游戏名称:") —— 那会让用例跟着文案标点一起变红(I-3
+# 无关。原来写的是文案原文("请输入游戏名称:") —— 那会让用例跟着文案标点一起变红
 # 把中文句内的半角逗号/冒号统一成全角时就撞过一次), 而文案的标点由
 # tests/unit/test_i18n.py 的三条守卫统一管着。
 _PROMPT = "提示语"
@@ -121,7 +121,16 @@ class _FakeWidget:
 
 
 class _FakeTextbox(_FakeWidget):
-    """假多行文本框: 只保留最后写入的内容."""
+    """假多行文本框: 只保留最后写入的内容, 并记下挂了哪些键(聚焦清占位要用)."""
+
+    def __init__(self, master: Any = None, **kwargs: Any) -> None:
+        super().__init__(master=master, **kwargs)
+        # 序列名与回调(用例直接叫它当"这个框被聚焦了").
+        self.binds: list[tuple[str, Any]] = []
+
+    def bind(self, _sequence: str, _callback: Any, **_kwargs: Any) -> None:
+        """记下绑定(与基类同形参名: 下划线起头的形参被视为位置参数)."""
+        self.binds.append((_sequence, _callback))
 
     def get(self, _start: str = "1.0", _end: str = "end") -> str:
         return self._value
@@ -1081,6 +1090,40 @@ def test_edit_backup_dialog_cancel_returns_none(harness: _FakeParent) -> None:
     assert dialogs.edit_backup_dialog(harness, DARK, **_edit_args()) is None
 
 
+def test_edit_backup_dialog_clears_the_placeholder_on_first_focus(
+    harness: _FakeParent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """聚焦时清掉占位文案, 并把它从弱色换回正文色.
+
+    占位文案是"这条备份为什么建的"那句灰字: 第一次聚焦就要让位给用户, 否则一打字
+    还得先删掉它。第二次聚焦不能再清 —— 那时框里已经是用户自己写的字了。
+    """
+    boxes: list[_FakeTextbox] = []
+    make_textbox = ctk.CTkTextbox
+
+    def capture(master: Any = None, **kwargs: Any) -> _FakeTextbox:
+        """造出描述框并记下它, 好让用例"聚焦"它."""
+        box = cast(_FakeTextbox, make_textbox(master=master, **kwargs))
+        boxes.append(box)
+        return box
+
+    monkeypatch.setattr(ctk, "CTkTextbox", capture)
+    harness.click_text = tr("dialog.cancel")
+    dialogs.edit_backup_dialog(harness, DARK, **_edit_args())
+
+    assert boxes, "改名/描述对话框应当有一个描述框"
+    box = boxes[0]
+    focus = dict(box.binds)["<FocusIn>"]
+
+    focus(None)
+    assert box.get() == "", "占位文案该被清掉"
+    assert box.kwargs["text_color"] == DARK.text_body, "清掉占位后该换回正文色"
+
+    box.insert("1.0", "用户写的内容")
+    focus(None)
+    assert box.get() == "用户写的内容", "第二次聚焦不能抹掉用户已经写下的字"
+
+
 def test_edit_backup_dialog_rejects_over_limit_description(
     harness: _FakeParent,
 ) -> None:
@@ -1509,9 +1552,13 @@ class _ComfortWindow:
         self._requested = requested
         self._chrome = chrome
         self._measured = measured
+        # 夹取"量了几轮": 已在下限时应当第一轮就收工(见
+        # test_the_comfort_line_stops_when_the_body_is_already_at_its_floor)。
+        self.idle_calls = 0
 
     def update_idletasks(self) -> None:
-        """假窗口没有待处理事件."""
+        """假窗口没有待处理事件; 只数一下夹取问了几轮."""
+        self.idle_calls += 1
 
     def winfo_screenheight(self) -> int:
         """屏幕高度(舒适线 = 它的 80%)."""
@@ -1609,6 +1656,29 @@ def test_the_comfort_line_stops_after_the_pass_limit(
     dialogs._clamp_to_comfort_line(window, current=561)
 
     assert body.height == 509 - dialogs._CLAMP_PASSES, "收够上限就该停手"
+
+
+def test_the_comfort_line_stops_when_the_body_is_already_at_its_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正文区已在下限却仍超线时**第一轮就收工**: 不再往下收, 也不做无用的反复量测.
+
+    这是"够不着"的形态(2026-10-02 实测: 700 高的屏 + 125% 缩放下批量导入的正文区已压到
+    ``_DIALOG_BODY_MIN``, 整窗仍是 654 物理 > 448): 口径是"夹取使完手段"就停手 —— 继续
+    往下压会把内容切成看不见, 反复量四轮也只是白跑。断言"量了几轮"正是为了咬住这两件事:
+    把早退去掉、或把 ``<=`` 改成 ``<``, 这条就会看到 4 轮而不是 1 轮。
+
+    收到上限附近就收工时走的却是**另一条**路(请求高度不再越线, 见上一条用例), 所以这一行
+    一直没有用例走到 —— 别把它当成防御性死代码删掉。
+    """
+    monkeypatch.setattr(ctk, "CTkScrollableFrame", _ComfortBody)
+    body = _ComfortBody(dialogs._DIALOG_BODY_MIN)
+    window: Any = _ComfortWindow(body, requested=900, measured=900)
+
+    dialogs._clamp_to_comfort_line(window, current=900)
+
+    assert body.height == dialogs._DIALOG_BODY_MIN, "已在下限的正文区不该被改写"
+    assert window.idle_calls == 1, "已在下限就该第一轮收工"
 
 
 def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
@@ -2378,3 +2448,73 @@ def test_centering_gives_up_at_the_pass_limit_or_when_the_window_is_gone() -> No
     dialogs._settle_centering(parent, window, (0, 0))
     _drive(window)
     assert not window.pending, "弹窗没了就不该再排复查"
+
+
+# ------------------------------------------- 读位置: "不知道" 不能当成 0
+
+
+def test_window_position_is_unknown_before_the_manager_replies() -> None:
+    """窗口管理器还没回过话时 ``geometry()`` 是空串 → "不知道", 不要当成 0.
+
+    当成 0 会让"位置对不对"这条判据把一个位于左上角的窗口当成"已经对了",
+    于是冷启动那次居中重校收手得太早(用户 2026-10-03 报的那一幕)。
+    """
+    window = _SettleWindow()
+    window.geometry_text = ""
+    assert dialogs._window_position(cast(Any, window)) is None
+
+
+def test_position_delta_is_not_measured_when_a_side_is_unknown() -> None:
+    """任一侧读不到位置就给 0(没差): 不去追一个不知道的目标."""
+    window = _SettleWindow()
+    window.geometry_text = ""  # 弹窗自己的位置读不到
+    assert dialogs._position_delta(cast(Any, window), "1000x800+300+250") == 0.0
+
+    window.geometry_text = "400x300+100+100"
+    assert dialogs._position_delta(cast(Any, window), "") == 0.0  # 目标读不到
+
+    # 两侧都读得到时才真的量差(取两个轴里大的那个)。
+    assert dialogs._position_delta(cast(Any, window), "600x680+140+130") == 40.0
+
+
+# ------------------------------------------- 正文区按内容定高
+
+
+class _ScrollingBody:
+    """可滚动正文区的替身: 只回答 "内容有多高" 并记下被改成什么高度."""
+
+    def __init__(self, box: tuple[int, int, int, int] | None) -> None:
+        self._box = box
+        self.heights: list[int] = []
+
+    def update_idletasks(self) -> None:
+        """假控件没有布局要跑."""
+
+    def _bbox(self, _what: str) -> tuple[int, int, int, int] | None:
+        """当作内部画布问"内容占多大"."""
+        return self._box
+
+    def configure(self, **kwargs: Any) -> None:
+        """记下被改的高度."""
+        self.heights.append(int(cast(int, kwargs["height"])))
+
+    @property
+    def _parent_canvas(self) -> Any:
+        """真控件里的那块画布(对话框靠它量内容)."""
+        return self
+
+    def bbox(self, what: str) -> tuple[int, int, int, int] | None:
+        """量不到内容(还没布局)时给 ``None``."""
+        return self._bbox(what)
+
+
+def test_fitting_the_body_keeps_the_height_without_measurable_content() -> None:
+    """量不出内容高度(高度是 0)时保持原值 —— 宁可多留白, 也不把内容切成看不见."""
+    empty = _ScrollingBody((0, 40, 10, 40))
+    dialogs._fit_dialog_body(cast(Any, empty), 800)
+    assert empty.heights == []
+
+    # 能量到时才收: 内容 500 + 余量 4, 且不超过封顶值。
+    grown = _ScrollingBody((0, 0, 10, 500))
+    dialogs._fit_dialog_body(cast(Any, grown), 800)
+    assert grown.heights == [504]

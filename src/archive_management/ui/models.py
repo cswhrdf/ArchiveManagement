@@ -151,7 +151,7 @@ def delete_result_text(plan: DeletionPlan, title: str) -> str:
     """删除备份的结果文案: 连带子分支 / 顶替父节点 / 单节点三种.
 
     ``title`` 是**被删掉的那一份**的名字: 只说"已删除该备份"等于没说删了
-    什么(I-7: 结果要说清"删了什么")。
+    什么(结果要说清"删了什么")。
     """
     if plan.mode is DeletionMode.CASCADE:
         return tr("result.delete_cascade", count=plan.removed_count)
@@ -663,7 +663,7 @@ def can_backup(game: GameSummary | None) -> bool:
     return game is not None and game.has_locations
 
 
-# --------------------------------------------------------- 本地游戏探测(E-1)
+# --------------------------------------------------------- 本地游戏探测
 
 
 @dataclass(frozen=True)
@@ -900,7 +900,7 @@ class CandidateItem:
         )
 
 
-# --------------------------------------------------------- 统一游戏主页(E-2)
+# --------------------------------------------------------- 统一游戏主页
 
 
 @dataclass(frozen=True)

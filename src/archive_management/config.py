@@ -112,7 +112,7 @@ class ActivationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # 按进程自动启停(默认关闭): 开启后监控全部已导入(且有存档位置)的游戏, 按启动
-    # 顺序接管/回落(见 PLAN 的阶段 G-8)。启用态决定快捷键与定时备份落到哪一款
+    # 顺序接管/回落。启用态决定快捷键与定时备份落到哪一款
     # 游戏上, 因此自动接管必须由用户明确打开。
     auto: bool = False
 
@@ -377,8 +377,8 @@ def _reset_to_defaults(path: Path, *, reason: str) -> ConfigLoad:
 
 def _preserve_invalid(path: Path) -> Path | None:
     """把非法的配置文件改名保留; 失败时只记录日志并返回 None."""
-    if not path.exists():
-        return None
+    if not path.exists():  # pragma: no branch - 调用方只在文件损坏时调它
+        return None  # pragma: no cover - 这条分支永远走不到
     backup = path.with_suffix(path.suffix + INVALID_CONFIG_SUFFIX)
     try:
         path.replace(backup)

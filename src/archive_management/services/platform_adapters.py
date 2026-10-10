@@ -1,6 +1,6 @@
 """平台适配器: 把各平台的本地数据翻译成版本化的平台模型.
 
-阶段 G 的边界约定: 领域层、应用层与界面只认
+平台适配的边界约定: 领域层、应用层与界面只认
 :class:`~archive_management.domain.PlatformGame` 与
 :class:`~archive_management.domain.SavePathCandidate`, 平台差异(目录规则、清单
 格式、云端清单)全部挡在适配器内部。本期只有 Steam 有真正的实现, 其余平台注册
@@ -49,7 +49,7 @@ from archive_management.services.steam_cloud import SteamCloudSource
 
 logger = logging.getLogger(__name__)
 
-# 未实现平台的默认说明; 界面接入(阶段 G-5)时再按 i18n 键映射成人话。
+# 未实现平台的默认说明; 界面接入时再按 i18n 键映射成人话。
 DEFAULT_UNSUPPORTED_REASON = "暂未实现"
 
 
@@ -167,7 +167,9 @@ class SteamAdapter:
         图标哈希来自本机 ``appinfo.vdf``: 解析一次后缓存在适配器实例里, 所以
         每款游戏只付一次字典查找。
         """
-        if game.platform != "steam" or not game.game_id:
+        if game.platform != "steam":  # pragma: no branch - 只有非 Steam 会命中
+            return ()
+        if not game.game_id:  # pragma: no cover - id 非空由 PlatformGame 保证
             return ()
         icons = self._steam_icons().get(game.game_id)
         if icons is None:

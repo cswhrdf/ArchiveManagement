@@ -466,3 +466,94 @@ def test_accelerators_lists_registered_bindings_only() -> None:
     )
 
     assert service.accelerators() == {"save_now": DEFAULT_ACCELERATOR}
+
+
+def test_the_unavailable_backend_accepts_unregister_calls() -> None:
+    """不可用后端的注销是空实现: 调用方不用先问它是不是真后端."""
+    UnavailableBackend("无图形环境").unregister(object())
+
+
+def test_backend_unregister_of_an_unknown_handle_keeps_the_listener() -> None:
+    """注销没注册过的句柄: 直接返回, 不重建监听器(重建会停掉正在跑的监听线程)."""
+    backend, fake = _fake_backend()
+    backend.register("<win>+<alt>+s", lambda: None)
+    created = len(fake.created)
+
+    backend.unregister("never-registered")
+
+    assert len(fake.created) == created
+    assert fake.listener.stopped == 0
+
+
+def _refuse(_bindings: dict[str, Callable[[], None]]) -> FakeListener:
+    """模拟键盘模块拒绝创建监听器."""
+    raise ValueError("pynput 拒绝")
+
+
+def test_backend_unregister_survives_a_listener_that_cannot_be_rebuilt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """注销时重建监听器失败只记警告: 绑定已经撤下, 不能把异常抛给调用方.
+
+    留第二条绑定是有意的: 表空了 ``_restart`` 会提前返回, 那样根本走不到"重建失败"。
+    """
+    backend, fake = _fake_backend()
+    backend.register("<win>+<alt>+s", lambda: None)
+    backend.register("<win>+<alt>+z", lambda: None)
+    monkeypatch.setattr(fake, "GlobalHotKeys", _refuse)
+
+    backend.unregister("<win>+<alt>+s")  # 不抛
+
+
+def test_format_accelerator_keeps_unparsable_text() -> None:
+    """解析不出来的文本原样返回: 不猜也不丢信息(界面靠它显示用户自己填的内容)."""
+    assert format_accelerator("not+a+combo+at+all") == "not+a+combo+at+all"
+
+
+def test_backend_resume_survives_a_listener_that_cannot_be_rebuilt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """恢复监听失败也只记警告, 且暂停态已经解除(不会再重建一次)."""
+    backend, fake = _fake_backend()
+    backend.register("<win>+<alt>+s", lambda: None)
+    backend.suspend()
+    original = fake.GlobalHotKeys
+    monkeypatch.setattr(fake, "GlobalHotKeys", _refuse)
+
+    backend.resume()  # 不抛
+    monkeypatch.setattr(fake, "GlobalHotKeys", original)
+    created = len(fake.created)
+    backend.resume()
+
+    assert len(fake.created) == created, "已经不是在暂停态了, 不该重建"
+
+
+def test_backend_reports_a_broken_keyboard_module_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """键盘模块自己抛错(不是 HotkeyError)也要收敛成"注册失败"并带上原因."""
+    backend, fake = _fake_backend()
+    monkeypatch.setattr(fake, "GlobalHotKeys", _refuse)
+
+    with pytest.raises(HotkeyError, match="pynput 拒绝"):
+        backend.register("<win>+<alt>+s", lambda: None)
+
+
+def test_the_wrapped_callback_runs_and_swallows_its_own_errors() -> None:
+    """交给 pynput 的是包装后的回调: 它要真的执行用户的回调, 且单个回调出错不外泄.
+
+    (监听线程里漏出的异常会让后续按键全部失效, 所以这里量"不抛"本身就是判据。)
+    """
+    backend, fake = _fake_backend()
+    calls: list[str] = []
+
+    def explode() -> None:
+        calls.append("called")
+        raise RuntimeError("动作炸了")
+
+    backend.register("<win>+<alt>+s", explode)
+    wrapped = fake.created[-1]["<cmd>+<alt>+s"]
+
+    wrapped()  # 不抛
+
+    assert calls == ["called"]

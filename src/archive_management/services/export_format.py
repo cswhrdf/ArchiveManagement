@@ -205,7 +205,9 @@ def member_target(root: Path, name: str) -> Path:
     relative = validate_member_path(name)
     candidate = root / relative
     if not is_within(candidate, root):  # pragma: no branch - 上一步已排除越界形态与盘符
-        raise PackageError(_unavailable("包内路径越出了目标目录", name))
+        raise PackageError(  # pragma: no cover - 兜底, validate_member_path 已先拒绝
+            _unavailable("包内路径越出了目标目录", name)
+        )
     return candidate
 
 

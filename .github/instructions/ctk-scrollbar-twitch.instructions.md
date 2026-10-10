@@ -1,5 +1,5 @@
 ---
-applyTo: "src/archive_management/ui/**.py, tests/unit/test_ui_widgets.py, tests/integration/test_gui_buttons.py, tests/integration/test_gui_scrollbars.py"
+applyTo: "src/archive_management/ui/**.py, tests/unit/test_ui_widgets.py, tests/integration/test_gui_home.py, tests/integration/test_gui_scrollbars.py"
 description: 'CustomTkinter 按需滚动条(以及所有"改几何 → 事件 → 再改几何"的循环)引起的界面抽搐与递归崩溃: 定位手法、根因、修法与守卫。'
 ---
 
@@ -128,7 +128,7 @@ blocker+critical 子集里就会跑到); 第二类是观感缺陷, 守卫按 `mi
 | `tests/unit/test_ui_widgets.py::test_sync_scrollbar_converges_instead_of_flipping`                                                         | 两轮判定不许翻来翻去(`blocker`)                                                 |
 | `test_sync_scrollbar_hides_whenever_the_content_fits` / `_keeps_a_shown_bar_for_a_small_overflow` / `_does_not_pop_up_for_a_tiny_overflow` | 判定口径与滞回方向                                                              |
 | `test_show_scrollbar_restores_the_grid_position`                                                                                           | 重新显示要给全摆放参数 **且** 压高度                                            |
-| `tests/integration/test_gui_buttons.py::test_tags_dialog_does_not_twitch_or_crash_while_adding_rows`                                       | 真窗口: 连点两次"添加标签"后无回调异常、判定次数有上限、高度请求 1px(`blocker`) |     | `tests/unit/test_ui_widgets.py::test_the_first_verdict_assumes_the_bar_is_shown` | 根因 C: 首次判定必须真的执行收起 |
+| `tests/integration/test_gui_home.py::test_tags_dialog_does_not_twitch_or_crash_while_adding_rows`                                       | 真窗口: 连点两次"添加标签"后无回调异常、判定次数有上限、高度请求 1px(`blocker`) |     | `tests/unit/test_ui_widgets.py::test_the_first_verdict_assumes_the_bar_is_shown` | 根因 C: 首次判定必须真的执行收起 |
 | `tests/unit/test_ui_widgets.py::test_hiding_uses_grid_forget_so_ctk_cannot_put_it_back`                                                    | 修法 6: 收起要走 `grid_forget`                                                  |
 | `tests/integration/test_gui_scrollbars.py::test_the_discovery_panel_has_no_stray_scrollbar_with_an_empty_library`                          | 根因 C 的真窗口版: 空库时发现页不该有滚动条                                     |
 | `tests/integration/test_gui_scrollbars.py::test_a_hidden_scrollbar_survives_the_canvas_reporting_its_position`                             | 根因 D: 画布回叫后仍必须保持收起                                                |

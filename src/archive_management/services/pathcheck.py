@@ -112,7 +112,7 @@ class _Tally:
 
     def visit(self, child: Path, pending: list[Path]) -> None:
         """记录一个子项; 目录会加入待遍历队列."""
-        if child.is_symlink():
+        if child.is_symlink():  # 链接本身算一项, 不跟进去数
             self.symlinks += 1
             return
         if child.is_dir():

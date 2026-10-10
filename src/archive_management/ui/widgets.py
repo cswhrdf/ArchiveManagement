@@ -52,7 +52,7 @@ _Unsubscribe = Callable[[], None]
 LabelStyle = Literal["primary", "body", "muted", "hint", "h2"]
 ButtonStyle = Literal["accent", "danger", "danger_soft", "ghost", "soft"]
 # **动作性质**: "这个按钮是干什么的" —— 业务代码只声明性质, 穿什么颜色由
-# :data:`ACTION_STYLES` 一处决定(I-10: 重要功能键的配色也要能断言)。
+# :data:`ACTION_STYLES` 一处决定(重要功能键的配色也要能断言)。
 # ``primary`` = 这一屏最该做的事; ``destructive`` = 破坏性动作; 其余是次要动作。
 ActionKind = Literal["primary", "secondary", "destructive", "destructive_soft"]
 
@@ -336,7 +336,7 @@ class UiKit:
             corner_radius=corner_radius,
             # 构造时就取调色板当前值: 原来硬写的是**深色主题**那一档("#314765"), 浅色主题下
             # 新建的滚动区会带着错色的滚动条直到下一次重绘(原先那条静态检查 C9101 拓的就是
-            # 这处, 已撤, 见 PLAN §17.3)。
+            # 这处, 已撤)。
             # `_palette` 为 None 只出现在 `apply()` 之前的极短窗口里, 那时用兜底色。
             scrollbar_button_color=(
                 getattr(self._palette, scrollbar_key)
@@ -851,7 +851,7 @@ def track_fit(
             shown = [clip(line, width) for line in lines]
             label.configure(text="\n".join(shown))
             # 真的裁掉了就把完整文本挂成悬停提示: 省略号只是"还有下文"的记号,
-            # 看不到下文就等于静默截断(I-3)。宽回来以后又完整了则把提示撤掉 ——
+            # 看不到下文就等于静默截断。宽回来以后又完整了则把提示撤掉 ——
             # 提示与可见文字一样的时候只会碍事。
             sync_tooltip(label, full="\n".join(lines), shown="\n".join(shown))
         except tk.TclError:  # 控件已销毁: 回调作废
@@ -1005,7 +1005,7 @@ def track_wraplength(
 _SCROLLBAR_FALLBACK = "#314765"
 
 # 悬停多久才弹出提示: 短到"停一下就有", 长到鼠标划过不会到处闪。
-# 提示文案记在控件上的属性名: 让"省了尾巴的地方到底挂没挂提示"能量出来(I-3)。
+# 提示文案记在控件上的属性名: 让"省了尾巴的地方到底挂没挂提示"能量出来。
 _TOOLTIP_ATTR = "_archive_tooltip"
 _TOOLTIP_DELAY_MS = 350  # 提示与鼠标控件的间距(像素)与内衬。
 _TOOLTIP_GAP = 6
@@ -1056,7 +1056,7 @@ def tooltip_text(widget: ctk.CTkBaseClass) -> str:
     """该控件挂着的悬停提示文案(没有提示就返回空串).
 
     被省略号截掉的文字, 唯一能看到全文的路就是悬停提示 —— 所以"这里到底挂没挂"
-    必须是可量的事实, 而不是靠读代码记得(守卫按它断言, 见 I-3)。
+    必须是可量的事实, 而不是靠读代码记得(守卫按它断言)。
     """
     attached = getattr(widget, _TOOLTIP_ATTR, "")
     if callable(attached):
@@ -1077,7 +1077,7 @@ def sync_tooltip(
     """按"有没有被截断"自动挂上/撤掉悬停提示(``shown=None`` 就自己去读控件).
 
     这是全应用**唯一**一处"裁了就得能给全文"的落点: :func:`track_fit` 与
-    :func:`fit_label` 都走它, 所以不存在"某处忘了挂提示"这种漏网(I-3)。
+    :func:`fit_label` 都走它, 所以不存在"某处忘了挂提示"这种漏网。
     """
     if shown is None:
         shown = str(widget.cget("text"))

@@ -1,4 +1,4 @@
-"""键盘可用性的守卫(I-6: 纯键盘能走完整个流程).
+"""键盘可用性的守卫(纯键盘能走完整个流程).
 
 七条判据, 每一条都对应一个实测出来的缺口(不是"应该会好用"):
 
@@ -37,7 +37,7 @@ G. **窗口级 Esc/回车只属于对话框** —— 常驻窗口(设置、定�
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,7 +47,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from gui_support import gui_app
+from ui_sharing import SharedUiRegistry, demo_app
 
 try:
     import customtkinter as ctk
@@ -62,7 +62,6 @@ from archive_management.services.hotkeys import (
 )
 from archive_management.ui import contrast, dialogs, keyboard
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import ArchiveApp
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
@@ -113,11 +112,11 @@ def _new_app(backend: ArchiveService) -> ArchiveApp:
 
 
 @pytest.fixture
-def app() -> Any:
-    """主窗口."""
-    application = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(application)
-    return application
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 用例间由池做快照-识别-还原)."""
+    with ui_shared.test_scope(demo_app) as application:
+        _pump(application)
+        yield application
 
 
 def _state(widget: Any) -> str:
@@ -1086,6 +1085,13 @@ def test_space_presses_a_focused_button(app: Any) -> None:
         _focus(window, cancel)
         inner = keyboard.focus_target(cancel)
         assert inner is not None
+        # 合成按键在 Tk 里是**按焦点窗口派发的**: 焦点只要不在这个内层控件上, 事件就落到
+        # 别处(实测: 焦点停在对话框顶层时, 那里没有 <space> 绑定, 按键白丢 —— 2026-10-10
+        # CI 上这条就是这么红的)。所以先把焦点真正放上去并**量它**, 量不到就当场报"焦点
+        # 没上去", 而不是把它记成"空格按不动"。
+        focused = _focus_hard(window, inner)
+        hint = f"焦点没落到取消按钮上(现在在 {window.focus_get()}), 空格会白丢"
+        assert focused, hint
         inner.event_generate("<space>", when="now")
         state["closed"] = 0 if window.winfo_exists() else 1
 

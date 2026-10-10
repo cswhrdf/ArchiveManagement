@@ -23,7 +23,7 @@ from archive_management.infrastructure.repository import (
     CandidateRepository,
     MonitoredDirectoryRepository,
 )
-from helpers import add_backup_node, add_game, migrated_database, utc_moment
+from helpers import add_backup_node, add_game, utc_moment
 
 pytestmark = [
     pytest.mark.normal,
@@ -32,12 +32,6 @@ pytestmark = [
     pytest.mark.story("监控目录与候选维护"),
     pytest.mark.layer("integration"),
 ]
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Database:
-    """真实 SQLite 数据库(已迁移)."""
-    return migrated_database(tmp_path)
 
 
 def _candidate(

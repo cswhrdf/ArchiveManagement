@@ -194,7 +194,11 @@ def format_accelerator(
         else parse_accelerator(accelerator)
     )
     if combo is None:
-        return accelerator if isinstance(accelerator, str) else ""
+        # ``combo`` 为空只可能来自"传进来的是字符串"那一支(见上面的三元式), 因此下面的
+        # 判断对按类型调用的调用方恒为真; 另一条只是"传了别的类型"时的兜底, 用例不构造它。
+        if isinstance(accelerator, str):  # pragma: no branch - 只可能为真
+            return accelerator
+        return ""  # pragma: no cover - 类型之外的值才走这里
     family = platform or current_platform()
     if family == "macos":
         return "".join(

@@ -1,0 +1,119 @@
+name: 缺陷报告
+description: 报告一个可以复现的问题（崩溃、数据不一致、界面错乱、快捷键失效等）
+title: "[缺陷] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。这个项目会**读写你的存档、并对备份目录做原子提交**，所以下面两项请尽量写准：
+        能不能稳定复现、有没有可能动到数据 —— 后者决定处理优先级。
+
+        提交前建议先做三件事：
+        1. 看一眼 [使用手册](https://github.com/cswhrdf/ArchiveManagement/blob/main/wiki/Home.md) 与
+           [平台差异](https://github.com/cswhrdf/ArchiveManagement/blob/main/docs/platforms.md)（权限、图形环境、目录位置常在这里）；
+        2. 搜一遍现有 issue，避免重复；
+        3. 如果内容涉及**凭据或不愿公开的完整路径**，不要贴在 issue 里 —— 用仓库的
+           “Report a vulnerability”（私有安全报告），或先私下联系维护者。
+
+  - type: dropdown
+    id: install_kind
+    attributes:
+      label: 你是怎么运行它的？
+      options:
+        - 源码运行（uv run python -m archive_management gui --root ...）
+        - Windows 打包版（onedir）
+        - Windows 打包版（onefile）
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 打包版填发布页上的版本号（或压缩包文件名）；源码运行填 `git rev-parse --short HEAD` 的结果
+      placeholder: "例如: v1.2.0 或 c903ff0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 系统与显示环境
+      description: 操作系统与版本；Windows 请附**显示缩放**；Linux 请说明 X11 还是 Wayland，以及有没有用虚拟显示
+      placeholder: "例如: Windows 11 24H2 / 显示缩放 125% / 界面语言 简体中文"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从启动开始一步一步写；偶发问题请说明大概多久出现一次、发生时你在做什么
+      placeholder: |
+        1. 启动软件（root 用哪个目录）
+        2. 进入……，点击……
+        3. 看到……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望的结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际的结果
+      description: 有报错原文就整段贴上（不要只贴截图里的半句），包括弹出对话框里的文字
+    validations:
+      required: true
+
+  - type: dropdown
+    id: data_impact
+    attributes:
+      label: 有没有可能动到存档数据？
+      description: “写坏 / 丢失 / 恢复后不一致”会立刻查，所以这一项请如实选
+      options:
+        - 只是界面或操作问题，没有动数据
+        - 备份或恢复的结果不对（数据可能不一致）
+        - 存档文件被改动、丢失，或原始目录被删
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（可选，但很有用）
+      description: |
+        应用目录（用 `--root` 启动时是 `<root>`）下 `logs/` 里最新的那一份。
+        日志按设计**不含**凭据、文件内容与完整敏感路径，可以整段贴；贴之前扫一眼，
+        如果里面有你不希望公开的磁盘路径，自行打码即可。
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: screenshots
+    attributes:
+      label: 截图或录屏（可选）
+      description: 直接拖进输入框；界面错位类问题请顺便写上当时的窗口大小
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经看过使用手册与平台差异说明里相关的部分
+          required: true
+        - label: 我搜过现有 issue，确认这不是已知事项
+          required: true
+        - label: 上面的"实际结果"里贴的是**原始文本**，不是转述
+          required: true

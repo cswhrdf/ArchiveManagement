@@ -1,4 +1,4 @@
-"""分支图布局纯函数的单元测试(I-9.1 / I-9.5.1 的判据).
+"""分支图布局纯函数的单元测试(布局与折叠的判据).
 
 判据全部是**数字**(不启动窗口):
 
@@ -8,7 +8,7 @@
 * 剪枝后仍是一棵连续的树(没有指向不存在节点的线);
 * 连线端点正好落在父框底边中点与子框顶边中点;
 * 字号变大时框跟着变大(布局是像素, 字号是缩放过的);
-* **折叠**(I-9.5.1): 不折叠时与旧结果逐字段相同、折叠后仍不重叠且父仍居中、宽度按
+* **折叠**: 不折叠时与旧结果逐字段相同、折叠后仍不重叠且父仍居中、宽度按
   单框算、后代数数得对且只报看得见的那些。
 """
 
@@ -218,7 +218,7 @@ def test_node_at_hits_the_box_that_was_drawn_last() -> None:
     assert layout.node_at(-1.0, -1.0) is None
 
 
-# -- 折叠(I-9.5.1) -----------------------------------------------------------
+# -- 折叠 -----------------------------------------------------------
 #
 # 夹具: ``root`` 有两个孩子 ``a`` / ``b``, 而 ``a`` 自己有三个孩子。
 # 固定尺寸下(框 100 / 水平间距 10 / 外边距 5)这些数字全是手算得出来的:
@@ -370,3 +370,19 @@ def test_the_marker_wins_the_hit_test_against_its_own_box() -> None:
     assert layout.marker_at(*elsewhere) is None
     assert layout.node_at(*elsewhere) is not None
     assert layout.marker_at(-1.0, -1.0) is None
+
+
+def test_placing_an_empty_forest_gives_no_boxes_and_no_width() -> None:
+    """一棵树都没有(全都剪掉了)时给空框表与 0 宽, 而不是负数宽度.
+
+    总宽是"最后一个框的右边"减一个间距得来的: 一个框都没有时那个减法会得出 ``-h_gap``,
+    画布的滚动范围跟着变成一个负值。
+    """
+    from archive_management.ui.tree_layout import _place_forest
+
+    metrics = tree_layout([]).metrics
+
+    boxes, width = _place_forest([], {}, {}, {}, (), metrics)
+
+    assert boxes == {}
+    assert width == 0.0

@@ -3,7 +3,7 @@ name: Build Windows Package
 on:
   pull_request:
     branches:
-      - master
+      - main
     types:
       - closed
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
       ref:
         description: "要构建的分支或提交,例如 dev"
         required: false
-        default: master
+        default: main
         type: string
 
 permissions:

@@ -185,44 +185,22 @@ class RestoreService:
     def plan(self, game_id: int, backup_id: int) -> RestorePlan:
         """检查快照完整性与写回目标, 返回可展示的预检结果."""
         node = self._require_node(game_id, backup_id)
-        entries: tuple[SnapshotEntry, ...] = ()
-        manifest: SnapshotManifest | None = None
-        reason: str | None = None
-        try:
-            manifest = read_manifest(self._backups.snapshot_root(node))
-        except (SnapshotError, OSError) as exc:
-            reason = str(exc)
-        snapshot_ok = False
-        degraded = False
-        if manifest is not None:
-            verification = self._backups.verify(node)
-            entries = manifest.entries
-            snapshot_ok = verification.ok
-            if not verification.ok:
-                reason = (
-                    f"快照清单校验未通过: 缺失 {len(verification.missing)} 项, "
-                    f"哈希不一致 {len(verification.mismatched)} 项"
-                )
-            elif verification.mode != self._policy().mode:
-                # 降级了(这份备份还没有哈希数据): 不拦住恢复, 但要在预检提示里说清楚
-                # 这次只校了名称, 内容是不是被改过看不出来。
-                degraded = True
-        targets: list[RestoreTarget] = []
-        warnings: list[str] = []
-        if manifest is not None:
-            targets, warnings = self._inspect_targets(game_id, manifest)
+        manifest, read_reason = self._read_plan_manifest(node)
+        entries, snapshot_ok, verify_reason, degraded = self._verify_for_plan(
+            node, manifest
+        )
+        targets, warnings = self._plan_targets(game_id, manifest)
         if degraded:
             warnings.insert(0, WARN_NO_HASHES)
         locations = self._locations.list_for_game(game_id)
+        file_count, total_size = _plan_totals(entries)
         plan = RestorePlan(
             backup_id=backup_id,
             title=self._title(node),
             snapshot_ok=snapshot_ok,
-            snapshot_reason=reason,
-            file_count=sum(1 for entry in entries if entry.file_kind == "file"),
-            total_size=sum(
-                entry.size for entry in entries if entry.file_kind == "file"
-            ),
+            snapshot_reason=verify_reason or read_reason,
+            file_count=file_count,
+            total_size=total_size,
             targets=tuple(targets),
             process=probe_processes(
                 self._process_hints(game_id, locations),
@@ -243,6 +221,48 @@ class RestoreService:
             process_running=plan.process.running,
         )
         return plan
+
+    def _read_plan_manifest(
+        self, node: BackupNode
+    ) -> tuple[SnapshotManifest | None, str | None]:
+        """预检第一跳: 读快照清单; 读不到时把原因**返回**给调用方而不是抛出.
+
+        预检的用途正是"把不能恢复的原因讲清楚", 所以清单缺失或损坏在这里不抛异常 ——
+        它会变成预检提示里的那句话。
+        """
+        try:
+            return read_manifest(self._backups.snapshot_root(node)), None
+        except (SnapshotError, OSError) as exc:
+            return None, str(exc)
+
+    def _verify_for_plan(
+        self, node: BackupNode, manifest: SnapshotManifest | None
+    ) -> tuple[tuple[SnapshotEntry, ...], bool, str | None, bool]:
+        """预检第二跳: 深度校验快照.
+
+        返回 ``(条目, 快照能否用, 失败原因, 是否降级校验)``。降级指这份备份还没有哈希
+        数据(名称模式创建、后台还没补齐): 不拦住恢复, 但预检里要说明这次只校了名称,
+        内容是不是被改过看不出来。
+        """
+        if manifest is None:
+            return (), False, None, False
+        verification = self._backups.verify(node)
+        if not verification.ok:
+            reason = (
+                f"快照清单校验未通过: 缺失 {len(verification.missing)} 项, "
+                f"哈希不一致 {len(verification.mismatched)} 项"
+            )
+            return manifest.entries, False, reason, False
+        return manifest.entries, True, None, verification.mode != self._policy().mode
+
+    def _plan_targets(
+        self, game_id: int, manifest: SnapshotManifest | None
+    ) -> tuple[list[RestoreTarget], list[str]]:
+        """预检第三跳: 列出每个来源的写回目标与警告; 清单都没读到就没有目标可列."""
+        if manifest is None:
+            return [], []
+        targets, warnings = self._inspect_targets(game_id, manifest)
+        return targets, warnings
 
     # -- 执行 ---------------------------------------------------------------
 
@@ -617,6 +637,12 @@ class RestoreService:
         """返回备份的展示名称."""
         name = (node.title or "").strip() or (node.branch_name or "").strip()
         return name or f"#{node.id}"
+
+
+def _plan_totals(entries: Sequence[SnapshotEntry]) -> tuple[int, int]:
+    """快照里的文件数与字节总量(目录与符号链接不计)."""
+    files = [entry for entry in entries if entry.file_kind == "file"]
+    return len(files), sum(entry.size for entry in files)
 
 
 def _target_for(plan: RestorePlan, index: int) -> RestoreTarget | None:

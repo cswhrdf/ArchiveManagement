@@ -17,7 +17,7 @@ from archive_management.domain import SaveLocation
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import SaveLocationRepository
-from helpers import add_game, add_location, make_save_folder, migrated_database
+from helpers import add_game, add_location, make_save_folder
 
 pytestmark = [
     pytest.mark.normal,
@@ -46,12 +46,6 @@ class _TrashDir:
         destination = self.destination / Path(path).name
         Path(path).rename(destination)
         self.moved.append(str(destination))
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Database:
-    """真实 SQLite 数据库(已迁移)."""
-    return migrated_database(tmp_path)
 
 
 def _game_with_save(database: Database, tmp_path: Path) -> tuple[int, SaveLocation]:

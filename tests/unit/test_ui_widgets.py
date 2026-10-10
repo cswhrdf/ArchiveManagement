@@ -54,6 +54,69 @@ def _scaled(monkeypatch: pytest.MonkeyPatch, scale: float) -> Any:
     return widgets.measured_font(_FakeFont(width=231, linespace=14), _NO_WINDOW)
 
 
+class _FakeAnchor:
+    """只回答"提示定位"用到的四个几何量的锚点替身(不建窗口)."""
+
+    def __init__(self, *, x: int, y: int, height: int, screen_height: int) -> None:
+        self._x = x
+        self._y = y
+        self._height = height
+        self._screen_height = screen_height
+
+    def winfo_rootx(self) -> int:
+        """控件左边界(屏幕坐标)."""
+        return self._x
+
+    def winfo_rooty(self) -> int:
+        """控件上边界(屏幕坐标)."""
+        return self._y
+
+    def winfo_height(self) -> int:
+        """控件高度."""
+        return self._height
+
+    def winfo_screenheight(self) -> int:
+        """屏幕高度(定位要按它判断下方放不放得下)."""
+        return self._screen_height
+
+
+class _FakeTip:
+    """只回答"需要多高"的提示窗口替身."""
+
+    def __init__(self, height: int) -> None:
+        """绑定这个提示需要的高度."""
+        self._height = height
+
+    def update_idletasks(self) -> None:
+        """真实实现要在这里刷一次几何(否则拿到的高度是 1); 替身无事可做."""
+
+    def winfo_reqheight(self) -> int:
+        """提示窗口需要的高度."""
+        return self._height
+
+
+def test_the_tooltip_opens_below_the_anchor_when_it_fits() -> None:
+    """空间够时提示在控件**下方**一个间隙处, 左边界与控件对齐."""
+    anchor = cast(
+        "ctk.CTkBaseClass", _FakeAnchor(x=100, y=200, height=30, screen_height=900)
+    )
+
+    position = widgets._tooltip_position(anchor, cast("tk.Toplevel", _FakeTip(40)))
+
+    assert position == f"+100+{200 + 30 + widgets._TOOLTIP_GAP}"
+
+
+def test_the_tooltip_flips_above_when_there_is_no_room_below() -> None:
+    """下方放不下时改到控件**上方** —— 这是提示贴着屏幕底边时唯一不缩水的出路."""
+    anchor = cast(
+        "ctk.CTkBaseClass", _FakeAnchor(x=100, y=860, height=30, screen_height=900)
+    )
+
+    position = widgets._tooltip_position(anchor, cast("tk.Toplevel", _FakeTip(40)))
+
+    assert position == f"+100+{860 - 40 - widgets._TOOLTIP_GAP}"
+
+
 def test_measured_font_scales_both_width_and_line_height(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -225,7 +288,7 @@ def test_buttons_painted_by_each_style(kit: widgets.UiKit) -> None:
 def test_destructive_styles_stay_inside_the_danger_range(palette: Any) -> None:
     """ "危险操作的颜色范围"就是这两种样式, 而且两套主题下都真的带危险色.
 
-    这条把 I-2 那句"删除类按钮的颜色必须落在危险色范围内"钉在 `widgets` 层:
+    这条把"删除类按钮的颜色必须落在危险色范围内"钉在 `widgets` 层:
     范围变了 (例如把主色也算进去) 会立刻变红。
     """
     assert set(DESTRUCTIVE_STYLES) <= set(BUTTON_STYLES)
@@ -236,7 +299,7 @@ def test_destructive_styles_stay_inside_the_danger_range(palette: Any) -> None:
 
 
 def test_every_action_kind_maps_to_its_own_style(kit: widgets.UiKit) -> None:
-    """动作性质与样式**一一对应**, 且 ``kind=`` 真的按性质取色(I-10).
+    """动作性质与样式**一一对应**, 且 ``kind=`` 真的按性质取色.
 
     两个性质共用一种样式的话, "从实测颜色反推性质"这条判据就不再成立(守卫靠的就是这个反推),
     所以这里把一一对应本身钉住; 顺便验一下 `UiKit.button(kind=...)` 与 `style=` 等价。
@@ -846,3 +909,190 @@ def test_card_surface_colors_put_selection_before_hover() -> None:
         LIGHT.accent_soft,
         LIGHT.accent_soft_border,
     )
+
+
+# --------------------------------------------------- 退路: 控件已销毁、空文案与未登记的按钮
+
+
+class _DeadContainer(_FakeContainer):
+    """已经销毁的假容器: 连排队都做不到(``after_idle`` 报 TclError)."""
+
+    def after_idle(self, func: Any) -> None:
+        """真控件销毁后 ``after_idle`` 就是这个反应."""
+        raise tk.TclError("bad window path name")
+
+
+class _FakeTipHost(_FakeCtkWidget):
+    """挂悬停提示的假控件: 记下排过/撤过的计时器(真 Tk 才有事件循环)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued: list[Any] = []
+        self.cancelled: list[str] = []
+
+    def after(self, _delay: int, callback: Any) -> str:
+        """记下排队的弹出任务."""
+        self.queued.append(callback)
+        return f"job{len(self.queued)}"
+
+    def after_cancel(self, job: str) -> None:
+        """记下被撤掉的任务."""
+        self.cancelled.append(job)
+
+
+def test_a_button_built_under_a_palette_remembers_it(
+    kit: widgets.UiKit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配色已经定下来时, 新建的按钮顺手把"这套色"记在自己身上(焦点环要用)."""
+    remembered: list[Any] = []
+    monkeypatch.setattr(
+        widgets, "remember_palette", lambda widget, palette: remembered.append(widget)
+    )
+    kit.apply(DARK)
+
+    button = kit.button(kit, "动作", style="accent")
+
+    assert remembered == [button]
+
+
+def test_repainting_an_unregistered_button_is_ignored(kit: widgets.UiKit) -> None:
+    """没登记过的按钮不属于这套配色: 重画时直接忽略(不猜它该是什么样子)."""
+    stranger = _FakeCtkWidget()
+
+    kit.repaint_button(cast(Any, stranger), DARK)
+
+    assert stranger.configure_calls == []
+
+
+def test_the_scrollbar_visibility_fix_is_applied_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """补丁是进程级的: 第二次调用什么都不做(否则会把包装器套第二层).
+
+    模块导入时就调过一次, 所以这里先把标志复位 —— 并在用例结束时把 ``_draw`` 也还原,
+    免得它把后面用例里的滚动条行为一起改了。
+    """
+    monkeypatch.setattr(widgets, "_APPLIED_SCROLLBAR_FIX", False)
+    monkeypatch.setattr(ctk.CTkScrollbar, "_draw", ctk.CTkScrollbar._draw)
+
+    assert widgets.apply_scrollbar_visibility_fix() is True
+    assert widgets.apply_scrollbar_visibility_fix() is False
+
+
+def test_auto_scrollbar_gives_up_when_the_container_cannot_queue() -> None:
+    """容器已销毁时不再排队判定(销毁过程也会发 ``<Configure>``), 也不把 TclError 抛出去."""
+    frame = _DeadContainer()
+
+    widgets.auto_scrollbar(frame)
+    frame.handlers["<Configure>"](SimpleNamespace())  # 再来一次事件也不该炸
+
+
+def test_track_wraplength_gives_up_when_the_container_cannot_queue() -> None:
+    """换行判定同样要兜住"容器已销毁": 销毁期间的事件不能把它变成异常."""
+    container = _DeadContainer()
+    label = _FakeCtkWidget()
+
+    widgets.track_wraplength(container, label, inset=20)
+    container.handlers["<Configure>"](SimpleNamespace())
+
+
+def test_track_fit_gives_up_when_the_label_is_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """标签已销毁时重裁直接作废(销毁过程也会发 ``<Configure>``), 不往外抛 TclError."""
+    container = _FakeContainer()
+    container.width = 400
+    label = _FakeCtkWidget()
+    monkeypatch.setattr(widgets, "measured_font", lambda *_args: _FakeFont(60, 14))
+
+    def boom(**_kwargs: Any) -> None:
+        raise tk.TclError("bad window path name")
+
+    monkeypatch.setattr(label, "configure", boom)
+
+    widgets.track_fit(container, cast(Any, label), ("很长的一段说明文字",))
+    container.handlers["<Configure>"](SimpleNamespace())
+
+
+def test_tooltip_text_gives_up_when_the_provider_raises() -> None:
+    """文案是函数(随选中项变)而它自己炸了时给空串: 缺一句提示不该打断渲染."""
+
+    def boom() -> str:
+        raise RuntimeError("文案还没准备好")
+
+    widget = SimpleNamespace(**{widgets._TOOLTIP_ATTR: boom})
+
+    assert widgets.tooltip_text(cast(Any, widget)) == ""
+
+
+def test_a_queued_tooltip_is_cancelled_when_the_pointer_leaves() -> None:
+    """移出时必须撤掉排队的那次弹出 —— 否则鼠标早就走了, 提示才慢悠悠地冒出来."""
+    widget = _FakeTipHost()
+    widgets.attach_tooltip(cast(Any, widget), "备份目录名")
+
+    widget.handlers["<Enter>"](SimpleNamespace())
+    widget.handlers["<Leave>"](SimpleNamespace())
+
+    assert widget.cancelled == ["job1"]
+
+
+def test_an_empty_tooltip_text_shows_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文案为空时不弹空框(文案是到点那一刻才读的, 可能正好被换空了)."""
+    opened: list[str] = []
+
+    def remember(_widget: Any, text: str) -> Any:
+        """记下"该弹出的那句文案", 不去碰真窗口."""
+        opened.append(text)
+        return object()
+
+    monkeypatch.setattr(widgets, "_open_tooltip", remember)
+    empty = _FakeTipHost()
+    widgets.attach_tooltip(cast(Any, empty), "")
+    named = _FakeTipHost()
+    widgets.attach_tooltip(cast(Any, named), "备份目录名")
+
+    empty.handlers["<Enter>"](SimpleNamespace())
+    empty.queued[-1]()
+    named.handlers["<Enter>"](SimpleNamespace())
+    named.queued[-1]()
+
+    assert opened == ["备份目录名"], "空文案不该弹出空框, 有文案的照弹"
+
+
+class _DeadTipWindow:
+    """提示窗口替身: 一被问尺寸就报"窗口已经没了"(TclError)."""
+
+    def __init__(self) -> None:
+        self.destroyed = 0
+
+    def update_idletasks(self) -> None:
+        """ничего."""
+
+    def winfo_reqwidth(self) -> int:
+        """已销毁的窗口就是这个反应."""
+        raise tk.TclError("bad window path name")
+
+    def destroy(self) -> None:
+        """记一次销毁."""
+        self.destroyed += 1
+
+
+def test_hover_tip_ignores_empty_text_and_survives_a_dead_window() -> None:
+    """空文案 = 收起; 量尺寸时窗口已经没了则收摊(而不是把 TclError 抛给调用方)."""
+    tip = widgets.HoverTip(
+        cast(Any, _FakeAnchor(x=0, y=0, height=10, screen_height=800))
+    )
+    tip.show("", root_x=0, root_y=0)
+    assert tip.visible is False
+
+    window = _DeadTipWindow()
+    tip._window = cast(Any, window)
+    tip._label = None  # 标签也没了 → 跳过"只换文案"那一支
+
+    tip.show("提示", root_x=10, root_y=10)
+
+    assert window.destroyed == 1
+    assert tip.visible is False
+    assert tip.text == ""

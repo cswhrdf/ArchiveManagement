@@ -177,13 +177,18 @@ def test_ci_merges_shard_results_with_the_script() -> None:
 
     hint = "CI 没有用 scripts/merge_allure_results.py 合并分片结果"
     assert "scripts/merge_allure_results.py" in text, hint
-    assert re.search(r"needs:\s*\[pytest\]", text) is not None
+    assert "pytest" in ci_workflow.needs_of(text, "pytest-report"), (
+        "报告作业要等 pytest 作业跑完(否则报告只反映最慢的那片)"
+    )
 
     # 汇总作业要等齐**所有**产出结论的作业: 漏一个就会漏收它的产物(报告里少一块),
     # 或者在该作业上传完之前就去下载(拿到半份)。新增产出 Allure 结果的作业时一起改这里。
     # 断言只看标识符集合, 不管 YAML 是写成一行还是摊成多行(编辑器会按自己的风格重排)。
     # 平台专属检查/静态分析/性能基准都并在 pytest 与 quality 里, 所以清单里没有它们的名字。
+    # `changes` 是那个轻量路径过滤作业: 它决定这轮要不要跑重量级作业(见
+    # test_ci_cancels_superseded_runs_and_skips_docs_only_pushes)。
     assert ci_workflow.needs_of(text, "allure-summary") == {
+        "changes",
         "quality",
         "pytest-report",
         "security",

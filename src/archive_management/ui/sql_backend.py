@@ -1510,7 +1510,7 @@ class SqlArchiveService:
         """按分支树删除备份: 同线路节点让后续上移, 分支根节点连带子分支."""
         _game, gid = self._game_ref(game_id)
         node = self._require_backup(gid, backup_id)
-        # 名字要在删之前取: 结果文案要说清"删的是哪一份"(I-7).
+        # 名字要在删之前取: 结果文案要说清"删的是哪一份".
         title = self._node_title(node)
         plan = self._backups.delete_node(gid, int(backup_id), cascade=True)
         self._touch()
@@ -2128,7 +2128,10 @@ class SqlArchiveService:
 
     def _summary(self, game: Game) -> GameSummary:
         if game.id is None:  # pragma: no branch - 游戏行来自仓储, id 必然非空
-            raise ArchiveManagementError(tr("error.unknown_game", game_id=""))
+            # 与上一行同一条判据: 仓储出来的行一定有 id, 这一支只是给类型检查一个出口。
+            raise ArchiveManagementError(
+                tr("error.unknown_game", game_id="")
+            )  # pragma: no cover - 仓储出来的行一定有 id
         location_count = self._games.count_locations(game.id)
         backup_count = self._games.count_backups(game.id)
         return GameSummary(

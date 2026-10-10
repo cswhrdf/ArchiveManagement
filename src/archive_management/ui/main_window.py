@@ -134,7 +134,7 @@ logger = logging.getLogger(__name__)
 
 # 首字占位块的文字色: 它坐在**固定色调**的色块上(见下面的 _TONE_COLORS, 这批颜色故意不跟
 # 主题走), 所以文字固定用白 —— 写成具名常量而不是调用里的字面量, 让"这个白是故意的"一眼可见。
-# (原先拦这类字面量的静态检查 C9101 已撤, 理由见 PLAN §17.3 —— 现在由 test_gui_theme_repaint
+# (原先拦这类字面量的静态检查 C9101 已撤 —— 现在由 test_gui_theme_repaint
 # 在运行期整屏核对配色。)
 _HERO_TILE_TEXT = "#ffffff"
 
@@ -148,7 +148,7 @@ _TONE_COLORS: dict[str, str] = {
 # 否则在更窄的屏幕(窗口被窗口管理器再压小)上会越界并盖住描边。
 # 2026-10-03 从 1200x720 降到 **1024x720**: CI 的 Windows/macOS runner 桌面只有约
 # 1024x768, 而旧下限比桌面还宽 —— 窗口管理器会把窗口夹回 1024, 于是界面用例跑在应用
-# **自己声明不支持**的尺寸下(两条 macOS 尺寸用例正是这么红的, 见 PLAN §42.2/§44)。
+# **自己声明不支持**的尺寸下(两条 macOS 尺寸用例正是这么红的)。
 # 1024 落在 runner 与老式笔记本屏之内, 并且仍然装得下固定宽度的行 —— 后半句由
 # ``test_gui_layout.test_home_widgets_fit_the_supported_minimum_window`` 守着。
 # 高度 720 不变: 它是 768 高的屏去掉标题栏后的可用高度, 再矮就真的放不下内容。
@@ -1236,7 +1236,7 @@ class ArchiveApp(ctk.CTk):
         self._list_sub.grid(row=1, column=0, padx=16, pady=(2, 8), sticky="w")
         self._list_scroll = self.kit.scroll_frame(self._list_panel, bg_key="well")
         self._list_scroll.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        # 分支视图不用滚动容器而是图画布(见 I-9): 两块同格叠放, 同一时间只显示一个。
+        # 分支视图不用滚动容器而是图画布: 两块同格叠放, 同一时间只显示一个。
         # 图画布自己拿 ``well`` 当底色(与滚动区一致), 所以切视图时那块区域的底色不变。
         self._branch_host = self.kit.frame(
             self._list_panel, bg_key="well", corner_radius=RADIUS_NONE
@@ -2322,7 +2322,7 @@ class ArchiveApp(ctk.CTk):
         backup_id = item.backup_id
         self._set_busy(True)
         # 进行中要说清"正在把哪一份恢复到哪里": 只有"正在恢复备份…"的话, 用户看不出
-        # 这一条属于哪一款游戏(I-7: 进行中的状态必须可辨识).
+        # 这一条属于哪一款游戏(进行中的状态必须可辨识).
         self._feedback(
             FeedbackKind.PENDING,
             tr("action.restore_pending", name=game.name, title=item.title),
@@ -2505,7 +2505,7 @@ class ArchiveApp(ctk.CTk):
             self._reload_data()
 
         self._set_busy(True)
-        # 进行中说清\"删的是哪一份\": 分支根节点连带的删除量由结果文案给出(I-7).
+        # 进行中说清\"删的是哪一份\": 分支根节点连带的删除量由结果文案给出.
         self._feedback(
             FeedbackKind.PENDING,
             tr("action.delete_pending", title=item.display_title),
@@ -3041,7 +3041,7 @@ class ArchiveApp(ctk.CTk):
     def _release_background(self) -> None:
         """释放后台资源(调度器 + 全局快捷键监听); **幂等**, 可以重复调.
 
-        为什么单独成方法(2026-10-05, PLAN §39.4): 以前只有 :meth:`_on_close` 会释放它们, 而界面
+        为什么单独成方法(2026-10-05): 以前只有 :meth:`_on_close` 会释放它们, 而界面
         用例的收尾走的是 ``destroy()`` —— 一个进程里跑完整套用例会攒下几十个活着的
         ``APScheduler`` 线程(每个真后端建起来就 start() 一个, 而界面用例里有 40 多处"建真后端
         的窗口 + ``finally: app.destroy()``"), 而 Tk 解释器早就被销毁了: macOS 上从非主线程碰
@@ -3095,7 +3095,7 @@ class ArchiveApp(ctk.CTk):
         把真正的失败现场搅乱。
 
         后台资源(调度器/快捷键监听)也在这里放掉: 窗口没了它们就再没有别的释放入口, 留着就是
-        活着的线程碰已销毁的 Tk(PLAN §39.4 的 macOS SIGTRAP)。放在最后一步拆控件**之前**做 ——
+        活着的线程碰已销毁的 Tk(macOS 上的 SIGTRAP 现场)。放在最后一步拆控件**之前**做 ——
         一个还在跑的调度器随时可能在自己的线程里回回调到界面。
         """
         self._destroyed = True

@@ -151,11 +151,15 @@ class WinRegistry:
     @staticmethod
     def _module() -> WinRegModule | None:
         """惰性导入 ``winreg``(非 Windows 返回 None)."""
+        # 导入的成败由平台本身决定, 换不成可替换谓词: 两支出口都走平台标记口径
+        # (scripts/coverage_platform.py), 在别的平台上排除。不要为覆盖率往 ``sys.modules``
+        # 塞替身模块或换掉本模块看到的 ``importlib`` —— 那只是把导入路径"演"给统计看,
+        # 真平台上的行为一点没多验到(2026-10-10 移除过两条这样的用例)。
         try:
             module = importlib.import_module("winreg")
-        except ImportError:  # pragma: no cover - 仅非 Windows 触发
-            return None
-        return cast(WinRegModule, module)
+        except ImportError:  # platform: linux macos - 非 Windows 平台没有 winreg 模块
+            return None  # platform: linux macos - 非 Windows 平台没有 winreg 模块
+        return cast(WinRegModule, module)  # platform: windows - winreg 仅 Windows 提供
 
     @staticmethod
     def _root(hive: str, module: WinRegModule) -> int | None:

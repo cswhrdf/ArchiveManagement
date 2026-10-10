@@ -93,7 +93,7 @@ def test_read_raises_on_non_string_value(
         i18n_module._read("zh-CN")
 
 
-# ---- I-3(CSV 43): 中文文案的标点统一用全角 -----------------------------------------
+# ---- 中文文案的标点统一用全角 -----------------------------------------
 #
 # 判据(与那轮转换用的规则一致): **紧跟中文的半角 ``,;:`` 一律改全角**, 且全角标点后面不再
 # 留空格(全角自带间距)。照旧用半角的是 ``1,000`` / ``12:30`` / ``C:\Users`` 这类 —— 它们的
@@ -108,7 +108,7 @@ _ANY_FULL_WIDTH = re.compile(r"[\uff0c\uff1b\uff1a]")
 
 
 def test_chinese_copy_uses_full_width_punctuation() -> None:
-    """中文句内的 ``,;:`` 必须是全角: 半角跟在汉字后面是"断句错位"(I-3)."""
+    """中文句内的 ``,;:`` 必须是全角: 半角跟在汉字后面是"断句错位"."""
     offenders = {
         key: value
         for key, value in _catalog("zh-CN").items()

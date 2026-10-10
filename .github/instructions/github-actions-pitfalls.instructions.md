@@ -32,6 +32,8 @@ cache key 由「架构 + runner 镜像 + 运行时版本 + 锁文件哈希」算
     save-cache: ${{ matrix.shard == 0 }} # 每平台只有一个写入者
 ```
 
+**这两个开关只属于 setup-uv**：挂到 `actions/checkout` 之类别的步骤上，GitHub 对未知输入**只告警不报错**（告警里列出的是 checkout 认得的那些键），参数静默失效、作业照样往下跑。同一类错还有"作业里漏写 `Install uv`"—— runner 上并不预装 uv，要等几十行之后的 `uv python install` 才以 `command not found` 挂掉。守卫 `tests/unit/test_test_config.py::test_every_uv_job_installs_uv_and_keeps_the_cache_inputs_on_it` 把这两条都钉住（2026-10-10 实测：汇总作业把这两个参数挂到了 checkout 上，而且整个少了 `Install uv` 那一步）。
+
 ## 3. 产物：命名、下载、隐藏文件
 
 - **产物名必须带矩阵维度**（`allure-results-${{ matrix.os }}-${{ matrix.shard }}`）：`upload-artifact` 允许同名，行为是**互相覆盖**而不是报错。

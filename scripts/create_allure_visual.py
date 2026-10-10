@@ -12,9 +12,9 @@
   (某处文字重排、颜色偏移)。两者都通过才算这一张通过。
 
 两条阈值都在下面的常量里, 也能用命令行覆盖。**它们按 CI 上实测的分布定**, 不再是最初那个
-"同渲染应当完全相同"的估数(2026-10-05 第一次拿到分布, 见 PLAN §18.4): 七张画面里**同渲染的
+"同渲染应当完全相同"的估数(2026-10-05 第一次拿到分布): 七张画面里**同渲染的
 噪声实测为 0** —— 四张与基线逐位相同(哈希 0 / SSIM 1.0000); 而"真实界面变化"最小到
-SSIM **0.9819**(主页工具栏/筛选那一行整体位移), 已知的真缺陷是 **0.9722**(§40.3 的 11px
+SSIM **0.9819**(主页工具栏/筛选那一行整体位移), 已知的真缺陷是 **0.9722**(11px
 行高错)。所以取 `MIN_SSIM = 0.995`(离"完全相同"留 0.005 余量, 而上面两类"真要人看一眼"
 的都仍判红)与 `MAX_HASH_DISTANCE = 2`(原来的 6 太松: 实测里真实变化只到 2-4, 它其实从没
 参与过判定)。改之前先去看那份实测, **不要凭印象改**: 太松等于没判据, 太紧会把 runner 镜像
@@ -400,7 +400,7 @@ def capture_screens(
         page._open(next(iter(page._rows)))
         pump(app, SETTLE_SECONDS)
         _record(app, screens_dir, "03-详情页-演示数据", grab, produced, skipped)
-        # 折叠态是新画面(I-9.5): 右下角的标记、说明行里的"N 个后代"与收起来之后的形状
+        # 折叠态是新画面: 右下角的标记、说明行里的"N 个后代"与收起来之后的形状
         # 都只能在这里看到 —— 它保住的是"折叠没把别的框挤歪"。编号紧随 03(处理顺序是
         # 字母序, 见 main), 所以报告里的先后与编号一致。
         record_a_folded_subtree(app, page, screens_dir, grab, produced, skipped)
@@ -451,8 +451,12 @@ def compare_one(name: str, actual: Path, baseline: Path | None) -> Comparison:
         # scikit-image 带 `py.typed`(所以 mypy 能看见这个函数), 但 `structural_similarity`
         # 自己没写标注 —— strict 下的 `no-untyped-call` 会把"调用它"判成错。按仓库既有做法
         # 给出**指定错误码**的最小忽略: 只放过这一次调用, 而不是把整个 skimage 当成 Any。
-        # 上游哪天补上标注, `warn_unused_ignores` 会把这一行报出来, 到时删掉即可。
-        similarity = structural_similarity(  # type: ignore[no-untyped-call]
+        # 这个忽略是环境依赖的: 装了 visual 组时 no-untyped-call 真的会触发; 没装时
+        # skimage 被 ignore_missing_imports 化为 Any、调用不报错, 这行反而成了"未使用的
+        # 忽略"。把 unused-ignore 一并列进忽略码, 两种环境都成立(mypy 对这类两态忽略的
+        # 官方姿势)。上游哪天补上标注后 no-untyped-call 不再触发, warn_unused_ignores
+        # 仍会报出这行, 到时删掉即可。
+        similarity = structural_similarity(  # type: ignore[no-untyped-call, unused-ignore]
             grey_base, grey_actual, data_range=255.0
         )
         ssim = float(similarity)

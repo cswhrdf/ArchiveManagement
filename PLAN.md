@@ -1120,6 +1120,7 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 | 13  | PR 上用**已有的** `--min-severity blocker`（或 `critical`）只跑关键用例, main 跑全量          | 仓库已经实现了这个开关, 几乎零开发量                                                                                                                                                      |
 | 14  | 给最慢的 GUI 用例打 `pytest.mark.slow`, PR 上 `-m "not slow"`                                 | 需要先按耗时排序（`--durations=20` 或 Allure 里的 duration）                                                                                                                              |
 | 15  | 按作业拆依赖分组: `[dependency-groups]` 拆成 `test`/`coverage`/`quality`/`analysis`/`package` | **已实施（2026-09-21）**, 实测收益比原估小得多: 缓存热时每实例只省约 0.5~1 秒（`uv sync` 装 51 个包 522ms）, 真正省下的是**冷缓存**那一轮（锁文件一变就得重建 uv 缓存）与各作业的安装体积 |
+| 16  | **降单条 ui 用例固定成本**: 先 profile 典型用例 call 段（ArchiveApp 构造 / pump / 断言 / destroy 收尾链）的时间占比, 再定点优化占比最大的一段 | 这是测试套件执行时间的**真正大头**（本地与 CI 都受益）: 2026-10-07 `--durations` 实测, 成本集中在 call 而非 fixture, Top60 慢用例合计只占 ~27% —— 是"280 条 ui × 每条 3~4s"的**数量×固定成本**型, 打 `slow` 标记排除头部用例收益有限（已并入第 14 条的不做结论）。红线: 建真窗 / 真实窗口映射是布局断言的一部分, 优化不得伤"真实 UI"语义 | **未做（2026-10-07 登记）**; 缓解措施先行 —— 本地手动全量可双进程分片（`scripts/run_tests_local.py`, 实测 18:28 → 12:27, 见 docs/testing.md §6） |
 
 **第 15 条的落地细节**: 各作业实际装的组 —— `quality` = test+quality+analysis; `pytest` = test+quality（片 0 的平台检查要 mypy）; `pytest-report` = coverage; `security` = test; `allure-summary` = **一组不装**（脚本只用标准库, Allure CLI 走 npm）; release 的 build = test+quality+package。
 
@@ -1149,7 +1150,7 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 
 1. **档 1**: 21 → 18 个实例; 剩两项已结案（npm 缓存已实施见 §12.4; 解释器目录缓存 2026-10-05 定案**不做**）。
 2. **档 2**: 18 → 13 → **11**（本节）; Windows 上的实例从 5 降到 2。**当前计数**: 默认分支上是 **14** 个实例（macOS 恢复后只给 1 片）, PR 与 dev 推送上是 **13** 个。
-3. **档 3**: 第 15 条已完成; 第 12/13/14 条**不做**（2026-10-05 定案）, 口径已定 —— **PR 仍跑三平台**（见下面的红线与 §15.2）。
+3. **档 3**: 第 15 条已完成; 第 12/13/14 条**不做**（2026-10-05 定案）, 口径已定 —— **PR 仍跑三平台**（见下面的红线与 §15.2）; 第 16 条 2026-10-07 登记未做（先以本地双片分片缓解）。
 
 ## 12. 测试报告增强（Allure 3，2026-09-29）
 
@@ -1184,7 +1185,9 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 - **`defaultLabels`**: 每个测试模块已强制声明 severity（有守卫）, fallback 反而会掩盖"漏标"。
 - **`hideLabels`**: 可选微调（例如 `os` 与 `env` 取值重复可隐藏一个）, 价值很小。
 
-### 12.4 报告发布到 GitHub Pages（2026-09-30 追加, 已落地）
+### 12.4 报告发布到 GitHub Pages（2026-09-30 追加, **2026-10-06 移除**）
+
+- **移除（2026-10-06, 用户要求）**: 不再发布到 GitHub Pages。三个发布步骤（`Unpack the report for Pages` / `Upload the report as a Pages artifact` / `Deploy to GitHub Pages`）、`pages: write` / `id-token: write` 权限与 `environment: github-pages` 都从 `allure-summary` 删掉了, 报告只作为 `allure-report-final` 产物上传（想要网址就自己搭, 仓库不再管）。守卫跟着换: 删 `test_the_pages_actions_are_a_compatible_pair` 与 `test_the_report_is_published_to_pages_from_the_default_branch_only`, 换成反向断言"发布确实删干净了"的 `test_the_pages_deploy_is_gone_and_the_report_is_an_artifact`（见 §12.4 下面那些记录 —— 它们是当时的决定, 留作历史）。
 
 需求: 报告 zip 只能下载后手动打开, Pages 给的是一个稳定网址。
 
@@ -1195,7 +1198,7 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 - **历史趋势（用户问的）**: **能保留, 而且与发布到哪里无关** —— 趋势来自 `.allure/history.jsonl` 在两个报告作业里的 artifact 往返（找上一次**成功**运行的同名产物 → 取回 → `allure generate` 追加本次一行 → 再传回产物）。两条要说清的边界: ① 趋势的寿命 = **artifact 的寿命**（默认 90 天）, 不是站点的寿命; ② 每一环都要求那一轮的 `conclusion` 是 `success`, 所以"报告生成之后才失败"的运行会丢掉它刚写好的那一行 → 正因为 ②, 发布作业用 `continue-on-error: true`（站点只是"给人看的副本", 它失败不该让这一轮的历史再也接不上, 作业在 UI 上仍是失败）。要更耐久得换存储（把 history.jsonl 一起发到站点上再回取 / 接 Allure Report Storage）, 未做。
 - **版本先例**: 见 §15.5（v3 + v4 是合法组合, 刻意不升主版本）。
 
-**状态**: 12.1 三项与 12.4 发布已落地（报告配置 + 五条守卫 + `docs/testing.md`）, 门禁全绿（全量 **2183 passed / 7 skipped**、`Total coverage 97.64%`）; 12.2 的开工条件实测见 §15.3。
+**状态**: 12.1 三项已落地（报告配置 + 五条守卫 + `docs/testing.md`）; **12.4 的 Pages 发布已于 2026-10-06 整体移除**, 门禁全绿（全量 **2183 passed / 7 skipped**、`Total coverage 97.64%`）; 12.2 的开工条件实测见 §15.3。
 
 ## 13. 修 CI 那一轮的红（2026-09-30, 提交 `98aa780`, run 36465748300）
 

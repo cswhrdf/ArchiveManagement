@@ -38,6 +38,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 ALLURE_CONFIG = REPO_ROOT / "allurerc.mjs"
 
+# 轻量门禁作业(路径过滤 + 必需检查结论)不跑测试、不产生 Allure 结果或覆盖率,
+# 没有"兜底现场"可收 —— 所以它们不在这对步骤的适用范围内。
+_GATE_ONLY_JOBS = {"changes", "required-check"}
+
 
 def _load_script(name: str) -> ModuleType:
     """按路径加载 ``scripts/`` 下的脚本(它们不是包, 只能用 importlib 按文件加载)."""
@@ -72,6 +76,7 @@ def _step(job: str, name: str) -> str:
 def test_every_job_has_a_failure_diagnostics_pair() -> None:
     """每个作业都要有那一对步骤, 而且收集步要落在作业的**后半段**(约定是"放最后")."""
     jobs = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))
+    jobs = {name: job for name, job in jobs.items() if name not in _GATE_ONLY_JOBS}
 
     assert len(jobs) == 5, f"作业数量变了, 这份守卫要跟着改: {sorted(jobs)}"
     for name, job in jobs.items():
@@ -91,6 +96,7 @@ def test_upload_runs_only_for_a_backstop_scene() -> None:
     **进程级崩溃 / 证据缺失**。判定只在一个地方算(脚本), 工作流只读它。
     """
     jobs = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))
+    jobs = {name: job for name, job in jobs.items() if name not in _GATE_ONLY_JOBS}
 
     for name, job in jobs.items():
         collect = _step(job, "Collect failure diagnostics")

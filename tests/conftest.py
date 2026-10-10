@@ -56,9 +56,11 @@ Allure 标签语义(与 Allure 3 报告控件一一对应):
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import logging
 from collections.abc import Generator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,12 +68,44 @@ import allure
 import pytest
 
 import crash_capture
+import durations
 import sharding
 import timeout_guard
 import tk_guard
+import ui_sharing
 from archive_management.i18n import DEFAULT_LOCALE, set_locale
 from archive_management.services.audit import AUDIT_LOGGER_NAME
 from archive_management.services.platforms import current_platform, platform_label
+
+
+def _install_platform_coverage_config() -> None:
+    """装上"本平台专属"的覆盖率配置(平台专属代码只在别的平台被排除).
+
+    为什么必须在**导入期**做: ``COVERAGE_RCFILE`` 只在 coverage 建配置的那一刻读一次。
+
+    **但要说清楚它到底对谁生效**(2026-10-06 实测):
+
+    - 对 ``coverage report`` / ``coverage xml`` 这类命令行**生效** —— CI 判单平台覆盖率正是走
+      那两步(合并后写这份 rc 到 ``GITHUB_ENV``, 再 ``coverage report --show-missing``);
+    - 对 ``pytest --cov`` **不生效**: pytest-cov 在导入根 conftest **之前**就构造了 Coverage
+      (见它的 ``pytest_load_initial_conftests``), 这里再改环境变量已经晚了。所以本地
+      ``pytest --cov`` 跑出来的是**合并口径**(不做平台排除), 与 ``coverage combine`` 一致。
+
+    生成失败时 ``setup_environment`` 会打印原因并退回 pyproject 的基线配置: 装配置这件事
+    不该把整个会话弄挂(退回之后的行为与改动前完全一致)。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "coverage_platform",
+        Path(__file__).resolve().parents[1] / "scripts" / "coverage_platform.py",
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - 文件就在仓库里
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.setup_environment()
+
+
+_install_platform_coverage_config()
 
 _SEVERITY_LEVELS = ("blocker", "critical", "normal", "minor", "trivial")
 _SEVERITY_RANK = {
@@ -246,6 +280,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help=f"失败现场 dump 的递归深度(默认 {crash_capture.DEFAULT_DEPTH}; 0 = 不生成 dump)",
     )
+    # 分片权重的数据采集(见 tests/durations.py): 全量跑一次刷新 tests/durations.json,
+    # sharding.cost_of 就能按每条用例的真实耗时装箱, 而不是目录经验单价。
+    parser.addoption(
+        "--record-durations",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="把每条用例的耗时(setup+call+teardown 之和, 秒)写成 JSON;"
+        " 全量跑一次即可刷新 tests/durations.json(分片权重的数据源)",
+    )
 
 
 def _resolve_severity(item: pytest.Item) -> str:
@@ -356,6 +400,33 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     ``pytest_configure`` 之后, 是唯一能保证"最后一次 enable 是我们"的位置。
     """
     crash_capture.reassert_hard_crash_log()
+
+
+# --record-durations 的累积器: nodeid -> 秒(setup/call/teardown 三段相加).
+# 无条件累加(每条用例三次字典操作, 开销可忽略), 是否落盘由会话结束时的选项决定.
+_DURATION_SAMPLES: dict[str, float] = {}
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """把每个阶段报告的耗时并进当前用例的累计(见 ``tests/durations.py``)."""
+    durations.accumulate(_DURATION_SAMPLES, report.nodeid, report.duration)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """带 ``--record-durations`` 时把本会话的每条用例耗时落盘.
+
+    空会话(``--collect-only``)不覆盖已有数据: 那份文件是全量跑出来的, 别被一次
+    "什么都没跑"的调用清空。部分运行会**整体覆盖**属于既定行为 —— 记录的就是
+    "这次跑了什么"。
+    """
+    path = session.config.getoption("--record-durations")
+    if path is None:
+        return
+    if not _DURATION_SAMPLES:
+        print(f"[durations] 本会话没有跑用例, 不覆盖 {path}")
+        return
+    durations.write(path, _DURATION_SAMPLES, recorded_at=datetime.now(UTC))
+    print(f"[durations] 已记录 {len(_DURATION_SAMPLES)} 条用例的耗时 -> {path}")
 
 
 def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -499,6 +570,20 @@ def _close_gui_apps() -> Iterator[None]:
     from gui_support import close_gui_apps
 
     close_gui_apps()
+
+
+@pytest.fixture(scope="session")
+def ui_shared() -> Iterator[ui_sharing.SharedUiRegistry]:
+    """: 共享 UI 会话注册表(机制与三条纪律见 ``tests/ui_sharing.py``).
+
+    session 级: 池里的窗口活过整批用例 —— 每条用例前后由 ``test_scope`` 做
+    "对齐基线 / 识别漂移并还原(还原不过就重建整窗)"; 会话末尾统一走
+    ``gui_support.close_apps`` 收尾, 拆不干净与逐用例收尾一样判红。不用它的
+    用例零开销: 注册表是空的, 收尾是空操作。
+    """
+    registry = ui_sharing.SharedUiRegistry()
+    yield registry
+    registry.close()
 
 
 @pytest.fixture(autouse=True)

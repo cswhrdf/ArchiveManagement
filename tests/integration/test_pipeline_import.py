@@ -619,6 +619,62 @@ def test_a_failed_node_insert_leaves_no_directory_behind(
         assert not (backup_root / game.storage_key / item.key).exists()
 
 
+def test_a_failing_rollback_does_not_mask_the_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, audit_log: list[str]
+) -> None:
+    """回滚本身也失败时: 只记一条告警, 原始的导入错误照旧抛出(不能被掩盖)."""
+    source = _build_package(tmp_path)
+    _database, _backup_root, service = _target(tmp_path / "target")
+    inspection = service.inspect(source.package)
+    original = BackupRepository.add_with_files
+    calls = 0
+
+    def fail_on_the_second_node(
+        self: BackupRepository,
+        node: BackupNode,
+        entries: Sequence[BackupFileEntry],
+    ) -> BackupNode:
+        """第一次照常写入, 第二次直接失败."""
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise DatabaseError("模拟写入备份节点失败")
+        return original(self, node, entries)
+
+    def refuse_to_delete(self: BackupRepository, node_id: int) -> None:
+        """回收时数据库也不可用."""
+        raise DatabaseError("回收时数据库不可用")
+
+    monkeypatch.setattr(BackupRepository, "add_with_files", fail_on_the_second_node)
+    monkeypatch.setattr(BackupRepository, "delete", refuse_to_delete)
+
+    with pytest.raises(DatabaseError, match="模拟写入备份节点失败"):
+        service.import_package(inspection, locations=_mapping(source))
+
+    assert "import.failed" in " ".join(audit_log)
+
+
+def test_import_treats_an_unparsable_timestamp_as_missing(tmp_path: Path) -> None:
+    """包里节点的时间戳写坏了: 不拒绝整包, 与"没有时间戳"走同一条退路(由库补当前时间)."""
+    source = _build_package(tmp_path)
+    database, backup_root, service = _target(tmp_path / "target")
+
+    def break_timestamps(config: dict[str, Any]) -> None:
+        for item in config["backups"]:
+            item["created_at"] = "不是时间"
+
+    _edit_package_config(source.package, break_timestamps)
+    inspection = service.inspect(source.package)
+    assert [node.created_at for node in inspection.nodes] == ["不是时间"] * 3
+
+    result = service.import_package(inspection, locations=_mapping(source))
+
+    nodes = BackupRepository(database).list_for_game(result.game_id)
+    assert len(nodes) == 3
+    assert all(node.created_at is not None for node in nodes), "由数据库补上时间"
+    assert _files_under(backup_root) != []
+
+
 # -- 配置解析的拒绝与退化 ---------------------------------------------------
 
 

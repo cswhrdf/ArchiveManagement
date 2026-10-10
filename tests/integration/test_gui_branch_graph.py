@@ -1,6 +1,6 @@
-"""分支视图的图画布守卫(I-9.2 / I-9.3 的判据).
+"""分支视图的图画布守卫(绘制与漫游的判据).
 
-判据来自 PLAN 的 I-9 拆分表, 全部写成**可量的数字**:
+判据全部写成**可量的数字**:
 
 1. **item 账目**: 画布上的 item 数 == 框数 + 连线数 + 文字条数(每框两条) —— 三个都是
    确定性数字, 比计时稳, 因此渲染基准用它;
@@ -226,12 +226,16 @@ def test_hover_and_selection_use_the_same_priority_as_cards(graph: Any) -> None:
     _pump(app)
 
     view.set_hovered("root-0", DARK)
+    assert view.hovered == "root-0", (
+        "悬停状态要能被问到(与 selected 一样: 守卫读它, 不翻私有字段)"
+    )
     assert view.canvas.itemcget(view._box_items["root-0"], "fill") == DARK.card_hover
 
     view.select("root-0", DARK)
     assert view.canvas.itemcget(view._box_items["root-0"], "fill") == DARK.accent_soft
 
     view.set_hovered(None, DARK)
+    assert view.hovered is None, "悬停走了之后状态也要清掉"
     assert view.canvas.itemcget(view._box_items["root-0"], "fill") == DARK.accent_soft
 
 
@@ -433,7 +437,7 @@ def test_switching_views_leaves_no_residue() -> None:
 
 
 def test_a_clipped_box_can_be_read_in_full_on_hover(graph: Any) -> None:
-    """框里被裁掉的字要能悬停回看 (I-3 "截断必须能回看" 在画布上的那一条).
+    """框里被裁掉的字要能悬停回看 ("截断必须能回看" 在画布上的那一条).
 
     画布上的文字挂不了 Tk 的 tooltip: 鼠标在画布里从一个框移到另一个框**不会**再来
     一次 ``<Enter>``, 所以提示由视图自己管 (见 ``widgets.HoverTip``)。这里量两头:
@@ -472,7 +476,7 @@ def test_the_canvas_shows_a_focus_ring_when_it_has_focus(graph: Any) -> None:
     """画布自己拿焦点时要有看得见的环 (它是普通 ``tkinter.Canvas``, 不在 keyboard 的补丁范围里).
 
     画布 ``takefocus=1`` —— Tab 能走到它身上。没有这条环, 焦点落在哪里就看不出来
-    (I-6 那批"焦点必须看得见"的用例只扫 ``CTk`` 控件, 画布是它们的盲区)。
+    (那批"焦点必须看得见"的用例只扫 ``CTk`` 控件, 画布是它们的盲区)。
     """
     app, view, _hooks = graph
     view.set_items(_fan("root", 3))
@@ -628,7 +632,7 @@ def test_selecting_on_the_graph_updates_the_right_panel() -> None:
     assert str(app._restore_btn.cget("state")) == "normal"
 
 
-# -- 折叠/展开(I-9.5.2 的绘制那一半) -----------------------------------------
+# -- 折叠/展开(绘制那一半) -----------------------------------------
 #
 # 一块小树: root 下面 a / b, 而 a 自己有三个孩子。折叠的**入口**与命中优先级是 9.5.3
 # 的内容, 这里量的是"收起来之后画布上是什么样": 账目、痕迹、以及选中一点没动。
@@ -637,7 +641,7 @@ def test_selecting_on_the_graph_updates_the_right_panel() -> None:
 def _traces(view: TreeView, node_id: str) -> str:
     """一个框上"看得见的说明行 + 被裁时的全文"合起来的痕迹文本.
 
-    说明行放不下时 :func:`fit_text` 会裁掉尾巴, 而被裁的部分**挂在悬停提示里**(I-3 的
+    说明行放不下时 :func:`fit_text` 会裁掉尾巴, 而被裁的部分**挂在悬停提示里**(截断必须能回看是硬规则,
     "截断必须能回看") —— 所以判据把两处合起来看, 否则"字够不够宽"会混进判据里。
     """
     texts = view._texts[node_id]
@@ -770,7 +774,7 @@ def test_switching_data_drops_the_stale_folds(graph: Any) -> None:
     assert view.node_ids == ("other", "other-0", "other-1")
 
 
-# -- 折叠/展开的交互(I-9.5.3) ------------------------------------------------
+# -- 折叠/展开的交互 --------------------------------------------------
 #
 # 三条命中各干一件事: 标记 = 折叠/展开, 框 = 选中, 空白 = 平移。入口就在框右下角,
 # 键盘只做"空格/回车折叠当前选中项"(方向键/WASD 已经绑给漫游了)。

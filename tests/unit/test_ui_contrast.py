@@ -73,8 +73,8 @@ DISABLED_PAIRS: tuple[tuple[str, str], ...] = tuple(
 STATE_PAIRS: tuple[tuple[str, str], ...] = (
     ("accent", "background"),
     ("accent", "card"),
-    # 折叠标记(I-9.5.2): 它画在 `card` / `card_hover` 两种底色上, 藏着选中项/当前节点时
-    # 用强调色 —— G5 的先例(新图形出现就要登记它落在的每一种底色), 漏登记过一次的教训。
+    # 折叠标记: 它画在 `card` / `card_hover` 两种底色上, 藏着选中项/当前节点时
+    # 用强调色 —— 新图形出现就要登记它落在的每一种底色, 漏登记过一次的教训。
     ("accent", "card_hover"),
     ("accent", "panel"),
     ("accent", "well"),

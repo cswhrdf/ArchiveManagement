@@ -1,13 +1,13 @@
-"""文案质量守卫(I-3: 未替换占位符 / 静默截断 / 空面板).
+"""文案质量守卫(未替换占位符 / 静默截断 / 空面板).
 
-I-3 的三条规则都要"能量出来"才守得住, 所以这里把 19 个界面状态跑一遍, 收集每个
+这三条规则都要"能量出来"才守得住, 所以这里把 19 个界面状态跑一遍, 收集每个
 文本控件**实际显示出来的文字**, 再按下面四条断言:
 
 A. **不得出现未替换的占位符**: 显示文本里出现 ``{`` 或 ``}`` 就说明某处 ``tr()``
    少传了参数(评审时发现: 面板里写着"可点「恢复到某节点」切换", 而按钮其实叫
    「恢复到此节点」—— 那是个没被替换的占位符)。
 B. **被省略号截掉的文字必须挂悬停提示**: "能换行就换行, 换行还放不下才补省略号"是
-   既有规则(I-1 守卫保证), 但只剩省略号的尾巴必须还能看到 —— 否则用户永远读不到
+   既有规则(既有守卫保证), 但只剩省略号的尾巴必须还能看到 —— 否则用户永远读不到
    完整内容(这就是"半句话"能被接受的前提)。
 C. **我们自己折行的文本不许以孤立的标点收尾**: 末行只有一个逗号/句号会读成"话没
    说完"(评审时发现)。只检查带 ``\\n`` 的文本(那是 ``status_lines`` 这类自己排的),
@@ -23,7 +23,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gui_support import gui_app
+from ui_sharing import SharedUiRegistry
 
 try:
     import customtkinter as ctk
@@ -218,14 +219,21 @@ def _hook(window: Any, *_args: Any, **_kwargs: Any) -> None:
     _record(_STATE["case"], window)
 
 
+def _shared_app() -> ArchiveApp:
+    """长文案共享池的工厂: 本模块的窗口共用一个长文案后端(长文案不是用例改的状态)."""
+    return _new_app(_LongTextService())
+
+
 @pytest.fixture
-def app() -> Any:
-    """主窗口(模态框的量点被换到 ``wait_window`` 上, 数据全是长文案)."""
-    application = gui_app(_new_app, _LongTextService())
-    _pump(application)
-    _STATE["palette"] = application.p
-    application.wait_window = _hook
-    return application
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 模态框量点换到 ``wait_window`` 上, 数据全是长文案)."""
+    with ui_shared.test_scope(
+        _shared_app, patched_attrs=("wait_window",)
+    ) as application:
+        _pump(application)
+        _STATE["palette"] = application.p
+        application.wait_window = _hook
+        yield application
 
 
 def sequence(*steps: Callable[[], Any]) -> Callable[[], None]:
@@ -605,7 +613,7 @@ def _problems() -> list[str]:
     return problems
 
 
-# 统计列的"无数据"只能是词, 不能退化成一个符号 —— CSV 20 号那条"像坏掉的组件"
+# 统计列的"无数据"只能是词, 不能退化成一个符号 —— 评审清单里那条"像坏掉的组件"
 # 就是面板里只摆了一个短横线。这里只钉这三条具体的值, 不搞含糊的启发式: 表格单元
 # 里的"—"(没有备份时)本来就该保留。
 _BARE_MARKS = {"", "-", "--", "\u2014", "\u2013", "?", "\uff1f"}

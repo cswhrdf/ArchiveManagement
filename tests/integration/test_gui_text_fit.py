@@ -1,4 +1,4 @@
-"""列表/表格里的文字不得被"无省略号地"硬裁 (I-1 第三个子项).
+"""列表/表格里的文字不得被"无省略号地"硬裁 (硬裁那一类里的一个子项).
 
 判据: 一个文本控件的**任意一行**像素宽 > 它自己的宽度时, Tk 会把文字裁掉而且**不补
 省略号** —— 用户看到的就是半句话。所以每个列表/表格里都要求: 每行都放得下, 放进不
@@ -279,7 +279,7 @@ def _areas(app: ArchiveApp) -> list[tuple[str, Any, bool]]:
     games = list(app.backend.list_games())
     app._open_game_detail(games[0].game_id)
     _pump(app)
-    # 分支视图自 I-9 起是**图画布**(框里的文字由 tree_view 自己用 fit_text 裁), 这里要
+    # 分支视图自改成**图画布**后(框里的文字由 tree_view 自己用 fit_text 裁), 这里要
     # 量的是"按卡片铺出来的列表" —— 切到时间线才是那一块。图画布自己的裁剪判据在
     # tests/integration/test_gui_branch_graph.py 里(画布 item 的实测宽度 ≤ 框宽)。
     app._switch_view(ViewKind.TIMELINE)

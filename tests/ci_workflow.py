@@ -16,6 +16,9 @@ from pathlib import Path
 # 仓库根目录: 本文件在 tests/ 下, 差一级.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+# 定时那轮只有"门 + 调用"(见 nightly.yml 顶部): 不含任何作业定义的副本 —— 全量链与报告链
+# 只有 ci.yml 一份, 免得两份文件各写一遍分片矩阵, 改一处忘了另一处。
+NIGHTLY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly.yml"
 # 发布工作流也要守同一批不变式(依赖分组、uv run 的隐式 sync)。
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
@@ -40,14 +43,20 @@ def workflow_text() -> str:
 def jobs(text: str) -> dict[str, str]:
     """取出 ``jobs:`` 下每个作业的名字与正文(名字 → 那一节文本).
 
-    顶层作业键的缩进是两个空格(四空格及更深的是作业内部的键), 且只从 ``jobs:``
-    之后开始扫 —— 前面的 ``on:`` / ``env:`` 也是两空格缩进的键。没有 ``jobs:`` 行时
-    按整段扫: 用例里手写的合成文本就属于这种, 真实工作流都有这行。
+    作业键的缩进由文件自己决定 —— 仓库里两种排版并存(``ci.yml`` / ``release.yml`` 两个
+    空格, ``nightly.yml`` / ``wiki.yml`` 四个), 所以取 ``jobs:`` 之后**最浅的那一档**键
+    作为作业层: 更深的都是作业内部的键。前面还有 ``on:`` / ``env:`` 这类顶层键, 所以只从
+    ``jobs:`` 之后开始扫。没有 ``jobs:`` 行时按整段扫: 用例里手写的合成文本就属于这种,
+    真实工作流都有这行。
     """
     blocks = re.split(r"^jobs:\n", text, maxsplit=1, flags=re.MULTILINE)
     body = blocks[1] if len(blocks) == 2 else text
+    indents = [len(value) for value in re.findall(r"^( +)[A-Za-z_][\w-]*:", body, re.M)]
+    assert indents, "工作流里一个作业都找不到"
+    indent = min(indents)
     found = re.findall(
-        r"\n  ([A-Za-z_][\w-]*):\n(.*?)(?=\n  [A-Za-z_][\w-]*:|\Z)",
+        rf"\n {{{indent}}}([A-Za-z_][\w-]*):\n(.*?)"
+        rf"(?=\n {{{indent}}}[A-Za-z_][\w-]*:|\Z)",
         # 前面补一个换行: 第一个作业前面没有换行, 不补的话它会被整条漏掉。
         "\n" + body,
         re.DOTALL,
@@ -113,8 +122,12 @@ def needs_of(text: str, job: str) -> set[str]:
 def job_condition(text: str, job: str) -> str:
     """取出作业级 ``if:`` 的条件文本; 作业没写 ``if:`` 时返回空串.
 
-    作业内部的键是四空格缩进, 步骤是六空格以上(其键更深), 所以只认四空格那一行 ——
-    否则 ``if: always()`` 这类条件会把步骤级的一起数进来。
+    作业内部的键缩进由文件自己决定(见 :func:`jobs`), 而作业块的**最浅那一档**就是作业级
+    的键(块从作业键之后开始), 步骤级更深 —— 所以只认最浅那一档的 ``if:``, 否则
+    ``if: always()`` 这类条件会把步骤级的一起数进来。
     """
-    matched = re.search(r"^ {4}if:\s*(.+)$", job_block(text, job), re.MULTILINE)
+    block = job_block(text, job)
+    indents = [len(value) for value in re.findall(r"^( +)\S", block, re.M)]
+    assert indents, f"{job} 里一行缩进都没有, 取不到作业级 if"
+    matched = re.search(rf"^ {{{min(indents)}}}if:\s*(.+)$", block, re.MULTILINE)
     return "" if matched is None else matched.group(1).strip()

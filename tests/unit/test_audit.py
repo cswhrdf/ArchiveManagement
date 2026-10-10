@@ -94,6 +94,17 @@ def test_failure_marks_action_suffix_and_level(captured: _Capture) -> None:
     assert "restore.failed" in record.getMessage()
 
 
+def test_failure_logging_does_nothing_when_the_error_level_is_off(
+    captured: _Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ERROR 级别被关掉时直接返回: 连字段渲染都不做(渲染要遍历字段并脉敏)."""
+    monkeypatch.setattr(_LOGGER, "level", logging.CRITICAL)
+
+    log_failure("restore", game_id=1, error="磁盘已满")
+
+    assert captured.records == []
+
+
 def test_fields_are_sorted_and_empty_values_skipped(captured: _Capture) -> None:
     log_action("backup.create", zeta=1, alpha=2, note=None, title="")
 

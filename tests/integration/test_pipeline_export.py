@@ -216,3 +216,75 @@ def test_export_does_not_touch_the_backup_root(tmp_path: Path) -> None:
         if path.is_file()
     )
     assert after == before
+
+
+def test_exporting_no_games_is_rejected(tmp_path: Path) -> None:
+    """空列表不算一次批量导出: 报错, 而不是写出一个什么都没有的包."""
+    database = helpers.migrated_database(tmp_path)
+    service = ExportService(database, backup_root=tmp_path / "backups")
+    destination = tmp_path / "batch.archive.zip"
+
+    with pytest.raises(ArchiveManagementError, match="至少 1 款"):
+        service.export_games([], destination)
+
+    assert not destination.exists()
+
+
+def test_exporting_an_unknown_game_is_rejected(tmp_path: Path) -> None:
+    """导出库里没有的游戏: 报"未知游戏", 且不在目标路径上留半成品."""
+    database = helpers.migrated_database(tmp_path)
+    service = ExportService(database, backup_root=tmp_path / "backups")
+    destination = tmp_path / "gone.archive.zip"
+
+    with pytest.raises(ArchiveManagementError, match="未知游戏"):
+        service.export_game(999, destination)
+
+    assert not destination.exists()
+
+
+def test_a_node_without_a_storage_path_is_refused_before_writing(
+    tmp_path: Path,
+) -> None:
+    """节点行缺少存储路径(历史数据或外部改过库): 明确拒绝, 且不留半成品.
+
+    实际拦下它的是备份服务的 ``snapshot_root``(同一批节点先过那里), 这里只钉住
+    "拒绝 + 目标路径上没有残缺包"这条契约, 不限定是哪一道守卫开口.
+    """
+    database, game_id, _save = _fixture(tmp_path)
+    BackupRepository(database).add(BackupNode(game_id=game_id, node_kind="manual"))
+    service = ExportService(database, backup_root=tmp_path / "backups")
+    destination = tmp_path / "Demo.archive.zip"
+
+    with pytest.raises(ArchiveManagementError, match="缺少存储路径"):
+        service.export_game(game_id, destination)
+
+    assert not destination.exists()
+
+
+def test_two_games_with_the_same_name_get_distinct_inner_entries(
+    tmp_path: Path,
+) -> None:
+    """同名两款游戏不能共用内层条目名(否则装包时后者会顶掉前者), 撞车时加序号."""
+    database = helpers.migrated_database(tmp_path)
+    backup_root = tmp_path / "backups"
+    backups = BackupService(database, backup_root=backup_root)
+    ids: list[int] = []
+    for index in range(2):
+        save = helpers.make_save_folder(tmp_path, index=index, content=f"state-{index}")
+        game_id = helpers.add_game(database, "Demo", path=save)
+        backups.create_backup(game_id, title=f"第 {index} 次")
+        ids.append(game_id)
+    destination = tmp_path / "batch.archive.zip"
+
+    result = ExportService(database, backup_root=backup_root).export_games(
+        ids, destination
+    )
+
+    assert result.games == 2
+    assert result.game_names == ("Demo", "Demo")
+    with fmt.read_batch_package(destination) as batch:
+        assert [game.entry for game in batch.games] == [
+            "Demo.archive.zip",
+            "Demo-2.archive.zip",
+        ]
+        assert [game.name for game in batch.games] == ["Demo", "Demo"]

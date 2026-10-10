@@ -1,4 +1,4 @@
-"""可用性守卫(I-4: 状态与可用性).
+"""可用性守卫(状态与可用性).
 
 "无效的控件要看起来无效" 必须能测, 否则只是一句口号。四条判据:
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 import sys
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gui_support import gui_app
+from ui_sharing import SharedUiRegistry, demo_app
 
 try:
     import customtkinter as ctk
@@ -171,12 +172,12 @@ def _hook(window: Any, *_args: Any, **_kwargs: Any) -> None:
 
 
 @pytest.fixture
-def app() -> Any:
-    """主窗口(模态框的量点被换到 ``wait_window`` 上)."""
-    application = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(application)
-    application.wait_window = _hook
-    return application
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 模态框量点换到 ``wait_window`` 上, 退出时由池还原该钩子)."""
+    with ui_shared.test_scope(demo_app, patched_attrs=("wait_window",)) as application:
+        _pump(application)
+        application.wait_window = _hook
+        yield application
 
 
 def _measure(app: Any, palette: Palette) -> list[str]:
@@ -377,7 +378,7 @@ class _LongRunningService(DemoArchiveService):
     """演示后端 + "真的在跑"那一段: 让界面上"进行中"的任务卡真的出现.
 
     ``DemoArchiveService.task_status`` 恒返回 ``running=False``, 所以进度行 / 取消按钮 /
-    「运行中」这三点在 GUI 用例里**从来没被量过** —— I-7 的"进行中可辨识 + 可取消"就是卡在
+    「运行中」这三点在 GUI 用例里**从来没被量过** —— "进行中可辨识 + 可取消"就是卡在
     这里。这个替身只在测试里把 running/cancellable 报成真, 长操作自己也真的睡一会儿; 被测的
     仍是主窗口怎么画这些状态(真实后端那一半由 ``tests/unit/test_sql_backend.py`` 的取消用例兜底)。
     """

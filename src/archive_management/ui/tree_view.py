@@ -1,4 +1,4 @@
-"""分支视图的**图画布**(I-9.2).
+"""分支视图的**图画布**.
 
 卡片做不出那张参考图, 原因是机制上的: 卡片是"一维纵向流水 + 文本前缀缩进", 而图要求
 "兄弟横排 + 父子之间有色连线"。所以分支视图换成这里的 ``Canvas`` 绘制, 时间线视图
@@ -10,7 +10,7 @@ item": 一个框 = **一个 item**(平滑多边形, 圆角)、一条连线 = **�
 "``canvas.find_all()`` 的长度 == 框数 + 连线数 + 文字条数"(见
 ``tests/integration/test_gui_branch_graph.py``)。
 
-实测过的三件事(见 PLAN 的 I-9):
+实测过的三件事:
 
 * **曲线不贵**: 400 节点一轮"清空 + 重画"的实测里, 只画方框+文字 7.4ms、加直线段 7.1ms、
   加 Tk 的 ``smooth=True`` 曲线 6.9ms —— 在噪声里, 而且比自己采样贝塞尔便宜, 所以连线走曲线。
@@ -114,7 +114,7 @@ class NodeTexts:
 
     @property
     def truncated(self) -> bool:
-        """有没有哪一行真的被裁过(悬停提示只在真的被裁时才挂, 见 I-3 那条规则)."""
+        """有没有哪一行真的被裁过(悬停提示只在真的被裁时才挂)."""
         return bool(self.full)
 
 
@@ -125,7 +125,7 @@ class ItemCounts:
     boxes: int
     edges: int
     texts: int
-    #: 折叠标记: 每个有孩子的框一个(I-9.5.2)。
+    #: 折叠标记: 每个有孩子的框一个。
     markers: int
 
     @property
@@ -188,8 +188,7 @@ class TreeView:
 
     画布**不进 Tab 焦点链里的节点**, 也不做"回车进选中项"(已确认接受的代价: 图要的是
     形状而不是信息密度)。保留的键盘能力是**漫游**(方向键 / WASD 平移) —— 这与将来的
-    "方向键在节点间走"冲突, 那时要先改绑定(例如 ``Ctrl+方向键``), 不能直接占用,
-    见 PLAN 的 I-9。
+    "方向键在节点间走"冲突, 那时要先改绑定(例如 ``Ctrl+方向键``), 不能直接占用。
     """
 
     def __init__(
@@ -206,7 +205,7 @@ class TreeView:
         self._by_id: dict[str, BackupItem] = {}
         self._nodes: list[Any] = []
         self._parent_of: dict[str, str] = {}
-        #: 当前收起的节点(**不持久化**: 折叠是看图时的临时收拢, 见 PLAN I-9.5 的口径)。
+        #: 当前收起的节点(**不持久化**: 折叠是看图时的临时收拢)。
         self._collapsed: set[str] = set()
         self._texts: dict[str, NodeTexts] = {}
         self._layout: TreeLayout = tree_layout([])
@@ -276,7 +275,7 @@ class TreeView:
         """把每个节点的两行字裁进框里(用与列表/海报同一套 ``fit_text``).
 
         被裁掉的行会把**全文**记在 ``NodeTexts.full`` 里 —— 画布上的文字没有 tooltip 可挂,
-        而"截断必须能回看"是 I-3 的硬规则, 所以悬停提示的文案在这里就备好了(每框两行都
+        而"截断必须能回看"是硬规则, 所以悬停提示的文案在这里就备好了(每框两行都
         放得下时 ``full`` 是空串, 那时不弹提示).
         """
         texts: dict[str, NodeTexts] = {}
@@ -289,7 +288,7 @@ class TreeView:
     def _meta_for(self, node_id: str) -> str:
         """说明行的全文(创建时间 · 类型; 折叠时换成"藏了什么").
 
-        折叠口径的落点(PLAN I-9.5): **画面可以藏, 但藏起来的东西必须在框上留下可发现的
+        折叠口径的落点: **画面可以藏, 但藏起来的东西必须在框上留下可发现的
         痕迹**。实测框只放得下一件事(框宽 168 - 两侧内衬 = 152px), 而时间/类型在右侧面板
         里还有一份、"藏了谁"只有这里能说 —— 所以折叠时**只讲藏了什么**, 并把最要紧的
         "藏了选中项/当前节点"排在最前面(被裁也要先保住它)。
@@ -364,7 +363,7 @@ class TreeView:
 
     @property
     def collapsed(self) -> frozenset[str]:
-        """当前收起的节点(**不持久化**: 只活在这个视图的内存里, 见 PLAN I-9.5)."""
+        """当前收起的节点(**不持久化**: 只活在这个视图的内存里)."""
         return frozenset(self._collapsed)
 
     def can_toggle(self, node_id: str | None) -> bool:
@@ -374,7 +373,7 @@ class TreeView:
     def toggle(self, node_id: str, palette: Palette) -> bool:
         """收起/展开一个节点的子树, 返回"现在是不是收起的".
 
-        两条硬口径(PLAN I-9.5): **折叠不改选中**(偷偷改选会让"恢复/建分支"作用到另一个
+        两条硬口径: **折叠不改选中**(偷偷改选会让"恢复/建分支"作用到另一个
         节点上), 以及重算几何之后把视口**对回刚点的那个框**(``scrollregion`` 变小后 Tk
         会把偏移夹回, 不管的话用户会突然看到别处)。
         """
@@ -460,7 +459,7 @@ class TreeView:
             yscrollincrement=max(1, int(self._layout.metrics.box_height / 2)),
             # 焦点环: 聚焦时是抢眼的 ``focus_ring``, 失焦时与画布底色同色(= 看不见环).
             # 画布是普通 Canvas(不在 keyboard 的补丁范围), 而它 ``takefocus=1`` ——
-            # Tab 走到它身上却看不出焦点, 正是 I-6 要拦的事。
+            # Tab 走到它身上却看不出焦点, 正是键盘可用性要拦的事。
             highlightbackground=palette.well,
             highlightcolor=palette.focus_ring,
         )
@@ -710,7 +709,7 @@ class TreeView:
         for key, arrow in _KEY_BINDINGS:
             self.canvas.bind(key, partial(self._on_key, arrow))
         # 空格/回车 = 收起/展开**当前选中项**(方向键与 WASD 已经绑给漫游, 节点间导航是
-        # 另一件事, 见 PLAN I-9.5 的口径)。
+        # 另一件事)。
         self.canvas.bind("<space>", self._on_fold_key)
         self.canvas.bind("<Return>", self._on_fold_key)
         # 滚轮: 默认纵向、Shift 横向(触控板用户); Windows 用 MouseWheel, X11 用 Button-4/5。
@@ -729,7 +728,7 @@ class TreeView:
         self._refresh_arrows()
 
     def _on_press(self, event: tkinter.Event) -> None:
-        """命中优先级: 标记 → 框 → 空白(PLAN I-9.5 的口径).
+        """命中优先级: 标记 → 框 → 空白.
 
         按在**标记**上时既不平移也不选中 —— 否则会出现"想折叠却选中了它", 或者
         "想折叠却把图画拖走了"。

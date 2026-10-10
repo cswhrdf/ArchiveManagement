@@ -2,5 +2,5 @@
 
 from archive_management.app import main
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no branch - 作为脚本跑时进, 被导入时不进
     main()

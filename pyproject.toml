@@ -35,7 +35,7 @@ license-files = ["LICENSE"]
 #   coverage —— 只有报告作业需要(合并各片数据、判覆盖率门槛); 它不跑用例, 所以不装 pytest
 #   quality  —— 代码质量门禁(ruff / 格式 / 宿主平台 mypy)、对比度第三方算尺与本地提交钩子
 #   analysis —— 静态分析与依赖检查(由 create_allure_quality.py --group analysis 逐项调用)
-#   visual   —— 界面视觉回归(感知哈希 + SSIM, 由 create_allure_visual.py 调用); 见 PLAN.md 17.4
+#   visual   —— 界面视觉回归(感知哈希 + SSIM, 由 create_allure_visual.py 调用)
 #   package  —— PyInstaller 打包(只有 release 工作流需要)
 #
 # visual 单独一组而不是塞进 quality: 它要 numpy/scipy/networkx/imageio/tifffile 一整串
@@ -194,6 +194,13 @@ no_implicit_optional = false
 allow_redefinition = false
 ignore_missing_imports = true
 mypy_path = "$MYPY_CONFIG_FILE_DIR/src:$MYPY_CONFIG_FILE_DIR/tests"
+# tests 各层目录(unit/performance/security)的 conftest 与根目录 tests/conftest.py 同名,
+# mypy 的模块发现会把它们判成 "Duplicate module"; 这些文件是纯 fixture 装配(由 pytest
+# 在收集期加载), 类型问题由 ruff 与运行期用例兜底, 故只对子目录 conftest 豁免检查.
+# ui-review/ 是一次性的本地评审脚本(自述"不参与质量门禁", 也未被 git 跟踪): 目录递归
+# 发现(如本地跑 `mypy .`)会把它扫进来, 这里一并排除 —— files 里没有它, CI 的正式
+# 检查范围不受影响.
+exclude = "(tests[/\\\\].+[/\\\\]conftest\\.py$|ui-review[/\\\\])"
 
 [[tool.mypy.overrides]]
 # CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制
@@ -213,18 +220,31 @@ exclude_dirs = ["tests", "scripts", "packaging", "build", "dist", ".venv", "dev-
 # archive_management 判成"传递依赖"(DEP003), 一报就是 197 条。tests 下的共享辅助模块
 # (pythonpath = tests)同样属于"自己家的代码"。
 known_first_party = [
-  "archive_management",
-  "helpers",
-  "reporting",
-  "conftest",
-  "gui_support",
-  "sharding",
-  "crash_capture",
-  "ci_workflow",
-  "tk_guard",
-  "timeout_guard",
   "allure_catalog",
+  "archive_management",
+  "button_support",
+  "ci_workflow",
+  "conftest",
+  "crash_capture",
+  "durations",
+  "gui_support",
+  "helpers",
+  "report_support",
+  "reporting",
+  "sharding",
+  "sql_support",
+  "timeout_guard",
+  "tk_guard",
+  "ui_sharing",
 ]
+# scikit-image 的模块名是 skimage 而不是包名直译的 scikit_image: 拿不到该包的
+# 安装元数据时(本地没装 visual 组 —— CI 的静态分析作业装了, 见 uv sync 那行
+# `--group visual`), deptry 只能猜映射, 猜错就把 scripts/create_allure_visual.py
+# 里的合法 import 误报成 DEP001。写死映射后两边都不再依赖环境。
+package_module_name_map = { "scikit-image" = "skimage" }
+# 拆分/新增 tests 下的共享辅助模块时**必须同步登记上面这份清单** —— 忘了的话 deptry
+# 会把它当"未声明依赖"(DEP001, 一处 import 一条), 本地提交钩子当场拦下(2026-10-07:
+# button/report/sql_support 三组就是这样被拦住的)。
 exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
 
 [tool.deptry.per_rule_ignores]
@@ -256,6 +276,10 @@ DEP004 = [
 # 截图转成 ndarray 才能交给 structural_similarity —— PIL 的 Image 没有 .shape, 传不进去。
 # 刻意不把 numpy 写进依赖清单: 它是这套算尺的实现细节, 跟着 scikit-image 的版本走才对。
 DEP003 = ["allure", "allure_commons", "numpy"]
+# numpy 的 DEP001 同理豁免: 没装 visual 组的环境里 deptry 关联不到"由 scikit-image
+# 带进来"这层传递关系, 会把它当"未声明"误报(装了 visual 组时不会; 见上面的映射注释)。
+# 它本来就不在 [project].dependencies 里, deptry 不是、也不该是 numpy 的门禁。
+DEP001 = ["numpy"]
 
 
 [tool.pytest.ini_options]
@@ -320,4 +344,4 @@ exclude_also = [
 show_missing = true
 skip_covered = true
 # 覆盖率门槛: 低于该值则 pytest 失败(在 source 中排除入口与平台分支后逐步上调).
-fail_under = 95
+fail_under = 100

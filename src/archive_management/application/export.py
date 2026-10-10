@@ -334,7 +334,7 @@ def _backup_config(
 def _node_key(node: BackupNode) -> str:
     """包内节点标识: 直接用快照目录名(时间戳 + 短哈希, 天然唯一)."""
     relative = node.storage_relpath
-    if not relative:
+    if not relative:  # pragma: no cover - snapshot_root 已先拒绝缺存储路径的节点
         raise ArchiveManagementError(f"备份节点缺少存储路径, 无法导出: #{node.id}")
     return Path(relative).name
 

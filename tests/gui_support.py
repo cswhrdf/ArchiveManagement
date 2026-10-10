@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -38,6 +39,24 @@ _STRAY_ROOTS: list[str] = []
 #: 把"占着默认根位置的别人的根"收掉时最多试几次。第一次偶尔打不中: Tk 抖动, 负载重时更
 #: 容易(实测偶发), 见 :func:`_discard_stray_root`。
 _STRAY_DESTROY_ATTEMPTS = 2
+
+#: 共享 UI 会话(``tests/ui_sharing.py``)登记的根: 它们**合法地**占着默认根位置活过一批
+#: 用例, 逐用例收尾的"清掉默认根位置上的陌生根"那道兜底(见 :func:`close_apps` 末尾)
+#: 不能把它们当残留收掉。弱引用集合: 窗口真没了会自动出列, 不用手工撤销。
+_SHARED_ROOTS: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
+def protect_shared_root(root: Any) -> None:
+    """把一个根登记为共享池的窗(收尾兜底不收它; 见 ``_SHARED_ROOTS`` 的说明)."""
+    with contextlib.suppress(Exception):  # 替身窗口(单元测试)不一定可弱引用
+        _SHARED_ROOTS.add(root)
+
+
+def unprotect_shared_root(root: Any) -> None:
+    """撤销登记: 重建/会话收尾要真销毁这扇窗时, 先让它回到"可收"状态."""
+    with contextlib.suppress(Exception):
+        _SHARED_ROOTS.discard(root)
+
 
 # --- Tk 会话抖动的重试 ------------------------------------------------------
 # 同一个进程里反复建/销窗口之后, 解释器偶尔会连 Tcl/Tk 库数据都加载不了, 于是建窗口
@@ -83,12 +102,17 @@ def _record_retry(attempt: int, error: Exception) -> None:
     allure.dynamic.parameter("重试", f"第 {attempt} 次: {TK_RETRY_REASON}")
 
 
-def gui_app(builder: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-    """创建主窗口并登记收尾; 撞上 Tk 会话抖动时**重试**, 仍然不可用才跳过.
+def build_with_retry(builder: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """按工厂建主窗口(撞上 Tk 会话抖动时**重试**, 仍然不可用才跳过), **不**登记收尾.
 
-    ``builder`` 是各用例模块自己的工厂(``_new_app`` / ``_long_name_app`` 之类),
-    参数原样转发。注意要在 ``monkeypatch`` 换掉模态对话框**之后**调用: 否则构造
-    过程中弹出的模态框会卡住测试线程。
+    从 :func:`gui_app` 拆出来给共享 UI 会话(``tests/ui_sharing.py``)用: 那里的窗口
+    要活过整批用例, 不能进 ``_LIVE_APPS`` 被逐用例的收尾拆掉; 但"抖动重试 + 半成品
+    根收拾 + 调度线程基线"这套纪律与逐用例窗口完全一致, 所以必须是同一个实现 ——
+    拆两份迟早走岔。
+
+    ``builder`` 是各用例模块自己的工厂(``_new_app`` / ``demo_app`` 之类), 参数原样
+    转发。注意要在 ``monkeypatch`` 换掉模态对话框**之后**调用: 否则构造过程中弹出
+    的模态框会卡住测试线程。
 
     抖动说明与纪律见本模块顶部的 :data:`TK_RETRY_REASON`。
     """
@@ -123,9 +147,20 @@ def gui_app(builder: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         if attempts > 1:
             _record_retry(attempts - 1, RuntimeError("重试后建窗口成功"))
         break
-    _LIVE_APPS.append(app)
     # 记在窗口上而不是模块级变量 —— 一个进程里可能同时存在多个窗口。
     app._scheduler_baseline = scheduler_baseline
+    return app
+
+
+def gui_app(builder: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """创建主窗口并登记收尾(用例结束时由 ``close_gui_apps`` 统一销毁).
+
+    ``builder`` 是各用例模块自己的工厂(``_new_app`` / ``_long_name_app`` 之类),
+    参数原样转发。注意要在 ``monkeypatch`` 换掉模态对话框**之后**调用: 否则构造
+    过程中弹出的模态框会卡住测试线程。
+    """
+    app = build_with_retry(builder, *args, **kwargs)
+    _LIVE_APPS.append(app)
     return app
 
 
@@ -149,8 +184,13 @@ def live_apps() -> tuple[Any, ...]:
     return tuple(_LIVE_APPS)
 
 
-def close_gui_apps() -> None:
-    """销毁当前用例创建的全部窗口(后建先销), 并**保证根窗口不留在会话里**.
+def close_apps(apps: list[Any]) -> list[str]:
+    """销毁给定的一批窗口(后建先销), 并**保证根窗口不留在会话里**; 返回没拆干净的现场.
+
+    拆自 :func:`close_gui_apps`: 逐用例收尾与共享 UI 会话的**会话级**收尾
+    (``tests/ui_sharing.py``)走同一条"验证 + 补救"路径 —— 区别只在判红时机:
+    这里把没拆干净的现场**返回**, 由调用方决定记在谁头上(逐用例收尾记当条用例,
+    会话级收尾记在会话末尾)。
 
     用例自己提前销毁过窗口时(例如中途重建主窗口)这里会再销毁一次 —— 窗口已经没了,
     收尾不应因此报错, 所以只咽掉 ``TclError``。
@@ -186,15 +226,14 @@ def close_gui_apps() -> None:
 
     broken: list[str] = []
     baselines: list[int] = []
-    while _LIVE_APPS:
-        app = _LIVE_APPS.pop()
+    for app in reversed(apps):
         # 记下这条用例**开始时**的调度线程数(建窗口那一刻记在窗口上, 见 gui_app): 收尾的判据是
         # "这条用例有没有攒下活的调度器", 而不是"进程里一个都不能有" —— 同一个进程里还会跑非 GUI
-        # 的集成用例, 它们建的真后端一样会起 scheduler(实测有一条会漏, 见 PLAN §15.9), 绝对判据
+        # 的集成用例, 它们建的真后端一样会起 scheduler(实测有一条会漏), 绝对判据
         # 会把别人的存量算到这条用例头上。
         baselines.append(int(getattr(app, "_scheduler_baseline", 0)))
         # **先**放后台资源再拆控件: 一个活着的调度器随时可能在自己的线程里回调到界面, 而 Tk
-        # 正在被拆 —— macOS 上从非主线程碰已销毁的 Tk 是已知的段错误源(PLAN §39.4)。方法幂等,
+        # 正在被拆 —— macOS 上从非主线程碰已销毁的 Tk 是已知的段错误源。方法幂等,
         # 已经走过 `_on_close()` 的窗口再调一次是空操作。
         _release_background(app)
         close_child_windows(app)
@@ -221,13 +260,14 @@ def close_gui_apps() -> None:
         )
     # 最后一步: `tkinter._default_root` 这个全局位置也得是干净的 —— 哪怕那里挂着的是
     # **别人的**根。留着它, 后面每一条用例贴图都会报 `image "pyimageN" does not exist`
-    # (2026-10-04 的事故), 所以这里是那件事的最后一道兜底。
+    # (2026-10-04 的事故), 所以这里是那件事的最后一道兜底。共享 UI 会话的根不在其列:
+    # 它们就是要活过这批用例的(见 `_SHARED_ROOTS`), 由会话级收尾统一拆。
     stray = _default_root_object()
-    if stray is not None:
+    if stray is not None and stray not in _SHARED_ROOTS:
         _discard_stray_root(stray, phase="收尾时")
     # 后台资源也得不留: 一个进程里跑完整套界面用例会攒下几十个活着的 `APScheduler` 线程, 而
     # Tk 解释器早被销毁 —— 那正是那次 macOS SIGTRAP 现场里挂着的东西(约 30 个
-    # `apscheduler..._main_loop`, 见 PLAN §39.4)。判据是**相对**的(见上面 baselines 的说明):
+    # `apscheduler..._main_loop`)。判据是**相对**的(见上面 baselines 的说明):
     # 收尾之后不得超过"这条用例开始时"那个数, 超了就是这条用例攒下的。
     # 这条用例压根没建自己的窗口(baselines 为空)时**不判**: 没有可归因的对象, 而进程里的存量
     # 可能是别人留下的 —— 界面文件里有一批用例只建真后端不建窗口(`SqlArchiveService(...)` 直接
@@ -239,6 +279,14 @@ def close_gui_apps() -> None:
             + ", ".join(_scheduler_threads())
             + f"; 这条用例开始时是 {allowed} 个"
         )
+    return broken
+
+
+def close_gui_apps() -> None:
+    """销毁当前用例创建的全部窗口(拆窗纪律见 :func:`close_apps`), 没拆干净判红."""
+    apps = list(_LIVE_APPS)
+    _LIVE_APPS.clear()
+    broken = close_apps(apps)
     if broken:
         # pytrace=False: 这里没有"出错的那一行"可指, 要紧的是上面那段现场描述(哪条用例、
         # 哪个子控件、原始 TclError)。pytest 会把它记成 teardown 阶段失败。
@@ -259,11 +307,22 @@ def _release_background(app: Any) -> None:
         release()
 
 
+def scheduler_thread_count() -> int:
+    """当前活着的后台调度线程数(会话级收尾刷新判据用, 见 ``ui_sharing.SharedUiRegistry.close``).
+
+    逐用例的收尾判据是"不得超过**这条用例开始时**(建窗采样)的线程数"; 会话级收尾收的是
+    活过整批用例的共享窗 —— 期间别的用例(只建真后端不建窗的那批, 实测有会漏的)攒下的
+    调度线程是**存量**, 不该由收尾来报。收尾前把基线刷新成"此刻的实存量", 判据就变成
+    "拆这些窗不得**新增**线程" —— 共享窗自己 release 的调度器没真退掉照样判红。
+    """
+    return len(_scheduler_threads())
+
+
 def _scheduler_threads() -> list[str]:
     """还活着的后台调度线程(``apscheduler`` 的调度线程名字里带 ``APScheduler``).
 
     为什么这么认: 一个活着的 scheduler 恰好一个这样的线程, 而它崩在 macOS 上的栈就是
-    ``apscheduler/schedulers/blocking.py::_main_loop``(PLAN §39.4 的现场)。名字里带
+    ``apscheduler/schedulers/blocking.py::_main_loop``(macOS 崩溃现场里挂着的那个栈)。名字里带
     ``APScheduler`` 的只有它, 不会误伤 pytest / uv / 线程池那些线程。
     """
     return [

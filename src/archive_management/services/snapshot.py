@@ -612,7 +612,7 @@ def _plan(sources: Sequence[SnapshotSource]) -> list[_CopyPlan]:
         )
         for path, relative in _iter_directory(origin):
             plans.append(_plan_entry(f"{root}/{relative}", path))
-    if not plans:  # pragma: no branch - create_snapshot 已拒绝空来源列表
+    if not plans:  # pragma: no cover - create_snapshot 已拒绝空来源列表, 这里走不到
         raise SnapshotError("存档位置为空, 没有可备份的内容")
     return plans
 
@@ -678,7 +678,7 @@ def _materialize(
         # 符号链接只记入清单(link_target 保留原始目标), 不复制其内容,
         # 避免快照越出用户确认过的存档路径.
         return plan.entry
-    if plan.origin is None:
+    if plan.origin is None:  # pragma: no cover - 目录与链接上面已返回
         raise SnapshotError(f"缺少复制来源: {plan.entry.relative_path}")
     if not hash_files:
         _copy_without_hash(plan.origin, target)

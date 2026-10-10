@@ -1,4 +1,4 @@
-"""按钮配色的守卫(I-2: 语义色与危险动作).
+"""按钮配色的守卫(语义色与危险动作).
 
 判据有三条, 缺一条都守不住"配色是有含义的"这件事:
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gui_support import gui_app
+from ui_sharing import SharedUiRegistry, demo_app
 
 try:
     import customtkinter as ctk
@@ -49,7 +50,6 @@ from archive_management.services.hotkeys import (
 from archive_management.ui import dialogs
 from archive_management.ui import schedule_window as sched_mod
 from archive_management.ui.backend import ArchiveService
-from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import ArchiveApp
 from archive_management.ui.manage_window import ManageGameWindow
 from archive_management.ui.models import (
@@ -216,13 +216,13 @@ def _hook(window: Any, *_args: Any, **_kwargs: Any) -> None:
 
 
 @pytest.fixture
-def app() -> Any:
-    """主窗口(模态框的量点被换到 ``wait_window`` 上)."""
-    application = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(application)
-    _STATE["palette"] = application.p
-    application.wait_window = _hook
-    return application
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 模态框量点换到 ``wait_window`` 上, 退出时由池还原该钩子)."""
+    with ui_shared.test_scope(demo_app, patched_attrs=("wait_window",)) as application:
+        _pump(application)
+        _STATE["palette"] = application.p
+        application.wait_window = _hook
+        yield application
 
 
 def sequence(*steps: Callable[[], Any]) -> Callable[[], None]:
@@ -682,8 +682,8 @@ def _kind_of(palette: Palette, painted: _Painted) -> ActionKind | None:
 def _important_action_problems(palette: Palette) -> list[str]:
     """**重要功能键的配色索引**: 登记的回调必须穿登记的那一档颜色.
 
-    I-10 的要求是"重要的功能按键也要有颜色, 而且这条关联要被测试钉住"。做法与
-    I-2 的破坏性清单一致: 判定按**回调名**, 不按文案 —— 改了文案/换了位置仍管得住,
+    要求是"重要的功能按键也要有颜色, 而且这条关联要被测试钉住"。做法与
+    破坏性清单一致: 判定按**回调名**, 不按文案 —— 改了文案/换了位置仍管得住,
     新增一个重要功能却忘了登记(或上错颜色)会直接变红。
 
     禁用态的不参与(那时颜色是禁用色, 反推不出本色), 但**每个登记项至少要有一条
@@ -764,7 +764,7 @@ _DESTRUCTIVE_HANDLERS = {
     "_on_remove_dir",  # 游戏发现 · 删除监控目录
 }
 
-# **重要功能键的配色索引**(I-10): 回调名 -> 它**允许**的动作性质集合。
+# **重要功能键的配色索引**: 回调名 -> 它**允许**的动作性质集合。
 # 这是"哪些算重要功能"的正式清单: 新增/改名时要么登记进来, 要么上面那条兜底
 # 断言会红并逼你表态。破坏性动作也在这里出现(它们的性质就是 destructive)。
 #

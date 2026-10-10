@@ -122,6 +122,9 @@ def _write_manifest(library: Path, appid: str, name: str, installdir: str) -> No
 def _write_libraryfolders(steam: Path, libraries: list[Path]) -> None:
     """写入 libraryfolders.vdf, 登记全部库目录."""
     body = '"libraryfolders"\n{\n'
+    # 真实文件里还有这种"既不是 path 也不是库编号"的键(旧版客户端写的时间戳), 解析器
+    # 必须跳过它们而不是当成库目录 —— 2026-10-10 覆盖率报告里那两行是三平台共同的缺口。
+    body += '\t"TimeNextStatsReport"\t"1759500000"\n'
     for index, library in enumerate(libraries):
         escaped = str(library).replace("\\", "\\\\")
         body += f'\t"{index}"\n\t{{\n\t\t"path"\t\t"{escaped}"\n\t}}\n'

@@ -167,7 +167,9 @@ def test_a_healthy_teardown_leaves_no_root_and_no_rescue() -> None:
     assert _default_root_is_usable(), "默认根这个位置上不能留着已经不能用的根"
 
 
-def test_a_failed_window_build_does_not_leave_its_root_behind() -> None:
+def test_a_failed_window_build_does_not_leave_its_root_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """回归: 建窗口那一次失败(抖动)留下的根要收掉, 重试建起来的窗口重新拿回默认根.
 
     出处(2026-10-04, 只有**整批连跑**才暴露): ``Tk.__init__`` 一上来就把
@@ -176,6 +178,11 @@ def test_a_failed_window_build_does_not_leave_its_root_behind() -> None:
     这个位置。后果与 2026-10-04 那次事故一模一样: 之后每条用例建起来的窗口都**不是**
     默认根, 不带 master 的图片会落到那个已经不能用的解释器里。
     """
+    # 本条与下一条的判据是"默认根这个**槽位**"的纪律, 而整批连跑时共享 UI 会话的池窗
+    # (见 tests/ui_sharing.py)会合法地坐在槽位上且活过用例 —— 新建的窗口永远接管不了
+    # 一个被占着的槽位, 断言会跟着全局状态跑偏。这里先把槽位暂时摘空(用例结束自动还原
+    # 回共享窗), 判的才是"抖动重试"这一件事本身。
+    monkeypatch.setattr(tkinter, "_default_root", None)
     built: list[Any] = []
 
     def flaky() -> Any:
@@ -249,7 +256,9 @@ def test_a_widget_whose_command_ledger_is_stale_is_repaired() -> None:
     assert stale not in (frame._tclCommands or []), "账上那条已经不存在的命令要划掉"
 
 
-def test_a_foreign_root_left_in_the_session_gets_collected() -> None:
+def test_a_foreign_root_left_in_the_session_gets_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """收尾的最后一道兜底: 别人的根占着默认根位置时, 收尾也要把它收掉.
 
     来源不止一种(重试留下的半成品、用例或第三方库在没有窗口时建控件/图片让 tkinter
@@ -261,6 +270,9 @@ def test_a_foreign_root_left_in_the_session_gets_collected() -> None:
     二是**不能自己 `tkinter.Tk()`** —— 那会绕开重试, 撞上已知的 Tk 抖动
     (`Can't find a usable init.tcl`) 时当场红(实测本机 10 次里红 1 次)。
     """
+    # 同上一条: 先摘空默认根槽位, 让"外来根"真的能坐上去(整批连跑时槽位被共享池窗
+    # 合法占着, 兜底只收槽位上的根, 外来根坐不上槽位就没人收了)。
+    monkeypatch.setattr(tkinter, "_default_root", None)
     foreign = gui_app(_new_app, DemoArchiveService(delay=0))
     forget_app(foreign)
 
@@ -347,7 +359,7 @@ def _scheduler_threads() -> list[str]:
 def test_a_real_backend_does_not_outlive_its_window(tmp_path: Path) -> None:
     """回归: 真后端(带调度器)不能活过它的窗口 —— 那是 macOS 分片被整片带走的根子.
 
-    出处(2026-10-05, PLAN §39.4): macOS 的崩溃现场里同时挂着约 30 个
+    出处(2026-10-05): macOS 的崩溃现场里同时挂着约 30 个
     ``apscheduler..._main_loop`` 线程 —— ``BackgroundScheduler()`` 构造时就 ``start()``,
     但释放入口只有一个: 只有 ``_on_close()``(用户点关闭)会放掉它, 而界面用例的收尾走的是
     ``destroy()``。用例里有 40 多处是“建一个真后端 + 建窗口 + ``finally: app.destroy()``”,

@@ -6,11 +6,17 @@
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
+from archive_management.domain.activation import build_name_ownership
 from archive_management.services.processes import (
     probe_game_process,
+    probe_games,
     probe_processes,
+    psutil_process_names,
 )
 
 pytestmark = [
@@ -20,6 +26,34 @@ pytestmark = [
     pytest.mark.story("恢复前检查游戏进程"),
     pytest.mark.layer("unit"),
 ]
+
+
+def test_probing_the_whole_library_without_needles_skips_the_process_table() -> None:
+    """库里没有可监控的游戏时不枚举进程表(没有判断依据就不该付这份开销)."""
+
+    def explode() -> list[str]:
+        raise AssertionError("不该枚举进程表")
+
+    probe = probe_games(build_name_ownership([]), provider=explode)
+
+    assert probe.checked is False
+    assert probe.running_ids == ()
+
+
+def test_process_names_skips_entries_without_a_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """psutil 报出的进程没有名字时跳过它: 取不到名字的进程不该进匹配集合."""
+    fake = SimpleNamespace(
+        process_iter=lambda _attrs: [
+            SimpleNamespace(info={"name": "game.exe"}),
+            SimpleNamespace(info=None),
+            SimpleNamespace(info={"name": None}),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+
+    assert list(psutil_process_names()) == ["game.exe"]
 
 
 def test_probe_matches_process_with_different_spelling() -> None:
