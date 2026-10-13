@@ -137,6 +137,10 @@ class GameFacts:
 
     game_id: str
     name: str
+    # 录入时识别到的原始名称: 译名写回会把 ``name`` 换成译名(见
+    # ``services/naming.py``), 原名只留在这里 —— 搜索要两个名字都认(用户 2026-10-13:
+    # "输入游戏原名...也无搜索效果")。
+    original_name: str = ""
     origin: str = "manual"
     created_at: datetime | None = None
     location_count: int = 0
@@ -257,7 +261,14 @@ class HomeFilter:
         wanted = self.category_item
         if wanted is not None and wanted not in facts.categories(now):
             return False
-        return not (self.search and self.search.casefold() not in facts.name.casefold())
+        if not self.search:
+            return True
+        # 当前名称(可能是译名)与录入时的原名都算命中: 译名写回之后名字已经换过一个,
+        # 用户手上拿的可能是当初录入时输入的那个(2026-10-13)。
+        needle = self.search.casefold()
+        return any(
+            needle in text.casefold() for text in (facts.name, facts.original_name)
+        )
 
 
 def _moment(value: datetime | None) -> float:

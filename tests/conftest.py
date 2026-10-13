@@ -447,6 +447,7 @@ _SHARED_UI_SESSIONS: dict[str, str] = {
     "tests/integration/test_gui_states.py": "demo-app",
     "tests/integration/test_gui_styles.py": "demo-app",
     "tests/integration/test_gui_tooltip.py": "demo-app",
+    "tests/integration/test_gui_window_icon.py": "demo-app",
 }
 
 

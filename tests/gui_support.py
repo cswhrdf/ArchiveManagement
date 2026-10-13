@@ -184,6 +184,26 @@ def live_apps() -> tuple[Any, ...]:
     return tuple(_LIVE_APPS)
 
 
+def type_text(root: Any, target: Any, text: str) -> None:
+    """像用户那样**真的敲键**输入文本, 而不是直接 ``insert``.
+
+    给内部 Tk 控件焦点后合成 ``<KeyPress>``/``<KeyRelease>`` —— Tk 自己在按下时插入字符,
+    因此走的是与用户输入完全相同的路径。**量"用户打字有没有反应"必须用这个**: 直接
+    ``insert`` 绕过了 Tk 的输入路径, 占位文字、输入法、撤销这些"只在真按键时才发生"的机制
+    一个都测不到(2026-10-14 搜索框那次就是这么漏过去的)。
+
+    只认得 ASCII —— Tk 的 keysym 没有中文, 传中文会 ``unknown keysym``。
+    """
+    target.focus_force()
+    root.update_idletasks()
+    root.update()
+    for char in text:
+        target.event_generate("<KeyPress>", keysym=char)
+        target.event_generate("<KeyRelease>", keysym=char)
+    root.update_idletasks()
+    root.update()
+
+
 def close_apps(apps: list[Any]) -> list[str]:
     """销毁给定的一批窗口(后建先销), 并**保证根窗口不留在会话里**; 返回没拆干净的现场.
 

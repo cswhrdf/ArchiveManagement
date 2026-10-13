@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.logging_config import configure_from_settings
 from archive_management.packaging import APP_DISPLAY_NAME, package_version
+from archive_management.services import single_instance
 from archive_management.services.platforms import (
     current_platform,
     has_windows_registry,
@@ -87,6 +90,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def is_packaged() -> bool:
+    """这次运行是不是打包产物(PyInstaller 会把 ``sys.frozen`` 置真)."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def default_command() -> str:
+    """没有写明子命令时跑什么.
+
+    打包版是 ``console=False``(没有控制台), 而 CLI 的老默认是 ``init`` —— 它把报告打进
+    一个不存在的控制台然后退出, 用户双击之后"屏幕上什么都没有", 看起来就是打不开
+    (2026-10-11 报的就是这个)。所以**打包版的"没说子命令" = 开界面**; 命令行用户显式写
+    ``init``/``doctor`` 时一切照旧, 源码运行(``python -m archive_management``)也照旧。
+
+    判据取"解析后子命令为空", 不是"argv 为空": 只给全局参数(如 ``--root``)时也要开界面。
+    """
+    return "gui" if is_packaged() else "init"
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     """解析命令行并分派, 返回进程退出码."""
     parser = build_parser()
@@ -99,15 +120,15 @@ def run(argv: Sequence[str] | None = None) -> int:
     verbose = bool(getattr(args, "verbose", False))
     command = args.command
     if command is None:
-        # 无参数启动时默认执行初始化: 完成应用目录、配置、日志与数据库引导.
-        command = "init"
+        command = default_command()
     if command == "init":
         # --force 不再需要: 配置内容非法时一律自动还原为默认值。
         return _run_init(paths, verbose=verbose)
     if command == "doctor":
         return _run_doctor(paths, verbose=verbose)
     if command == "gui":
-        return _run_gui(paths, smoke=args.smoke, verbose=verbose)
+        # ``smoke`` 只有写明 ``gui`` 子命令时才有(默认命令补出来的那次没有) → getattr.
+        return _run_gui(paths, smoke=getattr(args, "smoke", None), verbose=verbose)
     parser.error(f"未知命令: {command}")  # pragma: no cover - 子命令已校验
     return 1  # pragma: no cover - 上面不返回
 
@@ -189,7 +210,35 @@ def _run_doctor(paths: ApplicationPaths, *, verbose: bool) -> int:
 
 
 def _run_gui(paths: ApplicationPaths, *, smoke: float | None, verbose: bool) -> int:
-    """启动图形界面;无图形环境或缺少 tkinter 时给出清晰错误."""
+    """启动图形界面;无图形环境或缺少 tkinter 时给出清晰错误.
+
+    **打包版同一时间只允许开一个**(见 :mod:`archive_management.services.single_instance`):
+    两个进程各持同一个数据库/备份根/快捷键注册会互相踩, 用户看到的是"点了没反应"这类
+    怪事。
+
+    **第二个实例不给提示也不开新窗**(用户 2026-10-12 的要求: "重复打开应该直接跳转到上次
+    打开的窗口"): 双击的意图就是"我要用这个软件", 而它已经开着了 —— 于是这里写下一条
+    "到前台"请求(已经在跑的那个在它的 100ms 轮询里看到就把窗口叫回来)并以退出码 3 退出。
+    不再弹“已经多开了”的提示: 那是一道用户多余的确认。
+
+    闸门只在 ``sys.frozen`` 下生效: 开发与用例需要同时开多个窗口(分片跑集成用例时每片
+    都在自己的进程里建真窗口) —— 而且集成用例直接调 ``ui.main_window.run_gui``, 不经过
+    这里。``ARCHIVE_MANAGEMENT_ALLOW_MULTI=1`` 是诊断用的逃生门。
+    """
+    if not is_packaged() or single_instance.multi_instance_allowed():
+        return _start_gui(paths, smoke=smoke, verbose=verbose)
+    lock = single_instance.InstanceLock(single_instance.lock_path(paths))
+    if not lock.acquire():
+        _hand_over_to_running_instance(paths, lock)
+        return single_instance.ALREADY_RUNNING_EXIT
+    try:
+        return _start_gui(paths, smoke=smoke, verbose=verbose)
+    finally:
+        lock.release()
+
+
+def _start_gui(paths: ApplicationPaths, *, smoke: float | None, verbose: bool) -> int:
+    """真的去起窗口(异常一律收敛成"起不来"的返回码)."""
     try:
         from archive_management.ui.main_window import run_gui
 
@@ -203,6 +252,55 @@ def _run_gui(paths: ApplicationPaths, *, smoke: float | None, verbose: bool) -> 
         logger.error("GUI 启动失败: %s", exc)
         print(f"无法启动图形界面:{exc}\nGUI 需要可用的桌面环境与 tkinter。")
         return 2
+
+
+def _note_second_launch(
+    paths: ApplicationPaths,
+    lock: single_instance.InstanceLock,
+    token: str,
+    *,
+    granted: bool,
+    handled: bool,
+) -> None:
+    """第二个实例: 把日志按配置装好再记一行 —— 窗口化 exe 没有控制台, 日志是唯一证据.
+
+    正常退出路径上的这一行与 ``ui.main_window`` 里那行(收到请求了/已把窗口叫回来)成对, 事后
+    对日志就能看出"哪一次双击叫醒了窗口、有没有成"。两个布尔标记直接写进日志: 窗口没到前台时,
+    一眼就能分清是"权限没交出去"(``granted=False``)还是"对方没响应/太忙"(``handled=False``)。
+
+    读配置/装日志失败只当默认, **绝不能因此拦住退出**。
+    """
+    with contextlib.suppress(Exception):
+        loaded = load_or_repair_config(paths.config_path)
+        configure_from_settings(paths.log_dir, loaded.config.logging)
+    logger.info(
+        "已有实例在运行(%s): %s; 已请它把窗口叫到前台(%s, granted=%s handled=%s)",
+        lock.path,
+        lock.holder() or "未知",
+        token,
+        granted,
+        handled,
+    )
+
+
+def _hand_over_to_running_instance(
+    paths: ApplicationPaths, lock: single_instance.InstanceLock
+) -> None:
+    """第二个实例: 把前台交给已经在跑的那个, 然后自己退出(用户 2026-10-12 的要求).
+
+    三步: ①写下"请到前台"请求(对方 100ms 轮询里就能看到); ②Windows 上把"允许提到前台"的
+    权利也交出去 —— 后台进程自己抢不到前台(实测), 而用户刚双击起来的这个进程手上有; ③等对方
+    真的抬起来(请求文件被清掉就是回执)再退, 因为那份权限可能随本进程退出而失效。
+
+    三步都失败也照常退出: 用户那边只表现为"窗口没跳到前面", 不该退回"打了没反应"。
+    """
+    request_path = single_instance.focus_request_path(paths)
+    token = single_instance.request_focus(paths)
+    granted = single_instance.hand_over_foreground(
+        single_instance.holder_pid(lock.holder())
+    )
+    handled = single_instance.wait_until_handled(request_path)
+    _note_second_launch(paths, lock, token, granted=granted, handled=handled)
 
 
 def main() -> None:

@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import re
 import tkinter as tk
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -52,6 +54,79 @@ def _scaled(monkeypatch: pytest.MonkeyPatch, scale: float) -> Any:
     """把窗口缩放钉成 ``scale`` 后的度量包装(用假字体, 不建窗口)."""
     monkeypatch.setattr(widgets, "window_scaling", lambda _window: scale)
     return widgets.measured_font(_FakeFont(width=231, linespace=14), _NO_WINDOW)
+
+
+# 界面源码树(选择框的"只读"规则要扫的全部文件)。
+_UI_SOURCE = Path(__file__).resolve().parents[2] / "src" / "archive_management" / "ui"
+#: 选择框的构造入口(扫的是调用片段, 不是整行)。
+_COMBO_CALL = "ctk.CTkComboBox("
+#: 明确要"可输入"时才写的标记(必须带原因)。
+_EDITABLE_MARKER = "# 可输入"
+#: 原因的下限(与 pragma 原因同一条口径: 短得看不出所以然的不算)。
+_MIN_REASON = 5
+
+
+def _call_segments(source: str, needle: str) -> list[tuple[int, str]]:
+    """取出每个 ``needle`` 调用从开头到配对右括号的源码片段(行号, 片段)."""
+    found: list[tuple[int, str]] = []
+    cursor = source.find(needle)
+    while cursor != -1:
+        depth = 0
+        end = cursor + len(needle) - 1
+        while end < len(source):
+            if source[end] == "(":
+                depth += 1
+            elif source[end] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            end += 1
+        found.append((source.count("\n", 0, cursor) + 1, source[cursor : end + 1]))
+        cursor = source.find(needle, end + 1)
+    return found
+
+
+def test_editable_comboboxes_have_to_say_why() -> None:
+    """选择框默认"只能从列表里选"; 想要可输入的**例外**必须就地写明原因(2026-10-13 用户要求).
+
+    出处(用户 2026-10-13): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成误会",
+    追加一句"多选框的内容能否让其也不可选中"。默认口径落在
+    :func:`archive_management.ui.widgets.apply_picker_defaults` 一处(没写 ``state`` 就是
+    readonly + 不可选中), 所以这条守的是**例外**: 写 ``state="normal"`` 的地方必须紧跟
+    ``# 可输入: <原因>`` —— 否则下一个人只会看到"这处跟别处不一样", 而看不出为什么。
+
+    为什么不用"调用点必须写 readonly": 那种写法漏一处就退回老样子(2026-10-13 主页/设置/发现/
+    导入四处正是这么漏的); 默认值写在类上, 漏不掉。
+    """
+    found = 0
+    offenders: list[str] = []
+    for module in sorted(_UI_SOURCE.rglob("*.py")):
+        source = module.read_text(encoding="utf-8")
+        for number, call in _call_segments(source, _COMBO_CALL):
+            found += 1
+            states = set(re.findall(r'state="(\w+)"', call))
+            if not states - {"readonly", "disabled"}:
+                continue  # 只读/禁用(或压根没写): 默认口径管得住
+            _, marker, tail = call.partition(_EDITABLE_MARKER)
+            # 全角冒号写成码位: 仓库的 RUF001 禁止源码里出现全角标点(改文案时只动 JSON)。
+            reason = tail.splitlines()[0].strip(" :\uff1a") if marker else ""
+            if len(reason) >= _MIN_REASON:
+                continue
+            offenders.append(f"{module.relative_to(_UI_SOURCE)}:{number}")
+
+    assert found >= 8, f"一个选择框都没扫到: 判据失效了(扫到 {found} 处)"
+    assert offenders == [], (
+        "这些选择框是可输入的(内容能被手删掉): "
+        + ", ".join(offenders)
+        + ' —— 去掉 state="normal", 或写明 `'
+        + _EDITABLE_MARKER
+        + ": <原因>`"
+    )
+
+
+def test_the_picker_defaults_are_installed_at_import() -> None:
+    """默认口径必须在**导入时**就装上, 且只能装一次(第二次返回 False)."""
+    assert widgets.apply_picker_defaults() is False
 
 
 class _FakeAnchor:

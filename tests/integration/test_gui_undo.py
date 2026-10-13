@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import gui_app, type_text
 
 try:
     import customtkinter as ctk  # 既校验可导入, 也用于构造测试用控件
@@ -42,20 +42,6 @@ def _pump(root: Any) -> None:
     """跑一遍事件循环: 合成的按键要先映射窗口才会落到控件上."""
     root.update_idletasks()
     root.update()
-
-
-def _type(root: Any, target: Any, text: str) -> None:
-    """按真实按键输入文本.
-
-    给内部 Tk 控件焦点后合成 ``<KeyPress>``/``<KeyRelease>`` —— Tk 自己在按下时插入
-    字符, 因此走的是与用户输入完全相同的路径(不是直接 ``insert``)。
-    """
-    target.focus_force()
-    _pump(root)
-    for char in text:
-        target.event_generate("<KeyPress>", keysym=char)
-        target.event_generate("<KeyRelease>", keysym=char)
-    _pump(root)
 
 
 def _press(root: Any, target: Any, sequence: str, keysym: str, state: int) -> None:
@@ -115,7 +101,7 @@ def test_a_real_entry_undoes_one_keystroke_at_a_time() -> None:
     entry.pack(padx=10, pady=10)
     _pump(root)
 
-    _type(root, entry._entry, "abc")
+    type_text(root, entry._entry, "abc")
     assert entry.get() == "abc", "先确认合成的按键真的输进去了"
 
     _press(root, entry._entry, "<Control-z>", "z", 0x0004)
@@ -128,14 +114,19 @@ def test_a_real_entry_undoes_one_keystroke_at_a_time() -> None:
 
 
 def test_a_real_combo_box_entry_undoes_its_typing() -> None:
-    """下拉框的可输入部分同样支持撤销(存档位置、排序等都靠它)."""
+    """下拉框的**可输入**部分同样支持撤销(定时任务窗口的游戏选择框就靠它).
+
+    这里必须显式写 ``state="normal"``: 选择框默认是只读且选不中的(见
+    ``ui/widgets.apply_picker_defaults``), 想让人打字的那些要自己声明 —— 这条用例量的正是
+    那种"确实可输入"的形态。
+    """
     root = gui_app(ctk.CTk)
-    combo = ctk.CTkComboBox(root, values=["甲", "乙"])
+    combo = ctk.CTkComboBox(root, values=["甲", "乙"], state="normal")
     combo.pack(padx=10, pady=10)
     _pump(root)
     combo.set("")
 
-    _type(root, combo._entry, "xy")
+    type_text(root, combo._entry, "xy")
     assert combo.get() == "xy"
 
     _press(root, combo._entry, "<Control-z>", "z", 0x0004)
@@ -151,7 +142,7 @@ def test_a_real_text_box_undoes_typing_but_keeps_the_prefilled_text() -> None:
     box.insert("1.0", "预填的描述")  # 弹窗打开时程序写入
     _pump(root)
 
-    _type(root, box._textbox, "hello")
+    type_text(root, box._textbox, "hello")
     assert box.get("1.0", "end-1c") == "预填的描述hello"
 
     _press(root, box._textbox, "<Control-z>", "z", 0x0004)

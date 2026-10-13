@@ -279,3 +279,60 @@ def test_clicking_elsewhere_closes_the_dropdown(app: Any) -> None:
     _pump(app)
     assert active_dropdown() is None, "点别处没收起浮层"
     assert not window.winfo_exists(), "浮层窗口没销毁"
+
+
+def test_a_plain_combobox_is_read_only(app: Any) -> None:
+    """库级默认口径: 没写 ``state`` 的选择框自己就是只读的 —— 调用点不需要记得做什么.
+
+    出处(用户 2026-10-13): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成
+    误会"。口径落在 :func:`archive_management.ui.widgets.apply_picker_defaults` 一处, 所以这里
+    直接建一个**裸控件**: 它必须已经只读(程序改写会被 Tk 静默忽略, 手删也留不下痕迹)。
+    明确写了 ``state="normal"`` 的例外(定时任务窗口的"输入即筛选")与 ``disabled`` 不受影响。
+
+    "默认值写在哪"也要能守住: 如果哪天有人把补丁改回"靠调用点自己写 readonly", 这条会红。
+    """
+    plain = ctk.CTkComboBox(app, values=["甲", "乙"])
+    typed = ctk.CTkComboBox(app, values=["甲", "乙"], state="normal")
+    locked = ctk.CTkComboBox(app, values=["甲", "乙"], state="disabled")
+    try:
+        assert str(plain._entry.cget("state")) == "readonly"
+        assert str(typed._entry.cget("state")) == "normal", "例外不能被一起改掉"
+        assert str(locked._entry.cget("state")) == "disabled"
+        # 建出来就显示列表第一项(实测), 而只读之后程序改写会被 Tk 静默忽略。
+        assert plain.get() == "甲"
+        plain._entry.insert(0, "丙")
+        assert plain.get() == "甲", "只读的选择框还能被程序改写"
+    finally:
+        for widget in (plain, typed, locked):
+            widget.destroy()
+
+
+def test_dragging_on_a_picker_selects_nothing_and_opens_the_list(app: Any) -> None:
+    """选择框里的文字**选不中**: 拖一下只会打开列表(用户 2026-10-13 追加的要求).
+
+    出处: "多选框的内容能否让其也不可选中"。``readonly`` 只挡住改写 —— 拖选、双击选词
+    Tk 照做, 屏幕上出现蓝底高亮, 看着就是"这里能改"。修法是在 ``<Button-1>`` 上把点击接到
+    "打开列表"(与点箭头同一条路)并 ``return "break"`` 吃掉它。
+
+    这里喂的是**拖选**(按下 → 拖动 → 松开): 没有那条接线时 ``selection_present()`` 会是 1
+    (改前实测), 接上之后必须还是 0, 而列表必须已经打开。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    entry = combo._entry
+    # 共享池里的选择框可能带着上一次用例留下的"下一次点击是收起"(浮层被拆掉时它的回调没跑,
+    # 实测 ``_close_on_next_click`` 还停在 True): 这条用例要量的是"点文字 = 打开列表",
+    # 所以先把开关拨回"关着"。
+    combo._dropdown_menu.close()
+    combo._close_on_next_click = False
+    end_x = max(4, int(entry.winfo_width()) - 2)
+    entry.event_generate("<Button-1>", x=3, y=3)
+    entry.event_generate("<B1-Motion>", x=end_x, y=3)
+    entry.event_generate("<ButtonRelease-1>", x=end_x, y=3)
+    _pump(app)
+
+    assert entry.selection_present() == 0, "选择框的文字被拖选出来了(看着像能改)"
+    popup = active_dropdown()
+    assert popup is not None, "点在文字上应该像点箭头一样打开列表"
+    combo._dropdown_menu.close()
+    _pump(app)

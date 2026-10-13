@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import gui_app, type_text
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
@@ -1187,6 +1187,109 @@ def test_home_page_filters_games_and_runs_actions(
     assert _current_page(app) is AppPage.DETAIL
     assert app._game_id == "outer-wilds"
     assert app._title_label.cget("text") == "星际拓荒"
+
+
+def test_home_filters_cannot_be_hand_edited() -> None:
+    """主页筛选框只能从列表里选: 手删文字既改不掉值, 也不该在屏幕上留下"空着"的假象.
+
+    出处(用户 2026-10-13): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成误会"。
+    筛选值来自列表选项, 手删掉文字并不会改掉实际生效的筛选, 屏幕上却变成空白 —— 看着像"没选"。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+
+    for combo in (page._origin_box, page._category_box, page._page_size_box):
+        assert combo.cget("state") == "readonly", "选择框应当只读"
+        before = combo.get()
+        combo._entry.delete(0, "end")  # 与真实按键走同一条路
+        combo._entry.insert(0, "手打的")
+        assert combo.get() == before, "内容不该被改掉"
+
+
+def test_typing_in_the_home_search_box_filters_without_pressing_enter() -> None:
+    """边打字边筛: 敲完字列表就跟着缩, 不必按回车或点"搜索"(用户 2026-10-13).
+
+    出处: "首页搜索游戏名的搜索框...完全不起作用, 不管是输入游戏原名还是修改过的名称或
+    识别到的汉化名称均无搜索效果, 所有游戏还是都显示着没有过滤出我要的游戏"。实测根因不是
+    筛选逻辑(回车/点"搜索"那条路一直是通的, 见
+    :func:`test_home_page_filters_games_and_runs_actions`), 而是**打字时压根没筛** —— 用户看着
+    列表一动不动, 自然认为搜索框坏了。这里按真实接线喂一次 ``<KeyRelease>``, 防抖到期后
+    必须自己筛出来。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+
+    page._search_entry.insert(0, "山海")
+    # 事件喂给控件**自己**, 不直接调 _on_search_key: 后者测不到"<KeyRelease> 到底绑没绑上"
+    # (拆掉那条绑定它照样绿 —— 这一版就是这么被咬出来的)。
+    # 合成键盘事件走**焦点**窗口, 所以先把焦点交给这个输入框(见 docs/testing.md 那几条坑)。
+    page._search_entry._entry.focus_force()
+    page._search_entry._entry.event_generate("<KeyRelease>")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and set(page._rows) != {"shanhai"}:
+        _pump(app)
+        time.sleep(0.01)
+
+    assert set(page._rows) == {"shanhai"}, "打字之后列表没有跟着筛(防抖到期没跑)"
+    assert page._filter.search == "山海"
+    # 生效的搜索词与输入框必须一直是一份东西: 页面上"框里空着、其实还在筛"是最容易误会的形态
+    # (文字只由用户与"清除"两处改, 重绘不去回写它 —— 回写会把没提交的半句和输入法的候选打断)。
+    assert page._search_entry.get() == page._filter.search
+
+    # 词没变时再按回车/点"搜索"不该重查一遍库: 那一下还会把选中行与页码一起重置。
+    page._select("shanhai")
+    page._submit_search()
+    assert page._selected == "shanhai", "同一个搜索词不该重来一遍"
+    assert set(page._rows) == {"shanhai"}
+
+    # 清空输入 = 回到全部(清除按钮那条路也顺带撤掉挂起的搜索任务)。
+    page._clear_search()
+    _pump(app)
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+    assert page._filter.search == ""
+
+
+def test_typing_into_the_search_box_really_reaches_the_filter() -> None:
+    """真敲键(不是 ``insert``)也要能筛 —— 占位文字不许把用户打的字吃掉(用户 2026-10-14).
+
+    出处: "不管在首页的列表模式下还是在海报模式下, 使用搜索框均无反应, 我是指不管是输入时
+    没有筛选游戏, 手动点击搜索或用回车均无反应, 而且这个输入框内的内容还是可选可编辑, 且
+    没有在我输入内容时自动消失"。四条症状同一个根因: ``CTkEntry`` 的占位文字是**真写进
+    Entry 的内容**(``get()`` 在占位激活时恒为空), 而 ``make_reachable`` 早先把它"聚焦时取消
+    占位"的那条接线顶掉了 —— 用户敲的字全接在提示文案后面, 页面上看到的是"字在框里、点了
+    没反应, 提示也不消失"。根因的守卫在 ``test_gui_keyboard`` 里, 这条量的是用户看到的结果:
+    **按用户的路子敲键**(显示窗口 → 聚焦输入框 → 真按键), 列表必须跟着筛。
+
+    只敲 ASCII: Tk 的 keysym 没有中文(传中文会 ``unknown keysym``)。所以断言的是"名字里没有
+    这串字的游戏 ⇒ 筛成空"; 列表与海报两种模式吃的是同一份 ``board``, 所以这里顺手断言板上的
+    游戏也空了(不必再建一次海报窗口)。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    page = app._home_page
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+
+    type_text(app, page._search_entry._entry, "zz")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and page._filter.search != "zz":
+        _pump(app)
+        time.sleep(0.01)
+
+    assert page._search_entry.get() == "zz", "敲进去的字没进到输入框(占位的锅)"
+    assert page._filter.search == "zz", "打字之后搜索词没有生效"
+    assert page._rows == {}, "打了字列表却没筛"
+    empty_board = page._board
+    assert empty_board is not None
+    assert empty_board.games == (), "板上的游戏没跟着筛(海报模式看的就是它)"
 
 
 def test_home_page_covers_section_and_action_guards(

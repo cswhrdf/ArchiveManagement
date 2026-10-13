@@ -68,6 +68,7 @@ def load_facts(database: Database) -> list[GameFacts]:
             GameFacts(
                 game_id=str(game.id),
                 name=game.name,
+                original_name=game.original_name,
                 origin=game.origin,
                 created_at=game.created_at,
                 location_count=len(row.locations),

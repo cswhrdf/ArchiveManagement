@@ -1059,6 +1059,43 @@ def test_run_gui_reports_every_config_state(
     assert len(opened) == 3, "三次启动都要真的装配过后端"
 
 
+def test_a_second_start_brings_the_window_back_to_the_front(tmp_path: Path) -> None:
+    """第二个实例不开新窗, 而是让已经开着的那个到前台(用户 2026-10-12 的要求).
+
+    通道是数据目录里的请求文件(``services/single_instance``): 第二个进程写完就退出(它那一侧
+    的守卫在 ``tests/unit/test_cli.py``), 已经开着的这个在 100ms 轮询里看到就把窗口叫回来。
+    这里量的是**真窗口**: 用 ``withdraw()`` 造"藏起来了"的状态 —— 它在无窗口管理器的环境里也
+    站得住(``iconify`` 未必真的 Unmap, 与 ``test_gui_dropdown`` 那条同一个理由)。
+    """
+    from archive_management.services import single_instance
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path)
+    app = gui_app(_new_app, DemoArchiveService(delay=0), paths=paths)
+    _pump(app)
+    app.withdraw()
+    _pump(app)
+    assert not app.winfo_viewable(), "前提: 窗口真的藏起来了"
+
+    single_instance.request_focus(paths)
+    app._poll_messages()
+    _pump(app)
+
+    assert app.winfo_viewable(), "窗口应当被叫回前台"
+    assert (
+        single_instance.read_focus_request(single_instance.focus_request_path(paths))
+        == ""
+    ), "抬完窗口才清请求: 文件还在就说明没处理完"
+
+    # 没有新的请求时不再抬窗口 —— 否则用户手动切到别的软件后会被一直抢回来。
+    app.withdraw()
+    _pump(app)
+    app._poll_messages()
+    _pump(app)
+
+    assert not app.winfo_viewable(), "没有新请求就不该再抬窗口"
+
+
 def test_cancel_with_a_running_operation_reports_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

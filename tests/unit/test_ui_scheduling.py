@@ -83,6 +83,28 @@ class _HomePageScheduler:
         HomePage._schedule_list_sync(self)  # type: ignore[arg-type]
 
 
+class _HomePageSearch:
+    """借用真实的 ``HomePage._schedule_search`` / ``_run_search``, 但不建控件树."""
+
+    def __init__(self) -> None:
+        """装上替身宿主帧与真实方法依赖的状态字段."""
+        self.frame = _Scheduler()
+        self._search_job: str | None = None
+        self.searches = 0
+
+    def _submit_search(self) -> None:
+        """记录"真的筛了一次"."""
+        self.searches += 1
+
+    def _run_search(self) -> None:
+        """走真实实现: 它自己负责清掉 ``_search_job`` 再筛(所以执行完才允许再排一次)."""
+        HomePage._run_search(self)  # type: ignore[arg-type]
+
+    def schedule(self) -> None:
+        """调用真实实现(不构造整棵控件树)."""
+        HomePage._schedule_search(self)  # type: ignore[arg-type]
+
+
 class _DetailScheduler:
     """借用真实的 ``MainWindow._on_content_resize``, 但不建窗口."""
 
@@ -116,6 +138,12 @@ def list_sync() -> _HomePageScheduler:
 def detail_refit() -> _DetailScheduler:
     """详情页名称重裁的调度器."""
     return _DetailScheduler()
+
+
+@pytest.fixture
+def live_search() -> _HomePageSearch:
+    """边打字边筛的调度器."""
+    return _HomePageSearch()
 
 
 class _NameLabel:
@@ -214,6 +242,38 @@ def test_list_sync_runs_after_the_queued_job(list_sync: _HomePageScheduler) -> N
     assert len(list_sync.frame.jobs) == 2, "执行完成后可以再排一次"
 
 
+def test_live_search_coalesces_without_cancelling(
+    live_search: _HomePageSearch,
+) -> None:
+    """连打十几个字只排一个搜索任务, 且**一次都不撤销**: 撤销就是"无限推后"的病因."""
+    live_search.schedule()
+    first = live_search.frame.jobs[0]
+    for _ in range(50):
+        live_search.schedule()
+
+    assert live_search.frame.jobs == [first], "重复按键不该再排任务"
+    assert live_search.frame.cancelled == [], (
+        "不能撤销已排的任务: 输入法一次提交一整串时它会被无限推后"
+    )
+    # 防抖要短到"打字时列表跟着走"。
+    assert 0 < first[0] <= 500, f"防抖窗口看着不像给人用的: {first[0]}ms"
+
+
+def test_live_search_always_runs_within_the_debounce_window(
+    live_search: _HomePageSearch,
+) -> None:
+    """打字再快, 已经排好的那一次也一定会执行, 执行后才能再排下一次."""
+    live_search.schedule()
+    for _ in range(10):
+        live_search.schedule()
+
+    live_search.frame.fire()
+
+    assert live_search.searches == 1, "防抖到期必须真的筛一次"
+    live_search.schedule()
+    assert len(live_search.frame.jobs) == 2, "筛完之后可以再排下一次"
+
+
 def test_detail_refit_coalesces_without_cancelling(
     detail_refit: _DetailScheduler,
 ) -> None:
@@ -250,15 +310,19 @@ def test_home_page_clears_pending_sync_when_host_is_destroyed() -> None:
     page.frame = _Scheduler()
     page._frame_host = page.frame.canvas
     page._sync_job = None
+    page._search_job = None
     HomePage._schedule_list_sync(page)
+    HomePage._schedule_search(page)
     assert page._sync_job is not None
+    assert page._search_job is not None
 
     HomePage._on_frame_destroyed(
         page, cast(Any, SimpleNamespace(widget=page.frame.canvas))
     )
 
     assert page._sync_job is None
-    assert page.frame.cancelled == ["after#1"]
+    assert page._search_job is None, "打字打到一半切页也要把搜索任务撤掉"
+    assert page.frame.cancelled == ["after#1", "after#2"]
 
 
 def test_a_child_destroy_does_not_cancel_the_pending_sync() -> None:
@@ -267,6 +331,7 @@ def test_a_child_destroy_does_not_cancel_the_pending_sync() -> None:
     page.frame = _Scheduler()
     page._frame_host = page.frame.canvas
     page._sync_job = None
+    page._search_job = None
     HomePage._schedule_list_sync(page)
 
     HomePage._on_frame_destroyed(page, cast(Any, SimpleNamespace(widget=object())))

@@ -53,6 +53,15 @@ pytestmark = [
 # 后台操作等待上限: 恢复/备份会真读写文件, 覆盖率与 CI 环境下会明显变慢.
 
 
+def _current_page(app: Any) -> Any:
+    """返回主窗口当前页面.
+
+    经函数返回可避免 mypy 对 ``app._page`` 做字面量收窄(收窄后再比较另一页
+    会被判为 non-overlapping)。
+    """
+    return app._page
+
+
 def test_default_view_is_branch_tree_and_hides_old_auto_backups() -> None:
     """默认展示分支树; 分支树只保留最新一份自动备份, 时间线展示全部.
 
@@ -298,6 +307,51 @@ def test_deleting_last_game_clears_hero_panel(
     assert "山海旅人" not in app._title_label.cget("text")
     assert app._selected_name.cget("text") == "未选择节点"
     assert app._hero_origin_label.winfo_manager() == ""
+
+
+def test_deleting_the_only_game_from_the_detail_page_goes_back_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """用户 2026-10-12 报的: 库里只剩一款游戏、站在详情页把它删掉后, 界面还留在详情页.
+
+    详情页是围绕"某一款游戏"建的 —— 游戏没了, 那一页就是空壳(标题写着"未选择游戏"、
+    备份列表只剩一行占位), 用户既看不到游戏库、也看不到"还没有游戏"的下一步动作。
+    正确的结果是回主页: 主页自己会显示空状态, 并摆出当场能点的"去发现"。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import AppPage
+
+    _patch_dialogs(monkeypatch, confirm=True)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    for game in list(app.backend.list_games()):
+        if game.game_id != "shanhai":
+            app.backend.delete_game(
+                game.game_id, app.backend.delete_export_path(game.game_id)
+            )
+    app._refresh_after_manage(select="shanhai")
+    app._open_game_detail("shanhai")
+    _pump(app)
+    assert _current_page(app) is AppPage.DETAIL, "前提: 详情页真的打开了"
+
+    manager = _open_manager(
+        app,
+        game_id="shanhai",
+        name="山海旅人",
+        backup_location=str(tmp_path / "backups"),
+        on_change=app._refresh_after_manage,
+    )
+    manager._on_delete_game()
+    _pump(app)
+
+    assert app.backend.list_games() == []
+    assert _current_page(app) is AppPage.HOME, "游戏没了就不该留在详情页"
+    assert app._home_page.frame.grid_info() != {}, "主页才是可见的那一页"
+    assert app._content.grid_info() == {}, "详情页要收起来"
+    # 主页给出自己的空状态: 一条游戏行都没有, 并摆出"去发现"那个当场能点的动作.
+    assert app._home_page._rows == {}
+    assert app._home_page._empty_action is not None
 
 
 def test_reload_after_external_delete_clears_panels() -> None:

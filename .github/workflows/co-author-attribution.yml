@@ -1,0 +1,102 @@
+name: Co-author attribution
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify-co-authors:
+    name: Verify squash co-authors
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate and sync co-author trailers
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pullRequest = context.payload.pull_request;
+            if (pullRequest.draft) {
+              core.notice("Draft PR: co-author trailers will be synchronized when it is ready for review.");
+              return;
+            }
+
+            const startMarker = "<!-- co-author-trailers:start -->";
+            const endMarker = "<!-- co-author-trailers:end -->";
+            const current = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullRequest.number,
+            });
+            const body = current.data.body || "";
+            const start = body.indexOf(startMarker);
+            const end = body.indexOf(endMarker);
+            if (
+              start < 0 ||
+              end < start + startMarker.length ||
+              body.indexOf(startMarker, start + startMarker.length) >= 0 ||
+              body.indexOf(endMarker, end + endMarker.length) >= 0
+            ) {
+              core.setFailed("PR 描述缺少共同作者署名区标记，请重新应用仓库 PR 模板。");
+              return;
+            }
+
+            const commits = await github.paginate(
+              github.rest.pulls.listCommits,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullRequest.number,
+                per_page: 100,
+              },
+            );
+            const trailerPattern = /^Co-authored-by:\s*(.+?)\s*<([^<>\s]+)>\s*$/gim;
+            const authors = new Map();
+            const addAuthor = (name, email) => {
+              const key = email.trim().toLowerCase();
+              const safeName = name.trim().replace(/[<>\r\n]/g, "");
+              const safeEmail = email.trim();
+              if (key && safeName && !/[<>\s]/.test(safeEmail)) {
+                authors.set(key, { name: safeName, email: safeEmail });
+              }
+            };
+
+            for (const commit of commits) {
+              const author = commit.commit.author;
+              if (!author?.name || !author.email) {
+                core.setFailed(`无法确定提交作者身份: ${commit.sha}`);
+                return;
+              }
+              if (commit.author?.login?.toLowerCase() !== pullRequest.user.login.toLowerCase()) {
+                addAuthor(author.name, author.email);
+              }
+              for (const match of commit.commit.message.matchAll(trailerPattern)) {
+                addAuthor(match[1], match[2]);
+              }
+            }
+
+            const trailers = [...authors.values()]
+              .map((author) => `Co-authored-by: ${author.name} <${author.email}>`)
+              .join("\n");
+            const generated = trailers
+              ? `\n\n\`\`\`text\n${trailers}\n\`\`\``
+              : "\n\n（无共同作者需要署名）";
+            const updatedBody =
+              body.slice(0, start + startMarker.length) +
+              generated +
+              "\n" +
+              body.slice(end);
+
+            if (updatedBody !== body) {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullRequest.number,
+                body: updatedBody,
+              });
+              core.info(`已将 ${authors.size} 位共同作者同步到 PR 描述。`);
+            } else {
+              core.info(`PR 描述中的 ${authors.size} 条共同作者署名已是最新状态。`);
+            }

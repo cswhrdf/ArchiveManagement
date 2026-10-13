@@ -4,6 +4,9 @@
 
 它管理多个游戏及其一个或多个存档位置，把每次备份保存为带逐文件哈希清单的完整快照，用分支树和时间线呈现历史，允许随时恢复任一备份，并在明确确认后把不再需要的原始存档目录移入系统回收站。界面用 CustomTkinter 编写，数据存放在本地 SQLite 与应用自有的备份目录中，依赖与虚拟环境由 [uv](https://docs.astral.sh/uv/) 管理。
 
+> [!WARNING]
+> 本项目的代码由 AI 生成
+
 ## 功能概览
 
 - **游戏与存档位置管理**：录入游戏，添加存档目录或文件（记录规范化绝对路径，校验可用性、重复与高风险目标），原始位置与应用管理的备份目录始终分开展示。
@@ -15,6 +18,8 @@
 - **本地游戏发现**：从 Steam/Epic/GOG/Ubisoft 的安装清单、Windows 注册表与自定义监控目录中发现游戏，由用户确认后导入，不会自动改动游戏库。
 - **全局快捷键**：默认 `Win+Alt+S`（保存）与 `Win+Alt+Z`（创建分支），可在设置里现场录制修改（必须含 Win/Ctrl/Alt/Shift 之一且至少一个字母键）。
 - **可追溯**：所有用户操作写入滚动日志文件（不落数据库），高风险操作用 INFO、基础操作用DEBUG；日志不含凭据、文件内容与完整敏感路径。
+- **一个窗口就够了**：打包版同时只允许开一个界面进程 —— 两个进程各持同一个数据库、备份目录与全局快捷键注册会互相踩（表现为"点了没反应"这类没有报错的怪事），所以**第二次启动不会开新窗，而是把已经开着的那个窗口叫到前台**（退出码 3）；开发/用例不受这条限制，诊断用的逃生门见 [docs/development.md](docs/development.md)。
+- **库空了回主页**：删掉库里最后一款游戏后自动回到游戏主页（详情页是围绕某一款游戏建的，游戏没了就不该把这一页留在屏幕上），主页会显示"还没有游戏"并给出「去游戏发现」。
 
 ## 快速开始
 
@@ -70,17 +75,16 @@ Wayland）：没有显示器的服务器或 CI 可以先用虚拟显示，例如
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
-uv run pytest --cov
+uv run pytest                               # 用例(覆盖率口径见下面那段)
 uv run python scripts/run_tests_local.py    # 分片执行全量
 uv run deptry .       # 依赖卫生(未声明 / 多余 / 传递依赖)
 ```
 
-上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中 `pytest --cov` 在 Windows、Ubuntu、macOS 三个平台各跑一遍（见 [testing.md](./docs/testing.md) 第 4 节），`ruff` / `mypy`（宿主平台各一次）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（与平台无关的结论项带 `env=common`，归入报告的 `Common` 环境）；覆盖平台专属分支的 mypy 检查（`--platform win32` / `darwin`）分别在那个平台上跑，结论归入各自的 `Windows` / `macOS` 环境，与那个平台的测试结果一起看。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
+上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中用例在 Windows、Ubuntu、macOS 三个平台各跑一遍（见 [testing.md](./docs/testing.md) 第 4 节），`ruff` / `mypy`（宿主平台各一次）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（与平台无关的结论项带 `env=common`，归入报告的 `Common` 环境）；覆盖平台专属分支的 mypy 检查（`--platform win32` / `darwin`）分别在那个平台上跑，结论归入各自的 `Windows` / `macOS` 环境，与那个平台的测试结果一起看。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
 
-提交钩子只运行本次变动的静态检查与最高严重等级的单元测试（快速反馈）；CI 在 Windows、
-Ubuntu、macOS 上运行全量测试（见 [testing.md](./docs/testing.md) 第 4 节），并单独执行
-性能基准与安全测试（安全测试在三个平台各跑一遍），最后合并成一份 Allure 报告。测试分类、基准阈值与报告内容见
-[testing.md](./docs/testing.md)。
+**覆盖率是硬门禁（`fail_under = 100`），但它按平台口径判**：`uv run pytest --cov` 给的是**合并口径**的粗数字（pytest-cov 在导入根 conftest 之前就构造好了 Coverage 对象，套不上平台排除），按门禁核要走两步 `coverage run --rcfile=.coverage-platform.rc` + `coverage report -m`（那份 rc 由 `uv run python scripts/coverage_platform.py write` 生成、不入库），见 [CONTRIBUTING.md](./CONTRIBUTING.md) 第三节。
+
+提交钩子只运行本次变动的静态检查与最高严重等级的单元测试（快速反馈）；CI 在 Windows、Ubuntu、macOS 上运行全量测试（见 [testing.md](./docs/testing.md) 第 4 节），并单独执行性能基准与安全测试（安全测试在三个平台各跑一遍），最后合并成一份 Allure 报告。测试分类、基准阈值与报告内容见[testing.md](./docs/testing.md)。
 
 ## 打包
 
@@ -88,8 +92,9 @@ Ubuntu、macOS 上运行全量测试（见 [testing.md](./docs/testing.md) 第 4
 uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 ```
 
-构建读取 `packaging.py` 中的源码版本，产出 Windows x64 的 onedir 压缩包、onefile 可执行
-文件、SHA-256 校验文件与构建元数据。构建与发布流程见 [development.md](./docs/development.md)。
+构建读取 `packaging.py` 中的源码版本，在**仓库根**执行，产出 `dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是它产的** —— 那是发布工作流（`.github/workflows/release.yml` 的 `Prepare build files`）在构建之后自己打包的，它在构建前还会先跑 `uv run python scripts/build_icon.py --check`（位图与 `app.svg` 不一致就拦住）。构建与发布流程见 [development.md](./docs/development.md)。
+
+应用图标只有一份可编辑的真相 `src/archive_management/resources/app.svg`，界面与打包读的是它生成的位图（`uv run python scripts/build_icon.py`；改了 SVG 时提交钩子会自动重画），见[development.md 的「应用图标」](./docs/development.md)。
 
 ---
 

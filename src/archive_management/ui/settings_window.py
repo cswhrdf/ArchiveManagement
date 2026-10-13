@@ -307,6 +307,8 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
             dropdown_font=ctk.CTkFont(size=12),
             command=self._on_font_selected,
+            # 只能从列表里选(与语言/校验方式两个框一致): 手删内容不会把字号改掉, 只会让人以为改了.
+            state="readonly",
         )
         self._font_box.set(self._font_label_of(self._base_font_px))
         self._font_box.grid(row=3, column=1, padx=16, pady=(0, 16))

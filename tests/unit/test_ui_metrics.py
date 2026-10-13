@@ -47,7 +47,11 @@ _SPACE_KEYS = {"padx", "pady"}
 # 模块数从 23 变 24 是 2026-10-02 新增的 ``dropdown.py``(下拉浮层: 限高 + 滚动条 +
 # 按位置决定上下): 里面的间距/宽度全是 ``DROPDOWN_*`` 具名常量(设计值, 用的时候才过
 # 缩放换算), 所以三个站点数一个都没变。
-_EXPECTED_FILES = 24
+# 模块数从 24 变 25 是 2026-10-11 新增的 ``window_icon.py``(窗口/任务栏图标: 换掉
+# CustomTkinter 那条"每个窗口建好 200ms 后贴它自己那颗图标"的私有方法): 它只碰 Tk 的
+# 图标 API(``iconbitmap`` / ``iconphoto``), 一个间距/圆角/字号字面量都没有, 所以三个
+# 站点数一个都没变。
+_EXPECTED_FILES = 25
 # 圆角站点 66 → 67: 设置窗口新增的“备份校验方式”面板自带一个 ``corner_radius=10``
 # (与同窗口其他面板一致)。
 _EXPECTED_RADIUS_SITES = 67

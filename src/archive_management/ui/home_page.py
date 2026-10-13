@@ -126,6 +126,8 @@ _NAME_PAD = 8
 _NAME_FALLBACK_WIDTH = 200
 # 拖窗口时把"表头对齐 + 名称重裁"合并成一次: 每个像素都跑一遍会卡.
 _SYNC_DELAY_MS = 60
+# 边打字边筛的防抖窗口(毫秒): 一次连打十几个字不要每敲一下就查一遍库.
+_SEARCH_DEBOUNCE_MS = 300
 # 同一个行宽下, 表头对齐最多迭代几轮(表头几何变化不会触发滚动区的 Configure, 得主动再量一轮).
 # 轮数按**数据行的实测宽度**记账: 行宽一变(滚动条出现/收起、窗口缩放、名称重裁)就是新的一轮
 # 几何, 已算好的内边距全部作废, 得重新给满 —— 见 ``HomePage._rearm_alignment``。
@@ -280,6 +282,8 @@ class HomePage:
         self._value_font = ctk.CTkFont(size=11)
         # 延后的列表同步任务与海报模式当前的每行张数/已配置列数.
         self._sync_job: str | None = None
+        # 延后的搜索任务(边打字边筛, 见 :meth:`_schedule_search`).
+        self._search_job: str | None = None
         self._poster_columns = 0
         self._poster_slots = 0
         # 名称块(与它里面的名称标签)与已经量出来的块高: 海报卡片重建后按同一个数摆,
@@ -429,6 +433,14 @@ class HomePage:
         )
         self._search_entry.pack(side="left")
         self._search_entry.bind("<Return>", lambda _event: self._submit_search())
+        # 边打字边筛(用户 2026-10-13): 原来只有回车/点"搜索"才筛, 打字时列表一动不动 ——
+        # 用户看到的是"搜索框完全不起作用"。防抖合并语义与表头同步同一套(见 _schedule_search)。
+        # 同时盯按下与抬起: 中文是**输入法提交**的, 提交那一下走的是带字符的那条(``<KeyPress>``),
+        # 只绑 ``<KeyRelease>`` 时"打中文不筛"会被再报一次; 粘贴/清空没有按键, 另接两条。
+        self._search_entry.bind("<KeyPress>", self._on_search_key)
+        self._search_entry.bind("<KeyRelease>", self._on_search_key)
+        self._search_entry.bind("<<Paste>>", self._on_search_key)
+        self._search_entry.bind("<<Clear>>", self._on_search_key)
         self._search_btn = self._button(
             search, tr("home.search"), self._submit_search, width=52
         )
@@ -618,6 +630,8 @@ class HomePage:
             width=76,
             height=32,
             command=self._on_page_size_change,
+            # 只能从列表里选: 可输入时用户能把字删掉, 而实际生效的还是旧值 —— 看着像没选中的样子.
+            state="readonly",
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,
@@ -770,6 +784,8 @@ class HomePage:
             width=width,
             height=32,
             command=command,
+            # 筛选框全都**只能从列表里选**(同 _page_size_box): 手删内容只会造成"跟实际生效的值不一样".
+            state="readonly",
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,
@@ -972,7 +988,13 @@ class HomePage:
                 )
 
     def _render_filters(self, board: HomeBoard) -> None:
-        """下拉框列出"全部"与各取值(带数量), 并回显当前选择与展示偏好."""
+        """下拉框列出"全部"与各取值(带数量), 并回显当前选择与展示偏好.
+
+        **搜索框的**文字不在这里写**: 生效的搜索词只可能来自输入框本身(``_submit_search`` 读它)
+        或"清空"(``_clear_search`` 同时清掉文字), 所以每次都回写一遍是多余的 —— 而它有害:
+        用户刚敲进去、防抖还没到点的那半句会被别的重绘抹掉, 同值重写还会把光标挪到末尾、打断
+        输入法正在拼的候选。
+        """
         self._origin_keys = {tr("home.origin_all"): ""}
         self._origin_keys.update({item.text: item.key for item in board.origins})
         self._origin_box.configure(values=list(self._origin_keys))
@@ -983,9 +1005,6 @@ class HomePage:
         self._category_box.configure(values=list(self._category_keys))
         self._category_box.set(board.category_text)
 
-        if board.filter.search:
-            self._search_entry.delete(0, "end")
-            self._search_entry.insert(0, board.filter.search)
         self._page_size_box.set(str(board.filter.page_size))
         self._layout_switch.set(board.filter.layout.label)
 
@@ -1191,6 +1210,35 @@ class HomePage:
         if event.widget is not self._frame_host and event.widget is not self.frame:
             return
         self.cancel_list_sync()
+        self.cancel_search()
+
+    def _on_search_key(self, _event: tk.Event) -> None:
+        """搜索框里每敲一下都排一次"延后搜索"(合并语义, 见 :meth:`_schedule_search`)."""
+        self._schedule_search()
+
+    def _schedule_search(self) -> None:
+        """延后合并一次搜索: 已排过队就直接返回(**不取消也不重新计时**).
+
+        与 :meth:`_schedule_list_sync` 同一条理由: 改成"每次按键先取消再重新计时"看着更
+        跟手, 但事件足够密(输入法一次提交一整串、按键自动重复)任务就会被无限推后 —— 用户
+        手停了列表还是不动。合并能保证它一定在 :data:`_SEARCH_DEBOUNCE_MS` 内跑一次。
+        """
+        if self._search_job is not None:
+            return
+        self._search_job = self.frame.after(_SEARCH_DEBOUNCE_MS, self._run_search)
+
+    def cancel_search(self) -> None:
+        """撤掉挂起的搜索任务(控件销毁前、以及手动提交搜索前调用)."""
+        if self._search_job is None:
+            return
+        with contextlib.suppress(tk.TclError):
+            self.frame.after_cancel(self._search_job)
+        self._search_job = None
+
+    def _run_search(self) -> None:
+        """防抖到点了: 拿输入框里的**当前**文字筛一次."""
+        self._search_job = None
+        self._submit_search()
 
     def cancel_list_sync(self) -> None:
         """撤掉挂起的"表头对齐 + 名称重裁"任务(控件销毁前调用)."""
@@ -2010,14 +2058,22 @@ class HomePage:
         self._apply(replace(self._filter, category=key))
 
     def _submit_search(self) -> None:
-        """按名称搜索(清空输入即恢复全部)."""
+        """按名称搜索(清空输入即恢复全部).
+
+        搜索词与当前筛选条件一致时什么都不做: 边打字边筛会在回车之前就跑过一次, 再按回车
+        (或点"搜索")不许重查一遍库 —— 那一下还会把页码与选中行一起重置。
+        """
+        self.cancel_search()
         text = self._search_entry.get().strip()
+        if text == self._filter.search:
+            return
         log_action("ui.home_search", basic=True, length=len(text))
         self._selected = None
         self._apply(replace(self._filter, search=text))
 
     def _clear_search(self) -> None:
         """清除搜索与筛选条件, 回到默认视图(保留展示方式与每页条数)."""
+        self.cancel_search()
         self._search_entry.delete(0, "end")
         self._selected = None
         self._apply(

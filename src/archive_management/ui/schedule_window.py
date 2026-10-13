@@ -216,8 +216,12 @@ def add_schedule_dialog(
         text_color=palette.text_muted,
     ).pack(padx=24, anchor="w")
 
-    picker = ctk.CTkComboBox(
+    # 这个选择框要的是"输入即筛选"(下面 on_key 会把下拉候选收窄), 所以**故意**写成
+    # ``state="normal"`` —— 选择框默认是 readonly 且选不中的(见 widgets.apply_picker_defaults),
+    # 这是全局唯一一处例外, 靠下面那行 ``# 可输入:`` 的记号跟守卫对上(见 test_ui_widgets)。
+    picker = ctk.CTkComboBox(  # 可输入: 输入即筛选(见下面的 on_key)
         window,
+        state="normal",
         values=names,
         width=420,
         fg_color=palette.input_bg,

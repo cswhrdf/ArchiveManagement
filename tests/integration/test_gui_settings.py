@@ -488,6 +488,30 @@ def test_settings_window_holds_theme_and_hotkey_shortcuts(
         assert menu.cget("text_color") == palette.text_body
 
 
+def test_settings_choices_cannot_be_hand_edited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """设置里的选择框只能从列表里选: 手删文字既改不掉值, 也不该在屏幕上留下"空着"的假象.
+
+    出处(用户 2026-10-13): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成误会"。
+    选择框的值来自列表选项, 手删掉文字不会改掉实际生效的设置, 屏幕上却变成空白。这里量两件事:
+    控件是 ``readonly``; 而且真的删不动(Tk 对 readonly 的 insert/delete **静默忽略**, 实测)。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+
+    for combo in (window._font_box, window._language_box, window._verification_box):
+        assert combo.cget("state") == "readonly", "选择框应当只读"
+        before = combo.get()
+        combo._entry.delete(0, "end")  # 与真实按键走同一条路
+        combo._entry.insert(0, "手打的")
+        assert combo.get() == before, "内容不该被改掉"
+
+
 def test_settings_window_fits_its_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

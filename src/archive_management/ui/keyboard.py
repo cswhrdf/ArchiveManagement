@@ -315,11 +315,15 @@ def make_reachable(
             action()
         return "break"
 
-    inner.bind("<FocusIn>", on_focus_in)
-    inner.bind("<FocusOut>", on_focus_out)
+    # ``add="+"``: 这些内层控件上**本来就有别人的接线**, 只能往后加、不能顶掉。
+    # 实测(2026-10-14): ``CTkEntry`` 靠自己的 ``<FocusIn>`` 取消**占位文字**(占位不是提示
+    # 层, 而是真写进 Entry 的内容), 顶掉它之后占位永远不取消 —— 用户敲的字全接在提示文案
+    # 后面、``get()`` 却一直返回空, 表现成"框里的字能选能改但不消失, 搜索/筛选点了没反应"。
+    inner.bind("<FocusIn>", on_focus_in, add="+")
+    inner.bind("<FocusOut>", on_focus_out, add="+")
     if action is not None:
-        inner.bind("<space>", on_activate)
-        inner.bind("<Return>", on_activate)
+        inner.bind("<space>", on_activate, add="+")
+        inner.bind("<Return>", on_activate, add="+")
     widget._keyboard_reachable = True
     # 把"没聚焦时的原样"挂在控件上, 让别处(主按钮识别)也能看到它 —— 焦点态是临时
     # 改写的, 谁都不该拿焦点态当"这颗按钮是什么按钮"的依据。

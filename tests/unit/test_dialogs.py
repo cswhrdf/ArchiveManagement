@@ -2108,7 +2108,9 @@ def test_batch_import_dialog_starts_in_merge_mode_when_the_row_says_so(
         )
         assert merge.variable is not None
         assert merge.variable.get() == STRATEGY_MERGE, "开局就选中合并"
-        assert harness.combos[0].kwargs.get("state") == "normal", "开局就能选目标"
+        # 启用态是 readonly(不是 normal): 目标只能从候选里挑, 内容不该被手删掉 —— 与主页
+        # 筛选框同一条规则(用户 2026-10-13 报的误会)。
+        assert harness.combos[0].kwargs.get("state") == "readonly", "开局就能选目标"
 
     harness.click_text = tr("dialog.import_confirm")
     harness.on_wait = check_the_initial_state
@@ -2139,7 +2141,8 @@ def test_batch_import_dialog_disables_targets_until_merging(
             if radio.value == STRATEGY_MERGE
         )
         merge.invoke()
-        assert harness.combos[0].kwargs.get("state") == "normal"
+        # 启用时也是 readonly: 挑目标不等于可以手打(见 test_dialogs 里那条说明)。
+        assert harness.combos[0].kwargs.get("state") == "readonly"
         assert harness.combos[0].values == ["星际拓荒", "山海旅人"]
 
     harness.on_wait = check_the_states

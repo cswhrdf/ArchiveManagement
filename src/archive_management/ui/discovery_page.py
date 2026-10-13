@@ -334,6 +334,8 @@ class DiscoveryPanel:
             values=[item.label for item in CandidateFilter],
             width=140,
             command=self._on_filter_change,
+            # 只能从列表里选(与主页筛选框同一条规则): 可输入时能被手删成"看起来没选".
+            state="readonly",
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,

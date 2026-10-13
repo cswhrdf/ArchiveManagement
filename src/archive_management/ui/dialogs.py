@@ -1987,14 +1987,19 @@ class _BatchRowWidgets:
     strategy: ctk.StringVar
     target: ctk.CTkComboBox
     entries: tuple[tuple[ImportLocationRow, ctk.CTkEntry], ...]
-    target_parts: tuple[ctk.CTkBaseClass, ...]
+    heading: ctk.CTkBaseClass
 
 
 def _paint_batch_row(parts: _BatchRowWidgets) -> None:
-    """只有"合并"才启用目标选择(与单包对话框同一套语义)."""
-    state = "normal" if parts.strategy.get() == STRATEGY_MERGE else "disabled"
-    for part in parts.target_parts:
-        part.configure(state=state)
+    """只有"合并"才启用目标选择(与单包对话框同一套语义).
+
+    启用态是 ``readonly`` 而不是 ``normal``: 这是"从候选里挑一个", 不是输入框。而它旁边
+    的说明文字是 ``CTkLabel`` —— 两者接受的 state 不是一个集合(Label 不认 readonly),
+    所以分开写。
+    """
+    merged = parts.strategy.get() == STRATEGY_MERGE
+    parts.heading.configure(state="normal" if merged else "disabled")
+    parts.target.configure(state="readonly" if merged else "disabled")
 
 
 def batch_import_dialog(
@@ -2077,6 +2082,8 @@ def batch_import_dialog(
             card,
             values=[option.label for option in row.targets],
             height=_CARD_CONTROL_HEIGHT,
+            # 只能从列表里选(候选来自扫描结果): 手删内容不会换目标游戏, 提交时读的仍是列表里的值.
+            state="readonly",
             fg_color=palette.input_bg,
             button_color=palette.raised,
             button_hover_color=palette.raised,
@@ -2093,7 +2100,7 @@ def batch_import_dialog(
             strategy=strategy,
             target=target,
             entries=entries,
-            target_parts=(heading, target),
+            heading=heading,
         )
 
         def paint() -> None:

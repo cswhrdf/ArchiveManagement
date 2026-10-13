@@ -968,6 +968,110 @@ Linux 与 macOS 分片都会跑的那批用例 —— 所以**恢复 macOS 之�
 
 打包验收标准：在未安装 Python 和项目依赖的干净 Windows 环境中，双击可执行文件能够启动；程序能创建用户数据目录，能执行一次备份、恢复和导入导出；杀毒软件误报、缺少资源、动态库加载失败等问题必须记录并在发布前处理；**并完成第 8 条的逐屏截图比对（每处差异都要有结论）**。
 
+#### 阶段 J 的详细步骤（2026-10-11 补；**只写计划, 尚未开工**）
+
+本节刻意与开头那条"纯步骤描述不进这里"的写法不同：阶段 J 还没开工、步骤要一次写清**依赖顺序与判据**，所以先在这里写细，落地后按原口径压成"结论 + 坑"。
+
+**先认清现状**（开工前查过一轮, 免得重摸一遍）：
+
+- `packaging/archive-management.spec` 现在**没有** `icon=`、也**没有** `version=`；而 `docs/development.md` 的打包一节写着"`spec` 文件显式声明入口模块、**图标**与 CustomTkinter 主题资源" —— 那句是照抄本计划第 1 条，属于**口径过时**（spec 里一个图标都没有）。
+- 仓库里**没有应用图标资源**：`resources/` 只有 `i18n/` 与 `excluded-games.json`，界面也没调过 `iconbitmap` / `iconphoto`，`spec` 也没传 `icon=`。
+- `upx=True` 是**假开关**：UPX 不在依赖清单里，缺它时 PyInstaller 静默跳过，构建日志里没人会注意到（与 §11 里"配了个没人读的开关"同一类）。
+- `release.yml` 构建完**不跑产物本身**：现在的步骤是"构建 → 压缩 → 校验和 → 元数据 → 上传"，产物**能不能启动**在 CI 里没有判据（`docs/development.md` 里那份 2.1 s 是本机手量的）。
+- `console=False`：窗口化 exe 没有控制台。**不确定的两点要当场实测**：不重定向时 `sys.stdout` 是否为 `None`（CPython 与 PyInstaller 在"重定向后能不能读到"这一点上口径不同），以及日志的 `StreamHandler` 拿到 `None` 流时的行为（`logging` 内部对 `sys.stderr` 有真值判断，预期不抛）。**结论先按"判据不建在控制台上"办**。
+
+**执行顺序**：J-1（版本）→ J-2（图标）→ J-3（产物冒烟进 CI）→ J-4（逐屏比对）→ J-5（干净环境）→ J-6（UPX 去留）→ J-7（单文件边界）→ J-8（文档与守卫同步）。J-1/J-2 改的是**产物属性**，必须先定（后三步都要拿产物量）；J-4/J-5 都依赖 J-3 的"能起得来"。
+
+**J-1 版本信息的单一真相**
+
+- 落点：新建 `packaging/version-info.txt`（PyInstaller 的 `version=` 参数要的那份 KV 文本）+ `spec` 里 `EXE(..., version=...)`。**`packaging.py` 仍是唯一真相**，`release.yml` 里那条"正则抽 `__version__`"不动。
+- 做法：`FileVersion` / `ProductVersion` 写成四段数字（`0.0.1` → `0,0,1,0`，四段必须全是数字），`ProductName` / `CompanyName` / `FileDescription` 与 `packaging.py` 的常量对齐。
+- 判据：①打包后 exe 属性页的版本 == `packaging.py` 的 `__version__`，可自动判（pwsh 一行 `(Get-Item <exe>).VersionInfo.FileVersion`）；②守卫：读 `packaging.py` 的常量与 version 文件，逐字比对（放在 `tests/unit/test_package.py` 里，与既有四条同族）。
+- 坑：version 文件写错时**构建期才报**，且报错只说"某个字符串非法"，不说是哪一段 → 改完先本机构建一次，别直接推 CI。
+
+**J-2 应用图标（现在压根没有这个资源）**
+
+- 先定"图标从哪来"（这一步没有代码可写）：需要一份多尺寸 `.ico`（16 / 32 / 48 / 256；**256 那份**是资源管理器大图标，缺了会糊）。落点 `src/archive_management/resources/app.ico` —— 跟 i18n 资源同一棵树，随 `datas` 进包，运行时也读得到。取舍：Windows 打包这一阶段只做 `.ico`；Linux/macOS 的图标格式差异留给阶段 K 第 6 条一起定。
+- 两处接线：①`spec` 的 `EXE(icon=...)` —— **只改 exe 的 PE 资源**（资源管理器 / 任务栏的图标）；②窗口自己那份（任务栏 / Alt-Tab）：`main_window` 里设 `iconbitmap`（Windows 不设时理论上会沿用 exe 的，但要**实测**；且 `iconbitmap` 失败会抛 `TclError`，别让它把启动带崩 —— 要么先测好路径，要么包在兜底里并留一条日志）。
+- 判据：①Pillow 能打开该 `.ico` 且拿到 16/32/48/256 四种尺寸（可自动）；②打包后 exe 的 PE 图标非空（`[System.Drawing.Icon]::ExtractAssociatedIcon` 一行）；③**任务栏 / Alt-Tab 的样子只能人工看一眼** —— 截图管线抓的是窗口自身（`PrintWindow`），拿不到窗口外框上的图标，别指望 J-4 的比对能覆盖这条。
+- 坑：资源定位**不用** `sys._MEIPASS`。`datas` 的目标路径是 `archive_management/resources`，冻结后 `importlib.resources.files("archive_management")` 与源码期是同一套写法（`i18n.py` 与 `services/exclusions.py` 就是这么读的，而且 i18n 在 import 期就 `set_locale`，所以"能启动"本身就证明了这条链路在冻结环境可用）。**改 `datas` 的目标路径 = 改资源定位**，两处必须一起动。
+
+**J-2 已落地（2026-10-11，用户要求先做这一步）**
+
+- **画了什么**：`resources/app.svg`（人只改这一个文件）—— 深色圆角底板 + 青绿文件夹 + 三条"版本"横杠，**中间那条是当前节点**（近白色，与分支树里 ● 同义）；只保留三块能辨认的形状，16px 下仍然认得出（已出图逐档目视确认：16/24/32/48 都清楚）。
+- **产物四个**（都入库，随 `datas` 进包）：`app.ico`（**七档** 16/24/32/48/64/128/256）、`app-256.png`、`app-64.png`（顶栏那个 30px 品牌位配它，2x）、`app-icon.stamp`（sha256 指纹，回答"这批位图出自哪一版 SVG"）。
+- **代码分两层**：`services/icon_assets.py` 只**算**（定位、指纹比对、拼 ffmpeg 参数、Pillow 装 ICO、给界面一份"现有哪几个文件"的清单），`scripts/build_icon.py` 才**跑**（ffmpeg 光栅化 + 写指纹 + 可选 `git add`）。这么分是因为**软件不执行外部程序**（`tests/security/test_side_effects.py` 动态 + 静态两道闸），跑的那半必须在 `scripts/`。
+- **决策（用户问的"ffmpeg 还是库"）**：用**本机 ffmpeg** 光栅化，**不引入任何 Python 库**。三条理由：① 光栅化只发生在"改了图标"的时候，不在运行时；② `cairosvg` 在 Windows 要额外的 cairo 原生库（不是纯 wheel），为一件一辈子做几次的事加系统依赖不划算；③ **实测 ffmpeg 的 `-f ico` 只写一档尺寸**（BMP 编码，64x64），多尺寸 ICO **必须**由 Pillow（已是运行依赖）装配。已按用户要求在 `docs/development.md` 新增「应用图标」一节写明：为什么要外部工具、怎么确认本机 ffmpeg 带 librsvg（`ffmpeg -version` 里有 `--enable-librsvg`）、不在 PATH 时用 `--ffmpeg` 或环境变量 `ARCHIVE_MANAGEMENT_FFMPEG`。
+- **三处自动**：**提交钩子**（只在 `app.svg` 变了时触发，重画后自己 `git add`，与 `compact-json` 同一条路）、**`release.yml` 打包前 `--check`**（故意**不**自动重画：那会把陈旧提交默默修好）、**启动日志一行**（软件只核对并写 `应用图标: …`，不一致时给出该跑的命令 —— 用户原话是"每次启动转换"，改成了"每次启动核对 + 改 SVG 时钩子就重画"，因为软件不许执行外部程序，而且位图本来就入库）。
+- **守卫 20 条**（`tests/unit/test_icon_assets.py`）：入库的位图必须是当前 SVG 的产物（不一致时失败信息直接给出该跑的命令）、ICO 七档齐全、`app-<n>.png` 的边长与名字相符、`spec` 两处 `icon=` 与"缺位图即失败"、`release.yml` 的检查步骤在 `pyinstaller` 之前、提交钩子的入口与 `files`、以及界面接线（用假 ctk 与假窗口驱动**真实方法**：有图就用图、图损坏或缺资源退回落样式、`TclError` 不冒泡、贴图留引用）。
+- **还没做（留给后续 J 步）**：`spec` 的 `version=`（J-1 未动，只加了 `icon=`）；打包版 PE 图标非空的断言与任务栏目视（J-3 的产物冒烟里带）；Pillow 打开 ICO 的四种尺寸断言已换成七档（本文件上面的原文写"16/32/48/256 四种"，以代码为准）。
+
+**J-2 追加（2026-10-11，位图入库还是靠 CI 现画 —— 定了前者）**
+
+- 用户问"能不能把位图 gitignore 掉、让流水线编译时现画（或先下载最新 ffmpeg 再画）"。**结论：可行但不成比例，选"位图入库"**，并把 CI 那条路降级成"被验证的备份路径"而不是唯一路径。量化与理由（都已核实）：位图四份合计 **37.7 KB**；不入库的代价是 ① 干净检出时界面缺一块（顶栏退回落样式、窗口无图标）② "改了 SVG 忘了重画"这条守卫失去基准（本机没 ffmpeg 时钩子只能报错或跳过）③ **`fail_under=100` 会被环境绑架** —— "有位图就用图"那条分支只有真存在 `app-64.png` 时才走到，于是三平台×三片的每个 pytest 作业都得先装 ffmpeg 生成位图，与"每个作业只装自己需要的工具"的纪律相反 ④ 发布链路的确定性与供应链：`windows-latest` 的镜像清单里**没有** ffmpeg（只有 ImageMagick/7zip 等，实测抓了镜像 README），即使装上也不保证带 `--enable-librsvg`；"下载最新"则把渲染结果交给一个天天变的第三方二进制（同提交不同时间可能出不同像素）。
+- **落地形状（三处）**：`release.yml` 里 **先** `--check`（硬门禁，不需要 ffmpeg）**再**跑一条 `Probe the icon pipeline on this runner (informational)`（打印 ffmpeg 版本行 + 往 `%TEMP%` 重画并与入库产物逐字节比对；画不出来只记 `::warning::` 并照常发布，且这一步 `continue-on-error`）；新增 **`Icon probe` 工作流**（`.github/workflows/icon-probe.yml`，只 `workflow_dispatch`）用与发布作业相同的安装形状把渲染结果写到 `icon-probe-out/` 并作为 artifact 上传，供"runner 到底能不能画"这个问题单独取一次证据。顺序不许反：探针会重写指纹，先探针再 `--check` 就查不出入库产物陈旧（守卫钉住）。
+- **顺手修掉一个会让首次发布红掉的隐患**：CI 的安装步骤带 `--no-install-project`，那种环境里 `import archive_management` 是 `ModuleNotFoundError`（**实测复现**：临时 venv + `--no-install-project` 跑 `python -c "import archive_management"` 报错），而我先前加的那条 `uv run python scripts/build_icon.py --check` 正是这种形状 → 脚本顶部自己把 `src` 插进 `sys.path`，并在那个临时环境里复验通过。
+- 新增/改动的守卫（都做过咬合验证：改坏一次确认变红，再还原）：`test_the_release_workflow_checks_the_icon_before_packaging`（顺序 `--check` < 探针 < `pyinstaller`）、`test_the_release_probe_cannot_block_the_release`（`continue-on-error` + `--out-dir` + `::warning::` + 自己接住 `$LASTEXITCODE`）、`test_the_manual_probe_workflow_only_runs_on_demand`（只 `workflow_dispatch`、`windows-latest`、传 artifact、用 uv 必先 setup-uv、`--no-install-project`）、`test_the_icon_script_runs_without_an_installed_project`（`--out-dir` 解析 + 脚本自己塞 `src`）。`.gitignore` 里也写了一段"位图**要**入库，只忽略探针落点 `icon-probe-out/`"，免得后人好心把它忽略掉。
+
+**J-2 补丁（2026-10-11，子窗口与任务栏图标顶着 CTk 那颗）**
+
+- **症状（用户报）**：设置 / 定时任务 / 管理 / 对话框这些**子窗口**，标题栏与任务栏里都是 CustomTkinter 的默认图标。
+- **量到的证据**（临时探针：给 `CTk.iconbitmap` 套一层记录器再泵 0.6s，比查 `wm iconbitmap` 可靠 —— Windows 上那个查询恒为空）：不装补丁时 `主窗口: app.ico`、`子窗口: CustomTkinter_icon_Windows.ico`。**根因**：`CTk.__init__` / `CTkToplevel.__init__` 在 Windows 上排了 `after(200, self._windows_set_titlebar_icon)`，那个方法在 `_iconbitmap_method_called` 还是 `False` 时贴它包里的 `CustomTkinter_icon_Windows.ico`；主窗口因为在 `__init__` 里显式设过图标而逃过，**每个子窗口都会中招**。
+- **修法**（库没留接口）：`ui/window_icon.py` 把两个类上的私有方法 `_windows_set_titlebar_icon` 换成 `_titlebar_icon` → `apply_window_icon`（与 `ui/rendering.py` 换 `DrawEngine` 同一类手法；名字被库改掉时不会出错，只是守卫变红）。`apply_window_icon`：有 `app.ico` 就 `iconbitmap`（多尺寸），被 Tk 拒了退回 `iconphoto` + `app-256.png`，都没有返回 `False` —— 一步都不抛，图标不是启动的前提。接线放在 `ui/widgets.py` 模块级（与 `apply_border_rendering_fix()` 那几条并排），import 一次就够、幂等。
+- **顺手去重**：`main_window._apply_window_icon()` 改成 `apply_window_icon(self)`，删掉模块级的 `_photo_image()`（那份重复逻辑唯一的用处就是主窗口）。
+- **打字细节**：typeshed 给 `Wm.wm_iconbitmap` 没写参数类型，而项目开了 `disallow_untyped_calls` —— 模块里用一个小 `Protocol`（`iconbitmap` / `iconphoto` 两个方法）显式声明一次，换取调用点全部有类型（不是 `type: ignore`）。
+- **守卫**：`tests/unit/test_icon_assets.py`（两个窗口类都换成了我们的实现、再调一次是空操作、ico→png→无 三条分支、贴图必须留引用）；新增 `tests/integration/test_gui_window_icon.py`（真窗口 + 泵事件到 200ms 之后，断言那次 `iconbitmap` 收到的是 `app-window.ico`；**咬过一口**：把 `widgets.py` 的接线断开时，它量到的正是 `CustomTkinter_icon_Windows.ico`）。文档：`docs/development.md` 新增「窗口图标：CTk 会替每个窗口贴上它自己那颗」。
+- **补丁第一版把集成套件跑崩了（2026-10-11 当天查清并修好，**这条是本轮最值钱的发现**）**：装上补丁后单进程跑 `tests/integration` 会在第 200 个窗口左右以 `0xC0000005`（access violation）**硬崩**，`crash-dumps/faulthandler.log` 的原生栈落在 `tkinter.update_idletasks`（即 Tk 重绘时），不是我们的 Python 帧；**同一批文件把补丁摘掉跑是绿的（207 passed）** ⇒ 与我们有关。逐一对照后差异只有两处，都收紧：① 窗口改用**单独一颗小 ICO**（`app-window.ico`：16/24/32/48 四档 **BMP 编码**，`bitmap_format="bmp"`），入库那颗七档大图留给 exe 的 PE 资源（Windows 读它，不经过 Tk）；② 落点的判据跟着库自己的开关走（`_iconbitmap_method_called`），主窗口在 `__init__` 里已设过图标就不再贴——我们因此不再比库**多**发生一次 `wm iconbitmap`。改完同一条命令（同样 13 个 GUI 文件）恢复全绿，并留了两条守卫（`test_the_window_ico_is_small_and_bitmap_encoded`、`test_the_timer_leaves_a_window_that_already_has_an_icon_alone`）。**教训**：把"替库贴一张图"这类改动放进"一个进程里反复建/销窗口"的套件里，必须跑一次长会话（单跑那个文件是绿的，什么都发现不了）。
+
+**J-3 把"产物本身能跑"做成 CI 判据**
+
+- 落点：`release.yml` 的 `build` 作业，构建那一步之后新增一步（pwsh）。
+- 做法（四条，全部用临时 `--root`，别碰真实数据目录）：①`dist/ArchiveManagement/ArchiveManagement.exe --version`（退出码 0）；②`... doctor --root <临时>`（退出码 0，且 `<临时>` 下真的出现了配置 / 数据 / 日志三处 —— 这是"能建目录"的判据，**不看 stdout**）；③`... gui --root <临时> --smoke 3`（退出码 0；`--smoke` 让它自己退，不会把 runner 挂住）；④onefile 那份重跑①②③。
+- **追加（2026-10-11，J-3 开工前先修掉的一个真缺陷）**：用户编完第一版发现**两个 exe 双击都没反应**。查清是**默认命令**的问题：窗口化产物（`console=False`）没有控制台，而不带子命令时 CLI 默认跑 `init` —— 它把报告打进一个不存在的控制台就退出，屏幕上什么都没有。修法：`app.default_command()` 按 `sys.frozen` 分派（打包版 = `gui`，源码版仍是 `init`），判据取"解析后的子命令为空"，所以只给 `--root` 也会开界面；顺带修掉 `args.smoke` 在"默认补出来的 gui"上不存在的老写法（`getattr`，这条是守卫当场抓到的）。**验收方式（已实测 onedir 与 onefile 各一遍）**：直接启动 exe（不带参数）后日志里必须多一行 `界面启动` 且进程仍在（窗口开着），而不是只有 `初始化完成`；这条要进 J-3 的 CI 判据（①之前先跑一次"无参数启动"）。守卫三条在 `tests/unit/test_cli.py`（打包版无子命令→gui、只给全局参数→gui、显式子命令不被顶掉）。
+- 判据：**退出码 + 侧效应**（目录与 `logs/archive-management.log` 真的出现）。窗口化 exe 唯一可靠的"它真的干活了"的证据就是日志文件 —— 所以这一条同时替代了"读 stdout"。
+- **追加（2026-10-12，单实例闸门的验收，见 §49.1）**：用同一个临时 `--root` 先起第一个进程（`gui --root <临时> --smoke 30`，它会自己退，不占 runner），再起第二个。**可自动判的**是"第二个进程没有建界面且退 3"：那份 `--root` 的日志里**只有一条** `界面启动`，且第二个进程的退出码是 3（现在它不再弹模态框，所以退出码也能量得着）。
+- 坑：①一次冒烟必须**限时**（窗口起不来时 `gui` 会一直等 → 用外部超时兜住），onefile 首次启动要解包到 `%TEMP%\_MEIxxxx`，比 onedir 慢，超时给它留够（先量一次再定数字）；②`gui` 需要交互式桌面 —— windows runner 有会话，但**第一次上 CI 必须实看一眼**（本机绿说明不了 runner 绿）；③往 `release.yml` 加步骤会撞上 `tests/unit/test_test_config.py` 那四条工作流守卫（依赖分组、`--no-install-project`、`UV_NO_SYNC`、setup-uv 与缓存输入）—— 这批守卫是 `ci.yml` 与 `release.yml` **共用**的，新命令若引入新的组，还要在 `_CI_COMMAND_GROUPS` 里登记。
+
+**J-4 打包版与开发版的逐屏比对（第 8 条的落地，拆五步）**
+
+- **(a) 输入同源**：`--root` 指同一份已初始化目录。以前那份 `prepare_root()` 是阶段 I 的本地材料、**已删**，要重造一份最小的种子：跑一次 `init`，再按"要覆盖哪几张画面"灌数据（列表 / 海报 / 详情 / 分支图 / 发现 / 启停）。种子脚本与数据**都不进仓库**（与 §18 的理由一致：进仓库就变成第二份真相）。覆盖优先"一屏一张"，**不求 29 张全覆**。
+- **(b) 同屏**：窗口尺寸固定 1360×860、系统缩放 100%（`gui-tests-on-ci` 那条：尺寸不由被测程序决定）。开发版那一侧要**显式**设几何 —— 别用"记住的窗口几何"，否则会把上次的位置带进来（`config.ui.remember_window` 默认是开的）。
+- **(c) 抓图入口**：新增本机用的 `scripts/capture_packaged.py`（不进 CI 门禁）：启动 exe → **轮询式**等顶层窗口出现（按标题找，标题就是 `APP_DISPLAY_NAME`）→ 抓窗口自身。抓图原语**已有**：`crash_capture._grab_screen` 在 Windows 上走 `ImageGrab.grab(window=hwnd)`（PrintWindow，不受遮挡与系统缩放错位影响）。要补的只有一件事：**外部进程没有 Tk 对象**，`crash_capture._window_handle` 那条是"从 Tk 控件取句柄"，这里要换成"按标题枚举顶层窗口取句柄"。
+- **(d) 切屏（取舍先写死）**：只拍"启动后的默认状态（主页列表）"与"**命令行 / 热键能到达**的状态"（主题切换、启停分区、发现分区…）。**11 张对话框本阶段不做** —— 进程内调用不可用，靠输入合成去点，成本远大于收益。清单先定死再抓图，别拍到一半改口径。
+- **(e) 判据**：同一批画面、同参数抓的开发版与打包版逐张比，阈值沿用 §18.4 实测定下的 `MIN_SSIM=0.995 / MAX_HASH_DISTANCE=2`（这是**同一条渲染管线**上的两种打包方式，冻结本不该改变渲染）。**每处差异逐条给结论**：正当差异（字体回退、DPI、缩放）要写清"为什么正当"，缺图 / 空白 / 文案键裸露（`tr` 找不到键时原样返回键名）/ 整片默认色一律算缺陷，修在 spec 或代码里。
+- **先预判两类"看着像正当"的差异**（写在这里，免得当场拿它当借口）：①**DPI**：打包版有 PyInstaller 的清单、源码运行没有 → 非 100% 缩放下两者尺寸可能不同（所以 (b) 钉住 100%）；②**字体**：冻结后 Tk 仍用系统字体，CustomTkinter 自带字体若没进包会回退 —— 这是**缺陷**（`collect_data_files("customtkinter")` 本来就该把它带上，回退说明那条收集断了）。
+- 坑：打包版**首启动要多等**（onedir 冷启动也有 2 s 量级，见 `docs/development.md` 的实测），等窗口的轮询给足时间，别把"还在启动"判成"没起来"。
+
+**J-5 干净环境验证（分清哪档能自动、哪档只能人工）**
+
+- **可自动**：①把 `dist/ArchiveManagement` 拷到**仓库外**（例如 `%TEMP%\am-packaged`）再启动 —— 证明不依赖源码树 / CWD；②启动前把 `PATH` 收窄到 `C:\Windows\System32` —— 证明不依赖系统 Python。
+- **只能人工做一次**：真正的"未安装 Python 的干净机器"。用 Windows Sandbox（专业版自带）或全新虚拟机，走一遍备份 / 恢复 / 导入导出，把结果写进验收记录。这一档的价值在"运行时库（VC++ 运行库这类）在不在"，**只有干净环境照得出来**。
+- 坑：`--root` 必须指到临时目录（打包版与开发版共用同一套 `ApplicationPaths`，不指定就会往真实用户目录写）；崩溃留证（coredumpy）在冻结版里**能不能用还没验过** —— 验不了就退回"退出码 + 日志文件 + Windows 事件查看器"，并把"未验证"写出来。
+
+**J-6 UPX 去留（先量再定，定完落死）**
+
+- 先量：分别构建 `upx=False` 与装了 UPX 的 `upx=True`，记三项 —— onedir 体积 / onefile 体积 / 启动到窗口的时间。**把杀软算进来**：UPX 压过的 exe 属于"打包 + 自解压 + 压缩壳"里最像恶意软件的那种，误报率明显更高。
+- 定完就落死：要么在 CI 装 UPX 并**断言它真的压了**（构建日志里搜 UPX 行），要么写 `upx=False` 并在文档里写明"不压"。**别留 `upx=True` 这个假开关**。
+- 坑：判据要建在**日志 / 产物属性**上，不能建在"代码里写了 `upx=True`"上。
+
+**J-7 交付前的两条边界**
+
+- **单文件模式**：①冷启动明显慢（解包到 `%TEMP%\_MEIxxxx`），给一个上限并实测（现有基线只有 onedir 的 2.1 s，onefile 要单独量）；②退出后 `_MEIxxxx` 有没有被清掉 —— 异常退出会留残渣，用户会看到磁盘上多出几百 MB。
+- **误报**：交付前在 Windows Defender + 至少一个第三方引擎上扫一遍，把引擎名 / 版本 / 结论记进验收记录。有误报时优先"去掉 UPX / 换构建方式"，**不是**"让用户加白名单"。
+
+**J-8 改哪一处必须同步改哪几处**
+
+- **`spec`（`icon` / `version` / `datas` 的目标路径）** → `tests/unit/test_package.py`（新增"`spec` 引用的文件都在 + version 与 `packaging.py` 一致"）、`docs/development.md` 的打包一节（现在那句"显式声明图标"是过时口径）、`README.md` 的打包一节（产物名 / 体积变了要跟）。
+- **`release.yml` 的构建作业（加冒烟步骤 / 装 UPX）** → `tests/unit/test_test_config.py` 那四条工作流守卫（与 `ci.yml` **共用**：依赖分组、`--no-install-project`、`UV_NO_SYNC`、setup-uv 与缓存输入）；新增命令若引入新的依赖组，还要在 `_CI_COMMAND_GROUPS` 里登记。
+- **`resources/app.ico`（新资源）** → `spec` 的 `datas`（整棵 `resources/` 已经一起进包，但要确认没被 `exclude` 挡掉）、`main_window` 的 `iconbitmap`、J-3 里的 PE 图标断言。
+- **版本号（`packaging.py`）** → `packaging/version-info.txt`、`release.yml` 抽版本的正则、`tests/unit/test_package.py` 里那条"两处一致"。
+
+**验收记录长什么样**（接在上面那段"打包验收标准"上）：第 8 条的逐屏比对要有**逐条结论表**（画面名 / 差异 / 定性与理由 / 处置），与 J-5 的干净环境记录、J-7 的误报扫描结论一起留档。**这份记录是本地材料，不进仓库** —— 与阶段 I 那 29 张截图同一类（理由见 §18.2 第 1 条的反面：评审材料入库就会变成第二份真相）。
+
+**不在本阶段**（免得被顺手做掉）：macOS 的 `.app`、Linux 打包（两条都是阶段 K 第 6 条）、代码签名 / 公证、自动更新、安装器（Inno Setup / MSI）—— 后三条没排期，真要做先在 §10 的"后续阶段（未排期）"里单独立项。
+
+**工作量与排期**：约 **2 天量级**（J-1 + J-2 半天；J-3 半天；J-4 一天 —— 大头是种子数据与"能自动到达的状态"清单；J-5 / J-6 / J-7 半天）。**不阻塞阶段 K**，但两者用的是**同一份 spec**：先做完 J-1 / J-2 / J-3 再动 K，免得同一处改两遍。
+
 ### 阶段 K：自动发布流程
 
 阶段 I 完成后，使用 `.github/workflows/release.yml` 执行自动构建：
@@ -1114,13 +1218,13 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 
 ### 档 3 · 分级执行（最省, 但要同步改门禁; 只做了第 15 条）
 
-| #   | 改动                                                                                          | 说明                                                                                                                                                                                      |
-| --- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 12  | **PR 只跑 Linux 全量 + 分片; main 跑三平台**                                                  | 把 52 分钟变成个位数最直接的办法                                                                                                                                                          |
-| 13  | PR 上用**已有的** `--min-severity blocker`（或 `critical`）只跑关键用例, main 跑全量          | 仓库已经实现了这个开关, 几乎零开发量                                                                                                                                                      |
-| 14  | 给最慢的 GUI 用例打 `pytest.mark.slow`, PR 上 `-m "not slow"`                                 | 需要先按耗时排序（`--durations=20` 或 Allure 里的 duration）                                                                                                                              |
-| 15  | 按作业拆依赖分组: `[dependency-groups]` 拆成 `test`/`coverage`/`quality`/`analysis`/`package` | **已实施（2026-09-21）**, 实测收益比原估小得多: 缓存热时每实例只省约 0.5~1 秒（`uv sync` 装 51 个包 522ms）, 真正省下的是**冷缓存**那一轮（锁文件一变就得重建 uv 缓存）与各作业的安装体积 |
-| 16  | **降单条 ui 用例固定成本**: 先 profile 典型用例 call 段（ArchiveApp 构造 / pump / 断言 / destroy 收尾链）的时间占比, 再定点优化占比最大的一段 | 这是测试套件执行时间的**真正大头**（本地与 CI 都受益）: 2026-10-07 `--durations` 实测, 成本集中在 call 而非 fixture, Top60 慢用例合计只占 ~27% —— 是"280 条 ui × 每条 3~4s"的**数量×固定成本**型, 打 `slow` 标记排除头部用例收益有限（已并入第 14 条的不做结论）。红线: 建真窗 / 真实窗口映射是布局断言的一部分, 优化不得伤"真实 UI"语义 | **未做（2026-10-07 登记）**; 缓解措施先行 —— 本地手动全量可双进程分片（`scripts/run_tests_local.py`, 实测 18:28 → 12:27, 见 docs/testing.md §6） |
+| #   | 改动                                                                                                                                          | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 12  | **PR 只跑 Linux 全量 + 分片; main 跑三平台**                                                                                                  | 把 52 分钟变成个位数最直接的办法                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 13  | PR 上用**已有的** `--min-severity blocker`（或 `critical`）只跑关键用例, main 跑全量                                                          | 仓库已经实现了这个开关, 几乎零开发量                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 14  | 给最慢的 GUI 用例打 `pytest.mark.slow`, PR 上 `-m "not slow"`                                                                                 | 需要先按耗时排序（`--durations=20` 或 Allure 里的 duration）                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 15  | 按作业拆依赖分组: `[dependency-groups]` 拆成 `test`/`coverage`/`quality`/`analysis`/`package`                                                 | **已实施（2026-09-21）**, 实测收益比原估小得多: 缓存热时每实例只省约 0.5~1 秒（`uv sync` 装 51 个包 522ms）, 真正省下的是**冷缓存**那一轮（锁文件一变就得重建 uv 缓存）与各作业的安装体积                                                                                                                                                                                                                                                                                                     |
+| 16  | **降单条 ui 用例固定成本**: 先 profile 典型用例 call 段（ArchiveApp 构造 / pump / 断言 / destroy 收尾链）的时间占比, 再定点优化占比最大的一段 | 这是测试套件执行时间的**真正大头**（本地与 CI 都受益）: 2026-10-07 `--durations` 实测, 成本集中在 call 而非 fixture, Top60 慢用例合计只占 ~27% —— 是"280 条 ui × 每条 3~4s"的**数量×固定成本**型, 打 `slow` 标记排除头部用例收益有限（已并入第 14 条的不做结论）。红线: 建真窗 / 真实窗口映射是布局断言的一部分, 优化不得伤"真实 UI"语义<br/>**未做（2026-10-07 登记）**; 缓解措施先行 —— 本地手动全量可双进程分片（`scripts/run_tests_local.py`, 实测 18:28 → 12:27, 见 docs/testing.md §6） |
 
 **第 15 条的落地细节**: 各作业实际装的组 —— `quality` = test+quality+analysis; `pytest` = test+quality（片 0 的平台检查要 mypy）; `pytest-report` = coverage; `security` = test; `allure-summary` = **一组不装**（脚本只用标准库, Allure CLI 走 npm）; release 的 build = test+quality+package。
 
@@ -2811,6 +2915,273 @@ macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗�
 
 **教训**: 把守卫写成"绝对干净", 等于要求**别人**的历史也不许存在 —— 要么把基线取在受测对象之前, 要么显式
 钉住会话状态; 而"本机单跑绿"恰恰是这类缺陷最好的藏身处。
+
+## 49. 用户实测两条(2026-10-12): 打包版单实例 + 空库回主页
+
+用户在编好的打包版上实测报了两条: **多开会互相干扰**、**删掉库里最后一款游戏后界面留在详情页**。两条都不是
+崩溃, 而是"说不清的怪状态"(没有报错、画面也正常), 正因如此才要写成硬规则 + 守卫。
+
+### 49.1 打包版同一时间只允许一个界面进程
+
+- **根因**: 两个进程各持同一个数据库、备份根、全局快捷键注册与自动启停轮询, 谁都不报错, 但两边"我以为的
+  状态"互相覆盖(用户原话"多开会导致部分功能出现意料之外的情况")。测试与开发**要**并行开窗口(分片跑集成用例
+  时每片都在自己进程里建真窗口), 所以闸门只在打包版生效。
+- **第二个实例的处置改过两次口径**(同一天用户追加: "重复打开窗口应该直接跳转到上次打开的窗口, 而不是弹窗提示
+  用户已经多开了"): ①第一版弹一句"已经开着了"就退 —— 用户看到的是一道**多余的确认**, 而他双击的意图只是
+  "我要用这个软件"; ②第二版改成**把已经开着的那个窗口叫到前台**, 自己安静地退出(退出码 3): 请求走数据目录里
+  的请求文件 `instance.focus`(第二个进程写 `pid=… at=…`, 已经开着的那个在它的 100ms 轮询里
+  `deiconify + lift + focus_force`, **先抬窗口、抬完再清文件** —— 那个"文件没了"就是回执)。选"文件 + 轮询"
+  而不是窗口消息/跨进程句柄: 一是软件**不执行外部程序**, 二是三平台同一条路。
+- **先量后改抓到的真缺陷(本轮最值钱的一条)**: 第二版做完实测打包版 —— 窗口确实被**恢复成可见**(最小化状态
+  消失), 但前台仍是编辑器 ⇒ **`deiconify/lift` 抢不到前台**。这是 Windows 的"前台锁定": 后台进程
+  `SetForegroundWindow` 未必生效。第三版补上: 第二个进程(用户刚双击起来、手上有这个权利的那一个)调一次
+  `user32.AllowSetForegroundWindow(<已有实例的 pid>)`, 并**等回执再退**(那份权限可能随它退出而失效)。同一个
+  探针再测: 前台窗口变成应用名、`granted=True handled=True`。为什么不在两个平台都做: X11/macOS 没有这道闸
+  (也不用为它各写一套窗口系统 API)。
+- **取走即清空**是这条通道的关键: 文件留着的话每轮轮询都会抬一次窗口, 用户手动切到别的软件后又被抢回来;
+  而清得太早(读的时候就清)则第二个实例看不到"处理完了"。所以是"读 → 抬 → 清"三步, 清掉的就是给对方的回执。
+- **落点**: 新增 `services/single_instance.py`(`InstanceLock`、`request_focus` / `read_focus_request` /
+  `clear_focus_request` / `wait_until_handled` / `holder_pid` / `hand_over_foreground`、
+  `ALREADY_RUNNING_EXIT = 3`、逃生门 `ARCHIVE_MANAGEMENT_ALLOW_MULTI`); 拦截点在 `app._run_gui`(打包版且没开
+  逃生门时先拿锁, 拿不到就 `_hand_over_to_running_instance` → 写请求 + 交前台权限 + 等回执 + 记日志, 退 3;
+  起窗口的老逻辑抽成 `_start_gui`); 已经开着的那个在 `ui/main_window._maybe_come_to_front`(轮询里)
+  → `_come_to_front`(deiconify/lift/focus_force)。集成用例直接调 `run_gui`, 根本不经过这条闸门。
+  `_allow_windows_foreground` 里那一小段平台专属代码逐行带 `# platform: windows - …` 标记(覆盖率口径), 用
+  `getattr(ctypes, "WinDLL")` 取加载器 —— 与 `services/platform_scan` 读注册表同一套写法, 事是让另一平台的
+  mypy 也过(typeshed 里 `WinDLL` 按平台收)。
+- **为什么用"操作系统级文件锁"**(`msvcrt.locking` / `fcntl.flock`): 锁跟着进程走, 进程无论怎么消失
+  (正常退出 / 崩溃 / 被任务管理器结束)都由系统释放 ⇒ **不会留下把用户永久挡在门外的陈旧锁**("建文件即上锁"
+  那类做法得自己清理陈旧锁, 清理时又得猜"那个 pid 还在不在")。锁文件落在**数据目录**(`instance.lock`), 于是
+  `--root` 便携实例各用各的锁与请求文件。
+- **坑(第一版真栽了)**: 锁**第 0 字节**时, 第二个实例读不出锁文件里那行"谁占着" —— Windows 的
+  `msvcrt.locking` 会把**读**一起挡住(实测 `holder()` 返回空串), 日志只能写"未知"。改锁到
+  `_LOCK_OFFSET = 4096`(文件末尾之外, 实测可锁): 记录照旧可读、锁照样有效。Linux 的 `flock` 是建议锁、本来
+  就不挡读, 但两个平台共用一个偏移量最省心。
+- **守卫**: `tests/unit/test_single_instance.py` 十一条(第二个句柄被拒 / 释放后立刻能再拿 / 同一对象重复 acquire
+  与重复 release / 自动建目录且记录可读 / 文件不存在时空串 / `with` 的返回值与释放 / 便携根各用各的锁 / 请求
+  **读不清、清完才算处理完** / 等回执与超时 / 从锁记录里取 pid / 写不进去或文件为空都只返回空串 / 逃生门只认
+  明确写法) + `tests/unit/test_cli.py` 五条(第二个实例退 3、不建界面、**留下请求**且日志里带 granted/handled /
+  窗口期间锁一直在手、关掉后还回来 / 源码运行不受限 / 逃生门放行)
+  - `tests/integration/test_gui_lifecycle.py::test_a_second_start_brings_the_window_back_to_the_front`
+    (真窗口: `withdraw()` 造"藏起来了" → 请求 → 窗口回到可见且请求被清掉; 而且**没有新请求就不再抬窗口**)。
+- **咬合验证**(每一处都真打断过): 不写请求 → 第二个实例那条红(请求为空); 轮询里不调 `_maybe_come_to_front`
+  → 真窗口那条红(`winfo_viewable() == 0`); 抬完不清文件 → 服务层与真窗口两条同时红; `lock.acquire()` 判据
+  失效 → 第二个实例建了界面; `_LOCK_OFFSET` 改回 0 → 记录读不到。
+- **实测数字**(打包版 onedir, 用 `GetForegroundWindow` 量): 第二版(只有 deiconify/lift)
+  `iconic 1 → 0`(恢复成可见)但前台仍是编辑器; 第三版(加上交前台权限)前台窗口变成 `存档管理工具`,
+  日志里 `granted=True handled=True`, 两边的日志行带同一个 `pid=… at=…`(对得上就是同一次双击)。
+- **验收(打包版, 2026-10-12 两个产物各测一遍; onedir 上又用 "前台窗口标题" 量了一遍, 全绿)**:
+  - 第一个实例: 起来并保持存活, 日志里 `界面启动` 正好一条; 数据目录下 `instance.lock` 出现(记录是 `pid=<A 的进程号> version=0.0.1`)。
+  - 第二个实例: **不建界面**(日志里没有第二条 `界面启动`)、写下请求并退出, **退出码 3**(不再弹模态框, 所以这个码现在也量得着); 两边的日志成对出现且 `pid=… at=…` 相同。
+  - **窗口到前台**: 先用 `ShowWindow(SW_MINIMIZE)` 把 A 最小化(`IsIconic=1`), 再双击 → A 恢复(`IsIconic=0`)且 `GetForegroundWindow()` 的标题变成 `存档管理工具`; 当时的前台是编辑器。
+  - 用 `Stop-Process -Force` 强杀第一个实例(模拟崩溃/任务管理器结束)后**立刻**再开一个: 正常起来 ⇒ **没有陈旧锁**。
+  - 顺带一条反证: 用 PowerShell 整份读锁文件(`Get-Content -Raw` / `ReadAllBytes`)会被系统挡下来("另一个程序已锁定文件的一部分") —— 锁是真的挂在文件上, 不只是写了行字。**注意**: 这条也解释了为什么 `holder()` 只能读到文件长度为止(应用那侧就是这么读的)。
+  - 归入 J-3 的 CI 判据时只钉"日志只有一条 `界面启动` + 第二个进程退 3"(见 J-3 那条追加)。
+
+### 49.2 删掉最后一款游戏后要回主页(不再留在详情页)
+
+- **现象**: 库里只有一款游戏时打开它的详情页, 在"游戏管理"里删掉它 —— 游戏没了, 界面却还留在详情页:
+  标题写着"未选择游戏"、备份列表只剩一行占位, 用户既看不到游戏库、也看不到"还没有游戏"的下一步动作。
+- **根因**: `_show_empty_list()`(删空 / 外部删除 / 选中项消失 / 启动时无游戏, 四条路都走它)只把**控件**复位,
+  从不改 `self._page`; 而详情页是围绕"某一款游戏"建的, 游戏没了它就是空壳。
+- **落点**: 规则加在 `_show_empty_list()` 的**最后一步**(`if self._page is AppPage.DETAIL:` → `_show_page(HOME)`)
+  —— 一处覆盖四条路径; 启动阶段本就在主页, 这一步是空操作; 放最后是因为上面那串复位是给详情页控件做的,
+  先跳页再改就白改了。
+- **守卫**: `tests/integration/test_gui_backup_restore.py::test_deleting_the_only_game_from_the_detail_page_goes_back_home`
+  (先断言"详情页真的打开了", 再删唯一一款, 然后量三件事: 页面变回主页 / 详情页收起 / 主页给出自己的空状态 ——
+  一条游戏行都没有、并且摆出"去游戏发现")。**咬合验证**: 那一行改成恒假 ⇒ 当场红
+  (`<AppPage.DETAIL> is not <AppPage.HOME>`)。
+- **注意**: 同场景的老用例(`test_deleting_last_game_clears_hero_panel`, 走主页那条路)照旧绿 —— 两条一起看才
+  说明"规则只在详情页生效", 而不是把所有删空场景都改道。
+- **验收**: 真 Tk 窗口的集成用例(不是替身); 打包版这一条要人点进去(游戏主页 → 打开详情 → 游戏管理 → 删除游戏),
+  没法脚本化 —— 留给用户在自己那份产物上确认一次。
+
+### 49.3 这一轮的教训
+
+- **"不能多开"要拦在建窗口之前**: 拦在窗口起来之后, 用户会先看到第二个窗口再被关掉, 而他可能已经在里面点了
+  东西。现在的顺序是"拿锁 → 失败就提示并退出"。
+- **启动路径上的锁必须能靠"进程消失"自己解开**: 启动闸门最怕"上次崩了, 这次也进不去"。选 OS 级锁而不是
+  "锁文件存在即占用", 就是为了让这个失效模式压根不存在。
+- **提示里能带排查用的标识就带上**: 第一版只能说"未知", 是锁的位置挑错了; 现在锁与请求两边都带
+  `pid=… version=…` / `pid=… at=…`, 各自落在自己的日志里, 排查时能直接对上是哪个进程、哪一次双击。
+- **多余的一步就是多余**: 第一版给第二个实例弹了一句"已经开着了" —— 功能上没错, 但用户双击的意图是"我要用
+  这个软件", 而它已经开着了; 弹框只是把责任推回给用户(他自己去找那个窗口)。改成"直接叫到前台"后, 第二个实例连
+  图形栈都不需要碰, 顺带把"模态框会把进程挂住、退出码量不到"那条老坑一起消掉了。
+- **"能恢复可见"不等于"跳到前台"**: 窗口从最小化回来了、但是前台焦点仍在别的软件手上 —— 只有用探针量
+  `GetForegroundWindow` 才看得见这个差别。这条直接定义了要不要写平台专属代码(要)。
+- **守卫不许碰真实数据目录**(2026-10-13 实测撞上): `test_a_packaged_build_opens_the_window_when_started_without_arguments`
+  为了"argv 里一个参数都没有"而不传 `--root`, 于是默认路径落到**真实用户数据目录** —— 用户机器上正开着
+  这个软件时, 单实例闸门把界面挡掉, 用例就变成了"看运气"(当天就是这么红的: 那份日志里还留着
+  `已有实例在运行(…\AppData\Local\ArchiveManagement\instance.lock)`)。现在把 `ApplicationPaths.default`
+  替成临时根 —— 顺带一条副产品: 那次撞车正好证明**用户那边跑着的实例真的被叫到前台了**(`handled=True`)。
+- **平台专属代码的写法跟着仓库既有套路走**: 逐行 `# platform: windows - …` 标记(覆盖率按平台排除) +
+  `getattr(ctypes, "WinDLL")` 取加载器(typeshed 里它按平台收, 直接写会让另一平台的 mypy 报错)。
+- **手册里连"命令行"三个字都不能写**: `wiki/10` 第一稿顺手写了"给快捷方式或命令行加上环境变量…", 被
+  `test_wiki_sync::test_pages_stay_free_of_the_command_line` 当场拦下(手册面向"不碰命令行的用户",
+  写成命令行用法等于告诉用户"想用得先装 Python")。逃生门因此只留在 `docs/development.md`。
+
+**本轮门禁(2026-10-12)**: `ruff check` / `ruff format --check`(302 文件) / `mypy`(252 文件) 全绿;
+`pytest tests/unit` 2455 passed / 8 skipped; 平台感知覆盖率口径(`coverage_platform.py write` → `coverage run`
+→ `coverage report`) **100%**(2836 passed / 9 skipped, 行与分支 0 未覆盖); 打包产物 onedir 与 onefile 各跑一遍
+§49.1 的验收(含"前台窗口标题变成应用名"那条), 全绿。
+
+**这条本轮学到的两件事**: ①**做完就量,别拿"看着像"交差** —— 第二版把窗口恢复成可见就当事成了,
+直到用 `GetForegroundWindow` 量才发现前台压根没过去; ②**平台标记行必须单行**: 一次重排把
+`getattr(ctypes, "WinDLL", None)` 拆成三行、标记落在括号那行上 —— 另两行就不在排除范围里, 到了 Linux
+的覆盖率作业上会成为两个"永远不执行"的缺口。现在那几行都写成短单行 + 短原因。
+
+**同一轮的收尾(2026-10-13, 用户要求)**: push 那份忽略清单上的 `&ci_ignore_patterns` **根本没人引用**
+(PR 侧是块状字符串过滤器, 锚点进不去), 已删掉 —— 那条"忽略清单用锚点声明一次"的断言换成"它是普通键 +
+与 PR 侧逐条对齐"。顺带修掉两处**守卫对注释过敏**的毛病: ①`workflow.split("filters: |")` 会被注释里提
+一句同名串切歪(切完 PR 侧集合是空的, 报出来却是"两边不一致", 排查方向被带跑); ②
+`workflow.count("dorny/paths-filter")` 把注释里提的名字也数进去(判成"实现了两份")。两处都改成按**整行**
+找(`re.split` 的行锚点、数 `uses:` 行数)。**教训**: 文本判据别拿裸子串切/数 —— 注释里提一句同样的字,
+它就会指错地方。
+
+## 50. 选择框的内容能被手删(2026-10-13, 用户实测)
+
+- **现象**(用户原话): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成误会"。选择框(下拉框)
+  的值来自列表选项, 而 CustomTkinter 的 `CTkComboBox` 内部是个**可编辑的 Entry** —— 不显式写
+  `state="readonly"` 就能把文字选中删掉。删掉之后**实际生效的值没变**(它还在那个选项上), 屏幕上却变成
+  空白: 看着像"没选", 筛选却照旧生效。
+- **根因不是库的问题**: CTk 自己就把 readonly 当成正常用法(`set()` 会临时切回 normal 再写回 readonly,
+  实测 Tk 对 readonly 的 `insert`/`delete` 是**静默忽略**)。是仓库里只有三处写了 readonly
+  (`main_window._new_combo`、设置的语言/校验方式), 剩下四处漏了: 主页的筛选框与每页条数、游戏发现的筛选、
+  设置的字号、批量导入每行的"目标游戏"。
+- **落点**: 漏的那四处各加 `state="readonly"`; 批量导入那行**启用态从 `normal` 改成 `readonly`**
+  (`_paint_batch_row`; 它旁边的说明是 `CTkLabel`, 两者接受的 state 不是一个集合, 分开写);
+  **唯一保留可输入的是定时任务窗口的"游戏选择框"** —— 它要的是"输入即筛选"(有 `on_key` 在收窄候选,
+  wiki 第 5 章也写了这条), 就地标 `# 可输入: 输入即筛选(见下面的 on_key)`。
+- **守卫**:
+  - 结构(单测): `tests/unit/test_ui_widgets.py::test_every_picker_combobox_is_read_only` 扫
+    `src/archive_management/ui` 里每个 `ctk.CTkComboBox(` 调用片段(括号配对取出来), 要求要么带
+    `state="readonly"`、要么带` # 可输入: <原因>`(原因至少 5 个字); 并自检"至少扫到 8 处", 免得改名后
+    判据静默失效。
+  - 行为(集成): 主页与设置窗口各一条 —— 量控制是不是 readonly, 再真的 `_entry.delete`/`insert`
+    一遍, 断言文字没变(与真实按键走同一条路)。
+  - 既有那条"目标下拉框只在合并时可用"的断言从 `normal` 改成 `readonly`(`tests/unit/test_dialogs.py`)。
+- **咬合验证**: 拿掉 `_combo` 上的 readonly → 结构条与主页那条**同时**红(前者点名
+  `home_page.py:769`); 把 `_paint_batch_row` 改回 `normal` → 目标框那条红; 抹掉定时任务那处的
+  `# 可输入` → 结构条点名 `schedule_window.py:221`。三处都已复原。
+- **教训**: 库的"可选参数"就是默认会被漏的开关 —— 四处漏了三处是同一个错(写的人根本不知道要写)。
+  一处一处补上没有意义, 得把规则写成**扫源码的守卫**: 新加选择框时漏写 readonly 当场报错, 而"确实要输入"
+  的地方被逼着写清理由。另外: 判据要自检"扫到了东西", 否则一次重命名就能让它变成永远绿的。
+
+## 51. 选择框"选不可选" + 主页搜索框"边打字边筛"(2026-10-13, 用户实测追加)
+
+- **要求一(用户原话)**: "多选框的内容能否让其也不可选中"。§50 的 `state="readonly"` 只挡住**改写**:
+  readonly 的 Tk Entry 照样允许拖选、双击选词, 屏幕上出现蓝底高亮与插入符 —— 看着仍然像"这里能改"。
+- **口径落到一处**: `src/archive_management/ui/widgets.py` 新增 `apply_picker_defaults()`(库级补丁,
+  与 `install_keyboard_support` / `window_icon` 同一套"调用点不需要记得做什么"的做法):
+  - 没写 `state` 的选择框 ⇒ 一律 `readonly`(Tk 对 readonly 的 `insert`/`delete` 静默忽略, 实测);
+  - `readonly`/默认的再 `_lock_text_selection()`: 点文字 = **打开列表**, 拖动/双击/三击/带修饰键的点选
+    一并吃掉;
+  - 明确写 `state="normal"` 的例外不动(定时任务窗口的游戏选择框, 就地补上 `state="normal"`),
+    `state="disabled"` 也不动。
+- **改之前先量库内情**(两次量错、两次改口径):
+  - `CTkComboBox` **没有** `_button`: 箭头是画在它自己的 `_canvas` 上的, 点击由
+    `_canvas.tag_bind("dropdown_arrow", "<Button-1>", self._clicked)` 接住 —— 所以"点文字"要调
+    `combo._clicked()`(它自带禁用态判断与"列表开着就收起"的切换), 而不是去 invoke 一颗不存在的按钮。
+  - 只吃掉 `<Button-1>` **不够**: 探针里"按下 → 选中=0, 浮层=开"看着已经对了, 但紧接着
+    `<B1-Motion>` 让 `selection_present()` 变成 1 —— readonly 的 Entry **没有按下**也照样拖出选区
+    (Tk 从插入光标处开始选)。于是把 `_SELECTION_ONLY_EVENTS` 整族吃掉, 再量: 按下/拖动/松开之后
+    `sel` 恒为 0 且浮层开着。
+- **守卫**:
+  - 结构(单测): `test_editable_comboboxes_have_to_say_why` —— 默认值搬进补丁之后, 这条改为守**例外**:
+    调用片段里出现 `state="normal"`(或任何非 readonly/disabled 的 state)就必须紧跟
+    `# 可输入: <原因>`; 另外 `test_the_picker_defaults_are_installed_at_import` 断言
+    `apply_picker_defaults()` 第二次调用返回 `False`(证明它在导入时就装上了、且幂等)。
+  - 行为(集成, `test_gui_dropdown.py`): ① 建一个**裸** `ctk.CTkComboBox` —— 必须已经是 readonly
+    (程序 `insert` 无效), 而 `state="normal"` / `"disabled"` 两个例外不受影响; ② 在真窗口里喂
+    "按下 → 拖动 → 松开", 断言 `selection_present() == 0` **且**列表已经打开(两条一起才叫"点文字 = 点箭头")。
+- **咬合验证(3 次)**: 拆掉按下那条接线 → 红在"点文字没打开列表"; 只留按下、拆掉拖选拦截 → 红在
+  "选择框的文字被拖选出来了"; 不再强制 readonly → 红在"裸控件是 normal"; 抹掉定时任务那处的
+  `# 可输入` → 结构条点名 `schedule_window.py:222`。四处都已复原。
+- **要求二(用户原话)**: "首页搜索游戏名的搜索框...完全不起作用, 不管是输入游戏原名还是修改过的名称或
+  识别到的汉化名称均无搜索效果, 所有游戏还是都显示着"。
+- **根因两条, 都不是"筛选逻辑坏了"**:
+  1. **打字时压根没筛**: 主页搜索框只绑了 `<Return>`, 点「搜索」才走一次 —— 用户看着列表一动不动, 自然
+     认为搜索框坏了(回车那条路一直是通的, 集成用例 `test_home_page_filters_games_and_runs_actions` 一直绿)。
+  2. **搜索只比 `facts.name`**: 而库里那个名字可能已经被**译名写回**换掉了(`_rename_games` 会把
+     `name` 改成当前语言的译名, 录入时的原名只留在 `games.original_name`)。所以"输入游戏原名"本来就搜不到 ——
+     这一点仓库里早有先例: 批量导出对话框的筛选用的是"界面名或原名"(`models._matches_any`), 主页搜索漏了。
+- **落点**:
+  - 主页: `_search_entry` 增绑 `<KeyRelease>` → `_schedule_search()`(防抖 `_SEARCH_DEBOUNCE_MS = 300`,
+    **合并而不是重新计时**, 与 `_schedule_list_sync` 同一条理由: 输入法一次提交一整串时"取消再计时"会被
+    无限推后); `_run_search()` 到期读**当前**文字筛一次; `_on_frame_destroyed` 与 `_clear_search` 都撤掉
+    挂起的搜索任务; `_submit_search()` 在词没变时直接返回(边打字边筛已经筛过, 回车/点按钮不该再查一遍库,
+    那一下还会把页码与选中行重置); `_render_filters` **不再回写**输入框 —— 生效的搜索词只可能来自输入框
+    本身(`_submit_search` 读它)或“清空”(两者一起清), 所以回写是多余的, 而它有害: 用户刚敲进去、防抖
+    还没到点的那半句会被别的重绘抹掉, 同值重写还会把光标挪到末尾、打断输入法正在拼的候选。
+    “框里空着、其实还在筛”这个形态改由**不变式用例**守着(见下), 不靠回写。
+  - 原名: `GameFacts.original_name`(新字段, 默认 `""`)+ `HomeFilter.matches` 两个名字都认;
+    `application/home.load_facts` 与演示后端各自填上它。
+- **守卫与咬合**:
+  - 集成 `test_typing_in_the_home_search_box_filters_without_pressing_enter`: 喂**真实** `<KeyRelease>`
+    事件(不是直接调 `_on_search_key`), 等防抖到期后断言行集合缩到一款; 顺带断言"词没变再回车不会重置选中行";
+    **第一条版本是假绿** —— 拆掉 binding 它照样过(因为它直接调了处理函数), 咬合时抓出来, 改成喂事件;
+    喂事件又踩到"合成键盘事件走**焦点**窗口"(文档里早写着), 于是先 `_entry.focus_force()`。
+  - 单测 `test_live_search_*`: 用替身宿主帧驱动真实 `_schedule_search`/`_run_search` —— 连打 50 次只排一个
+    任务、**一次都不撤销**、防抖窗口在 (0, 500] ms 内; 宿主帧销毁那条同时撤掉同步任务与搜索任务。
+  - 单测 + 真实库用例: `test_search_also_matches_the_recorded_original_name`(域层)与
+    `test_search_finds_a_renamed_game_by_its_recorded_original_name`(`update_game` 改名后搜原名)。
+  - 咬合: 拆掉 `<KeyRelease>` 接线 → 红; 改成"取消再重新计时" → 合并语义两条红; 把 `matches` 改回只比
+    `name` → 域层与真实库两条红。都已复原。
+- **环境实测的坑(记下来)**:
+  - `event_generate("<KeyRelease>")` 不先把焦点交给控件就**不会**走到它的绑定上(合成键盘事件按焦点窗口
+    派发), 而且此时用例会以"没筛"的方式红 —— 看起来像产品的错。
+  - 共享池里的选择框会带着上一次用例留下的 `_close_on_next_click = True`(浮层被拆掉时它的回调没跑),
+    于是"点文字"变成**收起**而不是打开 —— 新用例自己把开关拨回"关着"再量。
+  - 成本复核: `load_facts`(含每个存档路径的可用性探测)在 2000 款规模实测 0.13s(`performance-results.csv`),
+    边打字边筛按 300ms 一批落在这个量级上可以接受, 因此没有为它引入缓存。
+- **教训**: ① "把默认值写在类上"比"每个调用点都记得写"强得多 —— 但**例外**要在源码里写明理由, 否则下一个
+  人只会看到"这处跟别处不一样"; ② 用户报"某个功能完全没反应"时, 先分清是**逻辑坏了**还是**触发条件与
+  预期不同**(这里是"只在回车时筛" vs "打字就该筛"), 两者修的地方完全不一样; ③ 改默认值这类口径一定要顺手跑一遍**全量** —— 本轮的 100% 覆盖率门禁当场咬出两处:
+  一条集成用例建的是**裸** `CTkComboBox` 却要往里打字(已改成显式 `state="normal"`, 与仓库纪律一致),
+  以及 `_render_filters` 回写输入框那两行在全量下**不可达**(回写本身也真的有害, 已删并换成不变式用例);
+  ④ 驱动界面行为的用例必须走
+  **真实接线**(喂事件), 直接调处理函数只能测到"处理函数自己是对的"。
+
+## 52. 搜索框"彻底没反应"的真根因: 占位文字 + 我们的键盘接线把它顶掉了(2026-10-14, 用户实测)
+
+- **现象(用户原话)**: "不管在首页的列表模式下还是在海报模式下, 使用搜索框均无反应, 我是指不管是输入时
+  没有筛选游戏, 手动点击搜索或用回车均无反应, 而且这个输入框内的内容还是可选可编辑, 且没有在我输入内容时
+  自动消失"。**四条症状同一个根因**, §51 那轮改的东西(防抖/回车/原名)一条都没生效 —— 因为**文字压根没
+  进到 Entry 里**。
+- **量到的真相(临时探针, 真打字 `<KeyPress>`, 未修时)**:
+  - `inner='ab输入游戏名称后回车'` / `ctk_get=''` / `placeholder_active=True` —— 用户敲的字接在**提示文案
+    后面**, 而 CTk 的 `get()` 在占位激活时**恒返回空**;
+  - 点一下输入框、`focus_force()` 都不取消占位(`placeholder_active` 仍是 `True`)。
+- **根因两件事叠在一起**:
+  1. `CTkEntry` 的 `placeholder_text` **不是提示层, 而是真写进 Entry 的内容**(`_activate_placeholder` 里
+     `_entry.insert(0, 提示文案)`), 靠它自己的 `<FocusIn>`(`_entry_focus_in` → `_deactivate_placeholder`)取消;
+  2. `ui/keyboard.py` 的 `make_reachable` 往内层控件绑事件时写的是 `inner.bind("<FocusIn>", ...)`
+     —— **不带 `add="+"` 就是替换** ⇒ CTk 那条处理被顶掉, 占位永远取消不掉。同一个坑还坑着批量导出/导入
+     对话框顶部的筛选框(它也带占位文字)。
+     于是: 框里看着有字(`inner` 里是提示 + 用户敲的字)、`get()` 却是空 ⇒ 回车/点"搜索"读到空串 ⇒
+     `_submit_search` 判定"词没变"直接返回(§51 加的那条早退) ⇒ 用户看到的是"点了完全没反应"。
+- **为什么上一轮的守卫没抓到**: 搜索用例是 `page._search_entry.insert(0, "山海")` —— 直接走 CTk 的
+  `insert()`(它会取消占位), **绕过了真实输入路径**; 而 `<KeyRelease>` 又是合成出来直接喂给控件的。用例全绿,
+  用户按真键盘一个字都进不去。**这是"守卫假绿"的第二种形态: 量具本身把被测路径短路了。**
+- **修法**: `make_reachable` 里四条绑定全部 `add="+"`(`<FocusIn>`/`<FocusOut>`/`<space>`/`<Return>`)——
+  类级补丁只能往后加, 不许顶掉控件自己的接线; 顺带把主页搜索框同时盯上 `<KeyPress>`(中文是**输入法提交**
+  的, 提交那一下走带字符的那条, 只绑 `<KeyRelease>` 会让"打中文不筛"再被报一次)、`<<Paste>>`、`<<Clear>>`。
+- **守卫(两条, 都咬红过)**:
+  - `tests/integration/test_gui_keyboard.py::test_our_wiring_never_replaces_the_widgets_own_handlers`:
+    结构上断言 `_entry_focus_in` 还在 `<FocusIn>` 的绑定表里, 行为上**真敲一个键**后占位必须已取消、
+    `get()` 就是那个字;
+  - `tests/integration/test_gui_home.py::test_typing_into_the_search_box_really_reaches_the_filter`:
+    按用户的路子走一遍(显示窗口 → 聚焦 → 真按键 → 等防抖), 断言输入框里的字、生效的搜索词与列表(含海报
+    模式吃的 `board.games`)一起跟着变。
+  - 咬合: 把 `<FocusIn>` 那条改回不带 `add="+"` → 两条同时红(结构条点名"占位文字会永远取消不掉",
+    主页那条报 `assert '' == 'zz'` —— 与用户描述一字不差); 复原后绿。
+- **顺手落地的公共设施**: `tests/gui_support.type_text(root, target, text)` —— 走真实按键输入(先给焦点,
+  再合成 `<KeyPress>`/`<KeyRelease>`), `test_gui_undo.py` 里的私有实现改用它。**只认 ASCII**(Tk 没有中文
+  keysym, 传中文报 `unknown keysym`), 所以"打中文"的用例改用"名字里没有这串字 ⇒ 筛成空"这种断言。
+- **教训**: ① 类级补丁往**别人已有接线的控件**上绑事件, 一律 `add="+"` —— 覆盖式绑定会静默拆掉库自己的
+  机制(占位文字、输入法、撤销这类都挂在这些事件上), 而且坏得"看着像产品功能没做"; ② 用例的输入路径要
+  与用户一致: 量"打字有没有反应"必须真按键, `insert` 会把占位/输入法/撤销一起绕过(**守卫假绿比没有守卫
+  更贵**); ③ 同一份症状(§51 与 §52)连着来两轮, 说明上一轮只改了"触发条件", 没验"文字到底进没进得去"。
 
 ---
 

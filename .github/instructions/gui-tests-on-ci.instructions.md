@@ -3,7 +3,7 @@ applyTo: "tests/integration/test_*.py,tests/gui_support.py,tests/unit/test_*.py,
 description: '写或改 GUI 端到端用例(以及它们量到的那几处界面代码)时的实测坑: CI 上的窗口尺寸不由用例决定、字体度量会变、合成键盘事件走焦点窗口(焦点可能压根不在对话框里)、尺寸夹取要看请求高度并收敛、延后的布局任务要与控件一起撤、行/卡片会被重渲染销毁(等待之后必须重新取引用)、平台默认值(-topmost/尾随空行计高)必须显式写掉、父窗口还没落地时算出来的居中/相对位置是错的(冷启动首次打开)、一个进程里只能有一个 Tk 根(没拆干净的根会让后面所有用例贴图报 image "pyimageN" does not exist, 而收尾断裂本身要按失败处理、不只记一笔). 遇到"本机绿、CI 红(尤其只有 Windows 或只有 Linux 红)"的布局/尺寸/文字截断/按键失败时先读这篇。'
 ---
 
-# GUI 端到端用例在 CI 上: 十二条实测出来的坑与写法
+# GUI 端到端用例在 CI 上: 十三条实测出来的坑与写法
 
 本仓库的 GUI 用例跑在真 Tk 上(本地 Windows、CI 的 ubuntu(xvfb) + windows runner), 下面每条都是
 **实测踩过**的: 失败形态都是"本机全绿、CI 上某几台红", 而且红的那几条看起来像产品 bug, 其实是用例
@@ -386,3 +386,18 @@ def _widget_spot(view: TreeView, canvas_x: float, canvas_y: float) -> tuple[int,
 16. 收尾报错时看清了是哪一种吗: 是"根真的留下"(缺陷, 要判红)、还是"某个控件的命令账本与解释器不一致"
     (`can't delete Tcl command`)? 后者要照 CI 现场造样本(`bind` 之后 `tk.deletecommand`), 不是造一个
     已经没了的窗口。
+
+## 12. 想量"用户打字"就真按键: 直接 `insert` 会绕过一半机制(2026-10-14 实测)
+
+- `CTkEntry` 的 `placeholder_text` **不是提示层, 而是真写进 Entry 的内容**(占位激活时 `get()` 恒返回
+  `""`), 靠它自己的 `<FocusIn>` 取消。所以**类级补丁往内层控件绑事件时必须 `add="+"`** —— 我们的
+  `make_reachable` 早先直接 `inner.bind("<FocusIn>", ...)`, 把它顶掉了: 用户敲的字接在提示文案后面、
+  `get()` 一直为空 —— 搜索框"看着能打字、点搜索/回车没反应、提示还不消失"(用户实测报的正是这一串)。
+  同病相怜的是批量导出/导入对话框顶部的筛选框(它也带占位文字)。
+  守卫: `test_gui_keyboard.py::test_our_wiring_never_replaces_the_widgets_own_handlers` —— 结构上断言
+  `_entry_focus_in` 还在, 行为上真按键之后占位必须已取消、`get()` 就是敲进去的那个字。
+- 用例里量"打字有没有反应"一律走 `gui_support.type_text(app, inner, "zz")`(**真**
+  `<KeyPress>`/`<KeyRelease>`, 字符由 Tk 自己插入), 别用 `entry.insert(...)`: 后者绕过占位、输入法
+  与撤销。2026-10-14 那一版的搜索用例就是 `insert` 过的 —— 全绿, 而用户按真键盘一个字都进不去。
+- `type_text` 只认得 ASCII(Tk 没有中文 keysym, 传中文报 `unknown keysym`) —— 要"打中文"就换个断言:
+  "名字里没有这串字 ⇒ 筛成空", 别去造中文按键。

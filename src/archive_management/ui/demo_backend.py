@@ -1491,6 +1491,7 @@ class DemoArchiveService:
                 GameFacts(
                     game_id=game_id,
                     name=summary.name,
+                    original_name=summary.original_name,
                     origin=self._origin_of(game_id),
                     location_count=len(locations),
                     backup_count=len(items),

@@ -47,6 +47,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from gui_support import gui_app, type_text
 from ui_sharing import SharedUiRegistry, demo_app
 
 try:
@@ -1099,3 +1100,34 @@ def test_space_presses_a_focused_button(app: Any) -> None:
     result = dialogs.confirm_dialog(app, DARK, title="t", message="m")
     _pump(app)
     assert (result, state["closed"]) == (False, 1)
+
+
+def test_our_wiring_never_replaces_the_widgets_own_handlers() -> None:
+    """H: 我们的键盘接线只能往后加 —— 顶掉控件自己的接线会让它坏得**看不出来**.
+
+    现场(用户 2026-10-14): "使用搜索框均无反应... 输入时没有筛选游戏, 手动点击搜索或用回车均
+    无反应, 而且这个输入框内的内容还是可选可编辑, 且没有在我输入内容时自动消失"。根因就在这条:
+    ``CTkEntry`` 的占位文字不是提示层, 而是**真写进 Entry 的内容**, 靠它自己的 ``<FocusIn>``
+    取消 —— 而 ``make_reachable`` 早先直接 ``inner.bind("<FocusIn>", ...)``(不带 ``add="+"``)
+    把它顶掉了。于是占位永远不取消: 用户敲的字接在提示文案后面、``get()`` 却一直返回 ``""``
+    —— 搜索框"看着能打字、点了没反应、内容还能选能改"。同一个坑还坑着批量导入的筛选框。
+
+    判据两层: 结构上"控件自己的处理器还在"(否则下次照样顶掉), 行为上"真敲一个键, 占位必须已经
+    取消、``get()`` 必须就是敲进去的那个字"。
+    """
+    root = gui_app(ctk.CTk)
+    entry = ctk.CTkEntry(root, placeholder_text="占位提示")
+    entry.pack(padx=10, pady=10)
+    root.update_idletasks()
+    root.update()
+    inner = entry._entry
+    assert entry._placeholder_text_active is True, "前提: 刚建出来就该显示占位"
+    assert entry.get() == ""
+
+    assert "_entry_focus_in" in inner.bind("<FocusIn>"), (
+        "我们的接线把 CTkEntry 自己的 <FocusIn> 顶掉了: 占位文字会永远取消不掉"
+    )
+    type_text(root, inner, "a")
+
+    assert entry._placeholder_text_active is False, "占位没被取消"
+    assert entry.get() == "a", f"敲进去的字没进到 Entry: {entry.get()!r}"

@@ -40,6 +40,17 @@ repos:
         # 文案资源, 继续保持多行。
         files: ^src/archive_management/resources/[^/]+\.json$
 
+      - id: build-icon
+        # 图标的唯一真相是 resources/app.svg: 改了它就地把 app.ico / app-*.png 重画好,
+        # 并像 compact-json / ruff-format 那样自己加回暂存区(本次提交直接带上新产物)。
+        # 没改 SVG 时钩子根本不会被触发; 位图已是最新时脚本是空操作 —— 所以**没装 ffmpeg
+        # 也能正常开发**, 只有真的要重画时才需要它(报错里会给出 --ffmpeg 与环境变量两条路)。
+        name: 应用图标 (SVG 重画为 ico/png)
+        entry: uv run --no-sync python scripts/build_icon.py --stage
+        language: system
+        pass_filenames: false
+        files: ^src/archive_management/resources/app\.svg$
+
       - id: mypy
         name: mypy
         entry: uv run --no-sync mypy

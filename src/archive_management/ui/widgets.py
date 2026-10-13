@@ -16,7 +16,7 @@ import tkinter as tk
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 import customtkinter as ctk
 
@@ -33,6 +33,7 @@ from archive_management.ui.rendering import (
 )
 from archive_management.ui.textfit import MeasurableFont, fit_path, fit_text
 from archive_management.ui.textundo import apply_input_undo_support
+from archive_management.ui.window_icon import install_default_window_icon
 
 apply_border_rendering_fix()
 # 下拉框右侧那半段边框被 CTk 涂成了箭头区底色, 看着像被箭头盖住 —— 补丁把它描回
@@ -42,6 +43,9 @@ apply_combo_border_fix()
 # (见 dropdown.apply_combo_dropdown_fix 的说明)。
 apply_combo_dropdown_fix()
 apply_input_undo_support()
+# CustomTkinter 会在每个窗口建好 200ms 后给它贴自己的图标(子窗口全部中招, 任务栏里也是),
+# 这里把它换成我们的 —— 与上面几条同属"库没留接口"的修补, 见 ui/window_icon.py。
+install_default_window_icon()
 # 键盘可用性(Tab 可达 / 焦点环 / 空格回车激活)也在类上打一次补丁: 控件是就地创建的
 # 还是走 UiKit 都自动接上, 调用点不需要记得做任何事(见 ui.keyboard)。
 install_keyboard_support()
@@ -1265,3 +1269,92 @@ class HoverTip:
 
 # 焦点态要换哪套颜色也回插回去(颜色只在本模块的 ``button_colors`` 一处定义)。
 set_focus_paint(focus_paint)
+
+
+# -- 选择框的默认口径: 只能从列表里选 --------------------------------------------
+_PICKER_DEFAULTS_APPLIED = False
+
+
+def apply_picker_defaults() -> bool:
+    """让选择框默认"只能从列表里选": 既不能编辑, 也不能选中(返回本次是否真打了补丁).
+
+    出处(用户 2026-10-13): "我发现了一个UI bug, 软件中所有的多选窗口其内容均可选择并删除,
+    这点非常容易造成误会" —— 追了一句"多选框的内容能否让其也不可选中"。选择框里的值都来自
+    ``values``, 手删/手选**改不了**真正生效的值, 却会在屏幕上留下蓝底高亮和插入符, 看着像
+    这里能打字。
+
+    库没留"默认只读"的开关, 所以在类上打一次补丁(**调用点不需要记得做任何事**, 与
+    keyboard / window_icon / textundo 那几条同一套做法), 且只对之后创建的控件生效:
+
+    * 没写 ``state`` 的 ⇒ 一律 ``readonly``。readonly 的 Entry 会把程序里的
+      ``insert``/``delete`` 静默忽略(实测), 而 ``set()`` 照常写入 —— 正是"只能从列表里选"。
+    * ``readonly`` 的再锁一层"不可选中": readonly 仍然允许拖选与双击选词, 所以把点文字改成
+      **打开列表**(等于点箭头, 收起时机与选中回调都不变), 并 ``return "break"`` 吃掉这次点击。
+    * 明确写了 ``state="normal"`` 的例外**不动**(定时任务窗口的游戏选择框要"输入即筛选");
+      ``state="disabled"`` 也不动(它本来就改不了也选不中)。
+
+    ``takefocus`` 不在这里管: 下拉框压根不进 Tab 链, 那是 :func:`keyboard.keep_out_of_tab_chain`
+    的事。
+    """
+    global _PICKER_DEFAULTS_APPLIED
+    if _PICKER_DEFAULTS_APPLIED:
+        return False
+    target = cast(Any, ctk.CTkComboBox)
+    original = target.__init__
+
+    def patched(self: object, *args: object, **kwargs: object) -> None:
+        # ``state`` 在 CTk 那边是位置参数, 但全仓库都按关键字传: 位置传法的调用点会落到
+        # "没写 state"这一支(被强制 readonly), 不会跑掉。
+        declared = kwargs.get("state")
+        original(self, *args, **kwargs)
+        if declared is None:
+            cast(Any, self).configure(state="readonly")
+        if declared in (None, "readonly"):
+            _lock_text_selection(cast(ctk.CTkComboBox, self))
+
+    setattr(target, "__init__", patched)  # noqa: B010
+    _PICKER_DEFAULTS_APPLIED = True
+    return True
+
+
+#: 只会在选择框里"把文字选出来"的鼠标事件: 一律吃掉(按下那条另有接线, 见下).
+#: 实测(2026-10-13, 真窗口): ``readonly`` 的 Entry **没有按下**也照样跟着 ``<B1-Motion>``
+#: 拖出蓝底选区(Tk 从插入光标处开始选), 双击/三击/带修饰键的点选各有一条类绑定。
+_SELECTION_ONLY_EVENTS = (
+    "<B1-Motion>",
+    "<Double-Button-1>",
+    "<Triple-Button-1>",
+    "<Shift-Button-1>",
+    "<Shift-B1-Motion>",
+    "<Control-Button-1>",
+    "<Control-Shift-Button-1>",
+)
+
+
+def _swallow(_event: tk.Event) -> str:
+    """吃掉这条鼠标事件: 返回 ``break`` 拦住 Tk 的类绑定(选区、插入符都不许出现)."""
+    return "break"
+
+
+def _lock_text_selection(combo: ctk.CTkComboBox) -> None:
+    """点选择框里的文字 = 打开列表, 拖它也不会选出字来(:func:`apply_picker_defaults`)."""
+    entry = combo._entry
+    # ``add="+"``: 不动别人已经挂在同一个事件上的接线(拦住 Tk 类绑定靠的是 ``break``).
+    entry.bind("<Button-1>", lambda _event: _open_from_text(combo), add="+")
+    for sequence in _SELECTION_ONLY_EVENTS:
+        entry.bind(sequence, _swallow, add="+")
+
+
+def _open_from_text(combo: ctk.CTkComboBox) -> str:
+    """打开下拉列表(走 CTk 自己那条点击路径), 并吃掉这次 ``<Button-1>``.
+
+    ``CTkComboBox`` 里**没有**箭头控件: 箭头是画在它自己的 ``_canvas`` 上的, 点击由
+    ``_canvas.tag_bind("dropdown_arrow", "<Button-1>", self._clicked)`` 接住(实测
+    2026-10-13: 按 ``_button`` 写会 AttributeError)。所以这里调 ``_clicked()`` —— 它自己
+    带禁用态判断与"列表已经开着就收起"的切换, 与点箭头完完全全同一条路。
+    """
+    combo._clicked()
+    return "break"
+
+
+apply_picker_defaults()

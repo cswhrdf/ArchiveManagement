@@ -60,8 +60,16 @@ uv run python -m archive_management gui --root ./dev-data     # 启动图形界�
 uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检（自动关闭）
 ```
 
-- 不带子命令运行时默认执行 `init`。
+- 不带子命令运行时默认执行 `init`；**打包产物例外：不带子命令时直接开图形界面** —— 双击的正是这条路，而窗口化的 exe 没有控制台，`init` 的报告只会打进一个不存在的控制台（屏幕上什么都没有，看起来就是打不开；2026-10-11 报的就是它）。判据是“解析后的子命令为空”，所以打包版只给 `--root` 之类的全局参数也会开界面（见 `app.default_command` 与 `tests/unit/test_cli.py` 的三条守卫）。
 - `--root` 可以把全部数据收敛到指定目录（便携模式与开发调试），此时配置、数据、日志、缓存都在该目录下；不加则使用系统约定的应用目录。
+- **打包版同时只允许开一个界面进程**（2026-10-12 要求）：两个进程各持同一个数据库、备份根与全局快捷键注册会互相踩，用户看到的是“点了没反应”“状态突然回退”这类没有报错的怪事。
+  - **第二个实例不开新窗、也不弹提示，而是把已经开着的那个叫到前台**（同一天用户的追加要求：“重复打开窗口应该直接跳转到上次打开的窗口”）：它往 `data/instance.focus` 写一条 `pid=… at=…` 请求就退出（**退出码 3**，与 argparse 的 2 分开），已经开着的那个在 100ms 轮询里看到就 `deiconify + lift + focus_force`（**先抬窗口、抬完再清文件**：文件没了就是回执）。
+  - **Windows 还要多一步**（2026-10-12 实测的坑）：前台锁定 —— 后台进程自己 `deiconify/lift` 只把窗口恢复成**可见**，前台焦点抢不过来（实测：第二个实例跑完前台仍是编辑器）。而“用户刚双击起来的那个进程”手上有这个权利，所以第二个实例另外调一次 `user32.AllowSetForegroundWindow(<已有实例的 pid>)`，并**等回执再退**（那份权限可能随它退出而失效）。日志里 `granted=` / `handled=` 就是这两步的结果：窗口没到前台时一眼能分清是“权限没交出去”还是“对方没响应”。其它平台没有这道闸（X11 由窗口管理器决定，macOS 由系统处理），那一步是空操作。
+  - 为什么用“文件 + 轮询”而不是窗口消息/跨进程句柄：一是软件**不执行外部程序**，二是这条路三个平台完全一样，不需要每个平台一套窗口系统 API。
+  - 闸门只在打包版生效（`app.is_packaged()`）：开发与用例都要能同时开多个窗口（分片跑集成用例时每片都在自己的进程里建真窗口），而且集成用例直接调 `ui.main_window.run_gui`，根本不经过这条闸门。
+  - 诊断用的逃生门：设 `ARCHIVE_MANAGEMENT_ALLOW_MULTI=1` 就照开（想同时跑两个打包版做对比时用）。
+  - 锁是 `data/instance.lock` 上的操作系统级锁（`services/single_instance.py`）：锁跟着进程走，进程无论怎么消失（正常退出/崩溃/被任务管理器结束）都由系统释放，所以**不会留下把应用永久锁在门外的陈旧锁**。锁与请求文件都落在数据目录，因此 `--root` 便携实例各用各的。
+  - 验收：打包版开两个进程 —— 第二个应当让第一个的窗口到前台（**最小化时会被恢复**，前台窗口标题应当变成应用名）、自己退出码 3，两边的日志里各多一行（`已请它把窗口叫到前台(… granted=True handled=True)` / `第二个实例请求到前台(…)`）。前台的判定可以直接量：看当前前台窗口的标题是不是应用名。
 - 全局 `--verbose` 本次启动就打开调试日志（默认只记录 INFO 及以上的高风险操作）；同一个开关也可以在软件设置里拨（写入 `config.json` 的 `logging.debug`，默认关闭，拨完立即生效）。
 
 ## 配置文件
@@ -72,16 +80,40 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 **内容非法时会自动把文件还原为默认值**，并在日志/界面里说明（CLI 的 `init` 与 `doctor` 会在输出里列出一行"配置还原"），应用照常启动；原文件会改名保留为同一目录下的`config.json.invalid`，方便对照自己改错了什么——既不让写坏的配置卡住启动，也不静默丢掉用户的改动。
 
+### 应用目录：数据、日志、备份与缓存都在哪
+
+四类目录由 :mod:`platformdirs` 解析（`infrastructure/paths.py`），**打包版与源码版完全一致，且与 exe / 源码所在目录无关**：
+
+| 角色                             | Windows                                   | Linux                                                         | macOS                                              |
+| -------------------------------- | ----------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- |
+| 配置（`config.json`）            | `%LOCALAPPDATA%\ArchiveManagement\`       | `$XDG_CONFIG_HOME/ArchiveManagement`（`~/.config/…`）         | `~/Library/Application Support/ArchiveManagement/` |
+| 数据（数据库 / 备份 / 导出）     | 同上                                      | `$XDG_DATA_HOME/ArchiveManagement`（`~/.local/share/…`）      | 同上                                               |
+| 日志（`archive-management.log`） | `%LOCALAPPDATA%\ArchiveManagement\Logs\`  | `$XDG_STATE_HOME/ArchiveManagement/log`（`~/.local/state/…`） | `~/Library/Logs/ArchiveManagement/`                |
+| 缓存（游戏译名、封面/图标）      | `%LOCALAPPDATA%\ArchiveManagement\Cache\` | `~/.cache/ArchiveManagement`                                  | `~/Library/Caches/ArchiveManagement/`              |
+
+- 数据目录下是 `archive-management.db` + `backups/`（应用自有备份，**绝不直接写用户的原始存档目录**）+ `exports/`（自动导出的归档包）+ `artwork/`（用户自己指定的封面/图标，用到时才创建）+ `instance.lock` / `instance.focus`（打包版的单实例锁与“请到前台”请求文件，见「命令行」一节；两个文件删了都会自动重建）；缓存目录下是 `game-names.json` 与 `artwork/`（下载来的封面/图标，可安全删除）。
+- **换版本、移动或删掉程序目录都不会动到这些目录**；想彻底重置就删掉它们（清理步骤见 `wiki/10 常见问题与故障排查`）。
+- **想看当前生效的真实路径**：打包版 `ArchiveManagement.exe doctor`、源码版 `uv run python -m archive_management doctor`，它会把配置 / 数据 / 日志 / 数据库 / 备份根逐行打出来（不带参数启动的 `init` 也会打同一张表）。
+- **便携模式**：给程序加 `--root <目录>`，四类目录都收敛到 `<目录>\{config,data,logs,cache}` 下（打包版可以把参数写进快捷方式；“只给 `--root`”也直接开界面，见「命令行」一节）。
+
 ## 质量门禁
 
-本地提交钩子 + CI 里跑的检查（`pytest --cov` 与平台相关，Windows / Ubuntu / macOS 三个平台都跑；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
+本地提交钩子 + CI 里跑的检查（用例与覆盖率在 Windows / Ubuntu / macOS 三个平台各跑一遍；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
 
 ```shell
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy                     # 宿主平台(本地钩子里跑的也是这一条)
-uv run pytest --cov
+uv run pytest                   # 用例(覆盖率见下面那条)
 uv run deptry .                 # 依赖卫生: 未声明 / 多余 / 传递依赖(本地钩子也会跑)
+```
+
+**覆盖率是硬门禁（`fail_under = 100`），但它要按平台口径判**：`uv run pytest --cov` 给的是**合并口径**的粗数字（不做平台排除，因为 pytest-cov 在导入根 conftest 之前就构造好了 Coverage 对象），与门槛不是一个口径。按门禁核走命令行两步（全量约 14 分钟；只想定位单个文件就配 `--data-file` + `--include`，另见 [CONTRIBUTING.md](../CONTRIBUTING.md) 第三节）：
+
+```shell
+uv run python scripts/coverage_platform.py write   # 生成 .coverage-platform.rc(不入库)
+uv run python -m coverage run --rcfile=.coverage-platform.rc -m pytest -q
+uv run python -m coverage report -m --rcfile=.coverage-platform.rc
 ```
 
 平台专属的类型检查（CI 里各在对应平台上的 `quality-platform` 作业跑一次，本地想复现就手动执行）：
@@ -151,14 +183,81 @@ CI 的 pytest 作业是**分片执行**的（三平台各 3 片并行，报告�
 2. 页面里的仓库链接用 `{{REPO_URL}}` 占位符（由工作流替换成真实地址），**不要写仓库相对链接**（Wiki 与仓库不在同一棵目录树里，相对链接会变成"不存在的页面"且不报错）。这两条与"章节编号/侧边栏链接齐全/镜像语义"一起由 `tests/unit/test_wiki_sync.py` 守住。
 3. **手册面向不接触命令行的用户**：只写窗口里的操作、数据与日志位置，不写 `uv run` / `python -m` / `--root` / 子命令这类内容（启动、初始化、便携模式属于 README 与本文档）。软件按平台各自编译发布，用户拿到的是可执行包，双击即用。同样由 `tests/unit/test_wiki_sync.py` 守住。
 
+## 应用图标
+
+图标的**唯一真相**是 `src/archive_management/resources/app.svg`（只改这一个文件），界面与打包读的都是它的产物：
+
+| 产物             | 给谁用                                                                           |
+| ---------------- | -------------------------------------------------------------------------------- |
+| `app.ico`        | exe 的 PE 资源（资源管理器/Alt-Tab）；内含 16/24/32/48/64/128/256 七档           |
+| `app-window.ico` | **窗口/任务栏**图标（Tk 的 `wm iconbitmap`）；只 16/24/32/48 四档且 **BMP 编码** |
+| `app-256.png`    | 非 Windows 的窗口图标（`iconphoto`）                                             |
+| `app-64.png`     | 顶栏的品牌位（30px 控件配 2x 位图）                                              |
+| `app-icon.stamp` | 记下这批位图出自哪一版 SVG（sha256）—— 守卫与启动日志都读它                      |
+
+重画：`uv run python scripts/build_icon.py`（`--force` 无条件重画，`--check` 只检查、不一致退 1）。位图已是最新时它是**空操作**，所以随手跑一次也无妨。
+
+### 为什么光栅化用外部工具（ffmpeg），而不是一个 Python 库
+
+- **软件本身不执行任何外部程序**（安全策略，动态与静态两道守卫见 `tests/security/test_side_effects.py`），所以「SVG → 位图」只发生在**开发/构建期**；打包产物里只有位图，与 ffmpeg 无关。
+- `cairosvg` 在 Windows 上要额外的 cairo 原生库（不是纯 wheel）；`svglib` + `reportlab` 对渐变、滤镜的支持有限。为「一辈子只发生几次」的重画动作引入任何一条系统依赖都不划算。
+- ffmpeg 是**可选**的：只要位图是最新的（正常情况），没装 ffmpeg 也一切照旧；只有改了 SVG 才轮到它出场。
+- 本机确认 ffmpeg 能画 SVG：`ffmpeg -hide_banner -version` 的输出里要有 `--enable-librsvg`（官方 BtbN 构建有）。不在 `PATH` 上时用 `--ffmpeg <路径>`，或设环境变量 `ARCHIVE_MANAGEMENT_FFMPEG`。
+- **ICO 必须由 Pillow 装配**：实测 ffmpeg 的 `-f ico` 只写**一档**尺寸（BMP 编码），而 Windows 的 16px 列表视图与 256px 大图标都得好看；Pillow 本来就是运行依赖（`CTkImage` 要用），由它把 256px 的 PNG 缩成七档装进一个 `.ico`，既不多依赖也不多一个外部工具。
+- **为什么窗口另用一颗小 ICO**（2026-10-11 实测）：把七档那颗交给 Tk 之后，集成套件跑到第 200 个窗口左右会在 `update_idletasks` 里以 **access violation** 死掉（原生栈留在 `crash-dumps/faulthandler.log`），而同一批文件不装窗口图标补丁跑是绿的；换成四档 BMP（`bitmap_format="bmp"`，Tk 的 Windows 图标读写器本来吃的就是 DIB）后恢复全绿。exe 的 PE 资源由 **Windows** 读，不经过 Tk 的手，所以那颗不需要跟着变小。
+
+### 什么时候会自动重画
+
+| 时机   | 做什么                                                                                                                        |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| 提交时 | pre-commit 的 `build-icon` 钩子**只在 `app.svg` 有改动时**触发，重画后自己 `git add`（与 `compact-json` 同一条路）            |
+| 发布时 | `release.yml` 打包前跑 `--check`，不一致判红。**故意不自动重画** —— 那会把一个陈旧的提交默默修好，没人发现                    |
+| 启动时 | 软件只**核对**并把结果写进日志（`应用图标: …`）；不一致时日志里直接给出该跑的那条命令。不重画的原因同上（软件不执行外部程序） |
+
+改了 SVG 而本机又没有 ffmpeg 时，唯一会失败的是「提交」那一步（钩子报错里给出 `--ffmpeg` 与环境变量两条路）；此时你也可以只提交 SVG、让有工具的人补产物 —— 但发布前 `--check` 一定会拦住。
+
+### 窗口图标：CTk 会替每个窗口贴上它自己那颗
+
+CustomTkinter 在**每个**窗口建好 **200ms** 后自己去贴 `CustomTkinter_icon_Windows.ico`（这个动作只在 Windows 上排），条件是「这个窗口上没人调用过 `iconbitmap`」：
+
+- 主窗口逃得过 —— `ArchiveApp.__init__` 里 `_apply_window_icon()` 已经显式设过我们的；
+- **每个子窗口都中招**：设置、定时任务、游戏管理、所有对话框，标题栏与任务栏里都是 CTk 那颗（2026-10-11 报的就是它）。
+
+库没留接口，所以 `ui/window_icon.py` 把 `CTk` 与 `CTkToplevel` 的私有方法 `_windows_set_titlebar_icon` 换掉（与 `ui/rendering.py` 换 `DrawEngine` 同一类手法）。换掉之后那次延时动作落到 `apply_window_icon`：
+
+- 有 `app-window.ico`（四档 BMP）就用它（`iconbitmap`：标题栁 16 / 缩放 24 与 32 / 高 DPI 任务栏 48）；被 Tk 拒了就退回 `iconphoto` + `app-256.png`（X11/macOS 只认图片）；都没有则什么都不做 —— 图标不是启动的前提，任何失败都只返回 `False`；
+- **判据跟库一样**：窗口上已经有人设过图标（主窗口在 `__init__` 里就设了）就不再贴——我们比库多出来的那一次 `wm iconbitmap` 正是上面那个 access violation 的差异；
+- 接线在 `ui/widgets.py` 模块级（与 `apply_border_rendering_fix()` 那几条一起），import 一次就够；
+- 库升级把那个私有名字改掉时**不会出错**，只是 CTk 照旧贴它那颗 —— 那时守卫变红，正好提醒来改这里。
+
+守卫两处：`tests/integration/test_gui_window_icon.py`（真窗口 + 泵事件到 200ms 之后，看那次 `iconbitmap` 收到哪个文件；已咬过一口：把接线断开时它量到的正是 `CustomTkinter_icon_Windows.ico`）与 `tests/unit/test_icon_assets.py`（两个窗口类都换成了我们的实现、再调一次是空操作）。
+
+### CI 怎么验这条流水线（两件事分开）
+
+**判断「位图和 SVG 一致」不需要 ffmpeg，判断「CI 自己能不能画」才需要** —— 所以 `release.yml` 里是两条步骤：
+
+1. `Check the application icon is up to date`（硬门禁）：`--check` 只比指纹，不一致就判红。发布**不依赖** runner 上有渲染工具。
+2. `Probe the icon pipeline on this runner (informational)`：打印 runner 上那个 ffmpeg 的版本行，然后往 `%TEMP%` 里重画一遍并与入库产物逐字节比对。没装 ffmpeg / 那份 ffmpeg 没有 librsvg / 字节不同 —— 都只记一条 `::warning::`，**照常发布**（入库位图已由第 1 步证明与 SVG 一致）。
+
+顺序不能反：探针会重写 `app-icon.stamp`，先探针再 `--check` 就查不出「入库产物陈旧」了（守卫 `test_the_release_workflow_checks_the_icon_before_packaging` 镢住这条顺序）。
+
+要**单独**回答「runner 能不能画」（不切发布）就手动跑 `Icon probe` 工作流（`.github/workflows/icon-probe.yml`，只 `workflow_dispatch`）：它用与发布作业相同的安装形状（`--no-install-project`）渲染到 `icon-probe-out/` 并把结果作为 artifact 上传，可以直接看渲染质量。
+
+> **为什么位图入库而不是靠 CI 现画**：位图五个文件合计约 **53 KB**；不入库的话，干净检出时界面会缺一块（顶栏退回纯色方块、窗口无图标），而且 `fail_under=100` 会逼着**每个 pytest 作业（三平台×三片）**都装 ffmpeg 并先生成位图（“有位图就用图”那条分支得被走到），最后发布还得赌 runner 上那份 ffmpeg 带 librsvg。换来的只是 53 KB。
+
+> **脚本不依赖“项目已安装”**：CI 的安装步骤帯 `--no-install-project`，那种环境里 `import archive_management` 会直接 `ModuleNotFoundError`（实测），所以 `scripts/build_icon.py` 顶部自己把 `src` 放进 `sys.path`（守卫 `test_the_icon_script_runs_without_an_installed_project`）。
+
 ## 打包
 
 ```shell
 uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 ```
 
-- 构建前应先通过全部门禁：`uv sync --locked`、Ruff（`check` + `format`）、mypy、pytest。
+- 构建前应先通过全部门禁：`uv sync --locked`、Ruff（`check` + `format`）、mypy、pytest；位图也要是最新的（`uv run python scripts/build_icon.py --check`，CI 在构建前就跑这一句）。
+- **在仓库根执行**：命令里的 `packaging/archive-management.spec` 是相对路径，`dist/` / `build/` 也落在当前目录下。
 - 版本直接读取 `packaging.py` 中的源码版本。
+- **本地产物**：`dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是这一条命令产的** —— 那是 `.github/workflows/release.yml` 的 `Prepare build files` 步骤在构建之后自己打包出来的，别把本地构建与发布产线混为一谈。
+- **双击就能用**：窗口化产物（`console=False`）不带子命令启动时会直接开界面（见「命令行」那条）；验证方式是双击（或直接启动 exe）后日志里应多一行 `界面启动`，而不是只有 `初始化完成`。
 - 产物为 Windows x64 的 **onedir** 压缩包、**onefile** 可执行文件、SHA-256 校验文件与构建元数据；发布包不得包含凭据、开发机绝对路径或测试数据。`spec` 文件显式声明入口模块、图标与 CustomTkinter 主题资源，并按需补充隐藏导入。
 - GitHub Actions 在 Windows runner 上构建并上传 `dist` 产物（手动触发也支持）。当前以Windows 为首要发布平台，macOS/Linux 打包未纳入。
 - 包体积与启动时间（2026-09-19，Windows x64 / Python 3.12，含量化封面依赖 Pillow 12.3.0）：**onedir 合计约 57.3 MB**（其中 `_internal/PIL` 约 12.8 MB，是本轮首次引入的开销）、**onefile 约 29.1 MB**；在已初始化的数据目录上启动到窗口出现**约 2.1 s**（同条件源码运行同样约 2.1 s，冻结后没有额外开销）。测量方式：`ArchiveManagement.exe gui --root <已初始化目录> --smoke 0.1` 连跑三次取稳定值。

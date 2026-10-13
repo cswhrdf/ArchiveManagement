@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  存档管理工具 · 应用图标(唯一真相).
+
+  设计意图(改之前先读这段):
+    * 深色圆角底板 + 青绿文件夹 —— 与软件默认深色主题、强调色(ui/palette.py 的
+      DARK.accent = #55d6be)一致, 放在浅色与深色的系统任务栏上都看得清;
+    * 文件夹里是"一叠版本"三条横杠: 上/下两条是历史备份(底板色, 退到后面),
+      中间那条用近白色 —— 它是"当前节点"(与分支树里 ● 当前节点同义);
+    * 只保留三块可辨认的形状(底板 / 文件夹 / 三条横杠), 所以在 16px 下仍然认得出,
+      不画连线与小圆点(那个尺寸下只会糊成一團).
+
+  改完怎么生效: 运行 `uv run python scripts/build_icon.py`(重画 app.ico / app-*.png),
+  提交前钩子与 `tests/unit/test_icon_assets.py` 都会核对"位图是不是这份 SVG 的最新产物".
+
+  尺寸: 坐标系统是 64 格(viewBox), 但画布**声明成 256** —— 光栅化工具按这个尺寸出图,
+  再各自缩小到 16/24/32/48/64/128, 全程只缩不放大(放大必糊).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="256" height="256" role="img" aria-label="存档管理工具">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17263f"/>
+      <stop offset="1" stop-color="#0a1120"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 底板: 深色圆角方块(自带背景, 因此在任何桌面背景上都可辨) -->
+  <rect x="0" y="0" width="64" height="64" rx="15" fill="url(#tile)"/>
+
+  <!-- 文件夹: 左侧带标签页, 正文 9..55 × 21..47 -->
+  <path fill="#55d6be" d="M14 15.5H27.5L31.5 21H50a5 5 0 0 1 5 5V42a5 5 0 0 1-5 5H14a5 5 0 0 1-5-5V20.5a5 5 0 0 1 5-5Z"/>
+
+  <!-- 三叠版本: 上下是历史备份(底板色), 中间那条是当前节点(近白色) -->
+  <g fill="#0b1120">
+    <rect x="17" y="27.6" width="26" height="3.6" rx="1.8"/>
+    <rect x="17" y="40.4" width="22" height="3.6" rx="1.8"/>
+  </g>
+  <rect x="17" y="34" width="30" height="3.6" rx="1.8" fill="#e7f7f3"/>
+</svg>

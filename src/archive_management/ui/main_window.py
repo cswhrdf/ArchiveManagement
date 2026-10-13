@@ -16,6 +16,7 @@ import time
 import tkinter as tk
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal, Protocol
 
 import customtkinter as ctk
@@ -52,6 +53,7 @@ from archive_management.exceptions import (
 from archive_management.i18n import DEFAULT_LOCALE, set_locale, tr
 from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.logging_config import apply_debug
+from archive_management.services import icon_assets, single_instance
 from archive_management.services.audit import log_action
 from archive_management.services.hotkeys import (
     ACTION_CREATE_BRANCH,
@@ -129,6 +131,7 @@ from archive_management.ui.widgets import (
     window_scaling,
     wrap_budget,
 )
+from archive_management.ui.window_icon import apply_window_icon
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +161,19 @@ WINDOW_DEFAULT_SIZE = (1360, 860)
 # 按屏幕夹尺寸时留出的余量: 标题栏 + 任务栏 + 一点呼吸空间。屏幕尺寸是整块屏幕
 # (不含任务栏信息), 所以只看 winfo_screenheight 会算出"贴到屏幕最下沿"的窗口。
 SCREEN_MARGIN = 96
+# 顶栏品牌位的边长: 图标位图是 64px 的, 缩到 30 是 2x 关系(高 DPI 下不糊)。
+LOGO_SIZE = 30
+
+
+def _logo_image(host: tk.Misc, path: Path) -> ctk.CTkImage | None:
+    """把图标位图读成 ``CTkImage``; 解不开(文件被截断等)时返回 ``None``."""
+    try:
+        with Image.open(path) as image:
+            loaded = image.copy()
+    except (OSError, ValueError):
+        logger.warning("品牌图标无法解码: %s", path)
+        return None
+    return host_image(host, light_image=loaded, size=(LOGO_SIZE, LOGO_SIZE))
 
 
 def fit_window_size(size: tuple[int, int], screen: tuple[int, int]) -> tuple[int, int]:
@@ -411,6 +427,10 @@ class ArchiveApp(ctk.CTk):
         self._usage_text = tr("status.usage", used="—")
         self._hotkeys = hotkeys if hotkeys is not None else GlobalHotkeyService()
         self._paths = paths
+        # 第二个实例"请把窗口叫到前台"的请求文件(数据目录里; 没有 paths 就不看任何文件)。
+        self._focus_request_path = (
+            None if paths is None else single_instance.focus_request_path(paths)
+        )
         # 只读一次配置: 语言、快捷键与"配置被还原过"的提示都从同一份结果出发。
         loaded = self._load_config()
         # 语言要在构造界面之前生效: 所有文案都是构建时取的.
@@ -439,6 +459,7 @@ class ArchiveApp(ctk.CTk):
         self.minsize(*WINDOW_MIN_SIZE)
         self._apply_window_geometry(loaded.config.window)
         self.configure(fg_color=self.p.background)
+        self._apply_window_icon()
 
         self._build_layout()
         self._register_hotkeys()
@@ -872,6 +893,39 @@ class ArchiveApp(ctk.CTk):
         if self._game is not None:
             self._show_page(AppPage.DETAIL)
 
+    def _apply_window_icon(self) -> None:
+        """给窗口装上应用图标(资源缺了就不装 —— 图标不是启动的前提).
+
+        这里只处理**主窗口**: 子窗口(设置/定时任务/管理/对话框)由 `ui/window_icon` 把
+        CustomTkinter 那个 200ms 的"贴自己图标"动作换掉之后自动生效, 不需要每个调用点
+        记得做这件事。
+        """
+        apply_window_icon(self)
+
+    def _build_brand_logo(self, parent: ctk.CTkFrame) -> ctk.CTkFrame | ctk.CTkLabel:
+        """顶栏左侧的品牌标记: 有图标位图就用它, 没有就退回原来的强调色圆角方块.
+
+        这是图标在界面里唯一的落点(30px 的位配 64px 的 PNG, 高 DPI 下也清晰)。
+        位图缺失或解不开都算“没有”: 界面少一个标记可以忍, 起不来不能忍。
+        """
+        icons = icon_assets.icon_files()
+        if icons.logo_png is not None:
+            picture = _logo_image(parent, icons.logo_png)
+            if picture is not None:
+                self._logo_image = picture
+                return ctk.CTkLabel(
+                    parent, text="", image=picture, width=LOGO_SIZE, height=LOGO_SIZE
+                )
+        square = ctk.CTkFrame(
+            parent,
+            width=LOGO_SIZE,
+            height=LOGO_SIZE,
+            corner_radius=8,
+            fg_color=self.p.accent,
+        )
+        self.kit.register(lambda p: square.configure(fg_color=p.accent))
+        return square
+
     def _build_topbar(self, parent: ctk.CTkFrame) -> None:
         """顶栏: 左侧是品牌与"← 游戏主页", 右侧是全局入口(添加游戏/定时任务/设置).
 
@@ -879,11 +933,8 @@ class ArchiveApp(ctk.CTk):
         无关, 放在固定的位置最容易找到。
         """
         parent.grid_columnconfigure(2, weight=1)
-        logo = ctk.CTkFrame(
-            parent, width=30, height=30, corner_radius=8, fg_color=self.p.accent
-        )
+        logo = self._build_brand_logo(parent)
         logo.grid(row=0, column=0, padx=(16, 12), pady=10)
-        self.kit.register(lambda p: logo.configure(fg_color=p.accent))
         brand = self.kit.label(
             parent, tr("topbar.brand"), style="primary", size=16, weight="bold"
         )
@@ -1445,6 +1496,11 @@ class ArchiveApp(ctk.CTk):
 
         删除最后一个游戏后, 概要区(名称/存档位置/统计)、标题行与选中面板都
         还停留在被删的那款游戏上, 因此这里把它们全部复位。
+
+        库里一款游戏都不剩时**还要离开详情页**(用户 2026-10-12 的要求): 详情页是围绕
+        "某一款游戏"建的, 游戏没了还留在那里, 屏幕上就是一页落不到实处的空壳; 回到主页,
+        主页顺手重读数据后显示自己的空状态("还没有游戏")。启动阶段本就在主页, 这一步是
+        空操作。
         """
         self._game_id = None
         self._game = None
@@ -1484,6 +1540,9 @@ class ArchiveApp(ctk.CTk):
             self._list_scroll, tr("list.empty_all"), style="muted", size=13
         )
         empty.pack(padx=10, pady=16)
+        if self._page is AppPage.DETAIL:
+            # 放在最后一步: 上面那套复位是给详情页控件做的, 先跳页再改就白改了。
+            self._show_page(AppPage.HOME)
 
     # ---------------------------------------------------------------- 渲染
 
@@ -3191,6 +3250,9 @@ class ArchiveApp(ctk.CTk):
         # archive_management.ui.typography._ScaledFont.__del__)。这里本来就在主线程上按
         # 100ms 周期跑, 是天然的排空点, 不需要额外的事件源。
         drain_deferred_fonts()
+        # 第二个实例按了"再开一次"就让窗口到前台(用户 2026-10-12): 通道是数据目录里的一个
+        # 请求文件, 与后台结果一样在主线程上按 100ms 周期看一眼。
+        self._maybe_come_to_front()
         while True:
             try:
                 kind, payload = self._messages.get_nowait()
@@ -3209,6 +3271,38 @@ class ArchiveApp(ctk.CTk):
         self._refresh_task()
         self._maybe_poll_activation()
         self._poll_job = self.after(100, self._poll_messages)
+
+    def _maybe_come_to_front(self) -> None:
+        """已经开着的那个实例看到"再开一次"的请求时, 把窗口叫到前台.
+
+        请求文件由第二个进程写在数据目录里(见 :mod:`archive_management.services.single_instance`),
+        这里每 100ms 看一眼。**先抬窗口、抬完再清文件**: 那个"文件没了"就是给第二个实例的回执,
+        它靠着这一下决定什么时候可以退出(Windows 的前台权限可能随它退出而失效); 不清的话每一轮
+        轮询还会重复抬窗口, 用户手动切到别的软件后又被抢回去。``paths`` 缺省时(用例里常见)不看
+        任何文件。
+        """
+        if self._focus_request_path is None:
+            return
+        token = single_instance.read_focus_request(self._focus_request_path)
+        if not token:
+            return
+        logger.info("第二个实例请求到前台(%s): 已把窗口叫回来", token)
+        self._come_to_front()
+        single_instance.clear_focus_request(self._focus_request_path)
+
+    def _come_to_front(self) -> None:
+        """从最小化/后台回到前台.
+
+        三步都是窗口自己就能做的事(不需要外部程序, 也不需要平台 API): 恢复(最小化时)、
+        置到最上层、把输入焦点抢过来。焦点这一步在个别窗口管理器上会被忽略(只闪任务栏),
+        那也仍然是"用户看得见的反应", 而不会报错。
+        """
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except tk.TclError:  # pragma: no cover - 窗口正在销毁时这几步会分别报错
+            return
 
     def _run_hotkey(self, payload: str) -> None:
         """执行快捷键请求; 停用或归档的游戏不触发(全局只有一款游戏启用)."""
@@ -3378,6 +3472,9 @@ def run_gui(
             ", ".join(loaded.repaired),
         )
     logger.info("界面启动(verbose=%s)", verbose)
+    # 图标位图是 app.svg 的产物(见 services/icon_assets): 这里只报一句状态, 不重画 ——
+    # 软件不执行外部程序, 改了 SVG 要重画时日志会直接给出该跑的那条命令。
+    logger.info("%s", icon_assets.summary())
     database = Database(paths.database_path)
     database.migrate()
     backend: ArchiveService = SqlArchiveService(

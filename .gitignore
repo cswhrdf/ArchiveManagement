@@ -78,6 +78,12 @@ security-results.json
 visual-work/
 visual-baselines-candidates/
 
+# 应用图标: **位图要入库**(app.svg 是唯一真相, app.ico / app-*.png / app-icon.stamp 是它的
+# 产物; 界面与打包直接读位图, CI 只用指纹核对 —— 见 docs/development.md 的「应用图标」)。
+# 这里只忽略探针的落点: `uv run python scripts/build_icon.py --force --out-dir icon-probe-out`
+# 与 `Icon probe` 工作流会往这里写一份"不改仓库"的渲染结果, 供人眼与逐字节比对。
+icon-probe-out/
+
 # Translations
 *.mo
 *.pot

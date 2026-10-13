@@ -27,6 +27,20 @@
 - [ ] 本地跑过全量或说明为什么不需要：`uv run python scripts/run_tests_local.py`
 - [ ] 新用例声明了严重等级（模块里 `pytestmark` 恰好一条），且不依赖执行顺序或别的用例的残留
 
+## Squash 合并署名
+
+<!--
+署名区由 Co-author attribution 检查在合并前自动统计 PR 提交作者并更新。
+Squash and merge 时，请确认 GitHub 的最终提交说明保留下面生成的 trailer。
+不要手工编辑两个标记之间的内容。
+-->
+
+<!-- co-author-trailers:start -->
+
+（等待 CI 自动统计共同作者）
+
+<!-- co-author-trailers:end -->
+
 ## 影响面
 
 - [ ] **数据安全**：动了存档的写入 / 删除 / 恢复 / 导入导出（这类改动请额外写清最坏情况会丢什么）
@@ -42,8 +56,7 @@
 - [ ] 新增/改动的代码都有用例覆盖
 - [ ] 确实够不着的行按口径写了豁免：平台专属用 `# platform: <平台…> - 原因`，
       其余用 `# pragma: no cover - 原因`（原因至少 5 字，不许标在 `def`/`class` 行上）
-- [ ] 平台豁免改动后用两步口径核过：`coverage run --rcfile=.coverage-platform.rc -m pytest -q`
-      + `coverage report -m --rcfile=.coverage-platform.rc`
+- [ ] 平台豁免改动后用两步口径核过：`coverage run --rcfile=.coverage-platform.rc -m pytest -q` + `coverage report -m --rcfile=.coverage-platform.rc`
 
 ## 关联与遗留
 

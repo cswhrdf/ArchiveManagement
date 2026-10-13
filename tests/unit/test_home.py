@@ -48,6 +48,7 @@ def _facts(
     game_id: str,
     *,
     name: str = "",
+    original_name: str = "",
     origin: str = "manual",
     locations: int = 1,
     backups: int = 1,
@@ -61,6 +62,7 @@ def _facts(
     return GameFacts(
         game_id=game_id,
         name=name or game_id,
+        original_name=original_name,
         origin=origin,
         location_count=locations,
         backup_count=backups,
@@ -183,6 +185,21 @@ def test_filter_matches_platform_category_and_search() -> None:
     assert HomeFilter(category="backup:none").matches(game, now=_NOW) is False
     assert HomeFilter(search="outer").matches(game, now=_NOW) is True
     assert HomeFilter(search="hollow").matches(game, now=_NOW) is False
+
+
+def test_search_also_matches_the_recorded_original_name() -> None:
+    """搜索要认**录入时的原名**: 译名写回之后名字已经换过一个, 用户手上拿的可能是原名.
+
+    出处(用户 2026-10-13): "不管是输入游戏原名还是修改过的名称或识别到的汉化名称均无
+    搜索效果"。原名只留在 ``games.original_name`` 里(译名写回会改写 ``name``), 只比 ``name``
+    的话原名就永远搜不到。
+    """
+    localized = _facts("a", name="星际拓荒", original_name="Outer Wilds")
+
+    assert HomeFilter(search="星际").matches(localized, now=_NOW) is True
+    assert HomeFilter(search="outer wilds").matches(localized, now=_NOW) is True
+    assert HomeFilter(search="OUTER").matches(localized, now=_NOW) is True
+    assert HomeFilter(search="空洞骑士").matches(localized, now=_NOW) is False
 
 
 def test_normalized_filter_falls_back_for_bad_values() -> None:

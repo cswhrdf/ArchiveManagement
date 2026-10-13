@@ -66,6 +66,29 @@ def test_home_board_lists_games_and_persists_filter(tmp_path: Path) -> None:
     assert reloaded.category_text == tr("home.category_all")
 
 
+def test_search_finds_a_renamed_game_by_its_recorded_original_name(
+    tmp_path: Path,
+) -> None:
+    """搜索要认**录入时的原名**: 改名/译名写回之后, 用户手上拿的很可能还是当初那个名字.
+
+    出处(用户 2026-10-13): "不管是输入游戏原名还是修改过的名称或识别到的汉化名称均无搜索
+    效果"。``games.original_name`` 只在录入时写一次(改名不改它), 所以两个名字都要搜得到。
+    """
+    service = _service(tmp_path)
+    game_id = service.add_game("Outer Wilds").game_id
+    service.update_game(game_id, "星际拓荒")
+
+    by_current = service.apply_home_filter(HomeFilter(search="星际"))
+    by_original = service.apply_home_filter(HomeFilter(search="outer wilds"))
+    missing = service.apply_home_filter(HomeFilter(search="空洞骑士"))
+
+    assert [item.name for item in by_current.games] == ["星际拓荒"]
+    assert [item.name for item in by_original.games] == ["星际拓荒"], (
+        "原名搜不到: 用户按录入时的名字找游戏会一无所获"
+    )
+    assert missing.games == ()
+
+
 def test_home_filter_options_carry_counts(tmp_path: Path) -> None:
     """平台与分类下拉框的每一项都要带数量, 避免点进空分类."""
     service = _service(tmp_path)

@@ -700,7 +700,10 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
     路径过滤**不能直接加在 pull_request 上**: 命中忽略时整条工作流不触发, 分支保护里的
     必需检查永远停在 pending, PR 反而合不了。所以两边用两种办法: push 用 `paths-ignore`
     (真的不跑); PR 用轻量 `changes` 作业判路径, 再由重量级作业的 `if:` 条件跳过 —— 这样
-    检查结果总会出现。忽略清单用 YAML 锚点声明一次, 两个触发器共用同一份规则。
+    检查结果总会出现。
+
+    两份忽略清单**各写一份**(2026-10-13 用户确认删掉了那个没人引用的 `&ci_ignore_patterns`):
+    PR 侧那份是块状字符串, 锚点进不去 —— 所以本用例把两份**逐条对齐**当作真正的护栏。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
@@ -710,13 +713,13 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
         "按 ref 分组: PR 与 dev/main 各管各的"
     )
 
-    # 忽略清单与分支规则各声明一次(锚点), push 用它们; PR 侧引用同一份分支规则。
-    # 锚点必须挂在 GitHub 认得的键上 —— 顶层开 `x-ci-*` 键会让整份工作流不生效,
-    # 由下面 test_ci_workflow_only_uses_top_level_keys_github_knows 守卫。
+    # 分支规则用锚点声明一次, PR 侧引用同一份; 忽略清单是**普通键**(形状见下面那条断言),
+    # 因为 PR 侧那份进不去锚点。锚点必须挂在 GitHub 认得的键上 —— 顶层开 `x-ci-*` 键会让整份
+    # 工作流不生效, 由下面 test_ci_workflow_only_uses_top_level_keys_github_knows 守卫。
     push_block = workflow.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0]
     assert re.search(r"branches: &ci_branches", push_block), "分支规则用锚点声明一次"
-    assert re.search(r"paths-ignore: &ci_ignore_patterns", push_block), (
-        "忽略清单用锚点声明一次, 免得 push / PR 两份规则走散"
+    assert re.search(r"^    paths-ignore:\s*$", push_block, re.M), (
+        "忽略清单是普通键(不带锚点): PR 侧那份进不去锚点, 两边靠下面的逐条对齐"
     )
     declared = set(re.findall(r'^\s+- "([^"]+)"$', push_block, re.M))
     assert declared == {
@@ -730,16 +733,25 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
     assert "paths-ignore" not in pull_block, "PR 不能用路径过滤: 必需检查会停在 pending"
     assert "branches: *ci_branches" in pull_block, "PR 的分支规则与 push 同一份(锚点)"
 
-    # `changes` 作业里的 filters 是**块状字符串**(锚点进不去), 所以两边必须逐条对齐:
-    # 少一条就会"push 不跑、PR 照跑"(或反过来), 而这种事在日志里看不出来。
-    filter_block = workflow.split("filters: |", 1)[1].split("\n\n", 1)[0]
+    # `changes` 作业里的过滤器是**块状字符串**(锚点进不去), 所以两边必须逐条对齐: 少一条就会
+    # "push 不跑、PR 照跑"(或反过来), 而这种事在日志里看不出来。切的位置按**整行**找: 拿
+    # `filters: |` 这个串直接切的话, 别处(注释里)提一句同名的东西就能把它切歪 —— 2026-10-13
+    # 实测踩过一次(切完之后 PR 侧集合是空的, 报出来的却是"两边不一致")。
+    parts = re.split(r"^\s+filters: \|\s*$", workflow, maxsplit=1, flags=re.MULTILINE)
+    assert len(parts) == 2, "找不到 `changes` 作业里的过滤器块"
+    filter_block = parts[1].split("\n\n", 1)[0]
     negated = set(re.findall(r"^\s+- '!([^']+)'$", filter_block, re.M))
     assert negated == declared, (
         f"push 的忽略清单与 PR 的路径过滤要逐条一致: {sorted(declared)} vs {sorted(negated)}"
     )
 
     # PR 侧靠轻量作业判路径 + 重量级作业条件跳过, 并且有一个"无论如何都给结论"的门禁作业。
-    assert workflow.count("dorny/paths-filter") == 1, "用一份路径过滤实现, 别各写一份"
+    # 数的是 `uses:` **行**(不是子串): 注释里提一句 `dorny/paths-filter` 不该被判成"实现了两份"
+    # —— 2026-10-13 实测踩过, 与上面那处切块的坑同一类。
+    filter_uses = re.findall(
+        r"^\s+uses: dorny/paths-filter@\S+", workflow, re.MULTILINE
+    )
+    assert len(filter_uses) == 1, "用一份路径过滤实现, 别各写一份"
     assert "needs.changes.outputs.should_run == 'true'" in workflow, (
         "重量级作业要按路径过滤的结果跳过"
     )
@@ -1301,3 +1313,28 @@ def test_run_ledger_includes_the_native_quality_gate(
     assert "Quality Gate failed" in ledger
     assert "\x1b" not in ledger, "CLI 输出的颜色码不能进报告"
     assert "退出码: 1" not in ledger, "退出码翻成结论后不该再原文照抄"
+
+
+def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> None:
+    """PR 合并前要核对共同作者 trailer, 模板也要提示合并提交保留它们."""
+    workflow = (
+        _REPO_ROOT / ".github" / "workflows" / "co-author-attribution.yml"
+    ).read_text(encoding="utf-8")
+    template = (_REPO_ROOT / ".github" / "pull_request_template.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pull_request_target:" in workflow
+    assert "pull-requests: write" in workflow
+    assert "github.rest.pulls.listCommits" in workflow
+    assert "github.rest.pulls.update" in workflow
+    assert "Co-authored-by:" in workflow
+    assert "pullRequest.user.login" in workflow
+    assert "pullRequest.draft" in workflow
+    assert "co-author-trailers:start" in workflow
+    assert "co-author-trailers:end" in workflow
+    assert "## Squash 合并署名" in template
+    assert "co-author-trailers:start" in template
+    assert "co-author-trailers:end" in template
+    assert "不要手工编辑" in template
+    assert "最终提交说明" in template
