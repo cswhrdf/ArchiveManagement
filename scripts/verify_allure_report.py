@@ -428,6 +428,54 @@ def environment_problems(report_dir: Path) -> list[str]:
     ]
 
 
+def default_environment_problems(report_dir: Path) -> list[str]:
+    """报告里不该有落在隐式 ``default`` 环境的结果(它们等于没带 env 标签).
+
+    ``default`` 是 Allure 在"这条结果的 labels 匹配不上任何声明的环境"时给的兜底.
+    生成端根本没读到仓库配置时**所有**结果都会进 default, 那是
+    :func:`environment_problems` 管的事; 这里抓的是"只有个别几条进了 default": 它们
+    从平台维度里消失 —— 报告里按平台筛选看不到它们, 逐平台的用例数也会比产物清单少,
+    而父级只会报一句"报告生成时掉过数据", 看不出是哪条、为什么.
+
+    实测成因(2026-10-14 run 38594250358, Linux/macOS 各少 1 条, 最终报告因此没上传):
+    ``pytest.mark.skip`` / ``skipif`` 由 pytest 在 ``pytest_runtest_setup`` 最前面求值,
+    **夹具一个都不跑** —— 标签若写在 autouse 夹具里(``allure.dynamic``), 被跳过的用例就
+    一条标签都没有。修法是让"环境事实"走收集期标记(见 ``tests/conftest.py`` 的
+    ``_attach_environment_labels``); 这条检查负责在它再次漏掉时当场点名。
+    """
+    entries = indexed_environments(report_dir)
+    if not entries:
+        return []
+    lookup = environment_alias_lookup(report_dir)
+    default_names = {
+        DEFAULT_ENVIRONMENT,
+        lookup.get(DEFAULT_ENVIRONMENT, DEFAULT_ENVIRONMENT).lower(),
+    }
+    offenders = [
+        result_id
+        for result_id, raw in entries.items()
+        if lookup.get(raw.lower(), raw).lower() in default_names
+    ]
+    if not offenders:
+        return []
+    return [
+        f"有 {len(offenders)} 条结果落在 default 环境(等于没带 env 标签: 被 skip 在夹具之前,"
+        f"或结果不是从 conftest 那条路写出来的): {result_titles(report_dir, offenders)}"
+    ]
+
+
+def result_titles(report_dir: Path, result_ids: Sequence[str]) -> str:
+    """把结果 id 翻成"用例名 (id)" —— 报错时点名比给一串 uuid 有用."""
+    shown: list[str] = []
+    for result_id in result_ids[:MAX_REPORTED_MISSING]:
+        payload = load_object(report_dir / DETAIL_DIRECTORY / f"{result_id}.json") or {}
+        name = payload.get("name")
+        shown.append(f"{name} ({result_id})" if isinstance(name, str) else result_id)
+    if len(result_ids) > MAX_REPORTED_MISSING:
+        shown.append(f"…(共 {len(result_ids)} 条)")
+    return ", ".join(shown)
+
+
 def static_problems(report_dir: Path) -> list[str]:
     """校验报告入口文件与控件数据(缺少这些连汇总都渲染不出来)."""
     problems = [
@@ -535,6 +583,7 @@ def verify_report(
         group_reference_problems(report_dir, expected, grouped_result_ids(report_dir))
     )
     problems.extend(environment_problems(report_dir))
+    problems.extend(default_environment_problems(report_dir))
     counts = platform_test_counts(report_dir, expected_platforms)
     problems.extend(platform_test_problems(counts, expected_platforms))
     manifests, manifest_load_problems = load_manifests(manifest_pattern)

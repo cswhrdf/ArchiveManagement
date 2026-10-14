@@ -140,7 +140,7 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
 - **运行总账的末节是「证据核对（应有 vs 实有）」**：应有的证据清单由 `scripts/allure_catalog.py` 一族族展开（平台矩阵 × 类别 × 各汇总项），逐项标"已收到 / 缺失"；每个缺失项另写一条 `broken` 结论并打 `::warning::`（门禁跟着红）；「判定」列说明每一项由谁负责。开头一行数"应有 N 项，收到 M 项"；末尾两张小表（结论清单 / 结论项声明的附件文件），粒度不同不合成一张表。为什么需要：Allure 只判"结果文件里有的东西"，合并环节吞掉半个平台时报告照样绿——总账把"应该有什么"摊开在页面上，缺一眼可见。
 - 性能 / 覆盖率 / 安全三节每平台一行，结论都从原始数据算出（脚本读文件而不是猜 CI 环境变量）。
 - **「有意不统计的覆盖」是报告首页的全局附件**（`allure-coverage-exclusions.md`）：来自 pragma 标记（`# pragma: no cover` 等）与 `pyproject.toml` 的 `exclude_also`，按文件列出"路径:行号—标记—原因"与总条数，未写原因的标记单独指出；解析规则与 `tests/unit/test_coverage_pragmas.py` 共用同一实现（守卫同步，防止两头漂移）。
-- **平台以 Allure 的"环境"维度呈现**（2026-10-05 起）：每条结果带 `env` 标签（平台展示名），`allurerc.mjs` 的 matcher 把标签映射成 Allure environment；报告里出现 Windows / macOS / Linux 三个环境，"按环境过滤/对比"直接可用。两个配套兜底：平台作为 `--platform` 参数进入结果身份——三平台 `retryHash` 各不相同（一个用例不会在跨平台合并后变成"重试"）、`historyId` 又共享（历史趋势能连上）；旧的 os 标签 + parentSuite 后缀保留（旧报告兼容 + 兜底）。**生成报告必须在仓库根执行**——Allure CLI 要读到 `allurerc.mjs` 才会识别环境，读不到会**静默**退回 default 环境，`scripts/verify_allure_report.py` 会判"报告不完整"。摘要类结论项同规则：带 env、标题不拼平台名（环境维度已经表达）。
+- **平台以 Allure 的"环境"维度呈现**（2026-10-05 起）：每条结果带 `env` 标签（平台展示名），`allurerc.mjs` 的 matcher 把标签映射成 Allure environment；报告里出现 Windows / macOS / Linux 三个环境，"按环境过滤/对比"直接可用。`env` 与 `os` 两个标签在**收集期**挂成标记（`conftest._attach_environment_labels`），**不能**写在 autouse 夹具里：`pytest.mark.skip` / `skipif` 由 pytest 在夹具之前求值，写在夹具里的标签会整个丢掉，结果会落进隐式的 `default` 环境——报告里按平台看不到它，逐平台用例数还会比分片自报的少（2026-10-14 run 38594250358 就是这样：Linux/macOS 各少 1 条，报告自检不过、最终报告没上传）。平台参数 `平台` 没有标记形态，仍留在夹具里。两个配套兜底：平台作为 `--platform` 参数进入结果身份——三平台 `retryHash` 各不相同（一个用例不会在跨平台合并后变成"重试"）、`historyId` 又共享（历史趋势能连上）；旧的 os 标签 + parentSuite 后缀保留（旧报告兼容 + 兜底）。**生成报告必须在仓库根执行**——Allure CLI 要读到 `allurerc.mjs` 才会识别环境，读不到会**静默**退回 default 环境，`scripts/verify_allure_report.py` 会判"报告不完整"。摘要类结论项同规则：带 env、标题不拼平台名（环境维度已经表达）。
 - 用例标题里的参数化 id 会被 pytest 转成 ASCII 转义（`\u7528\u6237`），生成报告时还原（界面与 URL 里都是可读中文）。
 - **`allurerc.mjs` 的三项读者辅助**：
   1. **categories 失败归类**——三条规则（id 与 `allurerc.mjs` / `tests/unit/test_test_config.py` 三处同步，改名要一起改）：
@@ -371,6 +371,7 @@ CTk 的实测缺口（Tk 8.6 + CTk 6.0）：按钮/单选/复选/开关画在 Ca
 - 检查入口资源（index.html、单个 app-\*.js、summary.json、test-results.json、widgets/\*\*/statistic.json、tree.json）；
 - 逐条核对结果索引引用的详情文件存在、条数与 allure-results 一致；
 - 校验用例分组引用的结果 id 都在索引里；
+- **不许有结果落在 `default` 环境**：生成端没读到配置时**所有**结果都会进 default（由"报告里只有 default 环境"那条拦下），只个别几条进 default 则是**它们没带 `env` 标签**的信号（报告里按平台看不到它们）——检查会点名到用例（`结果名 (id)`）；
 - `--expect-platforms` 的每个平台环境里都要有**真实用例**（判据 `framework=pytest`，与质量门同一判据）；
 - 传了 `--manifest` 时把"分片自报条数"与最终条数对上（声明的片号都到了、各片自报数 ≤ 结果文件数、报告各平台用例数 ≥ 自报数）。
 

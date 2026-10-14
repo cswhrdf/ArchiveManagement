@@ -129,6 +129,59 @@ def test_missing_environment_widget_is_reported(layout: _Layout) -> None:
     assert any("environments.json" in problem for problem in problems)
 
 
+def test_results_that_lost_their_environment_label_are_named(
+    layout: _Layout,
+) -> None:
+    """落在 default 环境的结果要点名: 那等于这条结果没带 ``env`` 标签.
+
+    实测成因(2026-10-14 run 38594250358): 被 ``pytest.mark.skipif`` 跳过的用例不跑任何夹具,
+    写在夹具里的 ``env`` 标签没落上 —— 结果落进 default, 逐平台用例数比产物清单少 1,
+    父级只报一句"报告生成时掉过数据", 看不出是哪条、为什么。
+    """
+    (layout.report / "test-results.json").write_text(
+        json.dumps(
+            {
+                "byId": {
+                    _RESULT_IDS[0]: {
+                        "id": _RESULT_IDS[0],
+                        "status": "skipped",
+                        "environment": "default",
+                    },
+                    _RESULT_IDS[1]: {
+                        "id": _RESULT_IDS[1],
+                        "status": "passed",
+                        "environment": "Windows",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (layout.report / "data" / "test-results" / f"{_RESULT_IDS[0]}.json").write_text(
+        json.dumps({"id": _RESULT_IDS[0], "name": "一条被跳过的用例"}),
+        encoding="utf-8",
+    )
+
+    _, problems = verifier.verify_report(layout.report)
+
+    message = next(problem for problem in problems if "default 环境" in problem)
+    # 报错要指向具体用例(名字读不到时退回 id), 而不是只给一个数字。
+    assert "一条被跳过的用例" in message
+    assert _RESULT_IDS[0] in message
+    assert _RESULT_IDS[1] not in message, "带平台环境的结果不该被点名"
+
+
+def test_results_without_an_environment_are_left_alone(layout: _Layout) -> None:
+    """索引里根本没写 environment 的条目不算"落进 default"(那是另一回事).
+
+    默认 fixture 的那两条就是这种形态(只写 id/status) —— 这条守主要是防止新检查
+    在“没写环境”上误报, 把正常报告判成不完整。
+    """
+    _, problems = verifier.verify_report(layout.report)
+
+    assert problems == []
+
+
 def test_platform_with_only_summary_items_is_reported(
     layout: _Layout, capsys: pytest.CaptureFixture[str]
 ) -> None:

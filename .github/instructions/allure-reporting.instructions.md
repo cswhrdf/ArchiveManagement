@@ -67,7 +67,8 @@ pytestmark = [
 - **四层都必填**：`epic`（闭集）→ `feature`（与生产模块一一对应）→ `story`（具体用户场景）→ `layer`（闭集 `unit/integration/e2e/performance/security`）。守卫 `test_every_test_module_declares_allure_labels`。
 - **严重等级恰好一个**：显式标记优先，否则按目录兜底（security→critical、performance→minor、其余→normal）；五级都要有人用。守卫 `test_every_test_module_declares_exactly_one_severity`。
 - `layer` 只能用 `allure.dynamic.label("layer", ...)` —— allure-pytest **没有** `allure.layer` 装饰器（守卫 `test_layer_label_is_written_as_raw_label`）。
-- 每条结果另带三项"平台冗余"：参数 `平台`、标签 `os`、标签 `env`（值都是平台显示名）。参数与套件名是"配置没被生成端读到"时的兜底；`env` 才是环境维度的入口（见第 4 节）。守卫 `test_allure_result_carries_the_platform`。
+- 每条结果另带三项"平台冗余"：参数 `平台`、标签 `os`、标签 `env`（值都是平台显示名）。参数与套件名是"配置没被生成端读到"时的兜底；`env` 才是环境维度的入口（见第 4 节）。
+- **`env` / `os` 必须在收集期挂成标记**（`conftest._attach_environment_labels`），**不能**在 autouse 夹具里用 `allure.dynamic` 写：`pytest.mark.skip` / `skipif` 由 pytest 在 `pytest_runtest_setup` 最前面求值，**那之后一个夹具都不跑** —— 写在夹具里的标签会整个丢掉，结果落进隐式的 `default` 环境（报告里按平台看不到它，该平台的用例数还比分片自报的少）。`平台` 参数没有标记形态（Allure 只在运行期提供参数接口），仍留在夹具里。守卫 `test_allure_result_carries_the_platform`（钉"标记里有 + 夹具里没有"）与 `tests/unit/test_allure_environment_labels.py`（真跑一条 `skipif` 用例，断言它照样带 env/os）。
 - **标题必须写到 `__allure_display_name__`**：allure-pytest 的 `pytest_runtest_setup` 会在所有 fixture 跑完后用 `item.name` 重新赋值，所以 `allure.dynamic.title` 会被冲掉；花括号要转义。描述在收尾时补回（`_restore_description`）。守卫 `test_title_is_readable_after_allure_pytest_renaming` / `test_title_follows_each_parametrized_case`。
 - 参数化 id 里的 ASCII 转义（`\u7528\u6237`）在生成报告时还原成中文（`_readable`），守卫 `test_readable_restores_unicode_escapes`。
 
@@ -137,6 +138,7 @@ run: echo "::error::质量门未通过 …" && exit 1
 - **只匹配到一个产物时 `download-artifact` 不建"以产物名命名的子目录"**：单片平台（macOS）必须把 `path` 直接写成那个分片目录名（矩阵字段 `download_path`），多片平台才写 `.`。踩过：macOS 的 12689 个结果文件摊在工作区根，合并脚本按分片目录找、一个都匹配不到，该平台的结论与覆盖率全程没进报告。守卫 `test_single_shard_platform_downloads_into_its_own_shard_directory`。
 - **`--manifest` 是"少一片"的唯一判据**：环境、通过率、格式自检、原生质量门都看不出"三片只合并进一两片"。清单由 `merge_allure_results.py` 写、随 `allure-resources-*` 上传、由 `verify_allure_report.py --manifest "allure-manifests/*.json"` 与最终条数对齐。守卫 `test_ci_records_shard_counts_in_a_manifest`。
 - **生成前自检，自检不过不发布**：`verify_allure_report.py` 校验详情目录、索引引用的文件、附件、环境 widget、条数；报告目录**不存在**视为"本次没有结果、未生成报告"（退出 0），其余缺资源即退 1。发布（`allure-report.tar.gz`）挂在"出 zip 那次自检成功"上，且**不再发布报告目录本身**。守卫 `test_ci_publishes_only_verified_report`。
+- **`default` 环境里不许有结果**：生成端没读到配置时*所有*结果都会进 `default`（由"报告里只有 default 环境"那条拦下）；只个别几条进 `default` 则是**它们没带 `env` 标签**的信号（上面那条 `skip` 成因就是这么表现的：逐平台用例数少几条、汇总报告里同身份的两份还被生成器并掉，索引比结果文件少 1）。检查由 `default_environment_problems()` 做，报错会点名用例（`结果名 (id)`）。守卫 `test_results_that_lost_their_environment_label_are_named`、`test_results_without_an_environment_are_left_alone`。
 - **产物名不许改**：`allure-resources-<镜像名>` / `allure-report-<镜像名>` / `coverage-<镜像名>` 里的名字代表"哪个平台的产物"，不是生成机器；改名会让历史曲线清零。
 - **别用 `--alluredir` 之外的东西表达归属**：报告目录、`.allure/`、`allure-results*/` 都在 `.gitignore` 里，本地跑出来的产物不入库。
 

@@ -2639,6 +2639,39 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
 - **文档同步**: `CONTRIBUTING.md` 第二节("只是不出报告" → "报告与覆盖率门禁也照出"; "覆盖率结论在 PR 与 nightly 的报告里看" → "每一轮的报告里看")、`.github/pull_request_template.md` 顶部门禁说明、`docs/testing.md` 第 6 节(流程图补一句"下面两步在每一轮都跑"、作业数量那条改成每一轮 16 个实例、报告作业那条整句重写并写清"排除理由随选层回退失效")。
 - **代价(诚实记一笔)**: push 到 `dev` 时每轮多 3 个 `pytest-report` 实例 + 1 个 `allure-summary`(各带一次 Node + Allure CLI 安装, npm 缓存命中约 10~20s/次)。换来的是 push 那一轮也能直接看覆盖率门槛与完整报告, 不必等 PR。
 
+## 58. 被 skip 的用例丢了 env 标签: 结果落进 default 环境, 报告自检不过(2026-10-15, 用户要求"按照方案修一下")
+
+- **现场(run 38594250358 的日志)**: Linux 与 macOS 的"合并测试报告"都报
+  `报告资源不完整: Linux 的报告里只有 2870 条用例, 少于分片自报的 2871 条(报告生成时掉过数据)`, 而同一个作业打印的
+  `结果索引 / 详情文件 / 用例分组 / allure-results 结果文件` 四个数**自洽(都是 2872)** ⇒ 既没缺片也没掉数据, 而是**有一条结果没被算进 Linux 环境**;
+  汇总报告那边更直接: `allure-report/data/test-env-groups 里有 1 个结果 id 不在结果索引中` +
+  `结果数不一致: allure-results 有 8837 个结果文件, 报告索引只有 8836 条`。两处都是①的后果, 而 `allure-report-final` 没上传是因为
+  `Verify final Allure report` 失败(`Upload final Allure report` 的条件就是 `steps.verify-report.outcome == 'success'`)。
+- **根因(本机两个探针量出来的)**: `pytest.mark.skipif(sys.platform != "win32", ...)`(`tests/integration/test_gui_window_icon.py`, 全库唯一一处 marker skip)
+  由 pytest 在 `pytest_runtest_setup` 最前面求值并抛 `Skipped` —— **那之后一个夹具都不跑**, 而 `env`/`os` 两个标签当时写在 autouse 夹具
+  `_configure_allure` 里(`allure.dynamic`)。实测: 被跳过的结果只剩 allure-pytest 自己写的 `framework/host/language/package/parentSuite/suite/tag/thread`,
+  `env=[]` ⇒ ① 报告里按平台筛不到它(逐平台用例数少 1; Windows 上这条用例**真的跑**, 所以那边正好 2871);
+  ② 汇总报告里 Linux + macOS 两份这种结果身份完全相同(无参数 ⇒ retryHash 是空串的 md5), 被生成器当成同一次尝试并掉 → 索引少 1 + 分组里留一个悬空 id。
+  两个探针: 一条 `skipif` 结果 `env=[]`(对照组有 `env=Windows`); 把无 env 的结果复制两份后 `allure generate` → **结果文件 2 / 报告索引 1**, 保留那条 `environment='default'`。
+- **修法 1(根治)**: `tests/conftest.py` 新增 `_attach_environment_labels(item)` —— 把 `env`/`os` 挂成**收集期标记**
+  (`_ALLURE_LABEL = allure.label`, 走 `item.add_marker`)。allure-pytest 在 `pytest_runtest_teardown` 里统一读 item 的标记(`allure_labels(item)`),
+  而 **teardown 对跳过的用例照样跑** ⇒ 这条路径不受夹具影响。两个标记从 `_configure_allure` 里删掉(标签只留一个来源; 两处都写会在结果上多出一份同名标签)。
+  **取舍**: `平台` 参数没法这么搬(Allure 只在运行期提供 `add_parameter`, 没有标记形态), 仍留在夹具里 —— 被跳过的用例少一个参数不影响它的环境归属。
+- **修法 2(直接信号)**: `scripts/verify_allure_report.py` 新增 `default_environment_problems()` + `result_titles()` —— 报告里不许有结果落在隐式 `default` 环境,
+  命中就点名用例(`结果名 (id)`)。它抓的是"个别几条进 default"(生成端完全没读到配置时是**所有**结果进 default, 那由 `environment_problems` 那条报),
+  以前只能靠"逐平台用例数比清单少"这种间接差发现, 而且只出现在单平台报告里。
+- **验证(本机实测)**: ① 改后那条 `skipif` 结果 `env=Windows / os=Windows`(对照组的参数**仍只有一条**, 即 `平台`);
+  ② 两条同身份、**带不同 env 标签**的结果 → 报告索引 2 条、环境 linux/macos、分组引用无悬空(与"都没标签时索引 1 条 + default"形成对照);
+  ③ 守卫: 改写 `test_test_config.py::test_allure_result_carries_the_platform`(钉"标记里有 env/os + 夹具里没有"), 新增
+  `tests/unit/test_allure_environment_labels.py::test_a_skipped_test_still_carries_the_environment_labels`(子进程真跑一条 `skipif` 用例,
+  用 `-p conftest` 借用仓库根 conftest, 断言两条结果都带 env/os 且各只有一份), `tests/unit/test_report_structure.py` 两条
+  (`test_results_that_lost_their_environment_label_are_named` / `test_results_without_an_environment_are_left_alone` —— 后者防止"索引里没写 environment"被误判)。
+  **咬合验证(探针用完即删)**: 去掉收集期那次 `_attach_environment_labels(item)` 调用 → 标签守卫红(结构守卫仍绿); 让 default 判定永不命中 → 结构守卫红(标签守卫仍绿); 都还原后绿且逐字相同。
+- **文档同步**: `.github/instructions/allure-reporting.instructions.md` 第 3 节(env/os 必须在收集期挂标记 + 两个守卫名)与第 9 节(default 环境自检),
+  `docs/testing.md` 第 5 节(标签来源与"为什么不能写在夹具里")与第 6 节自检清单(新增那条检查)。
+- **诚实记一笔(仍会漏的那类)**: 模块级 `pytest.skip(allow_module_level=True)`(25 个 GUI 模块在 Tk 不可用时走它)**没有 item**, 标记路线覆盖不到 ⇒
+  那种轮次仍会产出无 env 的结果。现在会被新的 default 自检**拦下**(报告不上传) —— 与仓库"结构问题拦发布"的口径一致: 那时作业本来就是红的(覆盖率门槛必挂), 日志里写着原因。
+
 ---
 
 # !这部分以下的内容识别时忽略，仅为个人记录灵感，输出的内容要写在上面不允许超过上面的分隔线

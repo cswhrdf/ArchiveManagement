@@ -168,6 +168,8 @@ _FALLBACK_DESCRIPTION = "ArchiveManagement 测试用例"
 _OUR_TITLES: dict[int, str] = {}
 # allure.dynamic 的函数没有类型标注, 统一按 Any 调用, 避免满屏 no-untyped-call 忽略.
 _ALLURE_DYNAMIC: Any = allure.dynamic
+# 同理: ``allure.label`` 是"标记装饰器"的工厂(返回 pytest mark), 也没有类型标注。
+_ALLURE_LABEL: Any = allure.label
 
 # pytest 把非 ASCII 的参数 id 用 ``unicode_escape`` 转义(中文变成 ``\u5e03\u5c14``,
 # 反斜杠变成 ``\\``), 报告标题要用可读文字, 所以展示前按同样的规则解回去。
@@ -190,6 +192,36 @@ def _readable(value: str) -> str:
 def _current_platform_label() -> str:
     """返回当前平台的可读名称(Windows/Linux/macOS), 供报告区分多平台结果."""
     return platform_label(current_platform())
+
+
+#: "这条用例跑在哪台机器上"的标签名 —— 由 :func:`_attach_environment_labels` 在**收集期**
+#: 写成标记, 而不是在夹具里用 ``allure.dynamic`` 写(理由见那个函数).
+_ENVIRONMENT_LABELS = ("env", "os")
+
+
+def _attach_environment_labels(item: pytest.Item) -> None:
+    """把平台事实(env / os)写成**收集期标记**, 让"被跳过"的用例也带得上.
+
+    为什么不能只靠夹具: ``pytest.mark.skip`` / ``skipif`` 由 pytest 在
+    ``pytest_runtest_setup`` 的**最前面**求值并抛出, 那之后**一个夹具都不跑** —— 而
+    :func:`_configure_allure` 是 autouse 夹具, 于是被跳过的用例一条标签都没有(实测: 只剩
+    allure-pytest 自己写的 framework/host/language/package/suite/tag/thread).
+    缺 ``env`` 的后果不是"少一个标签": 结果会落进 Allure 隐式的 ``default`` 环境 ——
+    报告里按平台筛选看不到它, 该平台的用例数也会比分片自报的少一条.
+
+    实测现场(2026-10-14 run 38594250358): ``tests/integration/test_gui_window_icon.py``
+    那条 ``skipif(sys.platform != "win32")`` 在 Linux/macOS 上被跳过 → 两边的"合并测试报告"
+    都判"报告生成时掉过数据"(2870 < 2871); 汇总报告里两份这种结果身份相同, 又被生成器
+    当成同一次尝试并掉(8837 个结果文件 vs 8836 条索引) → 自检不过 → 最终报告没上传.
+
+    标记由 allure-pytest 在 ``pytest_runtest_teardown`` 里统一读(``allure_labels(item)``),
+    而 teardown **对跳过的用例照样跑**, 所以这条路径不受夹具影响。
+    ``平台`` 参数没法这么搬(Allure 只有运行期的参数接口, 没有对应的标记), 仍留在夹具里:
+    被跳过的用例少一个参数不影响它出现在哪个环境。
+    """
+    platform = _current_platform_label()
+    for name in _ENVIRONMENT_LABELS:
+        item.add_marker(_ALLURE_LABEL(name, platform))
 
 
 def _title_of(item: pytest.Item) -> str:
@@ -357,6 +389,7 @@ def pytest_collection_modifyitems(
     kept: list[pytest.Item] = []
     for item in items:
         _validate_metadata(item)
+        _attach_environment_labels(item)
         severity = _resolve_severity(item)
         item.add_marker(getattr(pytest.mark, severity))
 
@@ -606,16 +639,11 @@ def _configure_allure(item: pytest.Item) -> None:
     # allure-pytest 没有 layer 装饰器, 只能写原始标签(Allure 3 "按层耗时" 直方图读它).
     _ALLURE_DYNAMIC.label("layer", layer)
     # 平台写成**参数**而不只是标签: Allure 用"用例全名 + 非 excluded 参数 + 标签"算重试
-    # 身份(retryHash), 少了参数, 三个平台的同名结果容易被并成"同一用例重试了多次";
-    # os 标签同时作为筛选维度。
+    # 身份(retryHash), 少了参数, 三个平台的同名结果容易被并成"同一用例重试了多次"。
+    # ``env`` / ``os`` 两个标签**不在这里写**: 它们是"这条用例跑在哪台机器上"的事实,
+    # 写在夹具里会让被 skip 的用例丢掉它们(见到 :func:`_attach_environment_labels`),
+    # 于是结果落进 default 环境、从平台维度里消失。
     _ALLURE_DYNAMIC.parameter("平台", platform)
-    _ALLURE_DYNAMIC.label("os", platform)
-    # env 标签把平台升级成 Allure 3 的一等维度"环境": 仓库根的 ``allurerc.mjs`` 用它把结果
-    # 归到 windows/macos/linux 三个环境, 于是合并报告里能按环境筛选, 每个用例的"环境"分页
-    # 会列出它在三台机器上的结果(而不是只能从参数/套件名里认平台)。
-    # 参数与套件名都保留: 它们是"配置没被生成端读到"时的兜底(那时环境会退化成 default),
-    # 自检脚本 ``scripts/verify_allure_report.py`` 会把这种退化报成失败。
-    _ALLURE_DYNAMIC.label("env", platform)
     # suite 三层与 layer/epic/feature 对齐, 作为只认 suite 标签的控件兜底;
     # 平台加在 parentSuite 末尾, 合并报告的套件树里能一眼看出用例跑在哪台机器上.
     _ALLURE_DYNAMIC.parent_suite(f"{_LAYER_SUITES.get(layer, layer)} · {platform}")

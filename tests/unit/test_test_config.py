@@ -668,14 +668,46 @@ def test_explicit_allure_title_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     assert allure_name(cast(pytest.Item, item), {}, None) == "自定义标题"
 
 
+class _MarkerItem:
+    """只实现 ``add_marker`` 的替身: 收集期标签就是靠它挂上去的."""
+
+    def __init__(self) -> None:
+        self.markers: list[Any] = []
+
+    def add_marker(self, marker: Any, append: bool = True) -> None:
+        """记下挂上来的标记(真实实现会把标记并入 item 的标记表).
+
+        ``append`` 是 pytest 的签名要求(默认 True), 这里只是收了它; 真实调用点不传。
+        """
+        self.markers.append(marker)
+
+
+def _environment_labels() -> dict[str, str]:
+    """跑一次真实的收集期钩子, 把挂上去的环境标签读成 ``{标签名: 值}``."""
+    item = _MarkerItem()
+    conftest._attach_environment_labels(cast(pytest.Item, item))
+    labels: dict[str, str] = {}
+    for mark in item.markers:
+        assert mark.name == "allure_label", mark
+        for value in mark.args:
+            labels[mark.kwargs["label_type"]] = value
+    return labels
+
+
 def test_allure_result_carries_the_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """平台要写成参数 + os/env 标签, 并同步写套件名(便于按平台/环境查看).
+    """平台要写成参数 + **收集期**的 os/env 标记, 并同步写套件名(便于按平台/环境查看).
 
-    参数与套件名是"生成端没读到 allurerc.mjs"时的兼底(那时环境会退化成 default),
+    参数与套件名是"生成端没读到 allurerc.mjs"时的兜底(那时环境会退化成 default),
     env 标签则是平台成为 Allure 3 "环境"维度的入口; 两者缺一都会让三平台结果
     在合并报告里难以分辨。
+
+    env/os **必须是收集期标记**, 不能在夹具里写: ``pytest.mark.skip`` / ``skipif`` 由 pytest
+    在 ``pytest_runtest_setup`` 最前面求值, 夹具一个都不跑 —— 写在夹具里的标签会整个丢掉,
+    结果落进隐式的 default 环境(2026-10-14 run 38594250358: Linux/macOS 的合并测试报告各
+    少 1 条用例, 汇总报告也因此自检不过、最终报告没上传)。所以这里同时钉住"标记里有"
+    与"夹具里没有再写一遍"(两处都写会在结果上多出一份同名标签)。
     """
     recorder = _DynamicRecorder()
     monkeypatch.setattr(conftest, "_ALLURE_DYNAMIC", recorder)
@@ -686,10 +718,10 @@ def test_allure_result_carries_the_platform(
     platform = conftest._current_platform_label()
     assert platform in {"Windows", "Linux", "macOS"}
     assert recorder.arguments("parameter") == ("平台", platform)
-    labels = recorder.all_arguments("label")
-    assert ("os", platform) in labels
-    assert ("env", platform) in labels
     assert str(recorder.arguments("parent_suite")[0]).endswith(f"· {platform}")
+    dynamic_labels = recorder.all_arguments("label")
+    assert all(name not in {"env", "os"} for name, _ in dynamic_labels), dynamic_labels
+    assert _environment_labels() == {"env": platform, "os": platform}
 
 
 def _allure_config_text() -> str:
