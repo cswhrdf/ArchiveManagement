@@ -105,8 +105,16 @@ def required_assets(root: Path | None = None) -> tuple[Path, ...]:
 
 
 def fingerprint(svg: Path) -> str:
-    """SVG 内容的 sha256(十六进制); 位图与本指纹一起构成"这一版"."""
-    return hashlib.sha256(svg.read_bytes()).hexdigest()
+    """SVG 内容的 sha256(十六进制); 位图与本指纹一起构成"这一版".
+
+    只认内容、不认换行风格: SVG 是 XML 文本, CRLF 与 LF 语义相同但字节不同,
+    而工作区是哪一种由每个贡献者的 ``core.autocrlf`` 决定(仓库历史上没有统一的 eol
+    约束)。直接对工作区字节取哈希, "同一次重画"就会在不同平台上得到不同指纹 ——
+    2026-10-15 的 CI 即此: stamp 在 Windows(CRLF 工作区)上写入, macOS/Linux 按 LF
+    检出, 两个平台的守卫全红(位图本身没有任何问题)。指纹与检出平台解耦后, stamp
+    在哪台机器上写都一样; ``.gitattributes`` 再把资源文本的 eol 钉死, 双保险。
+    """
+    return hashlib.sha256(svg.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def asset_state(root: Path | None = None) -> AssetState:

@@ -594,6 +594,17 @@ def _all_widget_problems(label: str, controls: list[Any], window: Any) -> list[s
         _settle(window)
 
 
+# 初始定焦的重试拍数。这不是放宽判据: 2026-10-14 macOS CI 偶发一次
+# "导入归档包: 窗口可见时定焦也没生效", 读失败现场的 coredumpy dump 核过:
+# ``_UNMEASURED`` 为空(环境不忙)、其后测的批量导出/批量导入同判据全过(不是劣化)、
+# 存活控件里没有任何 CTkToplevel(无僵尸窗口), ``focus_first`` 的产品接线
+# (after_idle + ``<Map>`` 双路径)也没有缺陷 —— 剩下的机制在 Aqua/Tcl 层:
+# 窗口激活晚于测量拍到达时, ``focus_set`` 只登记不定焦, ``focus_lastfor``
+# 要等真实的 FocusIn 才更新。重试走的正是产品自己的路径(窗口重映射时
+# ``<Map>`` 也会再调一次 ``focus_first``), 拍拍落空仍然算失败。
+_FOCUS_ATTEMPTS = 3
+
+
 def _dialog_problems(label: str, window: Any) -> list[str]:
     """对话框级别的三条: Esc、回车(要有主操作)、初始焦点.
 
@@ -608,9 +619,16 @@ def _dialog_problems(label: str, window: Any) -> list[str]:
     if keyboard.primary_button(window) is None:
         found.append(f"{label}: 找不到主操作按钮, 回车按不动")
     target = keyboard.focus_first(window)
-    # 定焦是排进 after_idle 的(那一刻窗口可能还没映射): 跑完事件循环再读 Tk 记下的焦点.
-    _settle(window)
-    last = window.focus_lastfor()
+    # 定焦是排进 after_idle 的(那一刻窗口可能还没映射): 跑完事件循环再读 Tk 记下的
+    # 焦点; 没落上时按 _FOCUS_ATTEMPTS 说明的理由重试, 拍拍落空才算真问题.
+    last: Any = None
+    for attempt in range(_FOCUS_ATTEMPTS):
+        _settle(window)
+        last = window.focus_lastfor()
+        if last is not None and str(last).startswith(f"{window}."):
+            break
+        if attempt + 1 < _FOCUS_ATTEMPTS:
+            keyboard.focus_first(window)
     if target is None:
         found.append(f"{label}: 没有可定焦的目标(既没有输入框也没有主按钮)")
     elif last is None or not str(last).startswith(f"{window}."):

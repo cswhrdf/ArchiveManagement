@@ -155,6 +155,23 @@ def test_fingerprint_follows_the_file_content(tmp_path: Path) -> None:
     assert icon_assets.fingerprint(svg) == icon_assets.fingerprint(svg)
 
 
+def test_fingerprint_ignores_line_endings(tmp_path: Path) -> None:
+    """指纹与换行风格无关: 同一份内容, CRLF 与 LF 检出必须同指纹.
+
+    2026-10-15 的 CI 事故守卫: stamp 在 Windows(``autocrlf`` 出 CRLF 工作区)上写入,
+    macOS/Linux 却按 LF 检出 —— 直接对工作区字节取哈希时, 同一次重画在两平台的
+    指纹不同, 守卫全红(位图本身没有任何问题)。指纹只认内容, "谁检出"不许改变
+    "是不是这一版"。
+    """
+    body = "<svg>\n  <rect/>\n</svg>\n"
+    lf = tmp_path / "lf.svg"
+    lf.write_bytes(body.encode())
+    crlf = tmp_path / "crlf.svg"
+    crlf.write_bytes(body.replace("\n", "\r\n").encode())
+
+    assert icon_assets.fingerprint(crlf) == icon_assets.fingerprint(lf)
+
+
 def test_icon_files_only_reports_what_is_there(tmp_path: Path) -> None:
     """定位图标: 文件在就给路径, 不在就给 None(缺资源是正常状态, 不抛异常)."""
     empty = icon_assets.icon_files(tmp_path)

@@ -2671,6 +2671,11 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
   `docs/testing.md` 第 5 节(标签来源与"为什么不能写在夹具里")与第 6 节自检清单(新增那条检查)。
 - **诚实记一笔(仍会漏的那类)**: 模块级 `pytest.skip(allow_module_level=True)`(25 个 GUI 模块在 Tk 不可用时走它)**没有 item**, 标记路线覆盖不到 ⇒
   那种轮次仍会产出无 env 的结果。现在会被新的 default 自检**拦下**(报告不上传) —— 与仓库"结构问题拦发布"的口径一致: 那时作业本来就是红的(覆盖率门槛必挂), 日志里写着原因。
+- **全量分片验证(`scripts/run_tests_local.py --coverage`, 跑了**两轮**): 两轮的 shard 0 都绿(898 passed / 4 skipped)、两轮的覆盖率都是 **100%(16669 语句 / 3668 分支 / 0 缺)**;
+  红都只在 shard 1 的**一条**上, 且是 `tests/integration/test_gui_layout.py` 里"表头与数据行没对齐"那一族的**不同**用例(首轮 `test_high_dpi_keeps_the_status_column_to_two_lines`, 复跑 `test_long_game_name_does_not_widen_the_list_rows`),
+  失败详情都是**六列整体位移一个恒定的水平量**(27px 与 16px)。按"拿到红先分清偶发与回归"核实: 单跑该模块 **24 passed**、定向这几条(`-k "long_game_name or high_dpi or long_state_column"`)**5 passed ×2\*\*
+  ⇒ 属 §40.5 记过的既有对齐抖动(表头对齐任务在并发 + 覆盖率追踪下没收敛, 见 `home_page._align_table_header` 的 `_ALIGN_MAX_ATTEMPTS`), 与本次改动无关(只加两个收集期标记, 不碰 Tk 几何/事件循环)。
+  已把这一族(含三个已观测用例名与 14/16/27px 指纹)写进 `.github/instructions/local-full-run.instructions.md` 的已知偶发清单; 根治要把"等对齐"的判据改硬, 留给单独一轮。
 
 ---
 
