@@ -95,6 +95,32 @@ def shard_plan(
     return [sorted(bucket) for bucket in buckets]
 
 
+def cluster_groups(node_ids: Sequence[str], groups: Mapping[str, str]) -> list[str]:
+    """把同组的用例**聚成一段**执行(片内执行顺序策略, 与 :func:`shard_plan` 配套).
+
+    按文件名字母序收集时, 一个共享池的用例往往散在多个模块里, 中间隔着十几个无关
+    模块 —— 池窗在这段空档里全程闲置挂着(2026-10 实测 demo-app 池: 开着约 258s,
+    真正在用约 33s)。本函数把同组用例平移到**组内首条**出现的位置连成一块, 组内
+    保持原相对顺序, 组外用例的相对顺序也不变(只被整体推后)。池窗由此只在它那一段
+    里存在, 与"用完即关"配合后既不陪跑也不闲置。
+
+    纯函数 + 稳定排序: 同样的输入总得到同样的顺序; 输入本身是"某一片的用例集"时,
+    聚出的相对顺序与全量视角一致(池成员整组同片, 见 :func:`shard_plan` 的 ``groups``)。
+    """
+    position = {node_id: index for index, node_id in enumerate(node_ids)}
+    anchors: dict[str, int] = {}
+    for index, node_id in enumerate(node_ids):
+        name = groups.get(node_id)
+        if name is not None and name not in anchors:
+            anchors[name] = index  # 每组锚定在自己首条出现的位置
+
+    def key(node_id: str) -> int:
+        name = groups.get(node_id)
+        return position[node_id] if name is None else anchors[name]
+
+    return sorted(node_ids, key=key)
+
+
 def _packing_units(
     node_ids: Sequence[str], groups: Mapping[str, str] | None
 ) -> list[tuple[float, str, list[str]]]:

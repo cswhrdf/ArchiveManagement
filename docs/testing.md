@@ -32,11 +32,7 @@ tests/
 | performance | `@pytest.mark.performance` | **不运行**    | 不运行                   | `quality` job 的一部分（ubuntu，单平台采集） |
 | security    | `@pytest.mark.security`    | **不运行**    | 不运行                   | `security` job（Windows/macOS/Linux）        |
 
-> **macOS 自 2026-09-30 起重新纳入 CI**（开发阶段曾因 macOS runner 按 Linux 的 10 倍计价屏蔽过一阵）。
-> 平台集合在四处保持一致：CI 三个矩阵（`pytest` / `pytest-report` / `security`）、`allurerc.mjs` 的
-> `environmentsTested`、汇总作业的 `--expect-platforms`，由守卫核对；三个平台**各 3 片**
-> （2026-10-10 起：仓库转公开后 Actions 不再计费，"贵平台少开片"的理由随之消失），
-> 墙钟与固定开销的取舍见 `.github/workflows/ci.yml` 矩阵处的注释。
+> **macOS 自 2026-09-30 起重新纳入 CI**（开发阶段曾因 macOS runner 按 Linux 的 10 倍计价屏蔽过一阵）。平台集合在四处保持一致：CI 三个矩阵（`pytest` / `pytest-report` / `security`）、`allurerc.mjs` 的 `environmentsTested`、汇总作业的 `--expect-platforms`，由守卫核对；三个平台**各 3 片** （2026-10-10 起：仓库转公开后 Actions 不再计费，"贵平台少开片"的理由随之消失），墙钟与固定开销的取舍见 `.github/workflows/ci.yml` 矩阵处的注释。
 
 ### 严重等级（失败影响面）
 
@@ -88,7 +84,7 @@ uv run pytest tests/security -m security
 
   池按工厂函数身份区分：`demo_app` 是全局标准演示池（states / styles / keyboard / tooltip 入池）；构造参数或污染面不同的模块建自己的池（copy_quality 的长文案池、dropdown 的独立池——它会改 `_page_size_box` 的 values/command）。**不**入池的模块维持"每用例一窗"：每条用例要不同构造参数的（sizes / layout / lifecycle / roots / smoke）与重度改后端数据的大户（home / 导入导出）——它们复用不到，硬塞只会换来每次重建。一组共用状态的用例可用 `group_scope` + `pool.rebaseline()` 做统一前后置。守卫：`tests/unit/test_ui_sharing.py`（替身钉逻辑分支）与 `tests/integration/test_gui_shared_session.py`（真窗口上的复用/隔离/共态组/数据漂移重建）。
 
-  两个全局影响：**共享窗会长期坐在 `tkinter._default_root` 槽位上**（收尾兜底不收它，`gui_support._SHARED_ROOTS` 就是为此设的），整批连跑时"新建窗口接管槽位 / 外来根坐上槽位被兜底收走"这些判据会跟着全局状态跑偏——`test_gui_roots.py` 里两条盯槽位纪律的用例开头先 `monkeypatch.setattr(tkinter, "_default_root", None)` 摘空槽位（结束自动还原），判的才是槽位这件事本身。执行中看到两三扇窗口同时开着、某条用例跑完窗口不关，是共享池的预期形态：窗活到会话末尾由 `ui_shared` 统一收。
+  两个全局影响：**共享窗会长期坐在 `tkinter._default_root` 槽位上**（收尾兜底不收它，`gui_support._SHARED_ROOTS` 就是为此设的），整批连跑时"新建窗口接管槽位 / 外来根坐上槽位被兜底收走"这些判据会跟着全局状态跑偏——`test_gui_roots.py` 里两条盯槽位纪律的用例开头先 `monkeypatch.setattr(tkinter, "_default_root", None)` 摘空槽位（结束自动还原），判的才是槽位这件事本身。窗口的开关节奏是**用完即关**：一个池的最后一个用例一结束，窗口就地关闭（`SharedUiRegistry.declare_users` 依据收集期的"用例→池"声明判断还有没有后续使用者，数据源同 `_SHARED_UI_SESSIONS`；没声明的池退回"会话末统一收"的旧行为）。同池的模块还会在收集期**聚成一段**执行（`sharding.cluster_groups`）：按文件名字母序，demo-app 池的 6 个模块之间隔着十几个每用例自建窗的模块，池窗在中间空档里闲置约 225s（占其开启时间 ~87%）；聚段后窗口只在自己那一段里存在，段尾即收——分片并行时每片挂着的闲置共享窗从"最多三扇陪全程"降到"正在用的那扇"，GUI/合成层的互相拖累也随之减轻。至于非池 GUI 模块里"同名窗口每条用例开关一次"，那是逐用例隔离（干净后端 + 干净窗）的既定形态，要减少它得把模块逐个接入共享池（逐模块证明"无业务影响/可还原"），调顺序帮不上。
 
 约定：测试优先复用**真实**领域服务、临时目录与 SQLite；只有外部依赖（系统回收站、系统快捷键、真实网络）才用可注入替身。不为了测试在生产代码里加分支，也不写"只验证 mock 调用次数"的用例。
 
@@ -150,32 +146,30 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
   1. **categories 失败归类**——三条规则（id 与 `allurerc.mjs` / `tests/unit/test_test_config.py` 三处同步，改名要一起改）：
      - `env-tk-library`：环境:Tk/Tcl 库不可用（症状清单与 `tk_guard.KNOWN_TK_SKIP_MARKERS` 同源、大小写不敏感、限定 layer 为 integration/e2e）；
      - `env-transient-database`：环境:数据库瞬时读失败（`sqlite3.OperationalError` 且数据库被锁/暂时不可读）；
-     - `gate-quality-check`：工程门禁:质量检查未通过（按 `testCategory=quality` 标签挑选）；
-       未命中的落进默认的 Product/Test errors 桶。
+     - `gate-quality-check`：工程门禁:质量检查未通过（按 `testCategory=quality` 标签挑选）；未命中的落进默认的 Product/Test errors 桶。
   2. **variables 报告顶部稳定事实**（覆盖率门槛、分层执行位置等；平台各自的事实按环境变量写）。每次运行会变的（提交号、分支、耗时）由 `environment.properties` 与总账负责，两边不重复不冲突。
-  3. **allowedEnvironments 环境 id 白名单**——少列一个 id 时 `allure generate` 直接 Internal Error 硬失败（这也是一种守卫）。
-     三项各有守卫（`tests/unit/test_test_config.py`、`tests/unit/test_report_quality_items.py`）。
+  3. **allowedEnvironments 环境 id 白名单**——少列一个 id 时 `allure generate` 直接 Internal Error 硬失败（这也是一种守卫）。三项各有守卫（`tests/unit/test_test_config.py`、`tests/unit/test_report_quality_items.py`）。
 
 ## 6. CI 流程
 
 ```text
-            ┌── quality (ubuntu): 静态检查 + 性能基准 + 覆盖率门槛(仅 push) + Allure 报告与总账
-push/PR ────┼── pytest (win/mac/linux) × 分片: 单元+集成(按层跳过, PR/push 只跑选中层)
+            ┌── quality (ubuntu): 静态检查 + 静态分析 + 性能基准 + 视觉回归
+push/PR ────┼── pytest (win/mac/linux) × 3 片: 单元+集成(两段: 先 not ui 再 ui)
             ├── security (win/mac/linux): 安全测试
-            └── required-check: 分层跳过的兜底
+            └── required-check: 纯文档改动跳过时的兜底
                  │
-nightly ───── ci.yml@dev(由 nightly.yml 的 gate 判 dev tip < 24h 才调用, 带 ref: dev)
+nightly ───── ci.yml@dev(nightly.yml 每晚无条件调用一次, 带 ref: dev)
                  │
-                 ▼
+                 ▼  (下面两步在 push / PR / nightly 每一轮都跑)
             pytest-report (ubuntu × 3 平台): 合并各片结果 + 生成 Allure 报告 + 自检
                  │
                  ▼
             allure-summary: 汇总三平台 + 覆盖率合并 + 原生质量门 + 总账 + 报告 artifact
 ```
 
-- **作业数量也是额度**：PR 与 nightly 一轮 16 个实例（3 平台 ×（3 pytest 片 + security）+ 2 报告 + quality + changes + required-check）。GitHub 按并发作业计价，多开一个分片 = 少一份留给别的 CI 的额度。
-- **层跳过（分桶在 changes 作业）**：`changes` 作业对 PR 的改动文件分类，输出 ui / backend 两层——ui 层 = `src/**/ui/**` + `tests/integration/test_gui_*.py` + 视觉基线 + 共享基建（`tests/gui_support.py` / `tests/button_support.py` / `tests/ui_sharing.py`，它们同时命中两层，ui 与 backend 是**或**的关系）；backend 层兜底 `src/**`（除 ui）+ `tests/**`（除 GUI 集成）。push 的四段 pytest 步骤按层放行；security 归 backend（安全测试不看 UI）；quality 不分层（静态检查整个仓库）。纯文档 push 跳过 pytest 作业，`required-check`（总是成功）兜住分支保护规则的必需检查。守卫：`tests/unit/test_ci_workflow.py`。
-- **`pytest-report` 与 `allure-summary`（覆盖率门槛 100% 与完整报告）在 PR 与 nightly 都跑**：push 只跑选中的层，切片上的覆盖率天生偏低，在那里判门槛等于自造假红——所以"最完整的证据"在 PR 报告作业里出，与 push 的层选择互不干扰。nightly 由 `nightly.yml` 的 gate（dev tip < 24h 才调用）带 `ref: dev` 调用 `ci.yml`；PR 与 nightly 两层全跑。守卫：`test_pr_and_nightly_run_full_while_push_selects_layers`。
+- **作业数量也是额度**：每一轮（push / PR / nightly）16 个实例（3 平台 ×（3 pytest 片 + security）+ 2 报告 + quality + changes + required-check）。GitHub 按并发作业计价，多开一个分片 = 少一份留给别的 CI 的额度。
+- **跳过只发生在"纯文档改动"上（分桶在 changes 作业）**：纯文档（`**/*.md` / `docs/**` / `.github/instructions/**` / `.github/prompts/**`）在 push 上被 `paths-ignore` 挡在触发之外，在 PR 上由 `changes` 作业的 dorny 过滤给出 `should_run=false` 从而跳过重量级作业；`required-check`（总是成功）兜住分支保护规则的必需检查。**2026-10-14 起不再按改动路径挑层** —— 那条 ui / backend 两层分桶的规则（2026-10-09 落地）已回退：PR / push / nightly 每一轮的四段 pytest 与 security 都跑全量（步骤条件里只剩平台与"第一段跑完 / 整轮没被取消"）。守卫：`test_every_trigger_runs_the_full_suite`。
+- **`pytest-report` 与 `allure-summary`（覆盖率门槛 100% 与完整报告）每一轮都跑**：push / PR / nightly 都是全量，覆盖率门槛与完整报告在哪个事件下都判得出（2026-10-14 起 push 也出报告：之前那条排除理由——"push 只跑选中的层，切片覆盖率天生偏低、在那里判门槛等于自造假红"——随选层回退一起失效了）。nightly 由 `nightly.yml` 每晚无条件带 `ref: dev` 调用 `ci.yml`（之前那个"dev tip < 24h 才跑"的门已按用户要求删掉）。守卫：`test_every_trigger_runs_the_full_suite`。
 - **省额度的三条**：① concurrency 取消被取代的运行（报告作业的条件必须是 `always() && !cancelled()`，否则前面被取消时报告不生成、上一轮的报告继续留在页面上冒充最新）；② 纯文档 push 用 `paths-ignore`、PR 用 `changes` 作业判路径 + `required-check` 兜底；③ 与平台无关的检查合进 quality、平台专属检查塞进 pytest 片 0（不新开作业）。完整的优化清单与取舍落在 `tests/unit/test_ci_workflow.py`。
 - 每个 pytest 作业上传自己的 `allure-results-<platform>-shard<N>`；汇总用 `download-artifact` 的 pattern + `merge-multiple: true` 一次拉齐，`pytest-report` 沿用 `.allure/history.jsonl` 累积历史。
 - **历史趋势靠 artifact 活着**（与报告怎么发布无关）：两个报告作业各自走"找上一次**带着同名产物**的运行（不问成败）→ 取回 `.allure/history.jsonl` → `allure generate` 读它并追加本次一行 → 新的 history.jsonl 传回 artifact"（`pytest-report` 用 `allure-resources-<平台>`，`allure-summary` 用 `allure-resources-final`）。要点：① 趋势寿命 = artifact 寿命（默认 90 天），窗口内没有一轮留着它就从零开始（不报错，曲线断了）；② 基线**不要求**那轮 success——失败轮的历史本该出现在趋势里，Allure 的趋势正是用来看失败的（只认成功运行时，连续失败的时期接不上任何一轮基线）；那一轮是否真的传了产物由 finder 的 artifact 检查把关；③ 报告只作为 artifact 存在（2026-10-06 起不再发布到 GitHub Pages），站点是否可达与历史链条无关；④ 恢复要认**两种 artifact 布局**——单路径上传时 `history.jsonl` 落在压缩包根部、多路径时带 `.allure/` 前缀，两种都探测、都找不到时响亮退出；⑤ **质量门不许写历史**——`allure quality-gate` 子命令同样遵循 `appendHistory`，会在半套结果的时点追加一条假快照，跑之前把真历史改名为同目录临时文件（改名即回、不跨设备）、跑完放回。守卫：`tests/unit/test_ci_history.py`。
@@ -440,6 +434,7 @@ uv run python scripts/verify_allure_report.py allure-report --manifest allure-ma
 - **参数**是 `--shard-count` / `--shard-index`（默认 `1`/`0` 即不分片），过滤发生在**严重等级过滤之后**：本地 `--min-severity=critical` 选出的子集也能分片跑。三条性质由 `tests/unit/test_sharding.py` 锁住：不重不漏（各片并集 == 全集）、同输入同分片、各片权重接近理想值。
 - **不要用 pytest-xdist**：GUI 用例各自起真实窗口，并行只会互相拖慢还引出 Tk 初始化失败；分片是进程级（CI 上机器级）并行。
 - **本地全量想快**：`uv run python scripts/run_tests_local.py`（双进程分片，实测省约三分之一墙钟，与单进程逐数一致）。**2 片是甜点不要贪多**（两进程同时操作真实窗口，桌面合成层互相拖慢）。脚本起 N 个进程等全部结束按片打印摘要，pytest 参数用 `--` 透传，片号由脚本注入别再写。
+- **连覆盖率门禁一起跑**：`uv run python scripts/run_tests_local.py --coverage` —— 每片用 `coverage run --rcfile=.coverage-platform.rc -m pytest` 起（各写自己的 `.coverage.shard-<片>`，收尾 combine + report，报告的退出码计入脚本退出码；rc 不在时脚本自己生成）。实测 2026-10-14（2850 条）：单进程 14:48 → 双片 13:05，结论逐数一致（100%）。**省得不多是因为这套用例被 GUI 与磁盘 I/O 卡着**；并发还会放大 GUI 用例本来就有的时序敏感点（拿到红先单跑那个模块核实，见 `.github/instructions/local-full-run.instructions.md`；2026-10-14 那条 `test_clicking_the_arrow_opens_the_dropdown` 已经量到成因并让用例自己摆正起点，再红就是回归）。
 - **合并**在 `pytest-report`（每平台一份，都在 Ubuntu）：`scripts/merge_allure_results.py` 搬各片结果（日志逐片给文件数）；覆盖率 `COVERAGE_FILE=.coverage.shard-<片>` 分片写再 combine。
 - **报告可在别的平台生成**：合并/汇总/生成/自检全是纯文件操作，三平台报告都在 Ubuntu 生成（Windows/macOS runner 按 2/10 倍计价）；"结论算哪个平台"由矩阵参数决定（`--platform` / `--expect-platforms`），**不能看 runner.os**（守卫 `test_report_job_does_not_depend_on_the_host_platform`）。
 - **跨平台合并覆盖率靠 `relative_files = true`**（各作业都从仓库根跑，combine 把分隔符归一；少了它"合并成功但一个文件都对不上"；守卫造一份反斜杠数据真跑 combine）。数据必须**按平台分开**合并与判门槛。
@@ -450,7 +445,7 @@ uv run python scripts/verify_allure_report.py allure-report --manifest allure-ma
 - **缺片的覆盖率一概不判门槛**：`collect_coverage_data.py --expect-shards` 逐片对数，缺片非 0 退出、后面全部跳过、末尾让作业红（曾经的坑：coverage xml 自己会合并剩下的数据并执行 fail_under，把"缺数据"说成"覆盖率掉了"；xml 那步带 `--fail-under=0`）。守卫 `test_ci_judges_the_coverage_only_on_complete_shard_data`。
 - **产物名不变**（allure-resources-<镜像名> / coverage-<镜像名> / allure-report-<镜像名>——名字带的是哪个平台的产物不是生成机器；改名历史曲线清零）。汇总作业 needs 必须含 pytest-report（否则在产物上传完之前开始下载）。
 - **三平台片数一致（各 3 片）**：总时长 ≈ 片数×固定开销 + 串行时间；片数只按这个算——2026-10-10 起不再看计价倍率（仓库公开后 Actions 免费）。片号 0 连续编到片数-1；片数出现在四处（矩阵、--shard-count、--shard-index、--expect-shards），不一致会**静默少跑**（守卫逐平台校验）。
-- **共享一份 UI 会话的用例整组同片**（`tests/conftest.py` 的 `_SHARED_UI_SESSIONS` + `sharding.shard_plan(groups=...)`）：它们靠 `tests/ui_sharing.py` 的池复用同一扇窗口与同一个后端，拆到两片后每片各自重建一份，复用直接作废。守卫 `tests/unit/test_sharding.py::test_shard_plan_keeps_a_shared_ui_session_in_one_piece`（还有一条反过来要求"真在用共享会话的模块都登记了"）。
+- **共享一份 UI 会话的用例整组同片**（`tests/conftest.py` 的 `_SHARED_UI_SESSIONS` + `sharding.shard_plan(groups=...)`）：它们靠 `tests/ui_sharing.py` 的池复用同一扇窗口与同一个后端，拆到两片后每片各自重建一份，复用直接作废。守卫 `tests/unit/test_sharding.py::test_shard_plan_keeps_a_shared_ui_session_in_one_piece`（还有一条反过来要求"真在用共享会话的模块都登记了"）。这份登记有三个消费者：分片装箱（`groups`）、"用完即关"（`SharedUiRegistry.declare_users`，池在最后一个用例结束时就地关闭）、片内聚段（`sharding.cluster_groups` 在收集期把同池模块连成一段执行，池窗不再隔着无关模块闲置挂着，见第 2 节）。
 - **依赖缓存只让片 0 写**（save-cache: `matrix.shard == 0`）：同平台各片 cache key 相同，并行保存只有第一个抢得到，其余打 Failed to save 噪音。
 
 ## 7. 本地生成与查看报告

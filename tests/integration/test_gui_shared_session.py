@@ -122,12 +122,24 @@ def test_group_scope_holds_its_state_and_restores_afterwards(
 def test_backend_drift_rebuilds_the_shared_window(
     ui_shared: SharedUiRegistry,
 ) -> None:
-    """数据漂移: 切主题落在共享后端上 → 旧窗收掉重建, 且重建留了账."""
-    with ui_shared.test_scope(_rebuild_factory) as before:
-        _pump(before)
-        before._on_toggle_theme()
-        _pump(before)
-    with ui_shared.test_scope(_rebuild_factory) as after:
-        assert after is not before, "后端数据被改过必须重建, 不能继续共用"
+    """数据漂移: 切主题落在共享后端上 → 旧窗收掉重建, 且重建留了账.
+
+    这条用例观察的是"退出 settle"的重建纪律, 而"用完即关"会在**最后一个**使用
+    者退出时跳过 settle 直接收池 —— 单模块跑时本用例正好是最后一个。先给池名
+    占位一个后续使用者, 强制收尾走 settle 那条路(用完即关的判定另有守卫钉住,
+    见 ``tests/unit/test_ui_sharing.py``)。
+    """
+    placeholder = "<占位: 这条用例要观察 settle 的重建>"
+    followers = ui_shared._remaining_users.setdefault("demo-app", set())
+    followers.add(placeholder)
+    try:
+        with ui_shared.test_scope(_rebuild_factory) as before:
+            _pump(before)
+            before._on_toggle_theme()
+            _pump(before)
+        with ui_shared.test_scope(_rebuild_factory) as after:
+            assert after is not before, "后端数据被改过必须重建, 不能继续共用"
+    finally:
+        followers.discard(placeholder)
     pool = ui_shared._pool_for(_rebuild_factory)
     assert pool.rebuilds, "重建必须留账(报告里要看得见)"

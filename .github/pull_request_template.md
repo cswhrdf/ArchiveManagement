@@ -1,15 +1,9 @@
 <!--
-填之前先看一眼 CONTRIBUTING.md 第九节。用不到的条目整行删掉，比留着"待办"更好读。
+填之前先看一眼 CONTRIBUTING.md 第十节。用不到的条目整行删掉，比留着"待办"更好读。
 
-本项目约定：`main` 不接受直接提交，只接受 `dev` 或 `bugfix/*` 分支的 PR 合入
-（新功能从 `dev` 拉分支）。
+本项目约定：`main` 不接受直接提交，只接受 `dev` 或 `bugfix/*` 分支的 PR 合入（新功能从 `dev` 拉分支）。
 
-门禁分三段：**PR 上跑全量**（三平台分片用例 + 静态检查 + 安全用例，**并出覆盖率判定与完整
-报告**）；合并后 push 到 `dev`/`main` **只按改动路径跑相关的分片**（确认没改坏，不出报告）；
-**nightly** 在 `dev` 24h 内有过合入时再跑一轮全量 + 报告。所以覆盖率结论看 **PR 与 nightly
-报告**里的「Coverage report」条目（或按 CONTRIBUTING 第三节在本机跑那两步）；push 那一轮
-没有报告，只有分片日志与分片产物。
--->
+门禁：**PR 与 push 都跑全量**（三平台分片用例 + 静态检查 + 安全用例；2026-10-14 起不再按改动路径挑层），**nightly** 每晚再跑一轮。**每一轮都出覆盖率判定与完整 Allure 报告**。所以覆盖率结论看那一轮报告里的「Coverage report」条目（或按 CONTRIBUTING 第四节在本机跑那两步）。 -->
 
 ## 动机
 
@@ -30,10 +24,7 @@
 ## Squash 合并署名
 
 <!--
-署名区由 Co-author attribution 检查在合并前自动统计 PR 提交作者并更新。
-Squash and merge 时，请确认 GitHub 的最终提交说明保留下面生成的 trailer。
-不要手工编辑两个标记之间的内容。
--->
+署名区由 Co-author attribution 检查在合并前自动统计 PR 提交作者并更新。 Squash and merge 时，请确认 GitHub 的最终提交说明保留下面生成的 trailer。不要手工编辑两个标记之间的内容。 -->
 
 <!-- co-author-trailers:start -->
 
@@ -54,8 +45,7 @@ Squash and merge 时，请确认 GitHub 的最终提交说明保留下面生成�
 ## 覆盖率（硬门禁 100%）
 
 - [ ] 新增/改动的代码都有用例覆盖
-- [ ] 确实够不着的行按口径写了豁免：平台专属用 `# platform: <平台…> - 原因`，
-      其余用 `# pragma: no cover - 原因`（原因至少 5 字，不许标在 `def`/`class` 行上）
+- [ ] 确实够不着的行按口径写了豁免：平台专属用 `# platform: <平台…> - 原因`，其余用 `# pragma: no cover - 原因`（原因至少 5 字，不许标在 `def`/`class` 行上）
 - [ ] 平台豁免改动后用两步口径核过：`coverage run --rcfile=.coverage-platform.rc -m pytest -q` + `coverage report -m --rcfile=.coverage-platform.rc`
 
 ## 关联与遗留

@@ -10,7 +10,9 @@ B2 的价值在"复用", 风险在"漏隔离"。这里用**替身窗口**(不建
 
 另钉三个生命周期事实: 池内跨用例复用**同一个**窗口对象、``patched_attrs`` 能把
 用例改写的实例属性(如 ``wait_window``)还原、共态组(``group_scope``)摆的状态只
-在组内当基线、组退出即还原。
+在组内当基线、组退出即还原。再钉"用完即关"(2026-10 起): 声明了"用例 → 池"的
+注册表在**最后一个**用例退出 ``test_scope`` 时就地收池, 没声明的退回"会话末统一
+收"的旧行为。
 """
 
 from __future__ import annotations
@@ -265,6 +267,7 @@ def pool_factory(monkeypatch: pytest.MonkeyPatch) -> tuple[list[FakeApp], Any]:
     made: list[FakeApp] = []
     closed: list[list[Any]] = []
     rebuilds: list[str] = []
+    early: list[str] = []
 
     def factory() -> FakeApp:
         app = FakeApp()
@@ -281,9 +284,16 @@ def pool_factory(monkeypatch: pytest.MonkeyPatch) -> tuple[list[FakeApp], Any]:
     monkeypatch.setattr(
         ui_sharing, "_record_rebuild", lambda reason, teardown: rebuilds.append(reason)
     )
+    monkeypatch.setattr(
+        ui_sharing, "_record_early_close", lambda key, node, teardown: early.append(key)
+    )
     registry = ui_sharing.SharedUiRegistry()
     return made, SimpleNamespace(
-        registry=registry, factory=factory, closed=closed, rebuilds=rebuilds
+        registry=registry,
+        factory=factory,
+        closed=closed,
+        rebuilds=rebuilds,
+        early=early,
     )
 
 
@@ -411,3 +421,119 @@ def test_registry_close_closes_every_pool_window(
         assert window._scheduler_baseline == 7, (
             "收尾前应把线程基线刷成会话末的实存量(建窗时刻的 0 代表不了整批跑完的进程)"
         )
+
+
+# --- 用完即关(2026-10 起) -----------------------------------------------------
+# 会话夹具把收集期的"用例 → 池"声明交给 declare_users 之后, 池的窗口在**它的
+# 最后一个用例**退出 test_scope 时就地关闭 —— 不再陪跑到会话末。这里用替身把
+# 判定钉住: 只关"没有后续使用者"的池、没声明就退回旧行为、关过的池再来人按需
+# 重建、最后一条用例不再白做"还原 → 重建"、同池名的兄弟工厂一并收掉。
+
+
+def test_a_pool_closes_as_soon_as_its_last_declared_user_finishes(
+    pool_factory: tuple[list[FakeApp], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """用完即关: 池的最后一个已声明用例退出时就地关窗, 会话末不再收第二次."""
+    _, env = pool_factory
+
+    def other_factory() -> FakeApp:
+        return FakeApp()
+
+    env.registry.declare_users(
+        {
+            "tests/demo/test_a.py::test_one": "pool-a",
+            "tests/demo/test_a.py::test_two": "pool-a",
+            "tests/demo/test_b.py::test_one": "pool-b",
+        }
+    )
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/demo/test_a.py::test_one (setup)")
+    with env.registry.test_scope(env.factory):
+        pass
+    assert not env.closed, "pool-a 还有 test_two 要跑, 不该关"
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/demo/test_b.py::test_one (call)")
+    with env.registry.test_scope(other_factory) as b_window:
+        pass
+    assert env.closed == [[b_window]], "pool-b 只此一条用例, 退出即关"
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST", "tests/demo/test_a.py::test_two (teardown)"
+    )
+    with env.registry.test_scope(env.factory):
+        pass
+    assert len(env.closed) == 2, "pool-a 的最后一条退出即关"
+    assert len(env.early) == 2, "两次提前关闭都要留账(early_closes / Allure)"
+    env.registry.close()
+    env.registry.close()  # 幂等: 会话末收尾不许把已收的池再拆一遍
+    assert len(env.closed) == 2
+
+
+def test_undeclared_registries_keep_the_session_end_behavior(
+    pool_factory: tuple[list[FakeApp], Any],
+) -> None:
+    """没声明使用关系就不知道"还有谁要用": 退回旧行为, 会话末统一收."""
+    _, env = pool_factory
+    with env.registry.test_scope(env.factory):
+        pass
+    assert not env.closed, "没声明过的注册表不得提前关池 —— 宁可晚关, 不可错关"
+    env.registry.close()
+    assert len(env.closed) == 1
+
+
+def test_a_late_user_after_an_early_close_gets_a_fresh_window(
+    pool_factory: tuple[list[FakeApp], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """提前关过的池又来了使用者: 按需重建一扇新窗, 退出时同样用完即关."""
+    made, env = pool_factory
+    env.registry.declare_users({"tests/demo/test_a.py::test_one": "pool-a"})
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/demo/test_a.py::test_one (call)")
+    with env.registry.test_scope(env.factory) as first:
+        pass
+    assert len(env.closed) == 1
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST", "tests/late/test_late.py::test_late (call)"
+    )
+    with env.registry.test_scope(env.factory) as second:
+        assert second is not first, "池已收过, 后来的使用者拿到的是重建的新窗"
+    assert len(made) == 2, "重建真的建了第二扇"
+    assert len(env.closed) == 2, "它自己就是最后的使用者, 退出时又收了一次"
+
+
+def test_the_last_user_skips_the_settle_choreography(
+    pool_factory: tuple[list[FakeApp], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """最后一条用例退出: 直接收池, 不再做"还原 → 验证 → 重建"(重建出来马上拆是白做)."""
+    _, env = pool_factory
+    env.registry.declare_users({"tests/demo/test_a.py::test_one": "pool-a"})
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/demo/test_a.py::test_one (call)")
+    with env.registry.test_scope(env.factory) as app:
+        app.backend.games.clear()  # 改脏后端: 旧行为是"直接重建", 现在应该是直接关
+    assert not env.rebuilds, "收池不该再触发重建"
+    assert len(env.closed) == 1
+
+
+def test_sibling_pools_of_the_same_exhausted_name_close_too(
+    pool_factory: tuple[list[FakeApp], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一池名下挂着的别的工厂(自检模块的替身工厂那种)也在最后一个用例后一并收掉."""
+    _, env = pool_factory
+
+    def sibling_factory() -> FakeApp:
+        return FakeApp()
+
+    env.registry.declare_users(
+        {
+            "tests/demo/test_shared.py::test_probe": "demo-app",
+            "tests/demo/test_icon.py::test_last": "demo-app",
+        }
+    )
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST", "tests/demo/test_shared.py::test_probe (call)"
+    )
+    with env.registry.test_scope(sibling_factory):
+        pass  # 兄弟池: 还有 test_last 要用这个池名, 窗口留着
+    assert not env.closed
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST", "tests/demo/test_icon.py::test_last (call)"
+    )
+    with env.registry.test_scope(env.factory):
+        pass  # 标准池的最后一条: 两个池一起收
+    assert len(env.closed) == 2, "demo-app 名下的两扇窗一起收掉, 不留陪跑的"

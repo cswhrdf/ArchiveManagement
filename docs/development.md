@@ -98,6 +98,8 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 ## 质量门禁
 
+常用命令的速查表在 [CONTRIBUTING.md](../CONTRIBUTING.md) 第二节，这里只讲这些检查各自的口径。
+
 本地提交钩子 + CI 里跑的检查（用例与覆盖率在 Windows / Ubuntu / macOS 三个平台各跑一遍；其余几项是公共检查，CI 只在 Ubuntu 跑一遍，结论归入报告里显式声明的 `Common` 环境）：
 
 ```shell
@@ -108,7 +110,7 @@ uv run pytest                   # 用例(覆盖率见下面那条)
 uv run deptry .                 # 依赖卫生: 未声明 / 多余 / 传递依赖(本地钩子也会跑)
 ```
 
-**覆盖率是硬门禁（`fail_under = 100`），但它要按平台口径判**：`uv run pytest --cov` 给的是**合并口径**的粗数字（不做平台排除，因为 pytest-cov 在导入根 conftest 之前就构造好了 Coverage 对象），与门槛不是一个口径。按门禁核走命令行两步（全量约 14 分钟；只想定位单个文件就配 `--data-file` + `--include`，另见 [CONTRIBUTING.md](../CONTRIBUTING.md) 第三节）：
+**覆盖率是硬门禁（`fail_under = 100`），但它要按平台口径判**：`uv run pytest --cov` 给的是**合并口径**的粗数字（不做平台排除，因为 pytest-cov 在导入根 conftest 之前就构造好了 Coverage 对象），与门槛不是一个口径。按门禁核走命令行两步（全量约 14 分钟；只想定位单个文件就配 `--data-file` + `--include`，另见 [CONTRIBUTING.md](../CONTRIBUTING.md) 第四节）：
 
 ```shell
 uv run python scripts/coverage_platform.py write   # 生成 .coverage-platform.rc(不入库)
@@ -163,8 +165,7 @@ CI 会在 Windows、Ubuntu、macOS 上运行全量测试（三个平台的矩阵
 
 1. `uv run pytest --alluredir=allure-results`
 1. `allure generate allure-results --output allure-report`
-1. `allure open allure-report`（标题、界面语言、端口、失败归类、运行变量与环境白名单都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）
-   （完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
+1. `allure open allure-report`（标题、界面语言、端口、失败归类、运行变量与环境白名单都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）（完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
 
 用例失败时会**自动留现场**（coredumpy dump + 界面截图 + 摘要，机制与纪律见 [testing.md](testing.md) 第 6 节）：dump 落在仓库根的 `crash-dumps/`（已被忽略），用 `coredumpy load crash-dumps/<用例>.dump` 进 pdb，或在 VSCode 里用 coredumpy 扩展右键打开；不想留就加 `--crash-dump-depth=0`。
 
@@ -172,16 +173,19 @@ CI 的 pytest 作业是**分片执行**的（三平台各 3 片并行，报告�
 
 ## 文档与 Wiki
 
-文档分两层，**不要互相复制内容**：
+文档分三层，**不要互相复制内容**：
 
 - `wiki/`：**面向用户的使用手册**，按章节拆分（`Home.md` 是目录、`_Sidebar.md` 是侧边栏、其余是 `NN 标题.md`）。它是手册的**唯一内容源**，改手册就改这里。
 - `docs/`：**面向开发与实现**的说明（界面结构、平台差异、测试体系、打包发布、CI 优化）。
+- `CONTRIBUTING.md`：**面向贡献者**的指南（常用命令速查、提交前要过的门禁、覆盖率口径、测试与代码约定、PR 流程）。
+
+仓库里的 markdown **不按宽度折行**：一段/一条写成一行（改文档时别手动折行），这样 diff 里改一个词就是一行；表格、代码块与 frontmatter 不在此列。
 
 同步机制：`.github/workflows/wiki.yml` 在 `wiki/**` 变化时（push 到 `dev`/`main`）或手动触发时，把 `wiki/*.md` **镜像**推送到 GitHub Wiki 的 git 仓库。两点注意：
 
 1. **首次需要人工在网页上开一次**：仓库 Settings → Features 勾选 Wikis，并在 Wiki 里保存过至少一页 —— GitHub 是在"第一次保存页面"时才创建 `<repo>.wiki.git`，之前工作流会 clone 失败（报错信息里直接写了这一步）。
 2. 页面里的仓库链接用 `{{REPO_URL}}` 占位符（由工作流替换成真实地址），**不要写仓库相对链接**（Wiki 与仓库不在同一棵目录树里，相对链接会变成"不存在的页面"且不报错）。这两条与"章节编号/侧边栏链接齐全/镜像语义"一起由 `tests/unit/test_wiki_sync.py` 守住。
-3. **手册面向不接触命令行的用户**：只写窗口里的操作、数据与日志位置，不写 `uv run` / `python -m` / `--root` / 子命令这类内容（启动、初始化、便携模式属于 README 与本文档）。软件按平台各自编译发布，用户拿到的是可执行包，双击即用。同样由 `tests/unit/test_wiki_sync.py` 守住。
+3. **手册面向不接触命令行的用户**：只写窗口里的操作、数据与日志位置，不写 `uv run` / `python -m` / `--root` / 子命令这类内容（启动、初始化、便携模式属于 README、[CONTRIBUTING.md](../CONTRIBUTING.md) 第二节的常用命令速查与本文档）。软件按平台各自编译发布，用户拿到的是可执行包，双击即用。同样由 `tests/unit/test_wiki_sync.py` 守住。
 
 ## 应用图标
 

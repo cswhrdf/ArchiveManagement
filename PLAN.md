@@ -2,11 +2,7 @@
 
 [TOC]
 
-> **这份文档怎么写（2026-10-04 收口时定下）**：只留三类内容 —— **各阶段追加的需求**、
-> **完成程度**（做完 / 暂缓 / 未开工，带日期）与**遇到的坑**（现象 → 根因 → 落点，能让下一个人
-> 少走一遍的那种）。纯步骤描述不进这里：逐条命令、一次 CI 的执行流水、已经写进代码注释的
-> 实现细节，在代码、`docs/`、`.github/instructions/` 与运行日志里各有一份，抄过来只会让这份文档
-> 越来越长。历史轮次按"结论 + 坑"压缩；**没做完的事统一登记在 §48**，不必翻遍几十个日期小节。
+> **这份文档怎么写（2026-10-04 收口时定下）**：只留三类内容 —— **各阶段追加的需求**、 **完成程度**（做完 / 暂缓 / 未开工，带日期）与**遇到的坑**（现象 → 根因 → 落点，能让下一个人少走一遍的那种）。纯步骤描述不进这里：逐条命令、一次 CI 的执行流水、已经写进代码注释的实现细节，在代码、`docs/`、`.github/instructions/` 与运行日志里各有一份，抄过来只会让这份文档越来越长。历史轮次按"结论 + 坑"压缩；**没做完的事统一登记在 §48**，不必翻遍几十个日期小节。
 
 ## 1. 项目目标
 
@@ -623,21 +619,11 @@ timeline/
 
 **三、键盘：三个缺口 + 一个补法（2026-09-27）**
 
-实测(CustomTkinter 6.0 + Tk 8.6)三个缺口: ① 按钮/单选/复选/开关都画在 Canvas 上, 默认**不进 Tab 链**
-(`tk_focusNext` 从窗口出发只能走到输入框与下拉框); ② 聚焦时没有任何视觉变化; ③ Canvas 没有空格/回车的
-内建绑定。
+实测(CustomTkinter 6.0 + Tk 8.6)三个缺口: ① 按钮/单选/复选/开关都画在 Canvas 上, 默认**不进 Tab 链** (`tk_focusNext` 从窗口出发只能走到输入框与下拉框); ② 聚焦时没有任何视觉变化; ③ Canvas 没有空格/回车的内建绑定。
 
-补法收在新模块 `ui/keyboard.py`, 按仓库既有的 `apply_*_support()` 约定在类上打一次补丁: 构造时接线
-(`takefocus=1` + 焦点环 + 空格/回车激活)、`configure(state=...)` 时同步 Tab 链、聚焦时换描边(失焦
-**原样还原**)。对话框统一在 `dialogs._present()` 里接 Esc=取消 / 回车=主操作(回车认"实测底色等于
-`accent`、否则 `danger`"那颗按钮 —— 有四个对话框的主按钮是**就地创建**的, 不走样式表), 初始焦点定在
-第一个输入框。
+补法收在新模块 `ui/keyboard.py`, 按仓库既有的 `apply_*_support()` 约定在类上打一次补丁: 构造时接线 (`takefocus=1` + 焦点环 + 空格/回车激活)、`configure(state=...)` 时同步 Tab 链、聚焦时换描边(失焦 **原样还原**)。对话框统一在 `dialogs._present()` 里接 Esc=取消 / 回车=主操作(回车认"实测底色等于 `accent`、否则 `danger`"那颗按钮 —— 有四个对话框的主按钮是**就地创建**的, 不走样式表), 初始焦点定在第一个输入框。
 
-守卫: `test_gui_keyboard.py`(5 条; 咬合: 不装补丁 → 3 条红)、`test_ui_keyboard.py`(新增 30 条无头)。
-**两条量具坑**: 不能拿 `tk_focusNext` 当量具(Tcl 侧定义, 本机反复建/销窗口时会报
-`invalid command name`, 见 `tests/gui_support.py` 那条已知抖动); CTk 的标题栏着色靠一个 **5ms 定时器**
-把窗口显示回来, 不 pump 就一直 `withdrawn`(那时收不到按键也定不了焦) → 量键盘前要自己 `deiconify()`,
-而对**窗口本身** `focus_force()` 会把子控件焦点顶掉。两件都写进了 `docs/testing.md`。
+守卫: `test_gui_keyboard.py`(5 条; 咬合: 不装补丁 → 3 条红)、`test_ui_keyboard.py`(新增 30 条无头)。 **两条量具坑**: 不能拿 `tk_focusNext` 当量具(Tcl 侧定义, 本机反复建/销窗口时会报 `invalid command name`, 见 `tests/gui_support.py` 那条已知抖动); CTk 的标题栏着色靠一个 **5ms 定时器** 把窗口显示回来, 不 pump 就一直 `withdrawn`(那时收不到按键也定不了焦) → 量键盘前要自己 `deiconify()`, 而对**窗口本身** `focus_force()` 会把子控件焦点顶掉。两件都写进了 `docs/testing.md`。
 
 **四、用户 12 号实测反馈：六个交互缺陷（全部先量后改）**
 
@@ -670,18 +656,10 @@ timeline/
 
 **七、CI 8 条红：换色把"聚焦态"变成了识别按钮性质的依据（2026-09-28）**
 
-`1e9f8e5 界面初步打磨` 一次报 **8 条** GUI 失败，根因只有一个: **聚焦换色改变了按钮自己的配色,
-而"这颗按钮是什么按钮"整套机制(主按钮识别、配色守卫)都在按实测底色判断**; CI 与本地在**焦点何时
-生效**上恰好相反(CI 一建出来定焦就生效), 于是同一份代码在两处量到不同状态。
+`1e9f8e5 界面初步打磨` 一次报 **8 条** GUI 失败，根因只有一个: **聚焦换色改变了按钮自己的配色, 而"这颗按钮是什么按钮"整套机制(主按钮识别、配色守卫)都在按实测底色判断**; CI 与本地在**焦点何时生效**上恰好相反(CI 一建出来定焦就生效), 于是同一份代码在两处量到不同状态。
 
-- **产品侧是真缺陷**: `primary_button()` 靠"实测底色 == `accent`/`danger`"定位主按钮, 聚焦后那颗
-  按钮已是软底 → 找不到主按钮 → **回车确认直接失效**。修法: `make_reachable` 记下"没聚焦时的原样",
-  新增 `keyboard.resting_fill(widget)` 当唯一入口(记过就认原样, 没记过/已还原就读活值),
-  `_focus_style` 与 `_button_candidates` 都改用它。
-- **量具侧四招**(都写进用例助手): 量之前先 `_defocus`; 焦点环守卫要 `_stabilize()`(主页的延后重排会在
-  量到一半时**整批换掉**控件, 给已摘下的控件 `focus_force` 不产生 `FocusIn`, 看着像"没画环"); 界面忙时
-  按钮是灰的(实现本来就不画环), 要等它可用; 量不到时**试三次**再判, 而且拿同窗口的对照控件当**煤鸟**
-  —— 煤鸟画得上就是真缺陷, 煤鸟也画不出才是环境(记进 `_UNMEASURED` 并附在失败信息里)。
+- **产品侧是真缺陷**: `primary_button()` 靠"实测底色 == `accent`/`danger`"定位主按钮, 聚焦后那颗按钮已是软底 → 找不到主按钮 → **回车确认直接失效**。修法: `make_reachable` 记下"没聚焦时的原样", 新增 `keyboard.resting_fill(widget)` 当唯一入口(记过就认原样, 没记过/已还原就读活值), `_focus_style` 与 `_button_candidates` 都改用它。
+- **量具侧四招**(都写进用例助手): 量之前先 `_defocus`; 焦点环守卫要 `_stabilize()`(主页的延后重排会在量到一半时**整批换掉**控件, 给已摘下的控件 `focus_force` 不产生 `FocusIn`, 看着像"没画环"); 界面忙时按钮是灰的(实现本来就不画环), 要等它可用; 量不到时**试三次**再判, 而且拿同窗口的对照控件当**煤鸟** —— 煤鸟画得上就是真缺陷, 煤鸟也画不出才是环境(记进 `_UNMEASURED` 并附在失败信息里)。
 - **`test_gui_text_fit` 的假红（两个平台一起红）**："夹具的长文本必须带省略号"依赖详情页**延后 60ms** 的名称重裁，CI 上它还没跑 → 量到的是按旧宽度裁的文本。修法：量之前 `_flush_delayed(app)` 直接调 `app._refit_detail_names()` 与主页 `_sync_list_layout()`，不靠时间。
 - **`test_gui_buttons` 的两条悬停用例**：主页重建会把 `_hover` 复位（延后重排正好落在 `_pump()` 里），CI 上鼠标还可能正好压在卡片上（真 `<Enter>` 把它提亮）。修法：`_set_hover(...)` 之后**立刻读**（CTk 的 `configure` 当场生效）；量"其余卡片是常规底色"之前显式 `_set_hover(None)`。
 - **`test_gui_sizes` 的 Linux 红（621 > 614）不是本次改动**：实测本机同一弹窗恒为 584，**定焦前后一模一样**。真因是 `_DIALOG_CHROME_HEIGHT = 52` 这个**估算值**在 Linux 上偏小 7px（正文区之外那部分的高度由字体与窗口管理器决定）。产品侧按**实测**补：`_clamp_to_comfort_line(window)` 在 `_present()` 里读 `winfo_reqheight()`，超线多少就收多少正文区（收到 `_DIALOG_BODY_MIN` 为止，内容由正文区自己滚）。坑：正文区要**递归**找 —— 批导把它套在卡片容器里，只找窗口的直接子控件会漏，那时夹取"跑了但什么都没做"。
@@ -707,22 +685,11 @@ timeline/
 
 **本轮不做（写明理由）**：不新增"进度条"这类更细的进行中反馈 —— 现有动作都是单次后端调用 + 状态栏文案 + 可取消按钮，进度百分比需要一个能报告进度的后端接口，属于 K 阶段（架构）的活。
 
-**收尾记录（2026-10-01）**：文案那一层与取消/失败路径的覆盖早已完成（见上），这次补的是验收里
-**最后缺的一条证据**，外加一条**新发现的待办**：
+**收尾记录（2026-10-01）**：文案那一层与取消/失败路径的覆盖早已完成（见上），这次补的是验收里 **最后缺的一条证据**，外加一条**新发现的待办**：
 
-- **"逐动作走一遍并截图"**：当时的抓图脚本新增了 feedback 模式，拍 5 张（进行中 / 进行中滚到底 /
-  取消已请求 / 取消完成 / 失败与下一步），脚本同时把每张的**文字证据**打进日志（不是只给图让人猜）。
-  为什么以前拍不到"进行中"：`DemoArchiveService.task_status()` 恒
-  `running=False`，而真后端（SQL）只在 `_active` 存在时报进行中，**耗时只能拉长在它开始之前**
-  （实测 6s 依旧 `cancellable=False`）。逐张核对表与两条复核结论写在当时的逐页评审记录里
-  （阶段 I 的本地材料, 已随收尾删除）的"I-7 的四种反馈状态"一节。
-- **新守卫（判据 E，咬合验证过）**：`tests/integration/test_gui_states.py::test_busy_task_card_is_recognizable_and_cancelable`
-  —— 进行中要看得见（「运行中」+ 进度行 + 进度文案 + 取消按钮可用）、能取消（请求真到后端，且有
-  "正在取消"的回执）、取消**不是错误**（以 INFO 收尾）、空闲时三样收起。它把"可辨识 / 可取消"
-  从"文案层有"变成"界面能被量到"。
-- **新发现（未修，已登记开放项）**：默认 1360×860 下任务卡第三行（进度文案 + 取消按钮）在侧栏折叠线
-  以下，进行中现场只露前两行；侧栏可滚所以不是点不到，但"跑着的时候取消按钮不在视野里"削弱了 I-7
-  的"可取消"。`f1`（折叠线以上）与 `f1b`（滚到底）是同一状态的两个视角。
+- **"逐动作走一遍并截图"**：当时的抓图脚本新增了 feedback 模式，拍 5 张（进行中 / 进行中滚到底 / 取消已请求 / 取消完成 / 失败与下一步），脚本同时把每张的**文字证据**打进日志（不是只给图让人猜）。为什么以前拍不到"进行中"：`DemoArchiveService.task_status()` 恒 `running=False`，而真后端（SQL）只在 `_active` 存在时报进行中，**耗时只能拉长在它开始之前** （实测 6s 依旧 `cancellable=False`）。逐张核对表与两条复核结论写在当时的逐页评审记录里（阶段 I 的本地材料, 已随收尾删除）的"I-7 的四种反馈状态"一节。
+- **新守卫（判据 E，咬合验证过）**：`tests/integration/test_gui_states.py::test_busy_task_card_is_recognizable_and_cancelable` —— 进行中要看得见（「运行中」+ 进度行 + 进度文案 + 取消按钮可用）、能取消（请求真到后端，且有 "正在取消"的回执）、取消**不是错误**（以 INFO 收尾）、空闲时三样收起。它把"可辨识 / 可取消" 从"文案层有"变成"界面能被量到"。
+- **新发现（未修，已登记开放项）**：默认 1360×860 下任务卡第三行（进度文案 + 取消按钮）在侧栏折叠线以下，进行中现场只露前两行；侧栏可滚所以不是点不到，但"跑着的时候取消按钮不在视野里"削弱了 I-7 的"可取消"。`f1`（折叠线以上）与 `f1b`（滚到底）是同一状态的两个视角。
 
 #### I-8 跨平台与发布前验证（优先级 低，收尾）
 
@@ -730,8 +697,7 @@ timeline/
 - 与阶段 J/K 的衔接：打包产物启动后**同一套截图脚本再跑一遍**，确认打包版与开发版视觉一致。
 - 判据：三平台各自的截图或"未能验证"的显式记录（不许沉默）。
 
-**收尾记录（2026-09-30）**：三平台那一半做完了（macOS 的 CI 证据随之恢复，见 11.9 的恢复记录），
-打包版那一半留给阶段 J/K —— 逐项如下，**"未验证"的都写明原因，不留沉默**。
+**收尾记录（2026-09-30）**：三平台那一半做完了（macOS 的 CI 证据随之恢复，见 11.9 的恢复记录），打包版那一半留给阶段 J/K —— 逐项如下，**"未验证"的都写明原因，不留沉默**。
 
 | 项                                | 做法与实测证据                                                                                                                                                                                                                                                                                                                                 | 状态                                                                    |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
@@ -743,15 +709,9 @@ timeline/
 | macOS · 同上                      | 2026-09-30 恢复 CI 后由 macOS 分片覆盖（矩阵里 1 片，含 `mypy --platform darwin`）                                                                                                                                                                                                                                                             | **待下一次 CI**（恢复当天无法触发）                                     |
 | 打包版视觉一致                    | 需要阶段 J/K 的打包产物（`packaging/archive-management.spec` 能构建，但 `release.yml` 目前只做 Windows，macOS 的 `.app` 未纳入）；当时的抓图脚本是**导入源码**跑的，直接对打包版跑需要另写"启动 exe + 按窗口句柄抓图"的入口（`crash_capture.grab_png(window=hwnd)` 已有这条能力）                                                              | **未做**，留给 J/K（本项就是计划里写的"与阶段 J/K 的衔接"）             |
 
-报告里的"图画布在另一平台也画得出来"这一条（I-9 复核时要求写进 I-8 清单的）：图画布相关的断言
-（item 账目 / 几何 / 选中描边 / 漫游）全在 `tests/integration/test_gui_branch_graph.py` 里，属于
-Linux 与 macOS 分片都会跑的那批用例 —— 所以**恢复 macOS 之后这条自动有了另一平台的证据**，
-本机再补一张 `13-游戏详情-分支视图-选中节点.png` 作对照。
+报告里的"图画布在另一平台也画得出来"这一条（I-9 复核时要求写进 I-8 清单的）：图画布相关的断言（item 账目 / 几何 / 选中描边 / 漫游）全在 `tests/integration/test_gui_branch_graph.py` 里，属于 Linux 与 macOS 分片都会跑的那批用例 —— 所以**恢复 macOS 之后这条自动有了另一平台的证据**，本机再补一张 `13-游戏详情-分支视图-选中节点.png` 作对照。
 
-**门禁（2026-09-30）**：`ruff format --check` / `ruff check` / `mypy`（195 文件 + `scripts`）/
-`deptry` / pre-commit 六个钩子全绿；全量 `pytest --cov` = **2183 passed / 7 skipped**、
-`Total coverage 97.64%`（门槛 95）。本轮没动 `src`，所以覆盖率与上一轮同值；守卫相关的改动只落在
-测试与配置上（macOS 三处期望值 + 新 instruction 文件 + `collect_coverage_data.py` 的两条行为用例）。
+**门禁（2026-09-30）**：`ruff format --check` / `ruff check` / `mypy`（195 文件 + `scripts`）/ `deptry` / pre-commit 六个钩子全绿；全量 `pytest --cov` = **2183 passed / 7 skipped**、 `Total coverage 97.64%`（门槛 95）。本轮没动 `src`，所以覆盖率与上一轮同值；守卫相关的改动只落在测试与配置上（macOS 三处期望值 + 新 instruction 文件 + `collect_coverage_data.py` 的两条行为用例）。
 
 #### I-9 分支树改为"节点-连线图"（2026-09-27 新需求, 优先级 高；**已实施**）
 
@@ -1081,9 +1041,7 @@ Linux 与 macOS 分片都会跑的那批用例 —— 所以**恢复 macOS 之�
 3. 直接读取 `packaging.py` 中的源码版本，不修改源码，不使用 Git tag 注入版本。
 4. 生成 Windows x64 压缩包、单文件可执行文件、SHA-256 校验文件和构建元数据。
 5. 自动上传 Actions artifact；正式 GitHub Release 的触发条件和版本生成方式待定。
-6. **平台范围待定（从阶段 I 的清点表挪过来）**：`release.yml` 当前只构建 Windows，Linux / macOS 的
-   包（含 macOS 的 `.app`）都没纳入 —— 当时只做首要发布平台（见阶段 J 第 7 条）。真要做时这一条要
-   一起定：目标平台、构建镜像、产物命名，以及 macOS 侧是否走签名 / 公证。
+6. **平台范围待定（从阶段 I 的清点表挪过来）**：`release.yml` 当前只构建 Windows，Linux / macOS 的包（含 macOS 的 `.app`）都没纳入 —— 当时只做首要发布平台（见阶段 J 第 7 条）。真要做时这一条要一起定：目标平台、构建镜像、产物命名，以及 macOS 侧是否走签名 / 公证。
 
 版本方案候选：
 
@@ -1164,24 +1122,11 @@ GitHub Actions 建议在 pull request 和主分支 push 上执行：
 12. M7.2：资源获取与缓存（G-4）。
 13. M7.3：界面接入与封面显示（G-5，含 Pillow 依赖）。
 14. M8：Windows 可执行文件打包和发布验证。
-15. M8.1（延后验证，不阻塞当前开发）：Ubuntu 26.04 迁移后的 CI 兼容性。
-    `ubuntu-latest` 目前是 Ubuntu 24.04，GitHub 公告 2026-10-19 起用 1–2 个月渐进切到 26.04。
-    已逐项评估现有 Linux 步骤，结论是**无需提前改动**：`Install Xvfb` 那一步已经同时处理
-    `.list` 与 `.sources`（26.04 用新式 `.sources`），`uv python install` 用 uv 自带 standalone
-    CPython 不依赖镜像里的 Python，Node 与 Allure CLI 由 `setup-node` 提供，GUI 用例只靠
-    `xvfb-run`；仓库、工作流与文档里也没有任何 `24.04` 之类的版本字符串需要同步修改。
-    迁移真正开始后跑一轮 CI，只确认三件事：
-    ① `Install Xvfb` 的 `apt-get update` / `install` 正常；
-    ② 三个平台的 GUI 用例没有被环境守卫成片 skip（成片 skip 会把覆盖率门槛变成难定位的失败）；
-    ③ `performance` job 的绝对预算（`budget_seconds`、内存预算）没有因镜像换代整体位移到踩线。
-    任何一项不达标就把对应 job 显式钉到 `ubuntu-24.04`（`performance` 优先：基准可比性依赖稳定
-    环境），并在工作流里写明取值理由。
+15. M8.1（延后验证，不阻塞当前开发）：Ubuntu 26.04 迁移后的 CI 兼容性。 `ubuntu-latest` 目前是 Ubuntu 24.04，GitHub 公告 2026-10-19 起用 1–2 个月渐进切到 26.04。已逐项评估现有 Linux 步骤，结论是**无需提前改动**：`Install Xvfb` 那一步已经同时处理 `.list` 与 `.sources`（26.04 用新式 `.sources`），`uv python install` 用 uv 自带 standalone CPython 不依赖镜像里的 Python，Node 与 Allure CLI 由 `setup-node` 提供，GUI 用例只靠 `xvfb-run`；仓库、工作流与文档里也没有任何 `24.04` 之类的版本字符串需要同步修改。迁移真正开始后跑一轮 CI，只确认三件事： ① `Install Xvfb` 的 `apt-get update` / `install` 正常； ② 三个平台的 GUI 用例没有被环境守卫成片 skip（成片 skip 会把覆盖率门槛变成难定位的失败）； ③ `performance` job 的绝对预算（`budget_seconds`、内存预算）没有因镜像换代整体位移到踩线。任何一项不达标就把对应 job 显式钉到 `ubuntu-24.04`（`performance` 优先：基准可比性依赖稳定环境），并在工作流里写明取值理由。
 
 ### 后续阶段（未排期，从阶段 I 的清点表挪过来）
 
-- **平台扩展轮（M9 候选）**：Epic / GOG / Xbox 的官方存档来源调研 —— 原文明确“本期不实现”，
-  所以它不属于阶段 I 的开放项。做的时候照阶段 G / M7 的做法：先调研来源与可信度分级，
-  再补候选校验与落库（G-1~G-5 那套模型可以直接复用）。
+- **平台扩展轮（M9 候选）**：Epic / GOG / Xbox 的官方存档来源调研 —— 原文明确“本期不实现”，所以它不属于阶段 I 的开放项。做的时候照阶段 G / M7 的做法：先调研来源与可信度分级，再补候选校验与落库（G-1~G-5 那套模型可以直接复用）。
 
 ## 11. CI 执行时间优化（2026-09-21 记录；档 1/档 2 已实施, 档 3 只做了第 15 条）
 
@@ -2003,61 +1948,37 @@ CustomTkinter 按显示器 DPI 装一个**窗口缩放**（本机 125% → 1.25�
 
 ## 32. 探测结果: 清空重扫 + 忽略按名字记(A/B/C 三项都做, 2026-10-03)
 
-用户要求把评估里的三个方案一起落地。它们的共同前提是"**候选记录是可以重建的**, 而用户的
-决定不能丢" —— 所以真正要改的是"哪些记录该活着"与"忽略这件事存在哪里"。
+用户要求把评估里的三个方案一起落地。它们的共同前提是"**候选记录是可以重建的**, 而用户的决定不能丢" —— 所以真正要改的是"哪些记录该活着"与"忽略这件事存在哪里"。
 
 ### 32.1 B(地基): 忽略改记在"按名字"的表上
 
-- 新表 `ignored_candidates(key PRIMARY KEY, name, created_at)`(迁移 **v14**);`key` 是
-  规范化后的名字, 由新加的 :func:`domain.discovery.normalize_game_name`(`strip + casefold`)
-  算 —— 全应用只这一处定义"两个名字算不算同一个", 排除清单的名称匹配、库里同名游戏的对应、
-  忽略表用的是同一个口径。
-- `ignore_candidate` 除了把候选行置为 `ignored`, 还会把**名字**记进这张表;
-  `restore_candidate` 会把它删掉。
-- 扫描时: 一条**新**候选只要名字在表里, 建出来就直接是 `ignored`(`_hide_ignored`)——
-  用户忽略过的游戏重新装上/重新扫到不会又冒回待处理。
-- **同名导入拦截**: `import_candidate` 除了原来的"这条候选已导入", 再按名字挡一道 ——
-  候选记录会被下面的清理删掉, "已导入"这条状态不再是可靠依据。
-- 已知代价(写在 schema 的注释里): 同名不同安装会一起被忽略; 名字变了(译名/版本后缀)就
-  匹配不上, 那条已忽略的游戏会回到待处理。
+- 新表 `ignored_candidates(key PRIMARY KEY, name, created_at)`(迁移 **v14**);`key` 是规范化后的名字, 由新加的 :func:`domain.discovery.normalize_game_name`(`strip + casefold`) 算 —— 全应用只这一处定义"两个名字算不算同一个", 排除清单的名称匹配、库里同名游戏的对应、忽略表用的是同一个口径。
+- `ignore_candidate` 除了把候选行置为 `ignored`, 还会把**名字**记进这张表; `restore_candidate` 会把它删掉。
+- 扫描时: 一条**新**候选只要名字在表里, 建出来就直接是 `ignored`(`_hide_ignored`)——用户忽略过的游戏重新装上/重新扫到不会又冒回待处理。
+- **同名导入拦截**: `import_candidate` 除了原来的"这条候选已导入", 再按名字挡一道 ——候选记录会被下面的清理删掉, "已导入"这条状态不再是可靠依据。
+- 已知代价(写在 schema 的注释里): 同名不同安装会一起被忽略; 名字变了(译名/版本后缀)就匹配不上, 那条已忽略的游戏会回到待处理。
 
 ### 32.2 A(扫描收尾清理) / C(手动清空)
 
 两条走同一个原语 :func:`application.discovery._prune_candidates`:
 
-- **A**: 扫描收尾时, 删掉"这次没扫到、且不是 `imported`"的候选 —— 磁盘上已经没有的东西
-  不该继续占着列表; 已忽略的先按名字记住再删。报告与界面提示多了 `pruned` 一项。
-- **C**: 探测结果页新增"清空结果"按钮(`discovery.clear_scan`, danger 风格 + 二次确认),
-  一次清掉所有非 `imported` 的候选, 之后重新扫描即可。
-- **`imported` 的行一条都不删**: 它们带着 `game_id`(删除游戏时退回的依据), 并且是
-  `candidates._resolve_install_dir` 在游戏没显式给安装目录时的**唯一来源** —— 所以
-  B 评估里那条"① 把 install_dir 固化到游戏记录"用**更省的做法**满足了: 不删这类行,
-  兜底就不会断(不变量写在 `_resolve_install_dir` 的注释里)。它们数量受游戏库规模约束。
+- **A**: 扫描收尾时, 删掉"这次没扫到、且不是 `imported`"的候选 —— 磁盘上已经没有的东西不该继续占着列表; 已忽略的先按名字记住再删。报告与界面提示多了 `pruned` 一项。
+- **C**: 探测结果页新增"清空结果"按钮(`discovery.clear_scan`, danger 风格 + 二次确认), 一次清掉所有非 `imported` 的候选, 之后重新扫描即可。
+- **`imported` 的行一条都不删**: 它们带着 `game_id`(删除游戏时退回的依据), 并且是 `candidates._resolve_install_dir` 在游戏没显式给安装目录时的**唯一来源** —— 所以 B 评估里那条"① 把 install_dir 固化到游戏记录"用**更省的做法**满足了: 不删这类行, 兜底就不会断(不变量写在 `_resolve_install_dir` 的注释里)。它们数量受游戏库规模约束。
 
 ### 32.3 演示后端与守卫
 
-- `demo_backend` 同步同一套语义(扫描 = 清掉非已导入 + 按忽略名单重新铺候选), 否则界面
-  用例与真实后端会分叉。
-- 新增/改写守卫: `test_scan_prunes_stale_records_but_remembers_the_ignore_by_name`
-  (旧记录清掉 → 名字留下 → 同名重新扫到直接回到已忽略)、
-  `test_scan_keeps_imported_candidates_on_disk_and_links_them_by_name`(已导入一条都不清)、
-  `test_clear_scan_results_keeps_imported_and_ignored_decisions`(手动清空)、
-  界面用例 `test_discovery_clear_results_keeps_imported_and_remembers_ignores`(点真按钮
-  走完整路径); 按钮数量那条判据跟着加上"清空结果"。
+- `demo_backend` 同步同一套语义(扫描 = 清掉非已导入 + 按忽略名单重新铺候选), 否则界面用例与真实后端会分叉。
+- 新增/改写守卫: `test_scan_prunes_stale_records_but_remembers_the_ignore_by_name` (旧记录清掉 → 名字留下 → 同名重新扫到直接回到已忽略)、 `test_scan_keeps_imported_candidates_on_disk_and_links_them_by_name`(已导入一条都不清)、 `test_clear_scan_results_keeps_imported_and_ignored_decisions`(手动清空)、界面用例 `test_discovery_clear_results_keeps_imported_and_remembers_ignores`(点真按钮走完整路径); 按钮数量那条判据跟着加上"清空结果"。
 - 界面模块数/间距站点数登记: 间距站点 772 → 774(新按钮在动作行里占一格)。
 
 ### 32.4 验收
 
-`tests/unit` 1955 条通过(唯一一条红是 `test_report_verification` 的 allure 钉版: 工作流
-已经装 3.19.1 而 `allurerc.mjs` 的注释还写着 3.18.0, 属于另一条在途改动, 与本轮无关);
-发现页界面用例 13 条通过(`test_discovery_rows_clip_long_paths_and_ignore_stale_refits` 那条
-"路径标签裁剪与重算差一个字符"是既有红, 与本轮无关); ruff / mypy 干净。
+`tests/unit` 1955 条通过(唯一一条红是 `test_report_verification` 的 allure 钉版: 工作流已经装 3.19.1 而 `allurerc.mjs` 的注释还写着 3.18.0, 属于另一条在途改动, 与本轮无关); 发现页界面用例 13 条通过(`test_discovery_rows_clip_long_paths_and_ignore_stale_refits` 那条 "路径标签裁剪与重算差一个字符"是既有红, 与本轮无关); ruff / mypy 干净。
 
 ## 38. 一次 CI 红的统一定位 + 失败现场诊断与 tar 打包(2026-10-04)
 
-从下载的 Allure 报告里逐条读出 11 failed / 4 broken 的 `error.message`, 定位到下面这些
-**互不相干**的原因(报告本身是好的: 每条都给了原文, 只是没人逐条读)。同时按用户要求给
-**每个作业**都落一份"失败才跑"的现场诊断, 并把报告打包从 Python 的 zip 换成系统的 `tar`。
+从下载的 Allure 报告里逐条读出 11 failed / 4 broken 的 `error.message`, 定位到下面这些 **互不相干**的原因(报告本身是好的: 每条都给了原文, 只是没人逐条读)。同时按用户要求给 **每个作业**都落一份"失败才跑"的现场诊断, 并把报告打包从 Python 的 zip 换成系统的 `tar`。
 
 ### 38.1 逐条定位(实测信息 → 原因 → 修法)
 
@@ -2076,182 +1997,107 @@ CustomTkinter 按显示器 DPI 装一个**窗口缩放**（本机 125% → 1.25�
 
 ### 38.2 每个作业都留一份"失败才跑"的现场
 
-- 新增 `scripts/collect_job_diagnostics.py`: 把几个关键路径的**在不在 / 几个文件 / 多大 /
-  哪几个最大**写成一页 `summary.md`, 并回显到运行日志。
-- 五个作业(`quality` / `pytest` / `pytest-report` / `security` / `allure-summary`)最后都加
-  `Collect failure diagnostics` + `Upload failure diagnostics`, 两者都挂 `if: failure()`
-  —— **前面的步骤都成功时根本不跑**, 不会为每轮 CI 多传一份空产物。
-- 脚本**不 import 项目包**(pytest 作业用 `--no-install-project`, 项目本身不可导入),
-  自带一份 UTF-8 输出设置。
-- 原 `crash-dumps` 上传保持不动(名字不变, 免得已经在下它的流程断掉); pytest 那条新 artifact
-  只放清单。
+- 新增 `scripts/collect_job_diagnostics.py`: 把几个关键路径的**在不在 / 几个文件 / 多大 / 哪几个最大**写成一页 `summary.md`, 并回显到运行日志。
+- 五个作业(`quality` / `pytest` / `pytest-report` / `security` / `allure-summary`)最后都加 `Collect failure diagnostics` + `Upload failure diagnostics`, 两者都挂 `if: failure()` —— **前面的步骤都成功时根本不跑**, 不会为每轮 CI 多传一份空产物。
+- 脚本**不 import 项目包**(pytest 作业用 `--no-install-project`, 项目本身不可导入), 自带一份 UTF-8 输出设置。
+- 原 `crash-dumps` 上传保持不动(名字不变, 免得已经在下它的流程断掉); pytest 那条新 artifact 只放清单。
 
 ### 38.3 失败现场进报告
 
-- 汇总作业按 `pattern: job-diagnostics-*` 收全各作业诊断到 `failure-diagnostics/`,
-  **不** `merge-multiple`(各份同名 `summary.md` 会互相覆盖)。
-- `create_allure_summary.py` 把它们拼成 `allure-failure-diagnostics.md`, 由 `allurerc.mjs`
-  的 `globalAttachments` 挂到报告首页 —— 全绿时只有一行"本轮没有作业失败"。
+- 汇总作业按 `pattern: job-diagnostics-*` 收全各作业诊断到 `failure-diagnostics/`, **不** `merge-multiple`(各份同名 `summary.md` 会互相覆盖)。
+- `create_allure_summary.py` 把它们拼成 `allure-failure-diagnostics.md`, 由 `allurerc.mjs` 的 `globalAttachments` 挂到报告首页 —— 全绿时只有一行"本轮没有作业失败"。
 
 ### 38.4 打包: 用系统的 `tar`, 不再套 zip
 
-- `verify_allure_report.py` 的 `--zip` → `--archive`, 产物 `allure-report.tar.gz`:
-  这一步**只在 Ubuntu 上跑**, 一万多个小文件交给 `tar -czf` 一个子进程, 再用 `tar -tzf`
-  列条目核对完整性(条目数对不上就报错)。
+- `verify_allure_report.py` 的 `--zip` → `--archive`, 产物 `allure-report.tar.gz`: 这一步**只在 Ubuntu 上跑**, 一万多个小文件交给 `tar -czf` 一个子进程, 再用 `tar -tzf` 列条目核对完整性(条目数对不上就报错)。
 - Pages 发布那一步改成 `tar -xzf`; 归档顶层仍是 `allure-report/`, 与以前一致。
-- 用户看到"压缩包套压缩包"里的**外层**是 GitHub artifact 传输自己压的, 不是我们套的 ——
-  这一层去不掉, 注释里写明了。
+- 用户看到"压缩包套压缩包"里的**外层**是 GitHub artifact 传输自己压的, 不是我们套的 ——这一层去不掉, 注释里写明了。
 
 ### 38.5 验收
 
-`tests/unit` **1999 passed / 7 skipped**; `ruff check src tests scripts` 与 `mypy`(203 个文件)
-干净。新增 `tests/unit/test_ci_diagnostics.py`(12 条) 钉住: 五个作业都有那一对步骤、条件
-是失败才跑、汇总作业不合并、附件名两处一致、脚本不依赖项目包。
+`tests/unit` **1999 passed / 7 skipped**; `ruff check src tests scripts` 与 `mypy`(203 个文件) 干净。新增 `tests/unit/test_ci_diagnostics.py`(12 条) 钉住: 五个作业都有那一对步骤、条件是失败才跑、汇总作业不合并、附件名两处一致、脚本不依赖项目包。
 
 ## 39. 失败现场没进报告 + 真实崩溃的采集(2026-10-04)
 
-用户的上一轮报告里, 全局附件 `allure-failure-diagnostics.md` 一直写着"本轮没有作业失败",
-而作业明明是红的; 同时 macOS 又崩了一次, 而 `crash-dumps/faulthandler.log` 是 **0 字节**
-—— 两个都不是"上报失败", 而是**我们自己把证据弄丢了**。
+用户的上一轮报告里, 全局附件 `allure-failure-diagnostics.md` 一直写着"本轮没有作业失败", 而作业明明是红的; 同时 macOS 又崩了一次, 而 `crash-dumps/faulthandler.log` 是 **0 字节** —— 两个都不是"上报失败", 而是**我们自己把证据弄丢了**。
 
 ### 39.1 附件为什么永远是空的
 
-汇总作业里写这份附件的是 `create_allure_summary.py`, 而它的主流程在
-"Summarize performance and security into Allure" 里跑 —— 那一步排在
-"Download failure diagnostics from every job" **之前**(实测: 脚本调用在 1160 行, 下载在
-1182 行)。于是它扫 `failure-diagnostics/` 时目录还不存在, 永远写出那一行"没有作业失败"。
+汇总作业里写这份附件的是 `create_allure_summary.py`, 而它的主流程在 "Summarize performance and security into Allure" 里跑 —— 那一步排在 "Download failure diagnostics from every job" **之前**(实测: 脚本调用在 1160 行, 下载在 1182 行)。于是它扫 `failure-diagnostics/` 时目录还不存在, 永远写出那一行"没有作业失败"。
 
-修法: 附件单独成一步(`--write-failure-diagnostics`), 挂在下载**之后**; 主流程不再碰它。
-守卫 `test_diagnostics_are_downloaded_before_the_attachment_is_written` 把三者的先后钉住。
+修法: 附件单独成一步(`--write-failure-diagnostics`), 挂在下载**之后**; 主流程不再碰它。守卫 `test_diagnostics_are_downloaded_before_the_attachment_is_written` 把三者的先后钉住。
 
 ### 39.2 faulthandler 的句柄被 pytest 抢走了
 
-证据(2026-10-03 macOS 分片): 文件 0 字节, 而那段线程栈出现在 **CI 日志**里 —— 也就是
-faulthandler 真的工作了, 只是**输出去了 stderr**。原因: pytest 自带的 faulthandler 插件也
-调 `faulthandler.enable()`(不带 `file` = stderr), 而同类钩子的调用顺序是**后注册的先跑**:
-它注册得比 conftest 早, 所以我们那次先执行, 随后被它覆盖。
+证据(2026-10-03 macOS 分片): 文件 0 字节, 而那段线程栈出现在 **CI 日志**里 —— 也就是 faulthandler 真的工作了, 只是**输出去了 stderr**。原因: pytest 自带的 faulthandler 插件也调 `faulthandler.enable()`(不带 `file` = stderr), 而同类钩子的调用顺序是**后注册的先跑**: 它注册得比 conftest 早, 所以我们那次先执行, 随后被它覆盖。
 
-修法两处: conftest 的 `pytest_configure` 标 `trylast`; 再加一个 `pytest_sessionstart`
-(一定跑在所有 configure 之后)调 `crash_capture.reassert_hard_crash_log()` 再抢一次。
-验收方式是真崩一次: 子进程里 `ctypes.string_at(0)`, 断言栈落进了
-`crash-dumps/faulthandler.log`(Windows 上头一行是 `Windows fatal exception: access
-violation`, 因此断言认"fatal"与栈帧名, 不认平台专属的小标题)。
+修法两处: conftest 的 `pytest_configure` 标 `trylast`; 再加一个 `pytest_sessionstart` (一定跑在所有 configure 之后)调 `crash_capture.reassert_hard_crash_log()` 再抢一次。验收方式是真崩一次: 子进程里 `ctypes.string_at(0)`, 断言栈落进了 `crash-dumps/faulthandler.log`(Windows 上头一行是 `Windows fatal exception: access violation`, 因此断言认"fatal"与栈帧名, 不认平台专属的小标题)。
 
 ### 39.3 系统级崩溃信息: 向操作系统要
 
-段错误发生在 Tk 的 C 代码里时, faulthandler 只能给 **Python 栈**(哪个线程死在哪个回调),
-"内存是谁碰坏的"要看信号、出错地址与原生调用栈 —— 那只有系统级报告里有。macOS 的
-ReportCrash 会把 `.ips` 写进 `~/Library/Logs/DiagnosticReports`, 但它是**异步**的(进程死后
-几秒才落盘), 所以收集时轮询等待。
+段错误发生在 Tk 的 C 代码里时, faulthandler 只能给 **Python 栈**(哪个线程死在哪个回调), "内存是谁碰坏的"要看信号、出错地址与原生调用栈 —— 那只有系统级报告里有。macOS 的 ReportCrash 会把 `.ips` 写进 `~/Library/Logs/DiagnosticReports`, 但它是**异步**的(进程死后几秒才落盘), 所以收集时轮询等待。
 
-- `collect_job_diagnostics.py` 新增 `--crash-reports-from` / `--crash-report-wait`:
-  只收**本次**产生的报告(mtime 晚于进程启动), 拷进 `crash-dumps/`(既有 artifact 即可带上)。
-  Linux/Windows 上来源目录不存在 → 一秒都不等。
-- 新增"崩溃现场摘录"一节: 把 `crash-dumps/` 里的文本现场(`.log` / `.ips`)内联进
-  `summary.md`, 单个文件上限 4000 字符(这份摘要要在报告里渲染, 整份塞进去会把页面卡死);
-  于是"这一轮为什么红"在报告首页就能看到, 不必先去下 artifact。
+- `collect_job_diagnostics.py` 新增 `--crash-reports-from` / `--crash-report-wait`: 只收**本次**产生的报告(mtime 晚于进程启动), 拷进 `crash-dumps/`(既有 artifact 即可带上)。 Linux/Windows 上来源目录不存在 → 一秒都不等。
+- 新增"崩溃现场摘录"一节: 把 `crash-dumps/` 里的文本现场(`.log` / `.ips`)内联进 `summary.md`, 单个文件上限 4000 字符(这份摘要要在报告里渲染, 整份塞进去会把页面卡死); 于是"这一轮为什么红"在报告首页就能看到, 不必先去下 artifact。
 
 ### 39.4 崩溃本体: 攒下的 ~30 个调度线程(2026-10-05 **已修**, 证据留着)
 
-macOS 分片的 faulthandler dump 里同时挂着 **~30 个**
-`apscheduler/schedulers/blocking.py::_main_loop` 线程 —— `BackgroundScheduler` 内部就是
-`BlockingScheduler` 在跑这个循环, 而 `ApschedulerBackend.__init__` 每建一个后端就
-`start()` 一次。链条是:
+macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/schedulers/blocking.py::_main_loop` 线程 —— `BackgroundScheduler` 内部就是 `BlockingScheduler` 在跑这个循环, 而 `ApschedulerBackend.__init__` 每建一个后端就 `start()` 一次。链条是:
 
 - `ArchiveApp._on_close()` 才会 `backend.shutdown()` + `hotkeys.shutdown()`;
 - `ArchiveApp.destroy()` **只**撤 `after` 任务, 不停调度器;
 - 界面用例走的是 `gui_support.close_gui_apps()` → 只调 `destroy()`。
 
-一个进程里跑完整套界面用例会攒下几十个活着的调度器线程, 而 Tk 解释器已被销毁 ——
-在 macOS 上从非主线程/对已销毁的 Tk 动手是一种已知的段错误来源。
+一个进程里跑完整套界面用例会攒下几十个活着的调度器线程, 而 Tk 解释器已被销毁 ——在 macOS 上从非主线程/对已销毁的 Tk 动手是一种已知的段错误来源。
 
-**修法(2026-10-05)**: 不再把"释放"只挂在某一个入口上 —— 抽出一份幂等的
-`ArchiveApp._release_background()`(调度器 + 快捷键监听), 由**两条路**共用: `destroy()`(所以
-用户关窗、应用退出、控件树收尾全算上) 与 `gui_support.close_gui_apps`(用例收尾)。它故意
-**不**依赖 `_on_close`, 因为界面用例根本不走关窗事件, 走的是 `destroy()`。
+**修法(2026-10-05)**: 不再把"释放"只挂在某一个入口上 —— 抽出一份幂等的 `ArchiveApp._release_background()`(调度器 + 快捷键监听), 由**两条路**共用: `destroy()`(所以用户关窗、应用退出、控件树收尾全算上) 与 `gui_support.close_gui_apps`(用例收尾)。它故意 **不**依赖 `_on_close`, 因为界面用例根本不走关窗事件, 走的是 `destroy()`。
 
-实测的关键一条: 界面用例里真后端那 40 多处写的是“建真后端 + 建窗口 +
-`finally: app.destroy()`”, 而 demo backend 一个线程都不漏(它压根没有调度器) —— 所以以前
-“数一数到底谁漏”数不出来, 把释放入口往下沉一层才一次性清掉。守卫两条:
-`test_a_real_backend_does_not_outlive_its_window`(故意绕开收尾、只走产品关窗路径; 抽掉修法
-实测报 `关窗之后不该剩下调度线程: ['APScheduler']`) 与 `close_gui_apps` 里按**相对基线**判的
-整批守卫(存量不是本用例攒的就不断在它头上)。
+实测的关键一条: 界面用例里真后端那 40 多处写的是“建真后端 + 建窗口 + `finally: app.destroy()`”, 而 demo backend 一个线程都不漏(它压根没有调度器) —— 所以以前“数一数到底谁漏”数不出来, 把释放入口往下沉一层才一次性清掉。守卫两条: `test_a_real_backend_does_not_outlive_its_window`(故意绕开收尾、只走产品关窗路径; 抽掉修法实测报 `关窗之后不该剩下调度线程: ['APScheduler']`) 与 `close_gui_apps` 里按**相对基线**判的整批守卫(存量不是本用例攒的就不断在它头上)。
 
 ### 39.5 验收
 
-`tests/unit` **2006 passed / 7 skipped**; `ruff check src tests scripts` 与 `mypy` 干净。
-新增守卫: 附件写在下载之后、`.ips` 只收本次的、来源目录不存在时不等待、栈要内联进摘要、
-上兆现场要截断、以及那条"真崩一次"的端到端验收。
+`tests/unit` **2006 passed / 7 skipped**; `ruff check src tests scripts` 与 `mypy` 干净。新增守卫: 附件写在下载之后、`.ips` 只收本次的、来源目录不存在时不等待、栈要内联进摘要、上兆现场要截断、以及那条"真崩一次"的端到端验收。
 
 ## 40. 按报告逐条修掉 4 条非通过(2026-10-04)
 
-直接读工作区里那份报告(`allure-report/`, 就是最新一轮 CI: run 37117553783): 7142 条里
-**7136 通过 / 3 failed / 1 broken**, 4 条全都定位到具体机制。
+直接读工作区里那份报告(`allure-report/`, 就是最新一轮 CI: run 37117553783): 7142 条里 **7136 通过 / 3 failed / 1 broken**, 4 条全都定位到具体机制。
 
 ### 40.1 Windows: 管理窗口"没贴着内容"(failed)
 
 报告原文: 实测 648, 内容请求 580, 页脚 30 —— 旧判据 `requested + footer + 8` = 618 < 648。
 
-- 差的那 68 **正好是**实现里那个 chrome 算式(`页脚 30 + 间距 6 + 上下内边距 32`),
-  也就是说判据漏掉了页脚与外边距; 而 CI 上"窗口自己的请求高度"只等于内容那一半。
-- 试过让实现**自己算**高度(正文 + chrome)而不是问 Tk 要请求: **本机立刻红了** ——
-  关闭按钮跑到窗口下沿以下 148px。Tk 的请求里还有我们没建模的间距, 自己拼会少给一块。
-  已撤回(注释留在实现里)。
-- 最终只改判据: 上限 = `请求 + 页脚 + 间距 + 上下内边距`, 单位统一到**物理**像素
-  (先把 `chrome` 按缩放换算好)。本机 854 ≤ 854 + 85 + 8 ✓; CI 648 ≤ 580 + 68 + 8 ✓。
-  下限保留(窗口明显比请求矮也要红), 而"窗口虚胖一大截"照样拦得住。
+- 差的那 68 **正好是**实现里那个 chrome 算式(`页脚 30 + 间距 6 + 上下内边距 32`), 也就是说判据漏掉了页脚与外边距; 而 CI 上"窗口自己的请求高度"只等于内容那一半。
+- 试过让实现**自己算**高度(正文 + chrome)而不是问 Tk 要请求: **本机立刻红了** ——关闭按钮跑到窗口下沿以下 148px。Tk 的请求里还有我们没建模的间距, 自己拼会少给一块。已撤回(注释留在实现里)。
+- 最终只改判据: 上限 = `请求 + 页脚 + 间距 + 上下内边距`, 单位统一到**物理**像素 (先把 `chrome` 按缩放换算好)。本机 854 ≤ 854 + 85 + 8 ✓; CI 648 ≤ 580 + 68 + 8 ✓。下限保留(窗口明显比请求矮也要红), 而"窗口虚胖一大截"照样拦得住。
 
 ### 40.2 macOS: 浮层的 topmost 关不掉(failed)
 
-`assert not 1 where 1 = wm_attributes('-topmost')`。查了那轮 CI 的提交(bae6b48):
-**"先 transient 再写掉 topmost"这个顺序已经在里面了**, 也就是说 macOS 上无边框
-(override-redirect)窗口的 `-topmost` 无论先写后写都读出来是 1 —— 那是 Tk 给这类窗口的
-平台默认值, 不是顺序问题(两轮 CI 都量到)。所以:
+`assert not 1 where 1 = wm_attributes('-topmost')`。查了那轮 CI 的提交(bae6b48): **"先 transient 再写掉 topmost"这个顺序已经在里面了**, 也就是说 macOS 上无边框 (override-redirect)窗口的 `-topmost` 无论先写后写都读出来是 1 —— 那是 Tk 给这类窗口的平台默认值, 不是顺序问题(两轮 CI 都量到)。所以:
 
 - 实现里那句写仍留着(在别的平台有效), 注释改成如实记录"macOS 上写不掉"并注明不要再试顺序;
-- 用例改成: **darwin 上钉机制**(浮层是宿主的附属窗口 —— 宿主隐藏/沉下去时它跟着走, 这才是
-  "不再盖住别的软件"的来源), **其它平台继续钉读数**。
+- 用例改成: **darwin 上钉机制**(浮层是宿主的附属窗口 —— 宿主隐藏/沉下去时它跟着走, 这才是 "不再盖住别的软件"的来源), **其它平台继续钉读数**。
 
 ### 40.3 Linux: 一行名与两行名的行位置不一致(failed)
 
-报告原文: 一行名 `(368, 28, ...)` 与两行名 `(368, 39, ...)` —— 名称标签高 28 vs 39, 下面
-两行跟着差 11px。**三条路都试过, 最后一条才成立(2026-10-03/04 两轮 CI 都验过)**:
+报告原文: 一行名 `(368, 28, ...)` 与两行名 `(368, 39, ...)` —— 名称标签高 28 vs 39, 下面两行跟着差 11px。**三条路都试过, 最后一条才成立(2026-10-03/04 两轮 CI 都验过)**:
 
-1. `configure(height=两行高)`: Windows/macOS 上有效, 在 X11 上对标签**不起作用**(标签仍然
-   跟着文本行数走);
-2. 钉 `grid_rowconfigure(1, minsize=...)`: 行高对了, 但**量不出**可信的两行高度 —— 未映射
-   的 `CTkLabel` 在 X11 上报的是它自己的默认高度 28(Windows 上才是文本高度 38), 而普通
-   `tk.Label` 探针又比真实标签短 2px(实测 36 vs 38), 于是照样对不齐(见 §42.1);
-3. **补一个尾随空行**(最终): 一行名在末尾补一个"只有空格"的第二行, 每张卡片的名称都是
-   **两行真文本** —— 不依赖任何测量, 自然高度天然相同, 而且一行名与两行名的第一个字落在
-   同一行上(比"在两行里垂直居中"更整齐)。
+1. `configure(height=两行高)`: Windows/macOS 上有效, 在 X11 上对标签**不起作用**(标签仍然跟着文本行数走);
+2. 钉 `grid_rowconfigure(1, minsize=...)`: 行高对了, 但**量不出**可信的两行高度 —— 未映射的 `CTkLabel` 在 X11 上报的是它自己的默认高度 28(Windows 上才是文本高度 38), 而普通 `tk.Label` 探针又比真实标签短 2px(实测 36 vs 38), 于是照样对不齐(见 §42.1);
+3. **补一个尾随空行**(最终): 一行名在末尾补一个"只有空格"的第二行, 每张卡片的名称都是 **两行真文本** —— 不依赖任何测量, 自然高度天然相同, 而且一行名与两行名的第一个字落在同一行上(比"在两行里垂直居中"更整齐)。
 
-判据上给的容差: 卡片总高 ±2(两行文本的自然高度在两个平台不可能逐像素相同), 而**位置与
-名称高度仍是严格相等**(那才是用户看得见的项); 卡片的 `grid_rowconfigure(1, minsize=...)`
-与那个探测标签都删掉了(间距站点先减一、回退后又加回来, 最终仍为 798)。
+判据上给的容差: 卡片总高 ±2(两行文本的自然高度在两个平台不可能逐像素相同), 而**位置与名称高度仍是严格相等**(那才是用户看得见的项); 卡片的 `grid_rowconfigure(1, minsize=...)` 与那个探测标签都删掉了(间距站点先减一、回退后又加回来, 最终仍为 798)。
 
 ### 40.4 macOS: 缺结论 Coverage report(macOS)(broken)
 
-这条**不是**独立的 bug: 那台机器的 pytest 被 SIGSEGV 打死, 覆盖率是会话结束才落盘的, 所以
-`coverage-data-macos-latest-*` 没有产物。本轮没动它 —— 上一轮已经把"崩了要留什么"补齐
-(faulthandler 句柄抢回来 + 系统级 `.ips` + 内联进报告), 下一轮的诊断里就会带上**全线程栈**
-(当前线索: dump 里挂着约 30 个 apscheduler 线程, 而 `ArchiveApp.destroy()` 不停调度器,
-见 §39.4)。
+这条**不是**独立的 bug: 那台机器的 pytest 被 SIGSEGV 打死, 覆盖率是会话结束才落盘的, 所以 `coverage-data-macos-latest-*` 没有产物。本轮没动它 —— 上一轮已经把"崩了要留什么"补齐 (faulthandler 句柄抢回来 + 系统级 `.ips` + 内联进报告), 下一轮的诊断里就会带上**全线程栈** (当前线索: dump 里挂着约 30 个 apscheduler 线程, 而 `ArchiveApp.destroy()` 不停调度器, 见 §39.4)。
 
 ### 40.5 顺带发现: 表头与数据行的 14px 错位是既有抖动
 
-两次连续运行里, `test_a_long_state_column_does_not_push_the_fixed_columns` 与
-`test_high_dpi_keeps_the_status_column_to_two_lines` 交替报"表头与数据行没对齐", 而六列
-**整体偏移恒为 14px**(就是滚动条宽度), 下一次同一条又不红。与本节改动无关(它们跑的是列表
-视图, 不建海报卡片), 已按"另一件事"记在这里, 留给后续处理。
+两次连续运行里, `test_a_long_state_column_does_not_push_the_fixed_columns` 与 `test_high_dpi_keeps_the_status_column_to_two_lines` 交替报"表头与数据行没对齐", 而六列 **整体偏移恒为 14px**(就是滚动条宽度), 下一次同一条又不红。与本节改动无关(它们跑的是列表视图, 不建海报卡片), 已按"另一件事"记在这里, 留给后续处理。
 
 ### 40.6 验收
 
-`tests/unit` **2006 passed / 7 skipped**; `ruff check src tests scripts` 与 `mypy` 干净;
-本机 GUI 侧复跑: `test_gui_sizes.py` 10 条、`test_gui_layout.py` 23 条、`test_gui_dropdown.py`
-全绿。**只能下次 CI 验收的**: 40.1/40.2/40.3 三条的判据在 CI 上的取值, 以及 40.3 会让
-一行名的海报卡片在 X11/macOS 上高约 11px(这正是修的 bug)—— 视觉回归若因此变化, 按 CI 给的
-候选基线更新 `tests/visual-baselines/`。
+`tests/unit` **2006 passed / 7 skipped**; `ruff check src tests scripts` 与 `mypy` 干净; 本机 GUI 侧复跑: `test_gui_sizes.py` 10 条、`test_gui_layout.py` 23 条、`test_gui_dropdown.py` 全绿。**只能下次 CI 验收的**: 40.1/40.2/40.3 三条的判据在 CI 上的取值, 以及 40.3 会让一行名的海报卡片在 X11/macOS 上高约 11px(这正是修的 bug)—— 视觉回归若因此变化, 按 CI 给的候选基线更新 `tests/visual-baselines/`。
 
 ## 41. 减少上传: 去掉"同一批文件传两遍"(2026-10-04)
 
@@ -2317,119 +2163,67 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个**
 
 ## 43. 失败现场改成"只兜底崩溃与证据缺失"(2026-10-04)
 
-用户的两条要求: ① 报告首页那份 `allure-failure-diagnostics.md` 里出现了"已经在结果里体现
-出来"的失败现象, 这种不该再占全局附件; ② 那一对"收集/上传失败现场"的节点要更严谨 ——
-普通失败前边的步骤已经记过了, 这一对只作为**最后的兜底**: 整个程序崩掉时把现场留下来。
+用户的两条要求: ① 报告首页那份 `allure-failure-diagnostics.md` 里出现了"已经在结果里体现出来"的失败现象, 这种不该再占全局附件; ② 那一对"收集/上传失败现场"的节点要更严谨 ——普通失败前边的步骤已经记过了, 这一对只作为**最后的兜底**: 整个程序崩掉时把现场留下来。
 
 ### 43.1 判定收回脚本: `scene` 只认两类证据
 
-`scripts/collect_job_diagnostics.py` 新增判定, 写进 `<诊断目录>/verdict.json` 与
-`$GITHUB_OUTPUT`:
+`scripts/collect_job_diagnostics.py` 新增判定, 写进 `<诊断目录>/verdict.json` 与 `$GITHUB_OUTPUT`:
 
-- **进程级崩溃**: `crash-dumps/faulthandler.log` 有栈(空日志不算 —— 那是每轮都有的文件),
-  或从系统目录收到崩溃报告(`.ips` 等);
-- **证据缺失**: `--expect` 声明的路径不在**或为空**(空目录 / 0 字节文件同样算)。覆盖率文件
-  是 pytest 会话结束才落盘的 —— 它不在, 说明进程没走到最后; 而"某一片没有产物"在结果里
-  只能看出缺, 看不出原因。
+- **进程级崩溃**: `crash-dumps/faulthandler.log` 有栈(空日志不算 —— 那是每轮都有的文件), 或从系统目录收到崩溃报告(`.ips` 等);
+- **证据缺失**: `--expect` 声明的路径不在**或为空**(空目录 / 0 字节文件同样算)。覆盖率文件是 pytest 会话结束才落盘的 —— 它不在, 说明进程没走到最后; 而"某一片没有产物"在结果里只能看出缺, 看不出原因。
 
-断言失败、门禁不通过、自检不通过这三类证据都在结果与日志里 → `scene=false`, **不上传**。
-顺带把等 macOS ReportCrash 的那 20 秒改成"只在**已经有崩溃迹象**时才等": 新增
-`collect_and_judge()` 先判定一次, 有迹象才去等, 等到报告就再判一次。
+断言失败、门禁不通过、自检不通过这三类证据都在结果与日志里 → `scene=false`, **不上传**。顺带把等 macOS ReportCrash 的那 20 秒改成"只在**已经有崩溃迹象**时才等": 新增 `collect_and_judge()` 先判定一次, 有迹象才去等, 等到报告就再判一次。
 
 ### 43.2 工作流: 上传步按判定跑
 
-五个作业的 `Collect failure diagnostics` 都加了 `id: diagnostics` 与
-`--github-output "$GITHUB_OUTPUT"`, 上传步统一成
-`if: failure() && steps.diagnostics.outputs.scene == 'true'`, 并且 `if-no-files-found`
-从 `warn` 改成 `error`(判定说有现场就必须真有东西; 静默少传一份等于把"附件里为什么没有
-这个作业"变成谜)。每个作业的 `--expect` 就是它**本该有**的产物: pytest 是结果目录与
-`.coverage.shard-<片>`, 报告作业是结果目录与 `allure-report`, 质量作业是三份结论目录,
-安全作业是它的结果目录, 汇总作业是结果目录与最终报告。
+五个作业的 `Collect failure diagnostics` 都加了 `id: diagnostics` 与 `--github-output "$GITHUB_OUTPUT"`, 上传步统一成 `if: failure() && steps.diagnostics.outputs.scene == 'true'`, 并且 `if-no-files-found` 从 `warn` 改成 `error`(判定说有现场就必须真有东西; 静默少传一份等于把"附件里为什么没有这个作业"变成谜)。每个作业的 `--expect` 就是它**本该有**的产物: pytest 是结果目录与 `.coverage.shard-<片>`, 报告作业是结果目录与 `allure-report`, 质量作业是三份结论目录, 安全作业是它的结果目录, 汇总作业是结果目录与最终报告。
 
 ### 43.3 附件: 拼接时按判定过滤
 
-`create_allure_summary.py` 只拼 `verdict.json` 里 `scene` 为真的那些作业(缺这份 JSON 的
-旧产物按"有现场"处理 —— 宁可多显示一段, 也不要在最需要证据的时候把它藏起来), 全都没现场
-时那段说明也改写清楚了: 这一页只收**进程级崩溃**与**证据缺失**。于是"某个用例红了"不再
-在首页出现两次。
+`create_allure_summary.py` 只拼 `verdict.json` 里 `scene` 为真的那些作业(缺这份 JSON 的旧产物按"有现场"处理 —— 宁可多显示一段, 也不要在最需要证据的时候把它藏起来), 全都没现场时那段说明也改写清楚了: 这一页只收**进程级崩溃**与**证据缺失**。于是"某个用例红了"不再在首页出现两次。
 
 ### 43.4 守卫
 
-`tests/unit/test_ci_diagnostics.py`: 每个作业的收集步必须有 `id` / `--github-output` /
-`--expect`, 上传步必须按 `steps.diagnostics.outputs.scene == 'true'` 跑且
-`if-no-files-found` 是 `error`; 脚本侧新增六条判定用例(普通失败为假、缺覆盖率 / 空目录 /
-空文件为真、只有**带栈**的 faulthandler 才算崩溃、没有迹象时不等系统报告、`$GITHUB_OUTPUT`
-压成一行、主入口同时写 `verdict.json` 与输出); 附件侧新增"只收有现场的作业 + 缺 JSON 时
-保守地收下"。
+`tests/unit/test_ci_diagnostics.py`: 每个作业的收集步必须有 `id` / `--github-output` / `--expect`, 上传步必须按 `steps.diagnostics.outputs.scene == 'true'` 跑且 `if-no-files-found` 是 `error`; 脚本侧新增六条判定用例(普通失败为假、缺覆盖率 / 空目录 / 空文件为真、只有**带栈**的 faulthandler 才算崩溃、没有迹象时不等系统报告、`$GITHUB_OUTPUT` 压成一行、主入口同时写 `verdict.json` 与输出); 附件侧新增"只收有现场的作业 + 缺 JSON 时保守地收下"。
 
 ### 43.5 验收
 
-`tests/unit` **2017 passed / 7 skipped**; `ruff format .` / `ruff check src tests scripts` /
-`mypy` 干净; 工作流 YAML 解析一遍并打印了五个作业的诊断步骤条件(收集步 `if: failure()`、
-汇总作业 `if: always() && (...)`; 上传步都带 `scene` 判定、`if-no-files-found: error`);
-本机实跑两种场景确认判定与输出格式(`scene=false` 只写日志, `scene=true` 才有
-`verdict.json`/`$GITHUB_OUTPUT` 的那条理由)。**只能下次 CI 验收的**: 真出一次崩溃时那份
-附件与 artifact 的存在性 —— 判定为假的作业应当**既不产 artifact、也不出现在附件里**。
+`tests/unit` **2017 passed / 7 skipped**; `ruff format .` / `ruff check src tests scripts` / `mypy` 干净; 工作流 YAML 解析一遍并打印了五个作业的诊断步骤条件(收集步 `if: failure()`、汇总作业 `if: always() && (...)`; 上传步都带 `scene` 判定、`if-no-files-found: error`); 本机实跑两种场景确认判定与输出格式(`scene=false` 只写日志, `scene=true` 才有 `verdict.json`/`$GITHUB_OUTPUT` 的那条理由)。**只能下次 CI 验收的**: 真出一次崩溃时那份附件与 artifact 的存在性 —— 判定为假的作业应当**既不产 artifact、也不出现在附件里**。
 
 ## 44. 详情页名称只留一处 + 最小窗口降到 1024x720 + 把"要更宽"的判据从真窗口里拿出来(2026-10-03)
 
-三件事互相咬合: 第 2 件让 CI 的窗口落进应用自己的规格区间, 第 3 件把那些"靠拉窗口"的判据
-从环境里彻底拿开。
+三件事互相咬合: 第 2 件让 CI 的窗口落进应用自己的规格区间, 第 3 件把那些"靠拉窗口"的判据从环境里彻底拿开。
 
 ### 44.1 详情页的游戏名只留左上角那一处
 
-用户看到名称印了两遍: 左上角头部标题 + 概要卡里("当前游戏"下面)。现在只留头部标题, 概要卡
-保留"位置 / 是否验证 / 来源 / 备份统计":
+用户看到名称印了两遍: 左上角头部标题 + 概要卡里("当前游戏"下面)。现在只留头部标题, 概要卡保留"位置 / 是否验证 / 来源 / 备份统计":
 
-- 删掉 `_hero_name_label` / `_hero_name_font` 与只为它存在的 `_HERO_TEXT_WIDTH` /
-  `_HERO_NAME_LINES`, 以及 `_set_detail_names()` 里那段裁剪与空状态里那句占位文案;
-- 守卫跟着改: `test_gui_buttons` 里三处"删掉游戏后不应残留名称"改看 `_title_label`(同一个
-  断言的语义), `test_long_game_name_is_capped_in_the_detail_header` 只量头部标题;
-- 度量守卫的两个计数跟着掉: 间距站点 798 → 796(概要卡那个 `pady=(2, 0)` 算两个整数)、
-  字号站点 174 → 173(少一个 `CTkFont(size=20, ...)`)。
+- 删掉 `_hero_name_label` / `_hero_name_font` 与只为它存在的 `_HERO_TEXT_WIDTH` / `_HERO_NAME_LINES`, 以及 `_set_detail_names()` 里那段裁剪与空状态里那句占位文案;
+- 守卫跟着改: `test_gui_buttons` 里三处"删掉游戏后不应残留名称"改看 `_title_label`(同一个断言的语义), `test_long_game_name_is_capped_in_the_detail_header` 只量头部标题;
+- 度量守卫的两个计数跟着掉: 间距站点 798 → 796(概要卡那个 `pady=(2, 0)` 算两个整数)、字号站点 174 → 173(少一个 `CTkFont(size=20, ...)`)。
 
 ### 44.2 最小窗口 1200x720 → 1024x720
 
-理由不是"想支持更小的屏", 而是**让 CI 的窗口落进应用自己的规格区间**: runner 的 Windows/
-macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗口夹回 1024, 于是界面用例跑在应用
-**自己声明不支持**的尺寸下(§42.2 那两条 macOS 红就是这么来的; `main_window.py` 的注释早就写着
-"比最小窗口更窄会越界并盖住描边")。
+理由不是"想支持更小的屏", 而是**让 CI 的窗口落进应用自己的规格区间**: runner 的 Windows/ macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗口夹回 1024, 于是界面用例跑在应用 **自己声明不支持**的尺寸下(§42.2 那两条 macOS 红就是这么来的; `main_window.py` 的注释早就写着 "比最小窗口更窄会越界并盖住描边")。
 
-- **筛选工具条跟着收窄**: 这一行的宽度总和**就是**主页的最小宽度 —— 实测 req 1326, 而 1024
-  窗口下的可用宽度只有 1186(逻辑 949)。改法: 页签 112→96、平台 112→104、类型 136→124、
-  搜索框 150→120、两颗按钮 58→52, 页签 padx 也收一档 → 合计约 **924 逻辑像素**(收窄后实测
-  req 1154), 余量 25px 留给取整。这些宽度全是固定的, 所以这条余量在任何字体/平台上都一样;
-- 依赖跟着改: `home_page` 的注释、`gui-tests-on-ci.instructions.md` 里
-  那段例子(`docs/testing.md` 只写了 720 的下限, 仍然成立);
-- **没有**放开"真桌面更窄时接受窗口管理器夹取"的判据: 1024 只是把常见情况包住, 更小的桌面还会
-  出现(更小的屏、以后的 runner), 那时判据该如实接受窗口管理器的决定;
-- 基线要重出: 工具条窄了、详情页少了一行名称 → 下一轮 CI 的 `visual-baselines-candidates` 里
-  `01/02/03/07` 会变, 按老规矩提交即可(本机是 Windows 渲染, 不能拿来当 Linux 基线)。
+- **筛选工具条跟着收窄**: 这一行的宽度总和**就是**主页的最小宽度 —— 实测 req 1326, 而 1024 窗口下的可用宽度只有 1186(逻辑 949)。改法: 页签 112→96、平台 112→104、类型 136→124、搜索框 150→120、两颗按钮 58→52, 页签 padx 也收一档 → 合计约 **924 逻辑像素**(收窄后实测 req 1154), 余量 25px 留给取整。这些宽度全是固定的, 所以这条余量在任何字体/平台上都一样;
+- 依赖跟着改: `home_page` 的注释、`gui-tests-on-ci.instructions.md` 里那段例子(`docs/testing.md` 只写了 720 的下限, 仍然成立);
+- **没有**放开"真桌面更窄时接受窗口管理器夹取"的判据: 1024 只是把常见情况包住, 更小的桌面还会出现(更小的屏、以后的 runner), 那时判据该如实接受窗口管理器的决定;
+- 基线要重出: 工具条窄了、详情页少了一行名称 → 下一轮 CI 的 `visual-baselines-candidates` 里 `01/02/03/07` 会变, 按老规矩提交即可(本机是 Windows 渲染, 不能拿来当 Linux 基线)。
 
 ### 44.3 "要更宽"的判据改成给函数喂显式宽度
 
-`test_names_follow_the_window_width` 原来要一个 1900px 宽的窗口, CI 上只能 `pytest.skip`
-(报告里那两条 `Names follow the window width` 的 skip 就是它)—— 等于判据在 CI 上不存在。
-现在改成给 `HomePage._fit_row_name` / `fit_label` **喂两个显式宽度**(180 / 640)比字数:
-与窗口无关、每个平台都真跑; 宽档还要与同一宽度下的 `fit_text` 逐字相等(防"停在窄档")。
+`test_names_follow_the_window_width` 原来要一个 1900px 宽的窗口, CI 上只能 `pytest.skip` (报告里那两条 `Names follow the window width` 的 skip 就是它)—— 等于判据在 CI 上不存在。现在改成给 `HomePage._fit_row_name` / `fit_label` **喂两个显式宽度**(180 / 640)比字数: 与窗口无关、每个平台都真跑; 宽档还要与同一宽度下的 `fit_text` 逐字相等(防"停在窄档")。
 
-`test_gui_text_fit` 的两档(1200 → 1024)在 1024 桌面上不可能真的变成两档, 所以不再假装: 把
-**实测**宽度写进判据标签(`1366(实际 1024)`), 裁剪逻辑本身的两档由 `tests/unit/test_textfit.py`
-直接喂预算守着。
+`test_gui_text_fit` 的两档(1200 → 1024)在 1024 桌面上不可能真的变成两档, 所以不再假装: 把 **实测**宽度写进判据标签(`1366(实际 1024)`), 裁剪逻辑本身的两档由 `tests/unit/test_textfit.py` 直接喂预算守着。
 
 ### 44.4 顺带修回: Allure CLI 被改成了浮动标签
 
-工作区里 `ci.yml` 两处 `npm install --global allure@3.19.1` 被改成了 `allure@3`(缓存 key 也从
-`npm-allure-3.19.1-*` 变成 `npm-allure-3-*`), 单元守卫因此红。已恢复为钉住的 3.19.1 并把理由
-写进注释: **浮动标签一升级就会换掉用例级历史的键**(§42.3 实测 3.18.0 → 3.19.1 把 `historyId`
-换成三段键), 历史会莫名其妙清零; 两条守卫分别钉"不许浮动"与"必须 ≥ 配置里的最低要求"。
+工作区里 `ci.yml` 两处 `npm install --global allure@3.19.1` 被改成了 `allure@3`(缓存 key 也从 `npm-allure-3.19.1-*` 变成 `npm-allure-3-*`), 单元守卫因此红。已恢复为钉住的 3.19.1 并把理由写进注释: **浮动标签一升级就会换掉用例级历史的键**(§42.3 实测 3.18.0 → 3.19.1 把 `historyId` 换成三段键), 历史会莫名其妙清零; 两条守卫分别钉"不许浮动"与"必须 ≥ 配置里的最低要求"。
 
 ### 44.5 验收
 
-`tests/unit` **2017 passed / 7 skipped**; `ruff format .` / `ruff check src tests scripts` /
-`mypy` 干净; 界面侧本机复跑: `test_gui_layout.py` + `test_gui_text_fit.py` 26 条、
-`test_gui_sizes.py` 10 条、`test_gui_buttons.py` 里与本改动相关的 11 条(整份在 CI 上跑)。
-**只能下次 CI 验收的**: 1024 桌面下各界面用例的取值、以及视觉回归的候选基线(见 44.2)。
+`tests/unit` **2017 passed / 7 skipped**; `ruff format .` / `ruff check src tests scripts` / `mypy` 干净; 界面侧本机复跑: `test_gui_layout.py` + `test_gui_text_fit.py` 26 条、 `test_gui_sizes.py` 10 条、`test_gui_buttons.py` 里与本改动相关的 11 条(整份在 CI 上跑)。 **只能下次 CI 验收的**: 1024 桌面下各界面用例的取值、以及视觉回归的候选基线(见 44.2)。
 
 ## 45. 最新一轮报告的逐条定性: 视觉三红 / 覆盖率缺失(我的漏子) / 冷启动居中(2026-10-04)
 
@@ -2447,111 +2241,61 @@ macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗�
 
 ### 45.2 02 的根因与修法: 名称块的高度不该由文本行数决定
 
-`home_page._build_poster` 原来靠"给一行名补一个只有空格的第二行"让名称永远两行 ——
-**尾随空行算不算一行由平台定**: Linux(X11) 上不算(实测 28 vs 39, 同样的代码 Windows/macOS
-绿), 所以 §40/§42 那两轮在 Linux 上等于没修。
+`home_page._build_poster` 原来靠"给一行名补一个只有空格的第二行"让名称永远两行 —— **尾随空行算不算一行由平台定**: Linux(X11) 上不算(实测 28 vs 39, 同样的代码 Windows/macOS 绿), 所以 §40/§42 那两轮在 Linux 上等于没修。
 
-现在改成**固定高度的名称块**: 外面套一个 `CTkFrame(height=两行行距, grid_propagate(False))`
-(见 `poster_name_block_height`: `linespace × 2` 换算成逻辑像素再 +2), 名称标签放进去 ——
-高度不量控件、也不看文本里有几个换行, 于是**任何平台**上一行名与两行名的卡片、以及名称下面那
-两行的位置都是同一个数。守卫改成量"名称块"(标签自己的 y 现在相对块), 并补了一条"块高必须装得
-下两行文本"。
+现在改成**固定高度的名称块**: 外面套一个 `CTkFrame(height=两行行距, grid_propagate(False))` (见 `poster_name_block_height`: `linespace × 2` 换算成逻辑像素再 +2), 名称标签放进去 ——高度不量控件、也不看文本里有几个换行, 于是**任何平台**上一行名与两行名的卡片、以及名称下面那两行的位置都是同一个数。守卫改成量"名称块"(标签自己的 y 现在相对块), 并补了一条"块高必须装得下两行文本"。
 
 ### 45.3 三个平台全缺覆盖率结论: 上一轮"减少上传"漏了一个消费者(已修)
 
-报告里 `缺少结论: Coverage report(Linux/Windows/macOS)` 三条 broken。根因: 覆盖率结论是
-**pytest-report 作业独有**的产出, 而它写在 `allure-results/`(那份**合并结果集**)里 —— §41 为
-了砍掉"同一批文件传两遍"决定不再上传整份合并结果集, 于是这条结论再没有路径进汇总报告(当时没
-建"结论类"的单独产物)。作业状态上看不出来(报告作业自己是绿的), 只有汇总报告里那三条 broken
-会说话。
+报告里 `缺少结论: Coverage report(Linux/Windows/macOS)` 三条 broken。根因: 覆盖率结论是 **pytest-report 作业独有**的产出, 而它写在 `allure-results/`(那份**合并结果集**)里 —— §41 为了砍掉"同一批文件传两遍"决定不再上传整份合并结果集, 于是这条结论再没有路径进汇总报告(当时没建"结论类"的单独产物)。作业状态上看不出来(报告作业自己是绿的), 只有汇总报告里那三条 broken 会说话。
 
-修法: `create_allure_coverage.py` 新增 `--publish-dir`, 把结论(结果 JSON + `coverage.xml`
-附件)复制一份到 `allure-results-coverage/`; 报告作业新增一步上传成
-`allure-results-coverage-<平台>`(名字必须用 `matrix.platform`: 三个平台的这个作业都跑在 ubuntu
-上, 用 `matrix.os` 会撞名并互相合并); 汇总作业那**一个** `pattern: allure-results-*` 直接收走。
-守卫: `test_the_coverage_conclusion_is_published`。
+修法: `create_allure_coverage.py` 新增 `--publish-dir`, 把结论(结果 JSON + `coverage.xml` 附件)复制一份到 `allure-results-coverage/`; 报告作业新增一步上传成 `allure-results-coverage-<平台>`(名字必须用 `matrix.platform`: 三个平台的这个作业都跑在 ubuntu 上, 用 `matrix.os` 会撞名并互相合并); 汇总作业那**一个** `pattern: allure-results-*` 直接收走。守卫: `test_the_coverage_conclusion_is_published`。
 
 ### 45.4 macOS 冷启动弹窗居中: 新用例在"小桌面"上的容忍度不够(本轮只记录)
 
-`弹窗 600x680 @212,59; 父窗口 1024x720 @0,59` → 理想纵向偏移 (720−680)/2 = 20px, 实际 0px
-(贴父窗口上沿), 用例容忍 12px。父窗口在 macOS runner 上**一直是** 1024x720(桌面高度 768, 与
-§44.2 改的最小尺寸无关 —— 旧下限 1200 也会被窗口管理器夹成 1024), 所以这条**不是**尺寸改动带
-来的: 它是新用例第一次在 CI 上跑, 而容忍度没有考虑"父窗口比弹窗大不了多少(=弹窗装不下理想
-偏移)"这一档。修法该落在用例(装不下时接受"贴边", 与 `test_gui_sizes` 其它条目同一条纪律),
-而不是放松 §36 的居中实现。
+`弹窗 600x680 @212,59; 父窗口 1024x720 @0,59` → 理想纵向偏移 (720−680)/2 = 20px, 实际 0px (贴父窗口上沿), 用例容忍 12px。父窗口在 macOS runner 上**一直是** 1024x720(桌面高度 768, 与 §44.2 改的最小尺寸无关 —— 旧下限 1200 也会被窗口管理器夹成 1024), 所以这条**不是**尺寸改动带来的: 它是新用例第一次在 CI 上跑, 而容忍度没有考虑"父窗口比弹窗大不了多少(=弹窗装不下理想偏移)"这一档。修法该落在用例(装不下时接受"贴边", 与 `test_gui_sizes` 其它条目同一条纪律), 而不是放松 §36 的居中实现。
 
 ### 45.5 Allure CLI 版本: 浮动标签的两个后果(用户已决定改成动态)
 
 用户 2026-10-04 决定把 CI 里的版本改成浮动标签 `allure@3`(动态取最新)。本机 A/B 的结论:
 
-- **历史**: 3.19.1 与 3.20.0(npm 上当前最新)输出的**键组成完全相同**(三段: `testCaseHash` /
-  `parametersHash` / `environmentHash`), 而 3.18.0 是两段 `historyId` —— 也就是说 §42.3 那次
-  "历史清零"是**跨大版本换键格式**造成的, 不是 3.19 的 bug; 同一版本连跑两次就会恢复。切到最新
-  之后**下一轮**就会对上(本轮 3.19.1 写的三段键与下一轮 3.20.0 算出来的三段键一致)。
-- **风险**: 3.20.0 在 `allure generate` 阶段**会执行质量门**, 而 `allurerc.mjs` 要求
-  `environmentsTested` 三个平台齐全 —— 报告作业是**单平台**的结果, 于是本机复现为
-  `generate` 退出 1(3.19.1 在同样输入下生成成功)。下一轮 CI 的报告作业因此可能红在"生成报告"
-  这一步。真要留在浮动标签上, 就得给报告作业单独一个不含 `qualityGate` 的配置; 否则钉回
-  3.19.1 最省事。
-- 守卫已改成**两种写法都允许**, 但浮动标签必须在 CI 里**运行期**比一次下限
-  (`Check Allure version` 现在会解析实际版本并在 < 3.18.0 时红): 3.13~3.17 配了 `historyPath`
-  会静默放行质量门(issue #895), 那种失效在报告里看不出来。
+- **历史**: 3.19.1 与 3.20.0(npm 上当前最新)输出的**键组成完全相同**(三段: `testCaseHash` / `parametersHash` / `environmentHash`), 而 3.18.0 是两段 `historyId` —— 也就是说 §42.3 那次 "历史清零"是**跨大版本换键格式**造成的, 不是 3.19 的 bug; 同一版本连跑两次就会恢复。切到最新之后**下一轮**就会对上(本轮 3.19.1 写的三段键与下一轮 3.20.0 算出来的三段键一致)。
+- **风险**: 3.20.0 在 `allure generate` 阶段**会执行质量门**, 而 `allurerc.mjs` 要求 `environmentsTested` 三个平台齐全 —— 报告作业是**单平台**的结果, 于是本机复现为 `generate` 退出 1(3.19.1 在同样输入下生成成功)。下一轮 CI 的报告作业因此可能红在"生成报告" 这一步。真要留在浮动标签上, 就得给报告作业单独一个不含 `qualityGate` 的配置; 否则钉回 3.19.1 最省事。
+- 守卫已改成**两种写法都允许**, 但浮动标签必须在 CI 里**运行期**比一次下限 (`Check Allure version` 现在会解析实际版本并在 < 3.18.0 时红): 3.13~3.17 配了 `historyPath` 会静默放行质量门(issue #895), 那种失效在报告里看不出来。
 
 ### 45.6 验收
 
-`tests/unit` 见下轮记录; 本机复跑: 海报相关 5 条、`test_report_verification.py` 与
-`test_ci_diagnostics.py` 全绿; `ruff format .` / `ruff check` / `mypy` 干净。**只能下次 CI
-验收的**: 02 是否回到基线(X11 上名称块 2 行的渲染)、03/04 的新基线、覆盖率结论是否回到三个
-平台、以及 45.5 那条"3.20.0 的 generate 会不会卡质量门"。
+`tests/unit` 见下轮记录; 本机复跑: 海报相关 5 条、`test_report_verification.py` 与 `test_ci_diagnostics.py` 全绿; `ruff format .` / `ruff check` / `mypy` 干净。**只能下次 CI 验收的**: 02 是否回到基线(X11 上名称块 2 行的渲染)、03/04 的新基线、覆盖率结论是否回到三个平台、以及 45.5 那条"3.20.0 的 generate 会不会卡质量门"。
 
 ## 46. 名称块的两处收尾 + 冷启动居中的口径 + 02 基线的定性(2026-10-04)
 
-新一轮报告 7355 条(7348 通过 / 3 failed / 3 broken / 1 skipped): **覆盖率结论已经回来了**
-(§45.3 生效), 剩下的全部落在 §45.2 那次"名称块"改动上。
+新一轮报告 7355 条(7348 通过 / 3 failed / 3 broken / 1 skipped): **覆盖率结论已经回来了** (§45.3 生效), 剩下的全部落在 §45.2 那次"名称块"改动上。
 
 ### 46.1 块高不能靠"标签请求高 ÷ 行数"(Linux 上算成 28, 两行文本要 39)
 
-两个地方同时失效: **单位**(`winfo_reqheight` 是物理像素, 而 CTk 的 `height=` 是逻辑像素)与
-**时机**(刚 `configure(text=...)` 的标签请求高还停在上一轮)。
+两个地方同时失效: **单位**(`winfo_reqheight` 是物理像素, 而 CTk 的 `height=` 是逻辑像素)与 **时机**(刚 `configure(text=...)` 的标签请求高还停在上一轮)。
 
-实测(本机 125%)摸清了真相: `CTkLabel` 有一个**与文本无关的默认高** —— 一行名量到 28(逻辑),
-两行名才长到 39, 那 11px 就是它的来源。所以块高改成"**一行行距 + 标签默认高 + 2px 取整余量**":
-行距取 `measured_font(...).metrics("linespace")`, 默认高直接读标签自己的 `cget("height")`,
-两个数都与具体名称无关 —— 同类卡片必然一致, 也就必然对齐。量它仍要在**控件落地之后**
-(`_sync_list_layout` 的延后任务, 海报模式也排一次): 布局之前的字体度量是默认字号的, 那正是
-上一次算出 28 的原因。块高变了之后卡片高度跟着重算(`_refit_poster_cards`)。
+实测(本机 125%)摸清了真相: `CTkLabel` 有一个**与文本无关的默认高** —— 一行名量到 28(逻辑), 两行名才长到 39, 那 11px 就是它的来源。所以块高改成"**一行行距 + 标签默认高 + 2px 取整余量**": 行距取 `measured_font(...).metrics("linespace")`, 默认高直接读标签自己的 `cget("height")`, 两个数都与具体名称无关 —— 同类卡片必然一致, 也就必然对齐。量它仍要在**控件落地之后** (`_sync_list_layout` 的延后任务, 海报模式也排一次): 布局之前的字体度量是默认字号的, 那正是上一次算出 28 的原因。块高变了之后卡片高度跟着重算(`_refit_poster_cards`)。
 
 ### 46.2 名称装进块里之后, 三个平台的用例都 StopIteration
 
-`test_poster_card_keeps_its_meta_below_the_title` 用 `_card_labels(card)`(只看直接子控件)找
-名称 —— 名称现在在名称块里, 于是 Windows/Linux/macOS 三条 broken。`_card_labels` 改成递归,
-判据本身没动。
+`test_poster_card_keeps_its_meta_below_the_title` 用 `_card_labels(card)`(只看直接子控件)找名称 —— 名称现在在名称块里, 于是 Windows/Linux/macOS 三条 broken。`_card_labels` 改成递归, 判据本身没动。
 
 ### 46.3 冷启动弹窗居中: 收敛成"装不下理想偏移时接受贴边"
 
-§45.4 那条在用例里收口: `_assert_centered` 的**纵向**容差改成
-`max(12, (父高 - 弹窗高) // 2)` —— 父窗口装不下理想偏移时"贴边"也算过(macOS runner: 父窗口
-1024x720、弹窗 600x680, 理想 20px、实际 0px)。横向不动(弹窗宽远小于父窗口), 所以"真的偏几百
-像素"那种回归仍然拦得住。
+§45.4 那条在用例里收口: `_assert_centered` 的**纵向**容差改成 `max(12, (父高 - 弹窗高) // 2)` —— 父窗口装不下理想偏移时"贴边"也算过(macOS runner: 父窗口 1024x720、弹窗 600x680, 理想 20px、实际 0px)。横向不动(弹窗宽远小于父窗口), 所以"真的偏几百像素"那种回归仍然拦得住。
 
 ### 46.4 02 的视觉回归是**有意**改动: 要提交新基线, 不是修代码
 
-`02` 仍是 SSIM 0.9692 —— 名称现在落在名称块的**上沿**(一行名与两行名的第一个字对齐), 而基线里
-它垂直居中, 差 11px。这条不该改代码, 而是把这一轮 `visual-baselines-candidates` 里的
-`02`(与 `03/04` 同一次)提交掉。
+`02` 仍是 SSIM 0.9692 —— 名称现在落在名称块的**上沿**(一行名与两行名的第一个字对齐), 而基线里它垂直居中, 差 11px。这条不该改代码, 而是把这一轮 `visual-baselines-candidates` 里的 `02`(与 `03/04` 同一次)提交掉。
 
 ### 46.5 验收
 
-`tests/unit` **2018 passed / 7 skipped**; `ruff format .` / `ruff check src tests scripts` /
-`mypy` 干净; 界面侧: `test_gui_layout.py` + `test_gui_sizes.py` 33 条、海报相关 5 条、
-`test_gui_buttons.py` 里与本次改动相关的 4 条全绿。**只能下次 CI 验收的**: 02 的新基线、
-块高在 X11(100%)上的实际取值(本机是 125%)。
+`tests/unit` **2018 passed / 7 skipped**; `ruff format .` / `ruff check src tests scripts` / `mypy` 干净; 界面侧: `test_gui_layout.py` + `test_gui_sizes.py` 33 条、海报相关 5 条、 `test_gui_buttons.py` 里与本次改动相关的 4 条全绿。**只能下次 CI 验收的**: 02 的新基线、块高在 X11(100%)上的实际取值(本机是 125%)。
 
 ## 48. 阶段 I 收口: 完成度统计与未完成项(2026-10-04)
 
-阶段 A–I 的功能项按里程碑全部达成(M1–M7.3, 见 §6 的「实施记录」与「阶段 I 的验收标准」)。
-这一节只做两件事: 给出**规模统计**, 并把**还没做完的记录集中登记**下来 —— 免得它们散在三十多个
-日期小节里"以后没人记得"。
+阶段 A–I 的功能项按里程碑全部达成(M1–M7.3, 见 §6 的「实施记录」与「阶段 I 的验收标准」)。这一节只做两件事: 给出**规模统计**, 并把**还没做完的记录集中登记**下来 —— 免得它们散在三十多个日期小节里"以后没人记得"。
 
 ### 48.1 规模统计(2026-10-04, 收口前)
 
@@ -2609,367 +2353,144 @@ macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗�
 
 ### 48.3 附: 2026-10-04 那轮的三处落地(重新登记)
 
-- **原生质量门的结果在哪看**: 汇总作业的输出写进 `allure-quality-gate.txt`,
-  `create_allure_summary.py` 的 `native_gate_section()` 把它拼成运行总账的一节
-  「## 原生质量门(Allure CLI)」(结论 + 退出码 + 原始输出), 随总账挂在报告首页「全局附件」。
-  文档同步: `allurerc.mjs` 的版本说明与 `docs/testing.md` 里两处旧话改成"CI 用浮动标签
-  `allure@3`, 下限在 `Check Allure version` 里**运行期**核对"。
-- **3.20.0 起 `generate` 也会执行质量门**: 逐平台的报告作业会因 `environmentsTested` 退 1
-  (实测: 3.19.1 在同样输入下能生成成功) → 新增 `allurerc.per-platform.mjs`(从主配置继承,
-  只摘掉 `qualityGate`), `pytest-report` 的 `Generate Allure report` 用它; 汇总作业仍用主配置
-  (它本来就是跑门的地方)。守卫: `test_per_platform_reports_skip_the_native_gate`。
-- **失败现场附件改成"没有现场就不生成"**: `failure_diagnostics_report()` 没有兜底现场时返回
-  `None`, 写盘时顺带删掉旧文件; `allurerc.mjs` 用 `existsSync` 按文件在不在决定收不收
-  (否则 Allure 会留一条"附件找不到"的告警)。守卫: `test_no_backstop_scene_means_no_attachment`、
-  `test_diagnostics_report_lands_in_the_allure_config`。
+- **原生质量门的结果在哪看**: 汇总作业的输出写进 `allure-quality-gate.txt`, `create_allure_summary.py` 的 `native_gate_section()` 把它拼成运行总账的一节「## 原生质量门(Allure CLI)」(结论 + 退出码 + 原始输出), 随总账挂在报告首页「全局附件」。文档同步: `allurerc.mjs` 的版本说明与 `docs/testing.md` 里两处旧话改成"CI 用浮动标签 `allure@3`, 下限在 `Check Allure version` 里**运行期**核对"。
+- **3.20.0 起 `generate` 也会执行质量门**: 逐平台的报告作业会因 `environmentsTested` 退 1 (实测: 3.19.1 在同样输入下能生成成功) → 新增 `allurerc.per-platform.mjs`(从主配置继承, 只摘掉 `qualityGate`), `pytest-report` 的 `Generate Allure report` 用它; 汇总作业仍用主配置 (它本来就是跑门的地方)。守卫: `test_per_platform_reports_skip_the_native_gate`。
+- **失败现场附件改成"没有现场就不生成"**: `failure_diagnostics_report()` 没有兜底现场时返回 `None`, 写盘时顺带删掉旧文件; `allurerc.mjs` 用 `existsSync` 按文件在不在决定收不收 (否则 Allure 会留一条"附件找不到"的告警)。守卫: `test_no_backstop_scene_means_no_attachment`、 `test_diagnostics_report_lands_in_the_allure_config`。
 
 ### 48.4 精简怎么做(下一步)
 
 只删"步骤描述", 不删需求与坑。按收益排序:
 
-1. ~~**§6**~~ ✅（第二批收尾见下）: 各阶段的任务项保留"需求 + 状态 + 坑", 删掉当时的验证步骤、命令与
-   数字流水; 阶段 I 的 I-1…I-11 压成每项 3~5 行。
+1. ~~**§6**~~ ✅（第二批收尾见下）: 各阶段的任务项保留"需求 + 状态 + 坑", 删掉当时的验证步骤、命令与数字流水; 阶段 I 的 I-1…I-11 压成每项 3~5 行。
 2. ~~**§11 / §15 / §17**~~ ✅（2026-10-04 完成）: 改成"档位/结论 + 暂缓理由 + 坑 + 守卫名"。
-3. **§13 之后的逐轮 CI 记录（现 118,717 字符, 最大的一块）**: 每轮只留 **症状 → 根因 → 落点 → 守卫**
-   四行 —— 这是剩下唯一的大头。
+3. **§13 之后的逐轮 CI 记录（现 118,717 字符, 最大的一块）**: 每轮只留 **症状 → 根因 → 落点 → 守卫** 四行 —— 这是剩下唯一的大头。
 4. 历史小节里已经**过期的事实**(如"基线尚未入库")随手改掉 —— 这一类比删字更重要。
 
-合计目标: 去空白字符数 **296,777 → 约 150,000**（≈ 一半; 原始字符数会因表格对齐而偏高, 见下面的口径）。
-每压完一节在提交信息里写一句"PLAN 精简: §x", 便于回溯。
+合计目标: 去空白字符数 **296,777 → 约 150,000**（≈ 一半; 原始字符数会因表格对齐而偏高, 见下面的口径）。每压完一节在提交信息里写一句"PLAN 精简: §x", 便于回溯。
 
-**度量口径（2026-10-04 开工后修正）**: **不要看行数** —— 这份文档的原文用很长的行（一节 200 行的
-"步骤描述"折行后可能有 400 行），一比就错。看**字符数**: `git show HEAD:PLAN.md` 与工作区逐节比
-（`len(旧节) → len(新节)`）。第一次开工（I-6 的两段）只减了 **959 字符（−6.5%）**，原因就是策略太保守:
-保留了六轮叙述。**修正后的策略**: 每节只留 **需求 + 结论（含阈值/实测数值表）+ 坑 + 守卫名**;
-逐轮叙述、量具细节、"咬合验证"的过程（改坏→变红→还原）一律压成一句或删掉 —— 它们是**当时怎么查的**,
-不是**结论**。用户 2026-10-04 明确同意删掉"当时怎么查的"。**超长单行段落没法用编辑工具精确匹配**,
-改用一次性脚本按**唯一起止锚点**替换区间: 先校验两个锚点都只出现一次、再打印"旧 → 新"字符数,
-用完即删, 改完立刻复核。
+**度量口径（2026-10-04 开工后修正）**: **不要看行数** —— 这份文档的原文用很长的行（一节 200 行的 "步骤描述"折行后可能有 400 行），一比就错。看**字符数**: `git show HEAD:PLAN.md` 与工作区逐节比（`len(旧节) → len(新节)`）。第一次开工（I-6 的两段）只减了 **959 字符（−6.5%）**，原因就是策略太保守: 保留了六轮叙述。**修正后的策略**: 每节只留 **需求 + 结论（含阈值/实测数值表）+ 坑 + 守卫名**; 逐轮叙述、量具细节、"咬合验证"的过程（改坏→变红→还原）一律压成一句或删掉 —— 它们是**当时怎么查的**, 不是**结论**。用户 2026-10-04 明确同意删掉"当时怎么查的"。**超长单行段落没法用编辑工具精确匹配**, 改用一次性脚本按**唯一起止锚点**替换区间: 先校验两个锚点都只出现一次、再打印"旧 → 新"字符数, 用完即删, 改完立刻复核。
 
 **进度（2026-10-04, 第二批已落）**
 
-- **度量口径再修正**: 表格被格式化工具对齐之后，**原始字符数会被空白撑大**（实测 43 条分隔行平均 247 字符、
-  最长 764，连续空格贡献约 15,000 字符）。所以**同时看去空白字符数**: 开工时 **296,777 → 现在 215,990**
-  （−27%），原始字符数 343,966 → 240,403。以后压完一节按"去空白"报数，才不会被对齐空白骗。
-- **第二批**: §11（21,738 → **5,906**）、§15（12,151 → **9,782**）、§17（12,232 → **7,405**）。
-  三节的压法一致: 保留**档位表 + 状态 + 暂缓/撤销理由 + 红线 + 坑 + 守卫名**，删掉背景叙述与
-  "当时怎么数出来的"过程（§17.2 那张最初设想表整体作废，只留一行指针指向 §18 的决定表）。
-- **顺手改掉的过期事实（第二批）**: §11 里的 `npm install --global allure@3.18.0` → **浮动标签 `allure@3`**
-  （运行期由 `Check Allure version` 核对 ≥3.18.0）; §15.4 加一条口径更新（缓存 key 里钉版本号那条收益要重看）;
-  §11 里"见 11.9"的悬空引用改为 §15.2; §15.9 的窗口最小尺寸补上"2026-10-03 已降到 1024×720（见 §44）"。
-- **第一批（§6）**: 175,550 → **93,824**（原始字符; 含格式化工具补回的对齐空白），已压 阶段 G 任务进度
-  （33,941 → 7,175）、G-8 设计要点（10,180 → 3,948）、子步骤拆分（8,670 → 2,428）、G-7、阶段 H 三节
-  （17,113 → 3,902）、I-6、I-9、I-9 之后、I-9.5、I-1…I-5、I-10、I-11、I-0、执行顺序、实施记录、
-  开放项清点（6,146 → 1,630, 未完成项改挂 §48.2）。
-- **第三批（逐轮 CI 记录, 进行中）**: §13（6,285 → **4,058**）、§14（5,630 → **2,796**）、
-  §19（4,093 → **2,515**）、§20（6,691 → **4,732**）。压法: 保留"症状 → 根因 → 落点 → 守卫"与每轮的
-  **实测数值/坑/守卫名**, 删掉叙述性复述与已经落在代码注释里的细节。
-- **第四批**: §12（6,941 → **5,721**）、§18（4,900 → **4,006**）、§23（4,350 → **3,633**）、
-  §24（5,279 → **3,646**）。**这一批开始把表格改成列表**: 格式化工具会给表格补对齐空白, 而列表不会被
-  重排 —— 所以"把等值表格改成列表"本身就是一条**不丢内容**的减重手段, 剩余章节继续这么做。
-- **第五批（一次性去掉表格对齐空白, 2026-10-04）**: §21（2,108 → **1,709**）、§22（5,871 → **5,351**）;
-  另用一次性脚本把**全文 35 张表格**的对齐空格去掉: **238,655 → 207,957 字符（−30,698）**, 而去空白
-  字符数**一字未变**（脚本用"分隔行归一后逐格比对"当判据, 不通过就不写文件）。**注意**: 编辑器里的
-  Markdown 格式化会重新补回这些空格 —— 想保住这部分收益, 就别对 `PLAN.md` 跑格式化（或在下一步把
-  等值表格改成列表, 列表不会被重排）。
-- **第六批（§25–§27, 2026-10-04）**: 3035 → 2526 / 2111 → 2070 / 2250 → 2224 —— **收益已经很小**,
-  因为这三节剩的本来就只有"根因 + 数值 + 守卫名 + 遗留项"。
-- **还剩（按大小）**: §16（1,658）、§28（1,752）、§29（1,554）、§30（1,051）、§31（1,199）、§32（835）、
-  §33（3,103）、§34（4,166）、§35–§37（约 5,700）、§38–§43（约 16,000）、§44–§46（约 7,000）、
-  §6 的 I-6 收尾与阶段 A–F / J–K。
-- **平台期（2026-10-04 观察）**: 从 §21 起，逐轮记录的压缩比只有 **2~5%**（§21 −19%、§22 −9%、
-  §25 −17%、§26 −2%、§27 −1%）—— 剩下的已经是**结论与坑本身**（数值、守卫名、根因），再压就是
-  删事实。要再往 150,000 走，只能选: ① 把逐轮的**实测数字与守卫清单**压成一行索引（→ 约 170,000）;
-  ② 把 §13–§46 整体折成"每轮症状→根因→落点→守卫四行 + 指向代码注释/文档"（→ 约 150,000，但细节离开
-  本文件）。两条都要用户点头（2026-10-04 的口径是"保留坑"）。
-- **第七批（§16 / §28–§37 / §41–§42, 2026-10-04）**: 这几轮的压缩比已经落到 **1~10%**（§16 −14%、
-  §28~§33 各 −1~10%、§34 −6%、§35 −7%、§36 −8%、§37 −13%、§41 −3%、§42 −5%）—— 剩下的是
-  **根因、实测数值、守卫名、遗留项**, 再压就是删事实。**结论: 按"保留坑"口径, 本文件的地板在
-  去空白 **≈203,000** 字符**。
-- **还没碰的**: §32（探测结果 A/B/C）、§38、§39、§40（头部）、§43–§46、§6 的 I-6 收尾与阶段 A–F / J–K
-  （合计约 24,000, 按上面这个比例大约只能再省 1~2%）。
+- **度量口径再修正**: 表格被格式化工具对齐之后，**原始字符数会被空白撑大**（实测 43 条分隔行平均 247 字符、最长 764，连续空格贡献约 15,000 字符）。所以**同时看去空白字符数**: 开工时 **296,777 → 现在 215,990** （−27%），原始字符数 343,966 → 240,403。以后压完一节按"去空白"报数，才不会被对齐空白骗。
+- **第二批**: §11（21,738 → **5,906**）、§15（12,151 → **9,782**）、§17（12,232 → **7,405**）。三节的压法一致: 保留**档位表 + 状态 + 暂缓/撤销理由 + 红线 + 坑 + 守卫名**，删掉背景叙述与 "当时怎么数出来的"过程（§17.2 那张最初设想表整体作废，只留一行指针指向 §18 的决定表）。
+- **顺手改掉的过期事实（第二批）**: §11 里的 `npm install --global allure@3.18.0` → **浮动标签 `allure@3`** （运行期由 `Check Allure version` 核对 ≥3.18.0）; §15.4 加一条口径更新（缓存 key 里钉版本号那条收益要重看）; §11 里"见 11.9"的悬空引用改为 §15.2; §15.9 的窗口最小尺寸补上"2026-10-03 已降到 1024×720（见 §44）"。
+- **第一批（§6）**: 175,550 → **93,824**（原始字符; 含格式化工具补回的对齐空白），已压 阶段 G 任务进度（33,941 → 7,175）、G-8 设计要点（10,180 → 3,948）、子步骤拆分（8,670 → 2,428）、G-7、阶段 H 三节（17,113 → 3,902）、I-6、I-9、I-9 之后、I-9.5、I-1…I-5、I-10、I-11、I-0、执行顺序、实施记录、开放项清点（6,146 → 1,630, 未完成项改挂 §48.2）。
+- **第三批（逐轮 CI 记录, 进行中）**: §13（6,285 → **4,058**）、§14（5,630 → **2,796**）、 §19（4,093 → **2,515**）、§20（6,691 → **4,732**）。压法: 保留"症状 → 根因 → 落点 → 守卫"与每轮的 **实测数值/坑/守卫名**, 删掉叙述性复述与已经落在代码注释里的细节。
+- **第四批**: §12（6,941 → **5,721**）、§18（4,900 → **4,006**）、§23（4,350 → **3,633**）、 §24（5,279 → **3,646**）。**这一批开始把表格改成列表**: 格式化工具会给表格补对齐空白, 而列表不会被重排 —— 所以"把等值表格改成列表"本身就是一条**不丢内容**的减重手段, 剩余章节继续这么做。
+- **第五批（一次性去掉表格对齐空白, 2026-10-04）**: §21（2,108 → **1,709**）、§22（5,871 → **5,351**）; 另用一次性脚本把**全文 35 张表格**的对齐空格去掉: **238,655 → 207,957 字符（−30,698）**, 而去空白字符数**一字未变**（脚本用"分隔行归一后逐格比对"当判据, 不通过就不写文件）。**注意**: 编辑器里的 Markdown 格式化会重新补回这些空格 —— 想保住这部分收益, 就别对 `PLAN.md` 跑格式化（或在下一步把等值表格改成列表, 列表不会被重排）。
+- **第六批（§25–§27, 2026-10-04）**: 3035 → 2526 / 2111 → 2070 / 2250 → 2224 —— **收益已经很小**, 因为这三节剩的本来就只有"根因 + 数值 + 守卫名 + 遗留项"。
+- **还剩（按大小）**: §16（1,658）、§28（1,752）、§29（1,554）、§30（1,051）、§31（1,199）、§32（835）、 §33（3,103）、§34（4,166）、§35–§37（约 5,700）、§38–§43（约 16,000）、§44–§46（约 7,000）、 §6 的 I-6 收尾与阶段 A–F / J–K。
+- **平台期（2026-10-04 观察）**: 从 §21 起，逐轮记录的压缩比只有 **2~5%**（§21 −19%、§22 −9%、 §25 −17%、§26 −2%、§27 −1%）—— 剩下的已经是**结论与坑本身**（数值、守卫名、根因），再压就是删事实。要再往 150,000 走，只能选: ① 把逐轮的**实测数字与守卫清单**压成一行索引（→ 约 170,000）; ② 把 §13–§46 整体折成"每轮症状→根因→落点→守卫四行 + 指向代码注释/文档"（→ 约 150,000，但细节离开本文件）。两条都要用户点头（2026-10-04 的口径是"保留坑"）。
+- **第七批（§16 / §28–§37 / §41–§42, 2026-10-04）**: 这几轮的压缩比已经落到 **1~10%**（§16 −14%、 §28~§33 各 −1~10%、§34 −6%、§35 −7%、§36 −8%、§37 −13%、§41 −3%、§42 −5%）—— 剩下的是 **根因、实测数值、守卫名、遗留项**, 再压就是删事实。**结论: 按"保留坑"口径, 本文件的地板在去空白 **≈203,000** 字符**。
+- **还没碰的**: §32（探测结果 A/B/C）、§38、§39、§40（头部）、§43–§46、§6 的 I-6 收尾与阶段 A–F / J–K （合计约 24,000, 按上面这个比例大约只能再省 1~2%）。
 - **当前体量**: 原始 **206,203** / 去空白 **203,307**（开工时 343,966 / 296,777 —— 按去空白口径 **−32%**）。
 
 ### 48.5 附: Linux 分片 0 的 `image "pyimage1" does not exist`(2026-10-04 当天定位与修复)
 
-- **症状**: 下载的那份报告里 7358 条结果只有一条非通过 —— Linux 分片 0 的
-  `test_icon_slot_survives_switching_and_deleting_games`(broken, `TclError: image "pyimage1" does not exist`),
-  报在建窗口贴图标那一步(`home_page._build_row` → `CTkLabel.__init__` → `configure(image=…)`); 单独跑它反而是绿的。
-- **定位(这次靠留证一步到位)**: 报告里挂着 1.9 MiB 的 coredumpy 现场 dump。用 `Coredumpy.load_data_from_path`
-  (**不是 `load()`** —— 那个会直接进 pdb)读出出错帧, 往上看 `f_globals`: `tkinter._default_root` 指着**上一条用例**
-  的 `ArchiveApp`(演示后端、分支视图、详情页是"星际拓荒"), 而它的 `_poll_job`/`_refit_job` 已置空 ⇒ `destroy()`
-  跑过却没拆干净; 分片顺序按 `--collect-only` 对回去, 留下它的是 `test_default_view_is_branch_tree_and_hides_old_auto_backups`
-  (受害者前 23 条)。**结论: 受害者只是受害者, 病根在前一条用例的收尾。**
-- **根因(两层, 缺一不成事故)**: ① `tkinter.Tk.destroy()` 是 `for c in list(self.children.values()): c.destroy()`
-  —— 任意一个子控件抛 `TclError`, 整条链就断在半路, 根窗口与 `_default_root` 一起留在会话里, 而
-  `close_gui_apps` 只 `suppress(TclError)`, 于是完全静默; ② `CTkImage` 贴图用的 `ImageTk.PhotoImage(图片)`
-  **不带 master**, 图片落到 `_default_root` 那个解释器里, 标签却属于新窗口 ⇒ "图片不存在"(与 2026-09-25 那条
-  被删掉的"海报底衬"用例撞的是同一件事)。
-- **落点**: `tests/gui_support.close_gui_apps` 改成"验证 + 补救 + 判红"(先关附属窗口 → `destroy()` → 确认根没了 →
-  逐个拆子控件补救 → 清掉 `_default_root`; 记 Allure 附件/参数 + stderr, 并**把这条用例判红**);
-  `ui/rendering.host_image` 让图片显式 `master=宿主控件`, 三个调用点(主页封面/图标、详情图标、管理窗口预览)全走它。
-- **守卫**: `tests/integration/test_gui_roots.py` 三条(留着的根抢不走图片 / 销毁链断了能救回来并清默认根 / 正常收尾
-  不产生补救记录)+ `tests/unit/test_ui_rendering.py` 两条(贴图必须传 master; 界面层不许再写 `ctk.CTkImage(`)。
-  **咬合验证**: `host_image` 改回不带 master → 守卫报出与 CI 逐字相同的 `image "pyimage1" doesn't exist`;
-  去掉收尾补救 → 收尾守卫报"根还在"。**回归**: 本地按 CI 原样跑分片 0, 第一次跑就抓出补救逻辑自己的一个 bug
-  (对已销毁的窗口问控件树会抛 TclError → 23 条 teardown ERROR), 修好后全绿。
-- **口径**: 收尾断裂按**缺陷**看待(与 `tests/tk_guard.py` 那条"环境问题要看得见"不同: 跳过的前提是"这条用例量
-  不到东西", 而这里断言都真跑过了、却在会话里留下一个活根)。当天先写成"记进报告但不判红", 复盘时改成**判红** ——
-  只记不红意味着"本机绿、CI 偶发红、且永远只能看到受害者"会一直演下去, 而这次事故的代价正是整条 Linux 分片 0 多了一条
-  broken。判红后现场仍在报告里(附件 + 参数 + stderr), 只是不再能静默通过; 咬合验证: 给某个子控件的 `destroy` 动手脚 →
-  那条用例本体绿、teardown 报 ERROR、pytest 退出码 1。
+- **症状**: 下载的那份报告里 7358 条结果只有一条非通过 —— Linux 分片 0 的 `test_icon_slot_survives_switching_and_deleting_games`(broken, `TclError: image "pyimage1" does not exist`), 报在建窗口贴图标那一步(`home_page._build_row` → `CTkLabel.__init__` → `configure(image=…)`); 单独跑它反而是绿的。
+- **定位(这次靠留证一步到位)**: 报告里挂着 1.9 MiB 的 coredumpy 现场 dump。用 `Coredumpy.load_data_from_path` (**不是 `load()`** —— 那个会直接进 pdb)读出出错帧, 往上看 `f_globals`: `tkinter._default_root` 指着**上一条用例** 的 `ArchiveApp`(演示后端、分支视图、详情页是"星际拓荒"), 而它的 `_poll_job`/`_refit_job` 已置空 ⇒ `destroy()` 跑过却没拆干净; 分片顺序按 `--collect-only` 对回去, 留下它的是 `test_default_view_is_branch_tree_and_hides_old_auto_backups` (受害者前 23 条)。**结论: 受害者只是受害者, 病根在前一条用例的收尾。**
+- **根因(两层, 缺一不成事故)**: ① `tkinter.Tk.destroy()` 是 `for c in list(self.children.values()): c.destroy()` —— 任意一个子控件抛 `TclError`, 整条链就断在半路, 根窗口与 `_default_root` 一起留在会话里, 而 `close_gui_apps` 只 `suppress(TclError)`, 于是完全静默; ② `CTkImage` 贴图用的 `ImageTk.PhotoImage(图片)` **不带 master**, 图片落到 `_default_root` 那个解释器里, 标签却属于新窗口 ⇒ "图片不存在"(与 2026-09-25 那条被删掉的"海报底衬"用例撞的是同一件事)。
+- **落点**: `tests/gui_support.close_gui_apps` 改成"验证 + 补救 + 判红"(先关附属窗口 → `destroy()` → 确认根没了 → 逐个拆子控件补救 → 清掉 `_default_root`; 记 Allure 附件/参数 + stderr, 并**把这条用例判红**); `ui/rendering.host_image` 让图片显式 `master=宿主控件`, 三个调用点(主页封面/图标、详情图标、管理窗口预览)全走它。
+- **守卫**: `tests/integration/test_gui_roots.py` 三条(留着的根抢不走图片 / 销毁链断了能救回来并清默认根 / 正常收尾不产生补救记录)+ `tests/unit/test_ui_rendering.py` 两条(贴图必须传 master; 界面层不许再写 `ctk.CTkImage(`)。 **咬合验证**: `host_image` 改回不带 master → 守卫报出与 CI 逐字相同的 `image "pyimage1" doesn't exist`; 去掉收尾补救 → 收尾守卫报"根还在"。**回归**: 本地按 CI 原样跑分片 0, 第一次跑就抓出补救逻辑自己的一个 bug (对已销毁的窗口问控件树会抛 TclError → 23 条 teardown ERROR), 修好后全绿。
+- **口径**: 收尾断裂按**缺陷**看待(与 `tests/tk_guard.py` 那条"环境问题要看得见"不同: 跳过的前提是"这条用例量不到东西", 而这里断言都真跑过了、却在会话里留下一个活根)。当天先写成"记进报告但不判红", 复盘时改成**判红** ——只记不红意味着"本机绿、CI 偶发红、且永远只能看到受害者"会一直演下去, 而这次事故的代价正是整条 Linux 分片 0 多了一条 broken。判红后现场仍在报告里(附件 + 参数 + stderr), 只是不再能静默通过; 咬合验证: 给某个子控件的 `destroy` 动手脚 → 那条用例本体绿、teardown 报 ERROR、pytest 退出码 1。
 - **判红之后的三次补课(2026-10-04, 全批连跑才暴露)**:
-  1. 判据不能是"`destroy()` 抛没抛异常" —— 用例自己提前销毁过窗口时(实测 `test_gui_buttons` / `test_gui_layout` /
-     `test_gui_theme_repaint` 里几十处), 收尾的第二次 `destroy()` 必然抛 `bad window path name`, 而根其实早没了。
-     第一次改完跑了 71 条 teardown ERROR, 全是这一条造成的。判据只能是"**根还在不在**"。
-  2. 会话里还会有**别人的根**占着 `tkinter._default_root`: `Tk.__init__` 一上来就把这个全局指向自己, 而
-     `gui_app` 撞上抖动重试时, **失败那一次**留下的对象再没人能销毁它 —— 于是之后每条用例建起来的窗口都**不是**
-     默认根(与事故同一条机理, 只是受害者还没轮到)。现在两处收口: `gui_app` 重试前按差值收掉那个半成品,
-     `close_gui_apps` 收尾时最后检查一次这个位置(收掉 + 留证 + **不判红**, 因为它无法归因给当前用例, 判红会让整批
-     连锁变红、把真正那条盖掉)。守卫 `tests/integration/test_gui_roots.py` 加到 5 条, 并改成与运行顺序无关的判据
-     ("默认根这个位置现在安全吗"而不是"它必须是 None")。
-  3. **守卫自己也会撞上那条抖动**: 第一版守卫直接 `tkinter.Tk()` 造一个"别人的根", 绕开了 `gui_app` 的重试 ——
-     实测跑 6 次红 1 次, 报的正是 `Can't find a usable init.tcl`。改成 `gui_app(...)` 建 + `gui_support.forget_app(app)`
-     摘掉登记(这才是"这个根没人负责"的真实形态)之后, 连跑 10 次全绿。同一轮里还把"根窗口那一下 `destroy .`
-     没拆掉"的原因从**静默**改成记进现场(`force_destroy` 不再吞异常, 兜底试两次), 因为那次红是"拆不掉"而不是
-     "抖动"时, 光看断言谁也说不清。
+  1. 判据不能是"`destroy()` 抛没抛异常" —— 用例自己提前销毁过窗口时(实测 `test_gui_buttons` / `test_gui_layout` / `test_gui_theme_repaint` 里几十处), 收尾的第二次 `destroy()` 必然抛 `bad window path name`, 而根其实早没了。第一次改完跑了 71 条 teardown ERROR, 全是这一条造成的。判据只能是"**根还在不在**"。
+  2. 会话里还会有**别人的根**占着 `tkinter._default_root`: `Tk.__init__` 一上来就把这个全局指向自己, 而 `gui_app` 撞上抖动重试时, **失败那一次**留下的对象再没人能销毁它 —— 于是之后每条用例建起来的窗口都**不是** 默认根(与事故同一条机理, 只是受害者还没轮到)。现在两处收口: `gui_app` 重试前按差值收掉那个半成品, `close_gui_apps` 收尾时最后检查一次这个位置(收掉 + 留证 + **不判红**, 因为它无法归因给当前用例, 判红会让整批连锁变红、把真正那条盖掉)。守卫 `tests/integration/test_gui_roots.py` 加到 5 条, 并改成与运行顺序无关的判据 ("默认根这个位置现在安全吗"而不是"它必须是 None")。
+  3. **守卫自己也会撞上那条抖动**: 第一版守卫直接 `tkinter.Tk()` 造一个"别人的根", 绕开了 `gui_app` 的重试 ——实测跑 6 次红 1 次, 报的正是 `Can't find a usable init.tcl`。改成 `gui_app(...)` 建 + `gui_support.forget_app(app)` 摘掉登记(这才是"这个根没人负责"的真实形态)之后, 连跑 10 次全绿。同一轮里还把"根窗口那一下 `destroy .` 没拆掉"的原因从**静默**改成记进现场(`force_destroy` 不再吞异常, 兜底试两次), 因为那次红是"拆不掉"而不是 "抖动"时, 光看断言谁也说不清。
 
 ### 48.6 附: 原生质量门 `tests-on-every-platform/environmentsTested` 一直报错(2026-10-04)
 
-- **症状**: 下载的报告里三平台用例齐全, 但 `quality-gate.json` 里这条规则报失败: `actual: ["Windows","macOS","Linux"]`、
-  `testResults: []` —— 三个平台全被判"没测过"。CI 上它被 `continue-on-error` 兜着, 只有末尾的结论步骤会读到退出码,
-  所以"门禁一直在报假错"这件事本身也不显眼。
-- **根因(清单写错了字段)**: 规则拿 `tr.environment`(**环境 id**: `windows`/`macos`/`linux`) 去比 `environmentsTested`
-  里的每一项, 而 `allurerc.mjs` 里写的是**显示名**。报告头的 `environments` 是 `{id: {name: ...}}` —— 显示名只用于
-  选择器与总账展示, 从不参与这条比较, 于是"跑得再全"也一律报缺。
-- **验证(两个方向, 都用真实结果集)**: 最小复现 + 从下载的报告重建的三平台结果集: 清单写显示名 → 三个平台全报缺;
-  换成 id → `quality-gate` 与 3.20.0 的 `generate` 都 `exit 0`、`quality-gate.json` 全 success; 再删掉 Linux 的结果
-  (清单仍是 id) → **只有** `linux` 报缺(规则确实在按环境筛, 不是恒红/恒绿)。
-- **第二处(顺序)**: 汇总作业里"跑质量门"排在"写运行总账"**之后**, 于是 `allure-run-ledger.md` 的「原生质量门」一节
-  永远写着"本次没有质量门输出"(总账读的是那一步落盘的日志文件, 文件还没生成)。现在门禁排在总账之前。
-- **落点与守卫**: `allurerc.mjs` 的清单改成 `["windows", "macos", "linux"]` 并写下这条发现; `.github/workflows/ci.yml`
-  调整两个步骤的先后; `tests/unit/test_report_verification.py::test_quality_gate_asks_every_platform_for_real_tests`
-  要求清单只出现小写 id、每个 id 都能在报告头的 `id` 里找到、"windows" 的显示名是 `Windows`,
-  `test_native_quality_gate_is_configured_and_pinned` 比对 `ci.yml` 里"门禁"与"总账"两个步骤的先后。
+- **症状**: 下载的报告里三平台用例齐全, 但 `quality-gate.json` 里这条规则报失败: `actual: ["Windows","macOS","Linux"]`、 `testResults: []` —— 三个平台全被判"没测过"。CI 上它被 `continue-on-error` 兜着, 只有末尾的结论步骤会读到退出码, 所以"门禁一直在报假错"这件事本身也不显眼。
+- **根因(清单写错了字段)**: 规则拿 `tr.environment`(**环境 id**: `windows`/`macos`/`linux`) 去比 `environmentsTested` 里的每一项, 而 `allurerc.mjs` 里写的是**显示名**。报告头的 `environments` 是 `{id: {name: ...}}` —— 显示名只用于选择器与总账展示, 从不参与这条比较, 于是"跑得再全"也一律报缺。
+- **验证(两个方向, 都用真实结果集)**: 最小复现 + 从下载的报告重建的三平台结果集: 清单写显示名 → 三个平台全报缺; 换成 id → `quality-gate` 与 3.20.0 的 `generate` 都 `exit 0`、`quality-gate.json` 全 success; 再删掉 Linux 的结果 (清单仍是 id) → **只有** `linux` 报缺(规则确实在按环境筛, 不是恒红/恒绿)。
+- **第二处(顺序)**: 汇总作业里"跑质量门"排在"写运行总账"**之后**, 于是 `allure-run-ledger.md` 的「原生质量门」一节永远写着"本次没有质量门输出"(总账读的是那一步落盘的日志文件, 文件还没生成)。现在门禁排在总账之前。
+- **落点与守卫**: `allurerc.mjs` 的清单改成 `["windows", "macos", "linux"]` 并写下这条发现; `.github/workflows/ci.yml` 调整两个步骤的先后; `tests/unit/test_report_verification.py::test_quality_gate_asks_every_platform_for_real_tests` 要求清单只出现小写 id、每个 id 都能在报告头的 `id` 里找到、"windows" 的显示名是 `Windows`, `test_native_quality_gate_is_configured_and_pinned` 比对 `ci.yml` 里"门禁"与"总账"两个步骤的先后。
 - **文档**: `docs/testing.md` 第 6 节(含"清单里必须写环境 id")。
-- 与 §48.5 是同一天的两件事, 但两处的教训不同: 那条是"受害者不是病根", 这条是"判据里的标识符写错了, 所以
-  一直报假错"。两者的共同点: **报错的那一层必须先自证判据本身是对的**(一个靠 dump 找到真正的脏状态, 一个靠
-  两个方向的对照实验分清"真缺"与"清单写错")。
+- 与 §48.5 是同一天的两件事, 但两处的教训不同: 那条是"受害者不是病根", 这条是"判据里的标识符写错了, 所以一直报假错"。两者的共同点: **报错的那一层必须先自证判据本身是对的**(一个靠 dump 找到真正的脏状态, 一个靠两个方向的对照实验分清"真缺"与"清单写错")。
 
 ### 48.7 附: 报告目录复用会把新报告"藏"进 `awesome/`(2026-10-04, 用户报"历史记录不可见")
 
-- **用户给的线索**: 上游 issue [#691](https://github.com/allure-framework/allure3/issues/691), 维护者最后的回答是
-  "复用已有的 `allure-report` 目录"造成的 —— 第一次生成的报告是**扁平**的, 第二次却被写进
-  `allure-report/awesome/`, 于是 `allure-report/index.html` 是**旧**报告, 带历史的那份在子目录里。
-- **本机复现(3.20.0, 同一个 `--output` 连跑两次)**: 第一次之后顶层是 `index.html` / `app-*.js` / `data/` / `widgets/`;
-  第二次之后多出一个 `awesome/`(`awesome/index.html` 存在), 而顶层 `index.html` 一个字节都没变。症状完全对上:
-  打开顶层的报告看到的是上一轮 —— 本次运行不在里面, "历史趋势"自然也是空的/停在上一次。
-- **CI 有没有这个问题: 没有**。三处事实各自独立: ① `allure-report/` 在 `.gitignore:251` 里且未被 git 跟踪 —— 全新
-  runner 的工作区里**根本不存在**这个目录; ② 全工作流只有两处 `allure generate`(线路 812 逐平台 / 1235 汇总), 分属
-  两个作业、都在全新 runner 上跑, 而且生成之前那两步下载都落在子目录(`.previous-allure-resources/` 只取
-  `history.jsonl`、`failure-diagnostics/`), 不会把报告解到工作区根; ③ 发布那一步先 `rm -rf site` 再解**自己刚打的**
-  `allure-report.tar.gz`, 且解完 `test -f site/allure-report/index.html`。本机那份报告也是健康的(报告根只有
-  `data/` + `widgets/`, 没有 `awesome/`; `data/history/` 里 6 份快照, `.allure/history.jsonl` 15 行)。
-- **容易真撞上的是本地**: 文档教的就是 `allure generate allure-results --output allure-report` 反复跑(第 7 节),
-  第二次就中招。已在那一节把做法写死: 生成前 `rm -rf allure-report`, 并给出判据(报告根出现 `awesome/` 就是撞上了)、
-  应急看法(`allure open allure-report/awesome`)与"干净的做法是删掉重生成"。这条与那一节原有的"目录已存在时数据不刷新"
-  是同一个根因的两种形态, 现在合成一条写。
-- **防回归**: `scripts/verify_allure_report.py` 的 `nested_report_problems` —— 报告目录里出现 `awesome/index.html` 直接
-  判红(CI 发布前必跑这个自检), 于是"将来有人把报告解包进工作区""CLI 换了输出布局"都会在发布前当场拦住, 而不是把一份
-  "看起来正常、其实是旧的"报告发到站点上。守卫: `tests/unit/test_report_verification.py::test_a_nested_report_directory_is_reported`。
+- **用户给的线索**: 上游 issue [#691](https://github.com/allure-framework/allure3/issues/691), 维护者最后的回答是 "复用已有的 `allure-report` 目录"造成的 —— 第一次生成的报告是**扁平**的, 第二次却被写进 `allure-report/awesome/`, 于是 `allure-report/index.html` 是**旧**报告, 带历史的那份在子目录里。
+- **本机复现(3.20.0, 同一个 `--output` 连跑两次)**: 第一次之后顶层是 `index.html` / `app-*.js` / `data/` / `widgets/`; 第二次之后多出一个 `awesome/`(`awesome/index.html` 存在), 而顶层 `index.html` 一个字节都没变。症状完全对上: 打开顶层的报告看到的是上一轮 —— 本次运行不在里面, "历史趋势"自然也是空的/停在上一次。
+- **CI 有没有这个问题: 没有**。三处事实各自独立: ① `allure-report/` 在 `.gitignore:251` 里且未被 git 跟踪 —— 全新 runner 的工作区里**根本不存在**这个目录; ② 全工作流只有两处 `allure generate`(线路 812 逐平台 / 1235 汇总), 分属两个作业、都在全新 runner 上跑, 而且生成之前那两步下载都落在子目录(`.previous-allure-resources/` 只取 `history.jsonl`、`failure-diagnostics/`), 不会把报告解到工作区根; ③ 发布那一步先 `rm -rf site` 再解**自己刚打的** `allure-report.tar.gz`, 且解完 `test -f site/allure-report/index.html`。本机那份报告也是健康的(报告根只有 `data/` + `widgets/`, 没有 `awesome/`; `data/history/` 里 6 份快照, `.allure/history.jsonl` 15 行)。
+- **容易真撞上的是本地**: 文档教的就是 `allure generate allure-results --output allure-report` 反复跑(第 7 节), 第二次就中招。已在那一节把做法写死: 生成前 `rm -rf allure-report`, 并给出判据(报告根出现 `awesome/` 就是撞上了)、应急看法(`allure open allure-report/awesome`)与"干净的做法是删掉重生成"。这条与那一节原有的"目录已存在时数据不刷新" 是同一个根因的两种形态, 现在合成一条写。
+- **防回归**: `scripts/verify_allure_report.py` 的 `nested_report_problems` —— 报告目录里出现 `awesome/index.html` 直接判红(CI 发布前必跑这个自检), 于是"将来有人把报告解包进工作区""CLI 换了输出布局"都会在发布前当场拦住, 而不是把一份 "看起来正常、其实是旧的"报告发到站点上。守卫: `tests/unit/test_report_verification.py::test_a_nested_report_directory_is_reported`。
 
 ### 48.8 附: 判红之后立刻暴露的 4 条 Linux"收尾断裂"(2026-10-04/05, 根因与修法)
 
-- **症状(照原样记下来, 这就是下一次的判据)**: 报告里 4 条 Linux 用例红, 名字是
-  `test_home_page_filters_games_and_runs_actions` / `test_visible_copy_is_complete_and_reachable` /
-  `test_windows_paint_buttons_by_palette_and_action_kind` / `test_a_stray_root_cannot_steal_our_images`, 消息都一样:
-  `收尾时窗口没被真正销毁(销毁链断在半路)… destroy() 抛的异常: TclError("can't delete Tcl command")`, 而
-  `补救后根还在吗: False` —— 也就是说**补救是有效的, 断的只是 Tk 自己那条循环**。
-- **根因(两层)**: ① `tkinter.Tk.destroy()` 是"**先取快照** `list(self.children.values())`, 再逐个 `c.destroy()`"的
-  一次性循环 —— 快照里的**任意一个**控件抛错, 整条循环就停在那里, 根窗口留在会话里(这正是 48.5 那条事故的机理, 只是这次
-  抛错的不是"用例自己动手脚的子控件", 而是一个**账实不符**的控件); ② 那个控件自己的 `Misc.destroy`
-  (`tkinter/__init__.py:689` 的 `deletecommand`)抛 `can't delete Tcl command`: 它的 `_tclCommands`(控件"我注册过
-  哪些 Tcl 命令"的账本)里留着**已经不存在**的命令名。本机实测(构造一个绑过 `<Configure>` 的 CTkFrame, 再把那条命令
-  删掉、账本不动): 连续三次 `destroy()` 全都抛同一个错, 账本一动不动 —— 所以它会**永远**卡住建个控件。
-- **为什么账实会不符**: 命令可能先被删掉(`after` 的回调触发后自己 `deletecommand`、控件被连带拆掉、别处先拆了同一条),
-  而账本记在控件自己身上。CustomTkinter 6.0.0 的 `CTkScrollableFrame.destroy()` 就属于这一类"连带拆除": 它除了拆自己,
-  还会 `self._parent_frame.destroy()` —— 而那个容器在 `children` 里是它的**兄弟**。
-- **修法(测试基础设施, `tests/gui_support.py`)**: 新增 `destroy_widget_tree()`, 收尾时**先自己按控件树自底向上拆**:
-  ① 动手前用 `winfo exists` 看窗口还在不在 —— 被连带带走的直接跳过, 并把它从 `children` 里摘掉(否则 `Tk.destroy` 的
-  快照还会撞上它); ② 每个控件各自兜异常; ③ 抛出时先核对账本(`info commands`)、把已经不存在的名字划掉再拆一次
-  (`_forget_deleted_tcl_commands`)。这三步之后才调窗口自己的 `destroy()` —— `after` 任务的撤销与 CTk 的解绑都在那里。
-  **判红判据不变**: 只看"根还在不在"; 修好账之后根就不该被留下, 留下才算真缺陷。
-- **守卫与咬合**: `tests/integration/test_gui_roots.py` 加到 7 条, 新增的两条就是这次 CI 现场的直译("children 里留着
-  一个已经没了的控件"、"账上留着已删命令"); 咬合验证: 去掉逐层拆 / 去掉修账 → 对应守卫变红, 且第二条在去掉修账时输出
-  的就是 CI 上那句 `!ctkframe (CTkFrame): TclError("can't delete Tcl command")`。
-- **还有一层"看得见"**: "收尾报了一声、但根已经拆干净"这件事**不判红**(会伤到后面用例的只有根被留下), 但要留证 ——
-  Allure 附件 + 参数 + stderr, 里面带着**控件名、异常原文、划掉了哪些命令**; 下次再出现就能直接点名, 不用再从头查。
+- **症状(照原样记下来, 这就是下一次的判据)**: 报告里 4 条 Linux 用例红, 名字是 `test_home_page_filters_games_and_runs_actions` / `test_visible_copy_is_complete_and_reachable` / `test_windows_paint_buttons_by_palette_and_action_kind` / `test_a_stray_root_cannot_steal_our_images`, 消息都一样: `收尾时窗口没被真正销毁(销毁链断在半路)… destroy() 抛的异常: TclError("can't delete Tcl command")`, 而 `补救后根还在吗: False` —— 也就是说**补救是有效的, 断的只是 Tk 自己那条循环**。
+- **根因(两层)**: ① `tkinter.Tk.destroy()` 是"**先取快照** `list(self.children.values())`, 再逐个 `c.destroy()`"的一次性循环 —— 快照里的**任意一个**控件抛错, 整条循环就停在那里, 根窗口留在会话里(这正是 48.5 那条事故的机理, 只是这次抛错的不是"用例自己动手脚的子控件", 而是一个**账实不符**的控件); ② 那个控件自己的 `Misc.destroy` (`tkinter/__init__.py:689` 的 `deletecommand`)抛 `can't delete Tcl command`: 它的 `_tclCommands`(控件"我注册过哪些 Tcl 命令"的账本)里留着**已经不存在**的命令名。本机实测(构造一个绑过 `<Configure>` 的 CTkFrame, 再把那条命令删掉、账本不动): 连续三次 `destroy()` 全都抛同一个错, 账本一动不动 —— 所以它会**永远**卡住建个控件。
+- **为什么账实会不符**: 命令可能先被删掉(`after` 的回调触发后自己 `deletecommand`、控件被连带拆掉、别处先拆了同一条), 而账本记在控件自己身上。CustomTkinter 6.0.0 的 `CTkScrollableFrame.destroy()` 就属于这一类"连带拆除": 它除了拆自己, 还会 `self._parent_frame.destroy()` —— 而那个容器在 `children` 里是它的**兄弟**。
+- **修法(测试基础设施, `tests/gui_support.py`)**: 新增 `destroy_widget_tree()`, 收尾时**先自己按控件树自底向上拆**: ① 动手前用 `winfo exists` 看窗口还在不在 —— 被连带带走的直接跳过, 并把它从 `children` 里摘掉(否则 `Tk.destroy` 的快照还会撞上它); ② 每个控件各自兜异常; ③ 抛出时先核对账本(`info commands`)、把已经不存在的名字划掉再拆一次 (`_forget_deleted_tcl_commands`)。这三步之后才调窗口自己的 `destroy()` —— `after` 任务的撤销与 CTk 的解绑都在那里。 **判红判据不变**: 只看"根还在不在"; 修好账之后根就不该被留下, 留下才算真缺陷。
+- **守卫与咬合**: `tests/integration/test_gui_roots.py` 加到 7 条, 新增的两条就是这次 CI 现场的直译("children 里留着一个已经没了的控件"、"账上留着已删命令"); 咬合验证: 去掉逐层拆 / 去掉修账 → 对应守卫变红, 且第二条在去掉修账时输出的就是 CI 上那句 `!ctkframe (CTkFrame): TclError("can't delete Tcl command")`。
+- **还有一层"看得见"**: "收尾报了一声、但根已经拆干净"这件事**不判红**(会伤到后面用例的只有根被留下), 但要留证 —— Allure 附件 + 参数 + stderr, 里面带着**控件名、异常原文、划掉了哪些命令**; 下次再出现就能直接点名, 不用再从头查。
 
 ### 48.9 附: macOS 分片被内核杀掉, 而且那条崩溃从未进过报告(2026-10-04/05)
 
-- **症状**: macOS 分片 0 在 `tests/integration/test_gui_dropdown.py` 第一个用例之后被信号打死(`exit code 133` =
-  SIGTRAP; `.ips` 里 `EXC_BREAKPOINT`); `job-diagnostics-macos-latest-0` **上传了**, 但报告的全局附件里没有"失败现场"
-  (`allure-report/artifacts.json` 只有总账与覆盖豁免两份)。
-- **崩溃本身**: 原生栈在主线程 `CFRelease ← -[NSCGSContext dealloc] ← AutoreleasePoolPage::releaseUntil` ——
-  Tk/Cocoa 的图形上下文在自动释放池里被回收时撞上指针认证(没有 Python 帧)。`crash-dumps/faulthandler.log` **是空的**:
-  faulthandler 默认不接 SIGTRAP, 所以这类崩溃拿不到 Python 栈 —— 想拿到就得显式接上 SIGTRAP(会与调试器冲突, 要留意),
-  暂时只把 `.ips` 收全。
+- **症状**: macOS 分片 0 在 `tests/integration/test_gui_dropdown.py` 第一个用例之后被信号打死(`exit code 133` = SIGTRAP; `.ips` 里 `EXC_BREAKPOINT`); `job-diagnostics-macos-latest-0` **上传了**, 但报告的全局附件里没有"失败现场" (`allure-report/artifacts.json` 只有总账与覆盖豁免两份)。
+- **崩溃本身**: 原生栈在主线程 `CFRelease ← -[NSCGSContext dealloc] ← AutoreleasePoolPage::releaseUntil` —— Tk/Cocoa 的图形上下文在自动释放池里被回收时撞上指针认证(没有 Python 帧)。`crash-dumps/faulthandler.log` **是空的**: faulthandler 默认不接 SIGTRAP, 所以这类崩溃拿不到 Python 栈 —— 想拿到就得显式接上 SIGTRAP(会与调试器冲突, 要留意), 暂时只把 `.ips` 收全。
 - **报告里没有它的两个原因(都是缺陷, 都已修)**:
-  1. `scripts/create_allure_summary.py` 按 `*/job-diagnostics/summary.md` 找摘要, 而各作业上传的是
-     `path: job-diagnostics/` —— artifact 里装的是那个目录的**内容**, 下载到 `failure-diagnostics/<artifact 名>/`
-     之后只有一层(`<artifact 名>/summary.md`, 用户下载的 zip 里就是这两份文件)。glob **永远匹配不到**, 于是"有崩溃
-     现场"也没人知道, 而且一声不吭。当时的**守卫按同一种(错的)布局造样本**, 于是两边一起绿 —— 现在两种布局都收,
-     守卫按真实布局造样本(另一条守着"多一层"那种旧布局, 免得以后再改上传路径又静默失效)。
-  2. 崩溃只挂在首页附件里的话, 它**不进任何计数、也不能按环境筛**(用户 2026-10-05 的要求是"便于统计")。现在每个
-     崩溃作业**另写一条 `broken` 结论项**: 环境 = 崩溃作业所在的平台(切到那个平台就能看到它)、等级 `critical`、
-     `testCategory=diagnostics`(不是用例, 质量门那条"每个平台都要有用例"不会误判)、现场摘要作为它的附件。没有兜底现场时:
-     **附件清掉、结论项一条不写** —— 一份永远存在的"失败现场"只会让人以为崩过(用户 2026-10-04 的原话)。
+  1. `scripts/create_allure_summary.py` 按 `*/job-diagnostics/summary.md` 找摘要, 而各作业上传的是 `path: job-diagnostics/` —— artifact 里装的是那个目录的**内容**, 下载到 `failure-diagnostics/<artifact 名>/` 之后只有一层(`<artifact 名>/summary.md`, 用户下载的 zip 里就是这两份文件)。glob **永远匹配不到**, 于是"有崩溃现场"也没人知道, 而且一声不吭。当时的**守卫按同一种(错的)布局造样本**, 于是两边一起绿 —— 现在两种布局都收, 守卫按真实布局造样本(另一条守着"多一层"那种旧布局, 免得以后再改上传路径又静默失效)。
+  2. 崩溃只挂在首页附件里的话, 它**不进任何计数、也不能按环境筛**(用户 2026-10-05 的要求是"便于统计")。现在每个崩溃作业**另写一条 `broken` 结论项**: 环境 = 崩溃作业所在的平台(切到那个平台就能看到它)、等级 `critical`、 `testCategory=diagnostics`(不是用例, 质量门那条"每个平台都要有用例"不会误判)、现场摘要作为它的附件。没有兜底现场时: **附件清掉、结论项一条不写** —— 一份永远存在的"失败现场"只会让人以为崩过(用户 2026-10-04 的原话)。
 - **守卫**: `tests/unit/test_ci_diagnostics.py` 四条(真实布局 / 多一层布局 / 崩溃→broken 结论项 / 没现场→两者都不写)
   - 原有的"写附件必须在下载之后"。
 
 ### 48.10 附: 历史记录"全丢"的根因与自动修复(2026-10-05)
 
 - **症状**(用户): 报告里每条用例的"历史记录"只剩本次运行那一条, 过去的全不见了。
-- **根因(实测)**: 趋势按 `retryHash` **精确匹配**(`point.testResults[result.retryHash]`), 而
-  `retryHash = <testCaseHash>.<parametersHash>.<environmentHash>` —— 采用 environments 之后从两段
-  变成三段, 于是历史文件里的旧快照(2 段键)一条也接不上。那份报告实测: 7231 条结果的历史长度分布
-  `{0: 5, 1: 7226}`, 而那个"1"还是**本次运行自己**重复追加的快照(每次 `allure generate` 会把同一份
-  快照追加两次、相隔 5-26 秒, 报告只排除自己那个 uuid, 另一份就成了"上一次历史")。数据一条没丢, 全在
-  `.allure/history.jsonl` 里 —— 丢的是匹配。
-- **修法**: 新增 `scripts/repair_allure_history.py`, 在**拷回历史之后、`allure generate` 之前**两处各跑一次
-  (逐平台作业与汇总作业):
+- **根因(实测)**: 趋势按 `retryHash` **精确匹配**(`point.testResults[result.retryHash]`), 而 `retryHash = <testCaseHash>.<parametersHash>.<environmentHash>` —— 采用 environments 之后从两段变成三段, 于是历史文件里的旧快照(2 段键)一条也接不上。那份报告实测: 7231 条结果的历史长度分布 `{0: 5, 1: 7226}`, 而那个"1"还是**本次运行自己**重复追加的快照(每次 `allure generate` 会把同一份快照追加两次、相隔 5-26 秒, 报告只排除自己那个 uuid, 另一份就成了"上一次历史")。数据一条没丢, 全在 `.allure/history.jsonl` 里 —— 丢的是匹配。
+- **修法**: 新增 `scripts/repair_allure_history.py`, 在**拷回历史之后、`allure generate` 之前**两处各跑一次 (逐平台作业与汇总作业):
   1. **去重**: 同一轮的重复快照按"时间窗(300 秒) + 键集合重合度(>= 0.9)"判定, 留信息更全的那一份;
-  2. **重键**: 旧形状的键按**唯一前缀**补成当前形状(当前形状 = 最新快照的键段数, 参考集合 = 文件里已是
-     当前形状的键), 补不出唯一值的条目丢掉;
-  3. **兜底**: 一份旧快照都连不上(身份算法本身变了)或整个文件认不出来(未来换了容器格式)时**清空历史
-     重新开始**, 并把原因写进修复记录。
-     真数据实测: 16 份 -> 去重 5 份, 重键 30133 条, 丢弃 1277 条, 可连接 10/10 份; 再跑一次**零改动**(幂等)。
-- **为什么能"自动处理"而不是每次手改**: CI 用的是浮动标签 `allure@3`(要追新功能), 形状随时可能再变 —— 所以
-  判据不写死段数, 只写"能不能唯一补上"; 修复记录里还记着这一轮**实际用的 CLI 版本**(`allure --version`),
-  下次再变能一眼对上是哪次更新。
-- **可见性**: 修好了/重置了都写 `allure-history-repair.md` 挂到首页「全局附件」(按文件在不在条件收, 与
-  失败现场那份同一套做法); 没修东西时删掉它, 免得挂着一份过期结论。
-- **守卫**: `tests/unit/test_ci_history.py` 十三条 —— 去重(同轮两条 / 差几条 / 相隔小时不并)、重键、多义
-  不猜、丢弃计数、兜底重置、认不出来即重置、幂等、无历史不留附件、配置与 `.gitignore` 接线、`ci.yml`
-  两处顺序(拷回 -> 修 -> 生成)。
+  2. **重键**: 旧形状的键按**唯一前缀**补成当前形状(当前形状 = 最新快照的键段数, 参考集合 = 文件里已是当前形状的键), 补不出唯一值的条目丢掉;
+  3. **兜底**: 一份旧快照都连不上(身份算法本身变了)或整个文件认不出来(未来换了容器格式)时**清空历史重新开始**, 并把原因写进修复记录。真数据实测: 16 份 -> 去重 5 份, 重键 30133 条, 丢弃 1277 条, 可连接 10/10 份; 再跑一次**零改动**(幂等)。
+- **为什么能"自动处理"而不是每次手改**: CI 用的是浮动标签 `allure@3`(要追新功能), 形状随时可能再变 —— 所以判据不写死段数, 只写"能不能唯一补上"; 修复记录里还记着这一轮**实际用的 CLI 版本**(`allure --version`), 下次再变能一眼对上是哪次更新。
+- **可见性**: 修好了/重置了都写 `allure-history-repair.md` 挂到首页「全局附件」(按文件在不在条件收, 与失败现场那份同一套做法); 没修东西时删掉它, 免得挂着一份过期结论。
+- **守卫**: `tests/unit/test_ci_history.py` 十三条 —— 去重(同轮两条 / 差几条 / 相隔小时不并)、重键、多义不猜、丢弃计数、兜底重置、认不出来即重置、幂等、无历史不留附件、配置与 `.gitignore` 接线、`ci.yml` 两处顺序(拷回 -> 修 -> 生成)。
 
 ### 48.11 附: `test_default_view_is_branch_tree_and_hides_old_auto_backups` 的两件事(2026-10-05)
 
-用户指着报告里这条用例("这个脚本问题")。它三个环境都是 **passed**(1-2 秒, 无重试), 问题在别处 —— 而且
-是两件事, 一件藏在那份 stderr 附件里, 另一件当天才刚到点:
+用户指着报告里这条用例("这个脚本问题")。它三个环境都是 **passed**(1-2 秒, 无重试), 问题在别处 —— 而且是两件事, 一件藏在那份 stderr 附件里, 另一件当天才刚到点:
 
-- **① stderr 附件里是 5 条 `invalid command name "..._poll_messages"`**(Linux)。这不是它的锅: 本机不带
-  捕获跑一遍 `test_gui_buttons.py`, 改前共 **187 处**这种报错, 落在谁名下取决于哪条用例先跑到事件循环。
-  根因: **自排任务 + 被直接调用** —— `ArchiveApp._poll_messages` 末尾排下一个任务并**覆盖** `_poll_job`,
-  而用例辅助 `_drain` 每轮都直接调它一次 ⇒ 先前那个 id 丢掉, `destroy()` 撤不到, 到点后在别处爆掉。
-  修法(产品侧): 该方法**开头先撤掉挂着的那个**(自己跑完那情形撤它是空操作), `destroy()` 复用同一个
-  撤销函数 `_cancel_after_job` / `_cancel_poll_job`。守卫是**结构判据**: `app.tk.call("after", "info")`
-  的任务表里带 `_poll_messages` 的条目必须恰好一个(咬合验证过: 把那一行注释掉, 守卫当场红)。
-- **收尾侧"统一撕掉还挂着的 after 任务"试过, 已撤回**: 剩下的同类噪声(`check` / `sync_now` / `apply` /
-  `focus_set` / `_revert_withdraw_after_windows_set_titlebar_color`)来自 Tk 与 CustomTkinter, 而且是**在
-  销毁过程中**才被排上的, 撤不到; 更麻烦的是名字分不清 —— 我们自己也有叫 `check`(`dialogs.py`)、
-  `sync_now`(`widgets.py`)、`apply`(`keyboard.py`) 的回调。那次统一扫还让别的用例变慢(撤掉 Tk 的 idle
-  处理器后, 有的用例等不到布局), 所以只治"我们排的、又没人撤"的那些。
-- **光撤还不够: 已经到点、被 Tk 取走的那个任务撤不掉** —— 整文件日志里还有一条
-  `Exception in Tkinter callback`: 轮询跑到 `_fit_task_name` → `winfo_width` 抛
-  `can't invoke "winfo" command: application has been destroyed`(即销毁之后还在碰控件)。修法:
-  `destroy()` 先立 `_destroyed` 牌子, `_poll_messages` / `_refit_detail_names` 看到就返回、也不再排下一个;
-  守卫 `test_the_pump_does_nothing_after_the_window_is_destroyed`(销毁后直接调那两个方法, 不许抛也不许再
-  排任务; 咬合验证: 撤掉牌子即红, `_poll_job` 会变成 `after#NN`)。
-- **实测数字**(`test_gui_buttons.py` 整文件、不带捕获): `invalid command name` **187 → 133**, 而**我们自己的
-  那一类为 0**(剩下全是 Tk/CustomTkinter 在销毁期间排上的); 用例数 160 passed(日期炸弹修好后不再有红)。
-- **fd 层那条判据不可靠**: "收尾后 stderr 里不许再出现 `invalid command name`" 在本机量不出来 —— 那种
-  报错要等销毁之后还有事件循环经过才会响, 把产品侧修复撤掉它照样绿; 所以最终只留结构判据。
-- **② 一颗日期炸弹**: 时间范围默认"最近 30 天", 而演示数据的日期是**固定的 2026-09-04..06**。CI 那轮
-  (10-04 17:52)阈值是 09-04 17:52, `b4`(09-04 22:31)还在窗口内 ⇒ 5 张卡片、绿; 到了 **10-05** 阈值变成
-  09-05 12:23 ⇒ `b4` 掉出窗口 ⇒ `assert len(app._cards) == total_items` 当场 `4 != 5`(本机实测, 咬合
-  验证: 撤掉那两行就复现)。报告里它一直是绿的, 只是因为跑的那天还在窗口边上 —— 这类断言**必须显式把
-  时间范围设成"全部"**, 用例里已改成 `app._filter_period.set(tr("filter.all_time"))` + 重渲染并写明原因。
-- 顺带: 给 `_poll_messages` 补了说明之后, `test_typography.py` 那条"消息泵要排空寄存字体"的文本守卫
-  (原来取前 600 字符)够不着那行调用了 —— 已改成取**整个方法体**(到下一条方法定义为止), 而不是把窗口
-  数字调大。
+- **① stderr 附件里是 5 条 `invalid command name "..._poll_messages"`**(Linux)。这不是它的锅: 本机不带捕获跑一遍 `test_gui_buttons.py`, 改前共 **187 处**这种报错, 落在谁名下取决于哪条用例先跑到事件循环。根因: **自排任务 + 被直接调用** —— `ArchiveApp._poll_messages` 末尾排下一个任务并**覆盖** `_poll_job`, 而用例辅助 `_drain` 每轮都直接调它一次 ⇒ 先前那个 id 丢掉, `destroy()` 撤不到, 到点后在别处爆掉。修法(产品侧): 该方法**开头先撤掉挂着的那个**(自己跑完那情形撤它是空操作), `destroy()` 复用同一个撤销函数 `_cancel_after_job` / `_cancel_poll_job`。守卫是**结构判据**: `app.tk.call("after", "info")` 的任务表里带 `_poll_messages` 的条目必须恰好一个(咬合验证过: 把那一行注释掉, 守卫当场红)。
+- **收尾侧"统一撕掉还挂着的 after 任务"试过, 已撤回**: 剩下的同类噪声(`check` / `sync_now` / `apply` / `focus_set` / `_revert_withdraw_after_windows_set_titlebar_color`)来自 Tk 与 CustomTkinter, 而且是**在销毁过程中**才被排上的, 撤不到; 更麻烦的是名字分不清 —— 我们自己也有叫 `check`(`dialogs.py`)、 `sync_now`(`widgets.py`)、`apply`(`keyboard.py`) 的回调。那次统一扫还让别的用例变慢(撤掉 Tk 的 idle 处理器后, 有的用例等不到布局), 所以只治"我们排的、又没人撤"的那些。
+- **光撤还不够: 已经到点、被 Tk 取走的那个任务撤不掉** —— 整文件日志里还有一条 `Exception in Tkinter callback`: 轮询跑到 `_fit_task_name` → `winfo_width` 抛 `can't invoke "winfo" command: application has been destroyed`(即销毁之后还在碰控件)。修法: `destroy()` 先立 `_destroyed` 牌子, `_poll_messages` / `_refit_detail_names` 看到就返回、也不再排下一个; 守卫 `test_the_pump_does_nothing_after_the_window_is_destroyed`(销毁后直接调那两个方法, 不许抛也不许再排任务; 咬合验证: 撤掉牌子即红, `_poll_job` 会变成 `after#NN`)。
+- **实测数字**(`test_gui_buttons.py` 整文件、不带捕获): `invalid command name` **187 → 133**, 而**我们自己的那一类为 0**(剩下全是 Tk/CustomTkinter 在销毁期间排上的); 用例数 160 passed(日期炸弹修好后不再有红)。
+- **fd 层那条判据不可靠**: "收尾后 stderr 里不许再出现 `invalid command name`" 在本机量不出来 —— 那种报错要等销毁之后还有事件循环经过才会响, 把产品侧修复撤掉它照样绿; 所以最终只留结构判据。
+- **② 一颗日期炸弹**: 时间范围默认"最近 30 天", 而演示数据的日期是**固定的 2026-09-04..06**。CI 那轮 (10-04 17:52)阈值是 09-04 17:52, `b4`(09-04 22:31)还在窗口内 ⇒ 5 张卡片、绿; 到了 **10-05** 阈值变成 09-05 12:23 ⇒ `b4` 掉出窗口 ⇒ `assert len(app._cards) == total_items` 当场 `4 != 5`(本机实测, 咬合验证: 撤掉那两行就复现)。报告里它一直是绿的, 只是因为跑的那天还在窗口边上 —— 这类断言**必须显式把时间范围设成"全部"**, 用例里已改成 `app._filter_period.set(tr("filter.all_time"))` + 重渲染并写明原因。
+- 顺带: 给 `_poll_messages` 补了说明之后, `test_typography.py` 那条"消息泵要排空寄存字体"的文本守卫 (原来取前 600 字符)够不着那行调用了 —— 已改成取**整个方法体**(到下一条方法定义为止), 而不是把窗口数字调大。
 
-**教训**: 报告里的"stderr 附件"常常是**别人**留下的噪声(挂在最后撞上的那条用例名下), 而"绿色"也可能只是
-日历还没翻到 —— 判据要么用任务表/不变量这类结构性的量, 要么显式钉住环境(时间、尺寸、焦点)。
+**教训**: 报告里的"stderr 附件"常常是**别人**留下的噪声(挂在最后撞上的那条用例名下), 而"绿色"也可能只是日历还没翻到 —— 判据要么用任务表/不变量这类结构性的量, 要么显式钉住环境(时间、尺寸、焦点)。
 
 ### 48.12 附: 首轮 CI 三条红全在我新加的那条守卫上(2026-10-05)
 
-首次上 CI(run 37322797661)报 3 条 failed, **三条都是同一条新用例**
-(`tests/integration/test_gui_roots.py::test_a_real_backend_does_not_outlive_its_window`), 每个平台一条 ——
-产品侧没问题, 是守卫自己写坏了:
+首次上 CI(run 37322797661)报 3 条 failed, **三条都是同一条新用例** (`tests/integration/test_gui_roots.py::test_a_real_backend_does_not_outlive_its_window`), 每个平台一条 ——产品侧没问题, 是守卫自己写坏了:
 
-- **绝对判据把"别人攒下的存量"算成自己的失败**: 第一版写的是"收尾之后进程里一个 `APScheduler` 线程都不许
-  剩", 而三次失败的残留数是 **2 / 3 / 8**, 没有一次是 0。同一进程里还有别的用例建过真后端(只建后端、不建
-  窗口 ⇒ 没有释放入口), 那些存量被算到了这条用例头上。本机单跑时基线恰好是 0, 所以一直没暴露 ——
-  **只在整批会话里才现形的判据, 必须写成相对量**。
-- **基线要取在"建后端之前"**: 调度线程是 `ApschedulerBackend.__init__` 里 `BackgroundScheduler().start()`
-  起来的(窗口只是用它, 不新建), 所以基线若取在 service 之后, 等于把被测对象自己算进基线、差值为 0 ⇒
-  "量到的是空气"那条断言反而先红(实测: 探针 1 个 + 服务 1 个 ⇒ `2 > 2` 失败)。
+- **绝对判据把"别人攒下的存量"算成自己的失败**: 第一版写的是"收尾之后进程里一个 `APScheduler` 线程都不许剩", 而三次失败的残留数是 **2 / 3 / 8**, 没有一次是 0。同一进程里还有别的用例建过真后端(只建后端、不建窗口 ⇒ 没有释放入口), 那些存量被算到了这条用例头上。本机单跑时基线恰好是 0, 所以一直没暴露 —— **只在整批会话里才现形的判据, 必须写成相对量**。
+- **基线要取在"建后端之前"**: 调度线程是 `ApschedulerBackend.__init__` 里 `BackgroundScheduler().start()` 起来的(窗口只是用它, 不新建), 所以基线若取在 service 之后, 等于把被测对象自己算进基线、差值为 0 ⇒ "量到的是空气"那条断言反而先红(实测: 探针 1 个 + 服务 1 个 ⇒ `2 > 2` 失败)。
 - **修法**: 与 `gui_support.close_gui_apps` 那条守卫同一个口径 —— 收尾之后只要求 `len(...) <= baseline`。
-- **验证**: ① 本地复现: 用例开头临时造一个"别人的"调度器 ⇒ 旧判据当场红(残留 1 个, 正是 CI 的形态);
-  ② 改成相对基线后 ⇒ 有存量也绿; ③ 抽掉产品侧 `destroy()` 里的 `_release_background()` ⇒ 立刻红
-  (`assert 1 <= 0`), 咬人保住; ④ `tests/integration/test_gui_roots.py` 整文件 10 passed。
-- **顺带记一条(本轮不动)**: 那些"只建后端、不建窗口"的用例**确实**在攒调度器(CI 跑到这条用例时已经躺着
-  2~8 个线程); 收尾守卫只按**相对基线**判, 所以它们不会被点名。将来要清这批存量, 得先给那些用例一个释放
-  入口 —— 它们不影响分片存活(比不上 §39.4 那种"几十个线程去碰已销毁的 Tk"), 只是把进程线程数抬高。
+- **验证**: ① 本地复现: 用例开头临时造一个"别人的"调度器 ⇒ 旧判据当场红(残留 1 个, 正是 CI 的形态); ② 改成相对基线后 ⇒ 有存量也绿; ③ 抽掉产品侧 `destroy()` 里的 `_release_background()` ⇒ 立刻红 (`assert 1 <= 0`), 咬人保住; ④ `tests/integration/test_gui_roots.py` 整文件 10 passed。
+- **顺带记一条(本轮不动)**: 那些"只建后端、不建窗口"的用例**确实**在攒调度器(CI 跑到这条用例时已经躺着 2~8 个线程); 收尾守卫只按**相对基线**判, 所以它们不会被点名。将来要清这批存量, 得先给那些用例一个释放入口 —— 它们不影响分片存活(比不上 §39.4 那种"几十个线程去碰已销毁的 Tk"), 只是把进程线程数抬高。
 
-**教训**: 把守卫写成"绝对干净", 等于要求**别人**的历史也不许存在 —— 要么把基线取在受测对象之前, 要么显式
-钉住会话状态; 而"本机单跑绿"恰恰是这类缺陷最好的藏身处。
+**教训**: 把守卫写成"绝对干净", 等于要求**别人**的历史也不许存在 —— 要么把基线取在受测对象之前, 要么显式钉住会话状态; 而"本机单跑绿"恰恰是这类缺陷最好的藏身处。
 
 ## 49. 用户实测两条(2026-10-12): 打包版单实例 + 空库回主页
 
-用户在编好的打包版上实测报了两条: **多开会互相干扰**、**删掉库里最后一款游戏后界面留在详情页**。两条都不是
-崩溃, 而是"说不清的怪状态"(没有报错、画面也正常), 正因如此才要写成硬规则 + 守卫。
+用户在编好的打包版上实测报了两条: **多开会互相干扰**、**删掉库里最后一款游戏后界面留在详情页**。两条都不是崩溃, 而是"说不清的怪状态"(没有报错、画面也正常), 正因如此才要写成硬规则 + 守卫。
 
 ### 49.1 打包版同一时间只允许一个界面进程
 
-- **根因**: 两个进程各持同一个数据库、备份根、全局快捷键注册与自动启停轮询, 谁都不报错, 但两边"我以为的
-  状态"互相覆盖(用户原话"多开会导致部分功能出现意料之外的情况")。测试与开发**要**并行开窗口(分片跑集成用例
-  时每片都在自己进程里建真窗口), 所以闸门只在打包版生效。
-- **第二个实例的处置改过两次口径**(同一天用户追加: "重复打开窗口应该直接跳转到上次打开的窗口, 而不是弹窗提示
-  用户已经多开了"): ①第一版弹一句"已经开着了"就退 —— 用户看到的是一道**多余的确认**, 而他双击的意图只是
-  "我要用这个软件"; ②第二版改成**把已经开着的那个窗口叫到前台**, 自己安静地退出(退出码 3): 请求走数据目录里
-  的请求文件 `instance.focus`(第二个进程写 `pid=… at=…`, 已经开着的那个在它的 100ms 轮询里
-  `deiconify + lift + focus_force`, **先抬窗口、抬完再清文件** —— 那个"文件没了"就是回执)。选"文件 + 轮询"
-  而不是窗口消息/跨进程句柄: 一是软件**不执行外部程序**, 二是三平台同一条路。
-- **先量后改抓到的真缺陷(本轮最值钱的一条)**: 第二版做完实测打包版 —— 窗口确实被**恢复成可见**(最小化状态
-  消失), 但前台仍是编辑器 ⇒ **`deiconify/lift` 抢不到前台**。这是 Windows 的"前台锁定": 后台进程
-  `SetForegroundWindow` 未必生效。第三版补上: 第二个进程(用户刚双击起来、手上有这个权利的那一个)调一次
-  `user32.AllowSetForegroundWindow(<已有实例的 pid>)`, 并**等回执再退**(那份权限可能随它退出而失效)。同一个
-  探针再测: 前台窗口变成应用名、`granted=True handled=True`。为什么不在两个平台都做: X11/macOS 没有这道闸
-  (也不用为它各写一套窗口系统 API)。
-- **取走即清空**是这条通道的关键: 文件留着的话每轮轮询都会抬一次窗口, 用户手动切到别的软件后又被抢回来;
-  而清得太早(读的时候就清)则第二个实例看不到"处理完了"。所以是"读 → 抬 → 清"三步, 清掉的就是给对方的回执。
-- **落点**: 新增 `services/single_instance.py`(`InstanceLock`、`request_focus` / `read_focus_request` /
-  `clear_focus_request` / `wait_until_handled` / `holder_pid` / `hand_over_foreground`、
-  `ALREADY_RUNNING_EXIT = 3`、逃生门 `ARCHIVE_MANAGEMENT_ALLOW_MULTI`); 拦截点在 `app._run_gui`(打包版且没开
-  逃生门时先拿锁, 拿不到就 `_hand_over_to_running_instance` → 写请求 + 交前台权限 + 等回执 + 记日志, 退 3;
-  起窗口的老逻辑抽成 `_start_gui`); 已经开着的那个在 `ui/main_window._maybe_come_to_front`(轮询里)
-  → `_come_to_front`(deiconify/lift/focus_force)。集成用例直接调 `run_gui`, 根本不经过这条闸门。
-  `_allow_windows_foreground` 里那一小段平台专属代码逐行带 `# platform: windows - …` 标记(覆盖率口径), 用
-  `getattr(ctypes, "WinDLL")` 取加载器 —— 与 `services/platform_scan` 读注册表同一套写法, 事是让另一平台的
-  mypy 也过(typeshed 里 `WinDLL` 按平台收)。
-- **为什么用"操作系统级文件锁"**(`msvcrt.locking` / `fcntl.flock`): 锁跟着进程走, 进程无论怎么消失
-  (正常退出 / 崩溃 / 被任务管理器结束)都由系统释放 ⇒ **不会留下把用户永久挡在门外的陈旧锁**("建文件即上锁"
-  那类做法得自己清理陈旧锁, 清理时又得猜"那个 pid 还在不在")。锁文件落在**数据目录**(`instance.lock`), 于是
-  `--root` 便携实例各用各的锁与请求文件。
-- **坑(第一版真栽了)**: 锁**第 0 字节**时, 第二个实例读不出锁文件里那行"谁占着" —— Windows 的
-  `msvcrt.locking` 会把**读**一起挡住(实测 `holder()` 返回空串), 日志只能写"未知"。改锁到
-  `_LOCK_OFFSET = 4096`(文件末尾之外, 实测可锁): 记录照旧可读、锁照样有效。Linux 的 `flock` 是建议锁、本来
-  就不挡读, 但两个平台共用一个偏移量最省心。
-- **守卫**: `tests/unit/test_single_instance.py` 十一条(第二个句柄被拒 / 释放后立刻能再拿 / 同一对象重复 acquire
-  与重复 release / 自动建目录且记录可读 / 文件不存在时空串 / `with` 的返回值与释放 / 便携根各用各的锁 / 请求
-  **读不清、清完才算处理完** / 等回执与超时 / 从锁记录里取 pid / 写不进去或文件为空都只返回空串 / 逃生门只认
-  明确写法) + `tests/unit/test_cli.py` 五条(第二个实例退 3、不建界面、**留下请求**且日志里带 granted/handled /
-  窗口期间锁一直在手、关掉后还回来 / 源码运行不受限 / 逃生门放行)
-  - `tests/integration/test_gui_lifecycle.py::test_a_second_start_brings_the_window_back_to_the_front`
-    (真窗口: `withdraw()` 造"藏起来了" → 请求 → 窗口回到可见且请求被清掉; 而且**没有新请求就不再抬窗口**)。
-- **咬合验证**(每一处都真打断过): 不写请求 → 第二个实例那条红(请求为空); 轮询里不调 `_maybe_come_to_front`
-  → 真窗口那条红(`winfo_viewable() == 0`); 抬完不清文件 → 服务层与真窗口两条同时红; `lock.acquire()` 判据
-  失效 → 第二个实例建了界面; `_LOCK_OFFSET` 改回 0 → 记录读不到。
-- **实测数字**(打包版 onedir, 用 `GetForegroundWindow` 量): 第二版(只有 deiconify/lift)
-  `iconic 1 → 0`(恢复成可见)但前台仍是编辑器; 第三版(加上交前台权限)前台窗口变成 `存档管理工具`,
-  日志里 `granted=True handled=True`, 两边的日志行带同一个 `pid=… at=…`(对得上就是同一次双击)。
+- **根因**: 两个进程各持同一个数据库、备份根、全局快捷键注册与自动启停轮询, 谁都不报错, 但两边"我以为的状态"互相覆盖(用户原话"多开会导致部分功能出现意料之外的情况")。测试与开发**要**并行开窗口(分片跑集成用例时每片都在自己进程里建真窗口), 所以闸门只在打包版生效。
+- **第二个实例的处置改过两次口径**(同一天用户追加: "重复打开窗口应该直接跳转到上次打开的窗口, 而不是弹窗提示用户已经多开了"): ①第一版弹一句"已经开着了"就退 —— 用户看到的是一道**多余的确认**, 而他双击的意图只是 "我要用这个软件"; ②第二版改成**把已经开着的那个窗口叫到前台**, 自己安静地退出(退出码 3): 请求走数据目录里的请求文件 `instance.focus`(第二个进程写 `pid=… at=…`, 已经开着的那个在它的 100ms 轮询里 `deiconify + lift + focus_force`, **先抬窗口、抬完再清文件** —— 那个"文件没了"就是回执)。选"文件 + 轮询" 而不是窗口消息/跨进程句柄: 一是软件**不执行外部程序**, 二是三平台同一条路。
+- **先量后改抓到的真缺陷(本轮最值钱的一条)**: 第二版做完实测打包版 —— 窗口确实被**恢复成可见**(最小化状态消失), 但前台仍是编辑器 ⇒ **`deiconify/lift` 抢不到前台**。这是 Windows 的"前台锁定": 后台进程 `SetForegroundWindow` 未必生效。第三版补上: 第二个进程(用户刚双击起来、手上有这个权利的那一个)调一次 `user32.AllowSetForegroundWindow(<已有实例的 pid>)`, 并**等回执再退**(那份权限可能随它退出而失效)。同一个探针再测: 前台窗口变成应用名、`granted=True handled=True`。为什么不在两个平台都做: X11/macOS 没有这道闸 (也不用为它各写一套窗口系统 API)。
+- **取走即清空**是这条通道的关键: 文件留着的话每轮轮询都会抬一次窗口, 用户手动切到别的软件后又被抢回来; 而清得太早(读的时候就清)则第二个实例看不到"处理完了"。所以是"读 → 抬 → 清"三步, 清掉的就是给对方的回执。
+- **落点**: 新增 `services/single_instance.py`(`InstanceLock`、`request_focus` / `read_focus_request` / `clear_focus_request` / `wait_until_handled` / `holder_pid` / `hand_over_foreground`、 `ALREADY_RUNNING_EXIT = 3`、逃生门 `ARCHIVE_MANAGEMENT_ALLOW_MULTI`); 拦截点在 `app._run_gui`(打包版且没开逃生门时先拿锁, 拿不到就 `_hand_over_to_running_instance` → 写请求 + 交前台权限 + 等回执 + 记日志, 退 3; 起窗口的老逻辑抽成 `_start_gui`); 已经开着的那个在 `ui/main_window._maybe_come_to_front`(轮询里) → `_come_to_front`(deiconify/lift/focus_force)。集成用例直接调 `run_gui`, 根本不经过这条闸门。 `_allow_windows_foreground` 里那一小段平台专属代码逐行带 `# platform: windows - …` 标记(覆盖率口径), 用 `getattr(ctypes, "WinDLL")` 取加载器 —— 与 `services/platform_scan` 读注册表同一套写法, 事是让另一平台的 mypy 也过(typeshed 里 `WinDLL` 按平台收)。
+- **为什么用"操作系统级文件锁"**(`msvcrt.locking` / `fcntl.flock`): 锁跟着进程走, 进程无论怎么消失 (正常退出 / 崩溃 / 被任务管理器结束)都由系统释放 ⇒ **不会留下把用户永久挡在门外的陈旧锁**("建文件即上锁" 那类做法得自己清理陈旧锁, 清理时又得猜"那个 pid 还在不在")。锁文件落在**数据目录**(`instance.lock`), 于是 `--root` 便携实例各用各的锁与请求文件。
+- **坑(第一版真栽了)**: 锁**第 0 字节**时, 第二个实例读不出锁文件里那行"谁占着" —— Windows 的 `msvcrt.locking` 会把**读**一起挡住(实测 `holder()` 返回空串), 日志只能写"未知"。改锁到 `_LOCK_OFFSET = 4096`(文件末尾之外, 实测可锁): 记录照旧可读、锁照样有效。Linux 的 `flock` 是建议锁、本来就不挡读, 但两个平台共用一个偏移量最省心。
+- **守卫**: `tests/unit/test_single_instance.py` 十一条(第二个句柄被拒 / 释放后立刻能再拿 / 同一对象重复 acquire 与重复 release / 自动建目录且记录可读 / 文件不存在时空串 / `with` 的返回值与释放 / 便携根各用各的锁 / 请求 **读不清、清完才算处理完** / 等回执与超时 / 从锁记录里取 pid / 写不进去或文件为空都只返回空串 / 逃生门只认明确写法) + `tests/unit/test_cli.py` 五条(第二个实例退 3、不建界面、**留下请求**且日志里带 granted/handled / 窗口期间锁一直在手、关掉后还回来 / 源码运行不受限 / 逃生门放行)
+  - `tests/integration/test_gui_lifecycle.py::test_a_second_start_brings_the_window_back_to_the_front` (真窗口: `withdraw()` 造"藏起来了" → 请求 → 窗口回到可见且请求被清掉; 而且**没有新请求就不再抬窗口**)。
+- **咬合验证**(每一处都真打断过): 不写请求 → 第二个实例那条红(请求为空); 轮询里不调 `_maybe_come_to_front` → 真窗口那条红(`winfo_viewable() == 0`); 抬完不清文件 → 服务层与真窗口两条同时红; `lock.acquire()` 判据失效 → 第二个实例建了界面; `_LOCK_OFFSET` 改回 0 → 记录读不到。
+- **实测数字**(打包版 onedir, 用 `GetForegroundWindow` 量): 第二版(只有 deiconify/lift) `iconic 1 → 0`(恢复成可见)但前台仍是编辑器; 第三版(加上交前台权限)前台窗口变成 `存档管理工具`, 日志里 `granted=True handled=True`, 两边的日志行带同一个 `pid=… at=…`(对得上就是同一次双击)。
 - **验收(打包版, 2026-10-12 两个产物各测一遍; onedir 上又用 "前台窗口标题" 量了一遍, 全绿)**:
   - 第一个实例: 起来并保持存活, 日志里 `界面启动` 正好一条; 数据目录下 `instance.lock` 出现(记录是 `pid=<A 的进程号> version=0.0.1`)。
   - 第二个实例: **不建界面**(日志里没有第二条 `界面启动`)、写下请求并退出, **退出码 3**(不再弹模态框, 所以这个码现在也量得着); 两边的日志成对出现且 `pid=… at=…` 相同。
@@ -2980,208 +2501,143 @@ macOS 桌面只有约 1024x768, 旧下限比它还宽 → 窗口管理器把窗�
 
 ### 49.2 删掉最后一款游戏后要回主页(不再留在详情页)
 
-- **现象**: 库里只有一款游戏时打开它的详情页, 在"游戏管理"里删掉它 —— 游戏没了, 界面却还留在详情页:
-  标题写着"未选择游戏"、备份列表只剩一行占位, 用户既看不到游戏库、也看不到"还没有游戏"的下一步动作。
-- **根因**: `_show_empty_list()`(删空 / 外部删除 / 选中项消失 / 启动时无游戏, 四条路都走它)只把**控件**复位,
-  从不改 `self._page`; 而详情页是围绕"某一款游戏"建的, 游戏没了它就是空壳。
-- **落点**: 规则加在 `_show_empty_list()` 的**最后一步**(`if self._page is AppPage.DETAIL:` → `_show_page(HOME)`)
-  —— 一处覆盖四条路径; 启动阶段本就在主页, 这一步是空操作; 放最后是因为上面那串复位是给详情页控件做的,
-  先跳页再改就白改了。
-- **守卫**: `tests/integration/test_gui_backup_restore.py::test_deleting_the_only_game_from_the_detail_page_goes_back_home`
-  (先断言"详情页真的打开了", 再删唯一一款, 然后量三件事: 页面变回主页 / 详情页收起 / 主页给出自己的空状态 ——
-  一条游戏行都没有、并且摆出"去游戏发现")。**咬合验证**: 那一行改成恒假 ⇒ 当场红
-  (`<AppPage.DETAIL> is not <AppPage.HOME>`)。
-- **注意**: 同场景的老用例(`test_deleting_last_game_clears_hero_panel`, 走主页那条路)照旧绿 —— 两条一起看才
-  说明"规则只在详情页生效", 而不是把所有删空场景都改道。
-- **验收**: 真 Tk 窗口的集成用例(不是替身); 打包版这一条要人点进去(游戏主页 → 打开详情 → 游戏管理 → 删除游戏),
-  没法脚本化 —— 留给用户在自己那份产物上确认一次。
+- **现象**: 库里只有一款游戏时打开它的详情页, 在"游戏管理"里删掉它 —— 游戏没了, 界面却还留在详情页: 标题写着"未选择游戏"、备份列表只剩一行占位, 用户既看不到游戏库、也看不到"还没有游戏"的下一步动作。
+- **根因**: `_show_empty_list()`(删空 / 外部删除 / 选中项消失 / 启动时无游戏, 四条路都走它)只把**控件**复位, 从不改 `self._page`; 而详情页是围绕"某一款游戏"建的, 游戏没了它就是空壳。
+- **落点**: 规则加在 `_show_empty_list()` 的**最后一步**(`if self._page is AppPage.DETAIL:` → `_show_page(HOME)`) —— 一处覆盖四条路径; 启动阶段本就在主页, 这一步是空操作; 放最后是因为上面那串复位是给详情页控件做的, 先跳页再改就白改了。
+- **守卫**: `tests/integration/test_gui_backup_restore.py::test_deleting_the_only_game_from_the_detail_page_goes_back_home` (先断言"详情页真的打开了", 再删唯一一款, 然后量三件事: 页面变回主页 / 详情页收起 / 主页给出自己的空状态 ——一条游戏行都没有、并且摆出"去游戏发现")。**咬合验证**: 那一行改成恒假 ⇒ 当场红 (`<AppPage.DETAIL> is not <AppPage.HOME>`)。
+- **注意**: 同场景的老用例(`test_deleting_last_game_clears_hero_panel`, 走主页那条路)照旧绿 —— 两条一起看才说明"规则只在详情页生效", 而不是把所有删空场景都改道。
+- **验收**: 真 Tk 窗口的集成用例(不是替身); 打包版这一条要人点进去(游戏主页 → 打开详情 → 游戏管理 → 删除游戏), 没法脚本化 —— 留给用户在自己那份产物上确认一次。
 
 ### 49.3 这一轮的教训
 
-- **"不能多开"要拦在建窗口之前**: 拦在窗口起来之后, 用户会先看到第二个窗口再被关掉, 而他可能已经在里面点了
-  东西。现在的顺序是"拿锁 → 失败就提示并退出"。
-- **启动路径上的锁必须能靠"进程消失"自己解开**: 启动闸门最怕"上次崩了, 这次也进不去"。选 OS 级锁而不是
-  "锁文件存在即占用", 就是为了让这个失效模式压根不存在。
-- **提示里能带排查用的标识就带上**: 第一版只能说"未知", 是锁的位置挑错了; 现在锁与请求两边都带
-  `pid=… version=…` / `pid=… at=…`, 各自落在自己的日志里, 排查时能直接对上是哪个进程、哪一次双击。
-- **多余的一步就是多余**: 第一版给第二个实例弹了一句"已经开着了" —— 功能上没错, 但用户双击的意图是"我要用
-  这个软件", 而它已经开着了; 弹框只是把责任推回给用户(他自己去找那个窗口)。改成"直接叫到前台"后, 第二个实例连
-  图形栈都不需要碰, 顺带把"模态框会把进程挂住、退出码量不到"那条老坑一起消掉了。
-- **"能恢复可见"不等于"跳到前台"**: 窗口从最小化回来了、但是前台焦点仍在别的软件手上 —— 只有用探针量
-  `GetForegroundWindow` 才看得见这个差别。这条直接定义了要不要写平台专属代码(要)。
-- **守卫不许碰真实数据目录**(2026-10-13 实测撞上): `test_a_packaged_build_opens_the_window_when_started_without_arguments`
-  为了"argv 里一个参数都没有"而不传 `--root`, 于是默认路径落到**真实用户数据目录** —— 用户机器上正开着
-  这个软件时, 单实例闸门把界面挡掉, 用例就变成了"看运气"(当天就是这么红的: 那份日志里还留着
-  `已有实例在运行(…\AppData\Local\ArchiveManagement\instance.lock)`)。现在把 `ApplicationPaths.default`
-  替成临时根 —— 顺带一条副产品: 那次撞车正好证明**用户那边跑着的实例真的被叫到前台了**(`handled=True`)。
-- **平台专属代码的写法跟着仓库既有套路走**: 逐行 `# platform: windows - …` 标记(覆盖率按平台排除) +
-  `getattr(ctypes, "WinDLL")` 取加载器(typeshed 里它按平台收, 直接写会让另一平台的 mypy 报错)。
-- **手册里连"命令行"三个字都不能写**: `wiki/10` 第一稿顺手写了"给快捷方式或命令行加上环境变量…", 被
-  `test_wiki_sync::test_pages_stay_free_of_the_command_line` 当场拦下(手册面向"不碰命令行的用户",
-  写成命令行用法等于告诉用户"想用得先装 Python")。逃生门因此只留在 `docs/development.md`。
+- **"不能多开"要拦在建窗口之前**: 拦在窗口起来之后, 用户会先看到第二个窗口再被关掉, 而他可能已经在里面点了东西。现在的顺序是"拿锁 → 失败就提示并退出"。
+- **启动路径上的锁必须能靠"进程消失"自己解开**: 启动闸门最怕"上次崩了, 这次也进不去"。选 OS 级锁而不是 "锁文件存在即占用", 就是为了让这个失效模式压根不存在。
+- **提示里能带排查用的标识就带上**: 第一版只能说"未知", 是锁的位置挑错了; 现在锁与请求两边都带 `pid=… version=…` / `pid=… at=…`, 各自落在自己的日志里, 排查时能直接对上是哪个进程、哪一次双击。
+- **多余的一步就是多余**: 第一版给第二个实例弹了一句"已经开着了" —— 功能上没错, 但用户双击的意图是"我要用这个软件", 而它已经开着了; 弹框只是把责任推回给用户(他自己去找那个窗口)。改成"直接叫到前台"后, 第二个实例连图形栈都不需要碰, 顺带把"模态框会把进程挂住、退出码量不到"那条老坑一起消掉了。
+- **"能恢复可见"不等于"跳到前台"**: 窗口从最小化回来了、但是前台焦点仍在别的软件手上 —— 只有用探针量 `GetForegroundWindow` 才看得见这个差别。这条直接定义了要不要写平台专属代码(要)。
+- **守卫不许碰真实数据目录**(2026-10-13 实测撞上): `test_a_packaged_build_opens_the_window_when_started_without_arguments` 为了"argv 里一个参数都没有"而不传 `--root`, 于是默认路径落到**真实用户数据目录** —— 用户机器上正开着这个软件时, 单实例闸门把界面挡掉, 用例就变成了"看运气"(当天就是这么红的: 那份日志里还留着 `已有实例在运行(…\AppData\Local\ArchiveManagement\instance.lock)`)。现在把 `ApplicationPaths.default` 替成临时根 —— 顺带一条副产品: 那次撞车正好证明**用户那边跑着的实例真的被叫到前台了**(`handled=True`)。
+- **平台专属代码的写法跟着仓库既有套路走**: 逐行 `# platform: windows - …` 标记(覆盖率按平台排除) + `getattr(ctypes, "WinDLL")` 取加载器(typeshed 里它按平台收, 直接写会让另一平台的 mypy 报错)。
+- **手册里连"命令行"三个字都不能写**: `wiki/10` 第一稿顺手写了"给快捷方式或命令行加上环境变量…", 被 `test_wiki_sync::test_pages_stay_free_of_the_command_line` 当场拦下(手册面向"不碰命令行的用户", 写成命令行用法等于告诉用户"想用得先装 Python")。逃生门因此只留在 `docs/development.md`。
 
-**本轮门禁(2026-10-12)**: `ruff check` / `ruff format --check`(302 文件) / `mypy`(252 文件) 全绿;
-`pytest tests/unit` 2455 passed / 8 skipped; 平台感知覆盖率口径(`coverage_platform.py write` → `coverage run`
-→ `coverage report`) **100%**(2836 passed / 9 skipped, 行与分支 0 未覆盖); 打包产物 onedir 与 onefile 各跑一遍
-§49.1 的验收(含"前台窗口标题变成应用名"那条), 全绿。
+**本轮门禁(2026-10-12)**: `ruff check` / `ruff format --check`(302 文件) / `mypy`(252 文件) 全绿; `pytest tests/unit` 2455 passed / 8 skipped; 平台感知覆盖率口径(`coverage_platform.py write` → `coverage run` → `coverage report`) **100%**(2836 passed / 9 skipped, 行与分支 0 未覆盖); 打包产物 onedir 与 onefile 各跑一遍 §49.1 的验收(含"前台窗口标题变成应用名"那条), 全绿。
 
-**这条本轮学到的两件事**: ①**做完就量,别拿"看着像"交差** —— 第二版把窗口恢复成可见就当事成了,
-直到用 `GetForegroundWindow` 量才发现前台压根没过去; ②**平台标记行必须单行**: 一次重排把
-`getattr(ctypes, "WinDLL", None)` 拆成三行、标记落在括号那行上 —— 另两行就不在排除范围里, 到了 Linux
-的覆盖率作业上会成为两个"永远不执行"的缺口。现在那几行都写成短单行 + 短原因。
+**这条本轮学到的两件事**: ①**做完就量,别拿"看着像"交差** —— 第二版把窗口恢复成可见就当事成了, 直到用 `GetForegroundWindow` 量才发现前台压根没过去; ②**平台标记行必须单行**: 一次重排把 `getattr(ctypes, "WinDLL", None)` 拆成三行、标记落在括号那行上 —— 另两行就不在排除范围里, 到了 Linux 的覆盖率作业上会成为两个"永远不执行"的缺口。现在那几行都写成短单行 + 短原因。
 
-**同一轮的收尾(2026-10-13, 用户要求)**: push 那份忽略清单上的 `&ci_ignore_patterns` **根本没人引用**
-(PR 侧是块状字符串过滤器, 锚点进不去), 已删掉 —— 那条"忽略清单用锚点声明一次"的断言换成"它是普通键 +
-与 PR 侧逐条对齐"。顺带修掉两处**守卫对注释过敏**的毛病: ①`workflow.split("filters: |")` 会被注释里提
-一句同名串切歪(切完 PR 侧集合是空的, 报出来却是"两边不一致", 排查方向被带跑); ②
-`workflow.count("dorny/paths-filter")` 把注释里提的名字也数进去(判成"实现了两份")。两处都改成按**整行**
-找(`re.split` 的行锚点、数 `uses:` 行数)。**教训**: 文本判据别拿裸子串切/数 —— 注释里提一句同样的字,
-它就会指错地方。
+**同一轮的收尾(2026-10-13, 用户要求)**: push 那份忽略清单上的 `&ci_ignore_patterns` **根本没人引用** (PR 侧是块状字符串过滤器, 锚点进不去), 已删掉 —— 那条"忽略清单用锚点声明一次"的断言换成"它是普通键 + 与 PR 侧逐条对齐"。顺带修掉两处**守卫对注释过敏**的毛病: ①`workflow.split("filters: |")` 会被注释里提一句同名串切歪(切完 PR 侧集合是空的, 报出来却是"两边不一致", 排查方向被带跑); ② `workflow.count("dorny/paths-filter")` 把注释里提的名字也数进去(判成"实现了两份")。两处都改成按**整行** 找(`re.split` 的行锚点、数 `uses:` 行数)。**教训**: 文本判据别拿裸子串切/数 —— 注释里提一句同样的字, 它就会指错地方。
 
 ## 50. 选择框的内容能被手删(2026-10-13, 用户实测)
 
-- **现象**(用户原话): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成误会"。选择框(下拉框)
-  的值来自列表选项, 而 CustomTkinter 的 `CTkComboBox` 内部是个**可编辑的 Entry** —— 不显式写
-  `state="readonly"` 就能把文字选中删掉。删掉之后**实际生效的值没变**(它还在那个选项上), 屏幕上却变成
-  空白: 看着像"没选", 筛选却照旧生效。
-- **根因不是库的问题**: CTk 自己就把 readonly 当成正常用法(`set()` 会临时切回 normal 再写回 readonly,
-  实测 Tk 对 readonly 的 `insert`/`delete` 是**静默忽略**)。是仓库里只有三处写了 readonly
-  (`main_window._new_combo`、设置的语言/校验方式), 剩下四处漏了: 主页的筛选框与每页条数、游戏发现的筛选、
-  设置的字号、批量导入每行的"目标游戏"。
-- **落点**: 漏的那四处各加 `state="readonly"`; 批量导入那行**启用态从 `normal` 改成 `readonly`**
-  (`_paint_batch_row`; 它旁边的说明是 `CTkLabel`, 两者接受的 state 不是一个集合, 分开写);
-  **唯一保留可输入的是定时任务窗口的"游戏选择框"** —— 它要的是"输入即筛选"(有 `on_key` 在收窄候选,
-  wiki 第 5 章也写了这条), 就地标 `# 可输入: 输入即筛选(见下面的 on_key)`。
+- **现象**(用户原话): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成误会"。选择框(下拉框) 的值来自列表选项, 而 CustomTkinter 的 `CTkComboBox` 内部是个**可编辑的 Entry** —— 不显式写 `state="readonly"` 就能把文字选中删掉。删掉之后**实际生效的值没变**(它还在那个选项上), 屏幕上却变成空白: 看着像"没选", 筛选却照旧生效。
+- **根因不是库的问题**: CTk 自己就把 readonly 当成正常用法(`set()` 会临时切回 normal 再写回 readonly, 实测 Tk 对 readonly 的 `insert`/`delete` 是**静默忽略**)。是仓库里只有三处写了 readonly (`main_window._new_combo`、设置的语言/校验方式), 剩下四处漏了: 主页的筛选框与每页条数、游戏发现的筛选、设置的字号、批量导入每行的"目标游戏"。
+- **落点**: 漏的那四处各加 `state="readonly"`; 批量导入那行**启用态从 `normal` 改成 `readonly`** (`_paint_batch_row`; 它旁边的说明是 `CTkLabel`, 两者接受的 state 不是一个集合, 分开写); **唯一保留可输入的是定时任务窗口的"游戏选择框"** —— 它要的是"输入即筛选"(有 `on_key` 在收窄候选, wiki 第 5 章也写了这条), 就地标 `# 可输入: 输入即筛选(见下面的 on_key)`。
 - **守卫**:
-  - 结构(单测): `tests/unit/test_ui_widgets.py::test_every_picker_combobox_is_read_only` 扫
-    `src/archive_management/ui` 里每个 `ctk.CTkComboBox(` 调用片段(括号配对取出来), 要求要么带
-    `state="readonly"`、要么带` # 可输入: <原因>`(原因至少 5 个字); 并自检"至少扫到 8 处", 免得改名后
-    判据静默失效。
-  - 行为(集成): 主页与设置窗口各一条 —— 量控制是不是 readonly, 再真的 `_entry.delete`/`insert`
-    一遍, 断言文字没变(与真实按键走同一条路)。
+  - 结构(单测): `tests/unit/test_ui_widgets.py::test_every_picker_combobox_is_read_only` 扫 `src/archive_management/ui` 里每个 `ctk.CTkComboBox(` 调用片段(括号配对取出来), 要求要么带 `state="readonly"`、要么带` # 可输入: <原因>`(原因至少 5 个字); 并自检"至少扫到 8 处", 免得改名后判据静默失效。
+  - 行为(集成): 主页与设置窗口各一条 —— 量控制是不是 readonly, 再真的 `_entry.delete`/`insert` 一遍, 断言文字没变(与真实按键走同一条路)。
   - 既有那条"目标下拉框只在合并时可用"的断言从 `normal` 改成 `readonly`(`tests/unit/test_dialogs.py`)。
-- **咬合验证**: 拿掉 `_combo` 上的 readonly → 结构条与主页那条**同时**红(前者点名
-  `home_page.py:769`); 把 `_paint_batch_row` 改回 `normal` → 目标框那条红; 抹掉定时任务那处的
-  `# 可输入` → 结构条点名 `schedule_window.py:221`。三处都已复原。
-- **教训**: 库的"可选参数"就是默认会被漏的开关 —— 四处漏了三处是同一个错(写的人根本不知道要写)。
-  一处一处补上没有意义, 得把规则写成**扫源码的守卫**: 新加选择框时漏写 readonly 当场报错, 而"确实要输入"
-  的地方被逼着写清理由。另外: 判据要自检"扫到了东西", 否则一次重命名就能让它变成永远绿的。
+- **咬合验证**: 拿掉 `_combo` 上的 readonly → 结构条与主页那条**同时**红(前者点名 `home_page.py:769`); 把 `_paint_batch_row` 改回 `normal` → 目标框那条红; 抹掉定时任务那处的 `# 可输入` → 结构条点名 `schedule_window.py:221`。三处都已复原。
+- **教训**: 库的"可选参数"就是默认会被漏的开关 —— 四处漏了三处是同一个错(写的人根本不知道要写)。一处一处补上没有意义, 得把规则写成**扫源码的守卫**: 新加选择框时漏写 readonly 当场报错, 而"确实要输入" 的地方被逼着写清理由。另外: 判据要自检"扫到了东西", 否则一次重命名就能让它变成永远绿的。
 
 ## 51. 选择框"选不可选" + 主页搜索框"边打字边筛"(2026-10-13, 用户实测追加)
 
-- **要求一(用户原话)**: "多选框的内容能否让其也不可选中"。§50 的 `state="readonly"` 只挡住**改写**:
-  readonly 的 Tk Entry 照样允许拖选、双击选词, 屏幕上出现蓝底高亮与插入符 —— 看着仍然像"这里能改"。
-- **口径落到一处**: `src/archive_management/ui/widgets.py` 新增 `apply_picker_defaults()`(库级补丁,
-  与 `install_keyboard_support` / `window_icon` 同一套"调用点不需要记得做什么"的做法):
+- **要求一(用户原话)**: "多选框的内容能否让其也不可选中"。§50 的 `state="readonly"` 只挡住**改写**: readonly 的 Tk Entry 照样允许拖选、双击选词, 屏幕上出现蓝底高亮与插入符 —— 看着仍然像"这里能改"。
+- **口径落到一处**: `src/archive_management/ui/widgets.py` 新增 `apply_picker_defaults()`(库级补丁, 与 `install_keyboard_support` / `window_icon` 同一套"调用点不需要记得做什么"的做法):
   - 没写 `state` 的选择框 ⇒ 一律 `readonly`(Tk 对 readonly 的 `insert`/`delete` 静默忽略, 实测);
-  - `readonly`/默认的再 `_lock_text_selection()`: 点文字 = **打开列表**, 拖动/双击/三击/带修饰键的点选
-    一并吃掉;
-  - 明确写 `state="normal"` 的例外不动(定时任务窗口的游戏选择框, 就地补上 `state="normal"`),
-    `state="disabled"` 也不动。
+  - `readonly`/默认的再 `_lock_text_selection()`: 点文字 = **打开列表**, 拖动/双击/三击/带修饰键的点选一并吃掉;
+  - 明确写 `state="normal"` 的例外不动(定时任务窗口的游戏选择框, 就地补上 `state="normal"`), `state="disabled"` 也不动。
 - **改之前先量库内情**(两次量错、两次改口径):
-  - `CTkComboBox` **没有** `_button`: 箭头是画在它自己的 `_canvas` 上的, 点击由
-    `_canvas.tag_bind("dropdown_arrow", "<Button-1>", self._clicked)` 接住 —— 所以"点文字"要调
-    `combo._clicked()`(它自带禁用态判断与"列表开着就收起"的切换), 而不是去 invoke 一颗不存在的按钮。
-  - 只吃掉 `<Button-1>` **不够**: 探针里"按下 → 选中=0, 浮层=开"看着已经对了, 但紧接着
-    `<B1-Motion>` 让 `selection_present()` 变成 1 —— readonly 的 Entry **没有按下**也照样拖出选区
-    (Tk 从插入光标处开始选)。于是把 `_SELECTION_ONLY_EVENTS` 整族吃掉, 再量: 按下/拖动/松开之后
-    `sel` 恒为 0 且浮层开着。
+  - `CTkComboBox` **没有** `_button`: 箭头是画在它自己的 `_canvas` 上的, 点击由 `_canvas.tag_bind("dropdown_arrow", "<Button-1>", self._clicked)` 接住 —— 所以"点文字"要调 `combo._clicked()`(它自带禁用态判断与"列表开着就收起"的切换), 而不是去 invoke 一颗不存在的按钮。
+  - 只吃掉 `<Button-1>` **不够**: 探针里"按下 → 选中=0, 浮层=开"看着已经对了, 但紧接着 `<B1-Motion>` 让 `selection_present()` 变成 1 —— readonly 的 Entry **没有按下**也照样拖出选区 (Tk 从插入光标处开始选)。于是把 `_SELECTION_ONLY_EVENTS` 整族吃掉, 再量: 按下/拖动/松开之后 `sel` 恒为 0 且浮层开着。
 - **守卫**:
-  - 结构(单测): `test_editable_comboboxes_have_to_say_why` —— 默认值搬进补丁之后, 这条改为守**例外**:
-    调用片段里出现 `state="normal"`(或任何非 readonly/disabled 的 state)就必须紧跟
-    `# 可输入: <原因>`; 另外 `test_the_picker_defaults_are_installed_at_import` 断言
-    `apply_picker_defaults()` 第二次调用返回 `False`(证明它在导入时就装上了、且幂等)。
-  - 行为(集成, `test_gui_dropdown.py`): ① 建一个**裸** `ctk.CTkComboBox` —— 必须已经是 readonly
-    (程序 `insert` 无效), 而 `state="normal"` / `"disabled"` 两个例外不受影响; ② 在真窗口里喂
-    "按下 → 拖动 → 松开", 断言 `selection_present() == 0` **且**列表已经打开(两条一起才叫"点文字 = 点箭头")。
-- **咬合验证(3 次)**: 拆掉按下那条接线 → 红在"点文字没打开列表"; 只留按下、拆掉拖选拦截 → 红在
-  "选择框的文字被拖选出来了"; 不再强制 readonly → 红在"裸控件是 normal"; 抹掉定时任务那处的
-  `# 可输入` → 结构条点名 `schedule_window.py:222`。四处都已复原。
-- **要求二(用户原话)**: "首页搜索游戏名的搜索框...完全不起作用, 不管是输入游戏原名还是修改过的名称或
-  识别到的汉化名称均无搜索效果, 所有游戏还是都显示着"。
+  - 结构(单测): `test_editable_comboboxes_have_to_say_why` —— 默认值搬进补丁之后, 这条改为守**例外**: 调用片段里出现 `state="normal"`(或任何非 readonly/disabled 的 state)就必须紧跟 `# 可输入: <原因>`; 另外 `test_the_picker_defaults_are_installed_at_import` 断言 `apply_picker_defaults()` 第二次调用返回 `False`(证明它在导入时就装上了、且幂等)。
+  - 行为(集成, `test_gui_dropdown.py`): ① 建一个**裸** `ctk.CTkComboBox` —— 必须已经是 readonly (程序 `insert` 无效), 而 `state="normal"` / `"disabled"` 两个例外不受影响; ② 在真窗口里喂 "按下 → 拖动 → 松开", 断言 `selection_present() == 0` **且**列表已经打开(两条一起才叫"点文字 = 点箭头")。
+- **咬合验证(3 次)**: 拆掉按下那条接线 → 红在"点文字没打开列表"; 只留按下、拆掉拖选拦截 → 红在 "选择框的文字被拖选出来了"; 不再强制 readonly → 红在"裸控件是 normal"; 抹掉定时任务那处的 `# 可输入` → 结构条点名 `schedule_window.py:222`。四处都已复原。
+- **要求二(用户原话)**: "首页搜索游戏名的搜索框...完全不起作用, 不管是输入游戏原名还是修改过的名称或识别到的汉化名称均无搜索效果, 所有游戏还是都显示着"。
 - **根因两条, 都不是"筛选逻辑坏了"**:
-  1. **打字时压根没筛**: 主页搜索框只绑了 `<Return>`, 点「搜索」才走一次 —— 用户看着列表一动不动, 自然
-     认为搜索框坏了(回车那条路一直是通的, 集成用例 `test_home_page_filters_games_and_runs_actions` 一直绿)。
-  2. **搜索只比 `facts.name`**: 而库里那个名字可能已经被**译名写回**换掉了(`_rename_games` 会把
-     `name` 改成当前语言的译名, 录入时的原名只留在 `games.original_name`)。所以"输入游戏原名"本来就搜不到 ——
-     这一点仓库里早有先例: 批量导出对话框的筛选用的是"界面名或原名"(`models._matches_any`), 主页搜索漏了。
+  1. **打字时压根没筛**: 主页搜索框只绑了 `<Return>`, 点「搜索」才走一次 —— 用户看着列表一动不动, 自然认为搜索框坏了(回车那条路一直是通的, 集成用例 `test_home_page_filters_games_and_runs_actions` 一直绿)。
+  2. **搜索只比 `facts.name`**: 而库里那个名字可能已经被**译名写回**换掉了(`_rename_games` 会把 `name` 改成当前语言的译名, 录入时的原名只留在 `games.original_name`)。所以"输入游戏原名"本来就搜不到 ——这一点仓库里早有先例: 批量导出对话框的筛选用的是"界面名或原名"(`models._matches_any`), 主页搜索漏了。
 - **落点**:
-  - 主页: `_search_entry` 增绑 `<KeyRelease>` → `_schedule_search()`(防抖 `_SEARCH_DEBOUNCE_MS = 300`,
-    **合并而不是重新计时**, 与 `_schedule_list_sync` 同一条理由: 输入法一次提交一整串时"取消再计时"会被
-    无限推后); `_run_search()` 到期读**当前**文字筛一次; `_on_frame_destroyed` 与 `_clear_search` 都撤掉
-    挂起的搜索任务; `_submit_search()` 在词没变时直接返回(边打字边筛已经筛过, 回车/点按钮不该再查一遍库,
-    那一下还会把页码与选中行重置); `_render_filters` **不再回写**输入框 —— 生效的搜索词只可能来自输入框
-    本身(`_submit_search` 读它)或“清空”(两者一起清), 所以回写是多余的, 而它有害: 用户刚敲进去、防抖
-    还没到点的那半句会被别的重绘抹掉, 同值重写还会把光标挪到末尾、打断输入法正在拼的候选。
-    “框里空着、其实还在筛”这个形态改由**不变式用例**守着(见下), 不靠回写。
-  - 原名: `GameFacts.original_name`(新字段, 默认 `""`)+ `HomeFilter.matches` 两个名字都认;
-    `application/home.load_facts` 与演示后端各自填上它。
+  - 主页: `_search_entry` 增绑 `<KeyRelease>` → `_schedule_search()`(防抖 `_SEARCH_DEBOUNCE_MS = 300`, **合并而不是重新计时**, 与 `_schedule_list_sync` 同一条理由: 输入法一次提交一整串时"取消再计时"会被无限推后); `_run_search()` 到期读**当前**文字筛一次; `_on_frame_destroyed` 与 `_clear_search` 都撤掉挂起的搜索任务; `_submit_search()` 在词没变时直接返回(边打字边筛已经筛过, 回车/点按钮不该再查一遍库, 那一下还会把页码与选中行重置); `_render_filters` **不再回写**输入框 —— 生效的搜索词只可能来自输入框本身(`_submit_search` 读它)或“清空”(两者一起清), 所以回写是多余的, 而它有害: 用户刚敲进去、防抖还没到点的那半句会被别的重绘抹掉, 同值重写还会把光标挪到末尾、打断输入法正在拼的候选。“框里空着、其实还在筛”这个形态改由**不变式用例**守着(见下), 不靠回写。
+  - 原名: `GameFacts.original_name`(新字段, 默认 `""`)+ `HomeFilter.matches` 两个名字都认; `application/home.load_facts` 与演示后端各自填上它。
 - **守卫与咬合**:
-  - 集成 `test_typing_in_the_home_search_box_filters_without_pressing_enter`: 喂**真实** `<KeyRelease>`
-    事件(不是直接调 `_on_search_key`), 等防抖到期后断言行集合缩到一款; 顺带断言"词没变再回车不会重置选中行";
-    **第一条版本是假绿** —— 拆掉 binding 它照样过(因为它直接调了处理函数), 咬合时抓出来, 改成喂事件;
-    喂事件又踩到"合成键盘事件走**焦点**窗口"(文档里早写着), 于是先 `_entry.focus_force()`。
-  - 单测 `test_live_search_*`: 用替身宿主帧驱动真实 `_schedule_search`/`_run_search` —— 连打 50 次只排一个
-    任务、**一次都不撤销**、防抖窗口在 (0, 500] ms 内; 宿主帧销毁那条同时撤掉同步任务与搜索任务。
-  - 单测 + 真实库用例: `test_search_also_matches_the_recorded_original_name`(域层)与
-    `test_search_finds_a_renamed_game_by_its_recorded_original_name`(`update_game` 改名后搜原名)。
-  - 咬合: 拆掉 `<KeyRelease>` 接线 → 红; 改成"取消再重新计时" → 合并语义两条红; 把 `matches` 改回只比
-    `name` → 域层与真实库两条红。都已复原。
+  - 集成 `test_typing_in_the_home_search_box_filters_without_pressing_enter`: 喂**真实** `<KeyRelease>` 事件(不是直接调 `_on_search_key`), 等防抖到期后断言行集合缩到一款; 顺带断言"词没变再回车不会重置选中行"; **第一条版本是假绿** —— 拆掉 binding 它照样过(因为它直接调了处理函数), 咬合时抓出来, 改成喂事件; 喂事件又踩到"合成键盘事件走**焦点**窗口"(文档里早写着), 于是先 `_entry.focus_force()`。
+  - 单测 `test_live_search_*`: 用替身宿主帧驱动真实 `_schedule_search`/`_run_search` —— 连打 50 次只排一个任务、**一次都不撤销**、防抖窗口在 (0, 500] ms 内; 宿主帧销毁那条同时撤掉同步任务与搜索任务。
+  - 单测 + 真实库用例: `test_search_also_matches_the_recorded_original_name`(域层)与 `test_search_finds_a_renamed_game_by_its_recorded_original_name`(`update_game` 改名后搜原名)。
+  - 咬合: 拆掉 `<KeyRelease>` 接线 → 红; 改成"取消再重新计时" → 合并语义两条红; 把 `matches` 改回只比 `name` → 域层与真实库两条红。都已复原。
 - **环境实测的坑(记下来)**:
-  - `event_generate("<KeyRelease>")` 不先把焦点交给控件就**不会**走到它的绑定上(合成键盘事件按焦点窗口
-    派发), 而且此时用例会以"没筛"的方式红 —— 看起来像产品的错。
-  - 共享池里的选择框会带着上一次用例留下的 `_close_on_next_click = True`(浮层被拆掉时它的回调没跑),
-    于是"点文字"变成**收起**而不是打开 —— 新用例自己把开关拨回"关着"再量。
-  - 成本复核: `load_facts`(含每个存档路径的可用性探测)在 2000 款规模实测 0.13s(`performance-results.csv`),
-    边打字边筛按 300ms 一批落在这个量级上可以接受, 因此没有为它引入缓存。
-- **教训**: ① "把默认值写在类上"比"每个调用点都记得写"强得多 —— 但**例外**要在源码里写明理由, 否则下一个
-  人只会看到"这处跟别处不一样"; ② 用户报"某个功能完全没反应"时, 先分清是**逻辑坏了**还是**触发条件与
-  预期不同**(这里是"只在回车时筛" vs "打字就该筛"), 两者修的地方完全不一样; ③ 改默认值这类口径一定要顺手跑一遍**全量** —— 本轮的 100% 覆盖率门禁当场咬出两处:
-  一条集成用例建的是**裸** `CTkComboBox` 却要往里打字(已改成显式 `state="normal"`, 与仓库纪律一致),
-  以及 `_render_filters` 回写输入框那两行在全量下**不可达**(回写本身也真的有害, 已删并换成不变式用例);
-  ④ 驱动界面行为的用例必须走
-  **真实接线**(喂事件), 直接调处理函数只能测到"处理函数自己是对的"。
+  - `event_generate("<KeyRelease>")` 不先把焦点交给控件就**不会**走到它的绑定上(合成键盘事件按焦点窗口派发), 而且此时用例会以"没筛"的方式红 —— 看起来像产品的错。
+  - 共享池里的选择框会带着上一次用例留下的 `_close_on_next_click = True`(浮层被拆掉时它的回调没跑), 于是"点文字"变成**收起**而不是打开 —— 新用例自己把开关拨回"关着"再量。
+  - 成本复核: `load_facts`(含每个存档路径的可用性探测)在 2000 款规模实测 0.13s(`performance-results.csv`), 边打字边筛按 300ms 一批落在这个量级上可以接受, 因此没有为它引入缓存。
+- **教训**: ① "把默认值写在类上"比"每个调用点都记得写"强得多 —— 但**例外**要在源码里写明理由, 否则下一个人只会看到"这处跟别处不一样"; ② 用户报"某个功能完全没反应"时, 先分清是**逻辑坏了**还是**触发条件与预期不同**(这里是"只在回车时筛" vs "打字就该筛"), 两者修的地方完全不一样; ③ 改默认值这类口径一定要顺手跑一遍**全量** —— 本轮的 100% 覆盖率门禁当场咬出两处: 一条集成用例建的是**裸** `CTkComboBox` 却要往里打字(已改成显式 `state="normal"`, 与仓库纪律一致), 以及 `_render_filters` 回写输入框那两行在全量下**不可达**(回写本身也真的有害, 已删并换成不变式用例); ④ 驱动界面行为的用例必须走 **真实接线**(喂事件), 直接调处理函数只能测到"处理函数自己是对的"。
 
 ## 52. 搜索框"彻底没反应"的真根因: 占位文字 + 我们的键盘接线把它顶掉了(2026-10-14, 用户实测)
 
-- **现象(用户原话)**: "不管在首页的列表模式下还是在海报模式下, 使用搜索框均无反应, 我是指不管是输入时
-  没有筛选游戏, 手动点击搜索或用回车均无反应, 而且这个输入框内的内容还是可选可编辑, 且没有在我输入内容时
-  自动消失"。**四条症状同一个根因**, §51 那轮改的东西(防抖/回车/原名)一条都没生效 —— 因为**文字压根没
-  进到 Entry 里**。
+- **现象(用户原话)**: "不管在首页的列表模式下还是在海报模式下, 使用搜索框均无反应, 我是指不管是输入时没有筛选游戏, 手动点击搜索或用回车均无反应, 而且这个输入框内的内容还是可选可编辑, 且没有在我输入内容时自动消失"。**四条症状同一个根因**, §51 那轮改的东西(防抖/回车/原名)一条都没生效 —— 因为**文字压根没进到 Entry 里**。
 - **量到的真相(临时探针, 真打字 `<KeyPress>`, 未修时)**:
-  - `inner='ab输入游戏名称后回车'` / `ctk_get=''` / `placeholder_active=True` —— 用户敲的字接在**提示文案
-    后面**, 而 CTk 的 `get()` 在占位激活时**恒返回空**;
+  - `inner='ab输入游戏名称后回车'` / `ctk_get=''` / `placeholder_active=True` —— 用户敲的字接在**提示文案后面**, 而 CTk 的 `get()` 在占位激活时**恒返回空**;
   - 点一下输入框、`focus_force()` 都不取消占位(`placeholder_active` 仍是 `True`)。
 - **根因两件事叠在一起**:
-  1. `CTkEntry` 的 `placeholder_text` **不是提示层, 而是真写进 Entry 的内容**(`_activate_placeholder` 里
-     `_entry.insert(0, 提示文案)`), 靠它自己的 `<FocusIn>`(`_entry_focus_in` → `_deactivate_placeholder`)取消;
-  2. `ui/keyboard.py` 的 `make_reachable` 往内层控件绑事件时写的是 `inner.bind("<FocusIn>", ...)`
-     —— **不带 `add="+"` 就是替换** ⇒ CTk 那条处理被顶掉, 占位永远取消不掉。同一个坑还坑着批量导出/导入
-     对话框顶部的筛选框(它也带占位文字)。
-     于是: 框里看着有字(`inner` 里是提示 + 用户敲的字)、`get()` 却是空 ⇒ 回车/点"搜索"读到空串 ⇒
-     `_submit_search` 判定"词没变"直接返回(§51 加的那条早退) ⇒ 用户看到的是"点了完全没反应"。
-- **为什么上一轮的守卫没抓到**: 搜索用例是 `page._search_entry.insert(0, "山海")` —— 直接走 CTk 的
-  `insert()`(它会取消占位), **绕过了真实输入路径**; 而 `<KeyRelease>` 又是合成出来直接喂给控件的。用例全绿,
-  用户按真键盘一个字都进不去。**这是"守卫假绿"的第二种形态: 量具本身把被测路径短路了。**
-- **修法**: `make_reachable` 里四条绑定全部 `add="+"`(`<FocusIn>`/`<FocusOut>`/`<space>`/`<Return>`)——
-  类级补丁只能往后加, 不许顶掉控件自己的接线; 顺带把主页搜索框同时盯上 `<KeyPress>`(中文是**输入法提交**
-  的, 提交那一下走带字符的那条, 只绑 `<KeyRelease>` 会让"打中文不筛"再被报一次)、`<<Paste>>`、`<<Clear>>`。
+  1. `CTkEntry` 的 `placeholder_text` **不是提示层, 而是真写进 Entry 的内容**(`_activate_placeholder` 里 `_entry.insert(0, 提示文案)`), 靠它自己的 `<FocusIn>`(`_entry_focus_in` → `_deactivate_placeholder`)取消;
+  2. `ui/keyboard.py` 的 `make_reachable` 往内层控件绑事件时写的是 `inner.bind("<FocusIn>", ...)` —— **不带 `add="+"` 就是替换** ⇒ CTk 那条处理被顶掉, 占位永远取消不掉。同一个坑还坑着批量导出/导入对话框顶部的筛选框(它也带占位文字)。于是: 框里看着有字(`inner` 里是提示 + 用户敲的字)、`get()` 却是空 ⇒ 回车/点"搜索"读到空串 ⇒ `_submit_search` 判定"词没变"直接返回(§51 加的那条早退) ⇒ 用户看到的是"点了完全没反应"。
+- **为什么上一轮的守卫没抓到**: 搜索用例是 `page._search_entry.insert(0, "山海")` —— 直接走 CTk 的 `insert()`(它会取消占位), **绕过了真实输入路径**; 而 `<KeyRelease>` 又是合成出来直接喂给控件的。用例全绿, 用户按真键盘一个字都进不去。**这是"守卫假绿"的第二种形态: 量具本身把被测路径短路了。**
+- **修法**: `make_reachable` 里四条绑定全部 `add="+"`(`<FocusIn>`/`<FocusOut>`/`<space>`/`<Return>`)——类级补丁只能往后加, 不许顶掉控件自己的接线; 顺带把主页搜索框同时盯上 `<KeyPress>`(中文是**输入法提交** 的, 提交那一下走带字符的那条, 只绑 `<KeyRelease>` 会让"打中文不筛"再被报一次)、`<<Paste>>`、`<<Clear>>`。
 - **守卫(两条, 都咬红过)**:
-  - `tests/integration/test_gui_keyboard.py::test_our_wiring_never_replaces_the_widgets_own_handlers`:
-    结构上断言 `_entry_focus_in` 还在 `<FocusIn>` 的绑定表里, 行为上**真敲一个键**后占位必须已取消、
-    `get()` 就是那个字;
-  - `tests/integration/test_gui_home.py::test_typing_into_the_search_box_really_reaches_the_filter`:
-    按用户的路子走一遍(显示窗口 → 聚焦 → 真按键 → 等防抖), 断言输入框里的字、生效的搜索词与列表(含海报
-    模式吃的 `board.games`)一起跟着变。
-  - 咬合: 把 `<FocusIn>` 那条改回不带 `add="+"` → 两条同时红(结构条点名"占位文字会永远取消不掉",
-    主页那条报 `assert '' == 'zz'` —— 与用户描述一字不差); 复原后绿。
-- **顺手落地的公共设施**: `tests/gui_support.type_text(root, target, text)` —— 走真实按键输入(先给焦点,
-  再合成 `<KeyPress>`/`<KeyRelease>`), `test_gui_undo.py` 里的私有实现改用它。**只认 ASCII**(Tk 没有中文
-  keysym, 传中文报 `unknown keysym`), 所以"打中文"的用例改用"名字里没有这串字 ⇒ 筛成空"这种断言。
-- **教训**: ① 类级补丁往**别人已有接线的控件**上绑事件, 一律 `add="+"` —— 覆盖式绑定会静默拆掉库自己的
-  机制(占位文字、输入法、撤销这类都挂在这些事件上), 而且坏得"看着像产品功能没做"; ② 用例的输入路径要
-  与用户一致: 量"打字有没有反应"必须真按键, `insert` 会把占位/输入法/撤销一起绕过(**守卫假绿比没有守卫
-  更贵**); ③ 同一份症状(§51 与 §52)连着来两轮, 说明上一轮只改了"触发条件", 没验"文字到底进没进得去"。
+  - `tests/integration/test_gui_keyboard.py::test_our_wiring_never_replaces_the_widgets_own_handlers`: 结构上断言 `_entry_focus_in` 还在 `<FocusIn>` 的绑定表里, 行为上**真敲一个键**后占位必须已取消、 `get()` 就是那个字;
+  - `tests/integration/test_gui_home.py::test_typing_into_the_search_box_really_reaches_the_filter`: 按用户的路子走一遍(显示窗口 → 聚焦 → 真按键 → 等防抖), 断言输入框里的字、生效的搜索词与列表(含海报模式吃的 `board.games`)一起跟着变。
+  - 咬合: 把 `<FocusIn>` 那条改回不带 `add="+"` → 两条同时红(结构条点名"占位文字会永远取消不掉", 主页那条报 `assert '' == 'zz'` —— 与用户描述一字不差); 复原后绿。
+- **顺手落地的公共设施**: `tests/gui_support.type_text(root, target, text)` —— 走真实按键输入(先给焦点, 再合成 `<KeyPress>`/`<KeyRelease>`), `test_gui_undo.py` 里的私有实现改用它。**只认 ASCII**(Tk 没有中文 keysym, 传中文报 `unknown keysym`), 所以"打中文"的用例改用"名字里没有这串字 ⇒ 筛成空"这种断言。
+- **教训**: ① 类级补丁往**别人已有接线的控件**上绑事件, 一律 `add="+"` —— 覆盖式绑定会静默拆掉库自己的机制(占位文字、输入法、撤销这类都挂在这些事件上), 而且坏得"看着像产品功能没做"; ② 用例的输入路径要与用户一致: 量"打字有没有反应"必须真按键, `insert` 会把占位/输入法/撤销一起绕过(**守卫假绿比没有守卫更贵**); ③ 同一份症状(§51 与 §52)连着来两轮, 说明上一轮只改了"触发条件", 没验"文字到底进没进得去"。
+
+## 53. 本地全量一律走并行分片脚本(含覆盖率模式), 并要求写进 instructions(2026-10-14, 用户要求)
+
+- **要求(用户原话)**: "每次完成修改获取全量结果时候用这个脚本来跑以节约时间, 将我的这条要求加入到`.github/instructions` 这里你认为合适的 skill 中, 如果都不合适允许新建"。
+- **落点**:
+  - 新建 `.github/instructions/local-full-run.instructions.md`(`applyTo: "**"` —— 这条规矩与具体文件无关, 四个既有 instructions 都按"改哪类文件"分, 没有能装"怎么跑全量"的); 里面写清: 全量一律 `scripts/run_tests_local.py`, 判覆盖率加`--coverage`, 单条/局部验证照旧直接跑 pytest, `--shard-count/--shard-index` 不许自己写, CI 不用这个脚本。
+  - `scripts/run_tests_local.py` 新增 `--coverage`: 每片 `coverage run --rcfile=<平台口径 rc> -m pytest` (各写 `.coverage.shard-<片>`, 同一份数据文件被两个进程写会互相冲掉), 收尾在日志目录 `combine`
+    - `report -m`, **报告退出码与各片退出码取最大值**当脚本退出码; rc 不在时先 `coverage_platform.py write` 生成; 顺带补上仓库其它脚本都有的 `ensure_utf8_output()`。命令/环境拼装抽成纯函数(`_shard_command` / `_shard_coverage_env`), rc 路径改成**相对仓库根**的绝对路径(不再看 cwd)。
+  - 文档: `docs/testing.md` 的分片一节、`CONTRIBUTING.md` 的覆盖率一节都加了这条快路与实测数字。
+- **实测(2026-10-14, 2850 条, 本机)**: 单进程 `coverage run … -m pytest` **14:48**(100%) → 双片 `--coverage` **13:05**(同样 2850 passed / 9 skipped, 覆盖率 100%, combine 两份数据 0 漏 0 部分)。**省得不多**: 两片各约 13 分钟 —— 这套用例被 GUI 与磁盘 I/O 卡着, 并发让每条 GUI 用例更慢;脚本自己记的非覆盖率场景省约三分之一(2026-10-07: 18:28 → 12:27)。
+- **第一次跑就咬出两个自己的 bug**: ① coverage 那条路少写 `-m`(`No file to run: ...pytest`);② `_report` 在"没有分片"时 `logs[0]` 会 KeyError(被新守卫当场抓到 —— 那个用例的假分片列表一开始是空的, 不真实, 改成真写一份日志后过)。
+- **双片跑咬出来的那条红(已量到成因, 已把起点摆正)**: 双片 `--coverage` 连跑两次都在 `tests/integration/test_gui_dropdown.py::test_clicking_the_arrow_opens_the_dropdown` 报"点箭头没打开下拉"(`.F......`, 即它在模块里的位置固定), 而**单跑该模块 9 passed**、单进程全量(含覆盖率)也一直绿。**量到的成因**: 同一个选择框上**留着开着浮层**时, 再点箭头那一下是把浮层**收起**而不是打开(`_close_on_next_click` / CTk 那套"下一次点击"开关), 于是 `active_dropdown()`是 None —— 我把"先开着浮层再点箭头"当诱因试过(chew): 报的就是这条断言原文。**修法**: 这条用例自己把起点摆正(先 `combo._dropdown_menu.close()` + `_close_on_next_click = False`), 并在量坐标之前先确认那一格排好了版(`winfo_width()` 还没落地时是 1, `width - 4` 是个负坐标, 点下去同样装成"没反应"); 两条都加了注释说明为什么。chew 过: 把重置去掉换成"留一个开着的浮层"→ 红(报原文);换回来 → 绿。
+- **还没量到的那一半(诚实记一笔)**: "共享池里的选择框为什么在分片跑时带着开着的浮层"没复现出来 —— 单跑 / 加 CPU 负载 / 负载 + 覆盖率追踪 / 相邻模块成对跑 / 整模块跑都绿, 也没有 pytest-randomly(顺序就是文件顺序)。所以上面那是**把用例的起点摆正**, 不是根治浮层状态泄漏本身。真要让"点一次没反应"这类问题消失, 得在 `ui/dropdown.py` 那一侧把"浮层开着/关着"收敛成单一真相(目前 CTk 的开关与我们的`_ACTIVE` 各记一份)。
+- **守卫**: `tests/unit/test_durations.py` 新增 5 条 —— 每片数据文件互不相同、命令形状(带/不带 `--coverage`各一条, 含"必须有 `-m`")、rc 只在缺失时生成、无数据时不合并、覆盖率退出码计入脚本退出码。
+
+## 54. 文档分工整理: 常用命令收进贡献指南, README 只留概览(2026-10-14, 用户要求)
+
+- **要求(用户原话)**: "帮我整理一下文档部分，既然已经有CONTRIBUTING.md这份贡献指南了，就总结一下常用命令行按章节填入这里 同时README.md中就不在需要写这些涉及开发相关的内容了，将其放入贡献指南中"。
+- **CONTRIBUTING.md 新增第二章「常用命令速查」**: 按用途分五组并各自指回对应章节 —— 环境·初始化·运行 / 静态门禁 / 用例·分片·覆盖率 / 报告·打包·图标 / 文档改动。把原来只在 README 里的那些命令收进来(冒烟自检、`create_allure_quality.py --group all`、性能与安全目录、allure 生成与自检、pyinstaller、`build_icon.py`), 并一并收进它们的口径说明(zip/`SHA256SUMS.txt`/`build-metadata.json` 由 release 工作流产出、先删旧报告目录才会刷新数据、`ui-review/` 是本地材料不入库)。
+- **章节号顺延**: 原二~九 → 三~十; 同步了五处引用(`.github/pull_request_template.md` 两处、`docs/development.md`、`.github/instructions/local-full-run.instructions.md`、文件内的锚点与"钩子会自动跑第X节那套"); 顾手把第一章那段与速查重复的命令块删掉(命令只留一份), 第一章改成"跟着敲一遍就是 `uv sync` → `pre-commit install` → `init` → `doctor` → `gui`" + 三条平台/数据说明。
+- **README.md 瘦身**: 删掉「质量门禁」与「打包」两节、快速开始里的 `pre-commit install` / `--smoke 1` 与"可编辑包/PYTHONPATH"那一段, 换成一小节「开发与贡献」(只放两个指针: CONTRIBUTING 第二节 / development.md + testing.md); 平台支持里 `xvfb-run -a uv run pytest` 那句改成指向第一节。
+- **docs/development.md**: 「文档与 Wiki」的分层说法由两层改成三层(加上 `CONTRIBUTING.md`),「质量门禁」开头加一行"常用命令速查在 CONTRIBUTING 第二节"。
+- **没有新增守卫**: 全库没有测试读 README/CONTRIBUTING 的内容(只有 PLAN 与注释提到它们), 所以这一轮靠人工核对引用 + 门禁党底; 复核口径 = `ruff check` / `format --check` + 对"第X节"引用的 grep 复查 + 全量分片跑。
+
+## 55. 全库 markdown 改成"一段一行"(不按宽度折行, 2026-10-14, 用户要求)
+
+- **要求(用户原话)**: "帮我调整一下仓库中所有md的内容，这部分内容不用考虑行宽限制，该写成1行的不要换行"。
+- **做法(一次性探针, 用完即删)**: `git ls-files -z "*.md"` 取全部跟踪的 markdown(31 个), 逐文件把"一个块的续行"并回同一行 —— 块 = 段落 / 列表项(含缩进续行) / 引用块; **代码围栏、表格行、标题行、缩进代码块、YAML frontmatter、行尾两个空格的硬换行、`> [!WARNING]` 这类标记行一律不动**。拼接规则: 两侧都是中文/全角标点时**不留空格**(顺带把折行渲染出来的那些多余空格去掉), 否则留一个空格(与原渲染一致)。
+- **探针自带四条自检(不过就跳过该文件)**: ① 围栏代码块逐字不变; ② 标题行/表格行/列表标记的序列不变(只比"去空白后的内容"验不出它们被并掉); ③ 去掉空白与行首 `>` 前缀后正文逐字不变; ④ 幂等(再跑一遍不再变)。31 个文件里 16 个有改动, 合计 **504 insertions / 1580 deletions**: `.github/instructions/gui-tests-on-ci.instructions.md` 403 → 238 行、`ctk-scrollbar-twitch.instructions.md` 161 → 113 行、`PLAN.md` 3221 → 2625 行、`docs/export-format.md` 274 → 230 行、`CONTRIBUTING.md` 284 → 219 行、`wiki/07` 70 → 67 行。
+- **踩到的两个 bug(都是探针自己的)**: ① 拼接时把引用块的 `>` 前缀丢了(空 `>` 行与首行的前缀都要补回去); ② 自检最初把"续行的 `>` 被并掉"当成内容丢失(那是本来就要丢的), 改成比对前先把**行首**的 `>` 归一化掉。
+- **约定落进文档**: `CONTRIBUTING.md` 第九节与 `docs/development.md` 的「文档与 Wiki」各加一条 —— markdown 不按宽度折行、一段/一条写成一行, 表格/代码块/frontmatter 不在此列。
+- **验证**: `ruff check` / `ruff format --check`(303 文件, 它也会看 md 里的 python 代码块) 全绿; 文档类守卫(`test_wiki_sync.py` / `test_test_config.py` / `test_i18n_copy.py`)41 passed; 探针重跑报"共 0 个文件"(幂等); 全量分片 `scripts/run_tests_local.py --coverage` = **2/2 片绿**(shard 0 1972 passed / shard 1 888 passed, 覆盖率 16669 语句 / 3668 分支 / 0 缺 = 100%, 墙钟 12:09)。
+- **顺带咬到的第二条并发偶发(GUI 布局)**: 第一次全量跑 shard 0 红在 `tests/integration/test_gui_layout.py::test_library_and_discovery_borders_are_visible`(`assert _offenders(app) == []`, 详情: 一个子控件 `1290x28 req=860x28` 与父容器 `1312x504` **右边贴齐 0px** —— 按模块自己的口径就是"0px = 贴边盖描边")。**判据核实**: 单跑该模块 24 passed ×2, 前一模块(`test_gui_keyboard.py`)+该模块+覆盖率追踪 34 passed, 同一轮复跑全量 2/2 绿 ⇒ 并发下读到的是半途几何。**与本次 md 改动无关**(md 不可能影响 Tk 几何), 但也不排除它抓到的是一处只在特定状态下出现的真·1px 贴边 —— 要定论得把该用例的等待/判据改硬(把"贴齐 0px"与">0 越界"分开判, 或要求更多轮几何一致), 那是单独一轮的事。已把这条写进 `.github/instructions/local-full-run.instructions.md` 的"拿到红先分清偶发与回归"一节。
+
+## 56. 回退"按改动路径选层": 每轮都跑全量, nightly 去掉 24h 门(2026-10-14, 用户要求)
+
+- **要求(用户原话)**: "帮我去掉nightly.yml已经ci.yml中和这写相关的分片内容，现在我要回退之前落地的基于前后端改动单独跑部分用例的要求，现在还是每次都跑全部了"。**先问过范围**: A 只回退选层 / B = A + 去掉 nightly 的 24h 门 / C = B + 纯文档改动也跑全量 —— 用户选 **B**。
+- **`ci.yml`**: `changes` 作业只剩 `should_run` 一个输出(ui / backend 两个层输出、dorny 里那两块路径过滤器与 `decide` 步里的层回显都删掉, 步名改成 `Decide whether CI should run`); 四段 pytest 步骤的条件简化成 `runner.os == 'Linux'` / `always() && !cancelled() && runner.os == 'Linux'` / `runner.os != 'Linux'` / `always() && !cancelled() && runner.os != 'Linux'`; `security` 回到 `needs.changes.outputs.should_run == 'true'`。注释里"push 分层"的说法一并改掉(留一句"已回退"免得下轮有人再去找那两块过滤器)。
+- **刻意没动的两条**: ① **纯文档改动不跑 CI**(push 的 `paths-ignore` + PR 的 dorny `should_run` + `required-check` 兜底) —— 那是另一条独立的省钱规则; ② **报告仍只有 push 不出**(`pytest-report` / `allure-summary` 的条件照旧 `github.event_name != 'push'`) —— **已在 §57 推翻**(用户 2026-10-14 要求 push 也出报告)。
+- **`nightly.yml`**: 删掉 `gate` 作业(那份 `git log -1 --format=%ct` + `age < 86400` 的判断); 只剩一个 `full-run`(带 `ref: dev` 调用 ci.yml) —— 每晚无条件跑一轮全量 + 报告, 也不再自己 checkout。
+- **守卫改写**: `test_pr_and_nightly_run_full_while_push_selects_layers` → `test_every_trigger_runs_the_full_suite`。新钉子: nightly 只有 `full-run` 一个作业、不含 `86400` 与任何 checkout; `changes` 只有 `should_run` 输出、路径过滤器只剩 `should_run` 一个键; 全文不出现 `outputs.ui`/`outputs.backend`/`needs.changes.outputs.ui|backend`; 四段 pytest 与 security 的条件**逐字相等**; 报告作业的条件也**逐字相等**(当时仍带 `github.event_name != 'push'`, 见 §57 已删); 两段 `-m "not ui"` / `-m "ui"` 各两处。**咬合验证(探针用完即删)**: 把层条件加回一段 pytest → 红; 往 nightly 里塞一行 `86400` → 红; 都还原后绿。
+- **文档同步(说"当前状态"的那几处)**: `CONTRIBUTING.md` 第二节的 push / nightly 两条、`.github/pull_request_template.md` 顶部那段门禁说明、`docs/testing.md` 第 6 节(流程图 + "层跳过"那条 + 报告作业那条)。
+- **验证**: ruff check / format --check 全绿; `test_ci_workflow.py` / `test_sharding.py` / `test_test_config.py` 80 passed; 两个工作流用 PyYAML 解析确认作业列表与 `changes` 的输出只剩 `should_run`; 全量分片跑见本轮收尾。
+
+## 57. push 也出报告: 报告链不再按事件名排除(2026-10-14, 用户要求)
+
+- **要求(用户原话)**: "都改掉， push 也出报告，且有些说明改动后将这些说明的注释也一并删除"。
+- **`ci.yml`**: `pytest-report` 与 `allure-summary` 的条件由 `always() && !cancelled() && needs.changes.outputs.should_run == 'true' && github.event_name != 'push'` 改成去掉末段 —— 每一轮(push / PR / nightly)都出合并报告与汇总报告。当初那条排除理由("push 只跑选中的层, 切片覆盖率天生偏低、在那里判门槛等于自造假红")随 §56 的选层回退一起失效, 排除本身只剩"省一轮报告作业", 用户选择不要这点节省。
+- **一并删掉的过期说明(用户明确要求)**: `ci.yml` 里两处解释"为什么 push 不出报告"的注释段、`nightly.yml` 里 `full-run` 那句"(报告链在 ci.yml 里的条件是'不是 push 就跑', 这一轮的事件是 schedule)"、`.github/instructions/allure-reporting.instructions.md` 第一节里"**只有非 push 的轮次出报告**"整条(它一并引的守卫名 `test_ci_publishes_only_verified_report` 从来只判自检与归档挂钩, 与事件无关 —— 删掉正好)。
+- **守卫改写**: `test_every_trigger_runs_the_full_suite` 里"报告作业仍带 `github.event_name != 'push'`"换成**逐字相等**断言(与 pytest 作业同一条 `always() && !cancelled() && needs.changes.outputs.should_run == 'true'`), 注释改成"每一轮都出报告, 事件名不再参与判断"。`test_report_jobs_do_not_start_for_a_superseded_run`(钉 `always()` + `!cancelled()`)不受影响, 照旧。
+- **文档同步**: `CONTRIBUTING.md` 第二节("只是不出报告" → "报告与覆盖率门禁也照出"; "覆盖率结论在 PR 与 nightly 的报告里看" → "每一轮的报告里看")、`.github/pull_request_template.md` 顶部门禁说明、`docs/testing.md` 第 6 节(流程图补一句"下面两步在每一轮都跑"、作业数量那条改成每一轮 16 个实例、报告作业那条整句重写并写清"排除理由随选层回退失效")。
+- **代价(诚实记一笔)**: push 到 `dev` 时每轮多 3 个 `pytest-report` 实例 + 1 个 `allure-summary`(各带一次 Node + Allure CLI 安装, npm 缓存命中约 10~20s/次)。换来的是 push 那一轮也能直接看覆盖率门槛与完整报告, 不必等 PR。
 
 ---
 

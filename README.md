@@ -30,31 +30,25 @@ uv sync --locked                                              # 安装依赖
 uv run python -m archive_management init --root ./dev-data    # 初始化目录/配置/数据库
 uv run python -m archive_management doctor --root ./dev-data  # 健康检查
 uv run python -m archive_management gui --root ./dev-data     # 启动图形界面
-uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检(自动关闭)
-uv run pre-commit install                                     # 安装 Git 提交钩子
 ```
 
 不带子命令运行时默认执行 `init`；`--root` 可以把全部数据收敛到指定目录，便于便携使用与调试。首次启动是空库：用顶栏的"+ 添加游戏"录入游戏或游戏发现中导入已发现的游戏，再在游戏设置里添加"原始存档位置"，之后即可备份、创建分支与恢复。命令行参数与配置文件（含内容非法时自动还原为默认值的行为）见 [docs/development.md](docs/development.md)。
 
-上面的命令可以在**任意目录**执行：项目以**可编辑包**装进 `.venv`（`uv sync` 只往 site-packages 放一个指向 `src` 的 `.pth` 与一份 dist-info，源码仍留在工作区），所以 `python -m archive_management` 与直接调用 `.venv` 里的解释器都能导入自身源码，不需要设置 `PYTHONPATH`。首次 `uv sync` 会联网取一次构建后端（`hatchling`），访问 PyPI 不畅时先配镜像；细节（CI 为什么不装它、又在哪里验证）见 [docs/development.md](docs/development.md)。
+上面的命令可以在**任意目录**执行，不需要设置 `PYTHONPATH`（项目以可编辑包装进 `.venv`；首次 `uv sync` 会联网取一次构建后端，访问 PyPI 不畅时先配镜像）。原因与"CI 为什么不装它、又在哪里验证"见 [CONTRIBUTING.md](./CONTRIBUTING.md) 第二节。
 
-## 平台支持
+## 平台支持(仅限有GUI的环境)
 
-| 能力                           | Windows | Linux                   | macOS(未进行实机测试)   |
-| ------------------------------ | ------- | ----------------------- | ----------------------- |
-| 应用目录/配置/日志/数据库/备份 | ✅      | ✅                      | ✅                      |
-| 备份/恢复/删除到系统回收站     | ✅      | ✅                      | ✅                      |
-| 全局快捷键                     | ✅      | ✅ 需图形环境与监听权限 | ✅ 需授予"辅助功能"权限 |
+| 能力                           | Windows | Linux | macOS(未进行实机测试) |
+| ------------------------------ | :-----: | :---: | :-------------------: |
+| 应用目录/配置/日志/数据库/备份 |   ✅    |  ✅   |          ✅           |
+| 备份/恢复/删除到系统回收站     |   ✅    |  ✅   |          ✅           |
+| 全局快捷键                     |   ✅    |  ✅   |  ✅ 需"辅助功能"权限  |
 
-表中的"图形环境"指系统提供的图形显示服务（Windows 与 macOS 自带，Linux 上是 X11 或
-Wayland）：没有显示器的服务器或 CI 可以先用虚拟显示，例如 `xvfb-run -a uv run pytest`。
-各平台探测来源的差异（GOG/Ubisoft 仅 Windows 可用等）与 macOS 的权限、目录位置见
-[platforms.md](./docs/platforms.md)；`doctor` 子命令会打印当前平台与注册表探测是否可用。
+表中的"图形环境"指系统提供的图形显示服务（Windows 与 macOS 自带，Linux 上是 X11 或 Wayland）：没有显示器的服务器或 CI 可以先用虚拟显示（`xvfb-run`，见 [CONTRIBUTING.md](./CONTRIBUTING.md) 第一节）。各平台探测来源的差异（GOG/Ubisoft 仅 Windows 可用等）与 macOS 的权限、目录位置见 [platforms.md](./docs/platforms.md)；`doctor` 子命令会打印当前平台与注册表探测是否可用。
 
 ### 支持的游戏平台
 
-游戏库的来源按"能自动做到多少"分三档；逐个平台的位置、可信来源与例外见
-[platforms.md](./docs/platforms.md) 的"商店平台的支持程度"。
+游戏库的来源按"能自动做到多少"分三档；逐个平台的位置、可信来源与例外见 [platforms.md](./docs/platforms.md) 的"商店平台的支持程度"。
 
 | 游戏平台              | 自动发现安装位置    | 自动推断存档位置 | 封面与图标  |
 | --------------------- | ------------------- | ---------------- | ----------- |
@@ -63,38 +57,16 @@ Wayland）：没有显示器的服务器或 CI 可以先用虚拟显示，例如
 | GOG / Ubisoft Connect | ✅ 仅 Windows       | ❌ 手动添加      | ❌ 占位图   |
 | 监控目录 / 手动添加   | ✅ 目录由你指定     | ❌ 手动添加      | ❌ 占位图   |
 
-- **自动发现安装位置**：扫描平台客户端自己的安装清单与 Windows 注册表就能列出游戏；
-  **自动推断存档位置**：直接给出可信的存档路径（Steam 读的是它自己的云同步清单）。
-  拿不到可信来源的一律**手动添加**，绝不按路径模板猜。
+- **自动发现安装位置**：扫描平台客户端自己的安装清单与 Windows 注册表就能列出游戏； **自动推断存档位置**：直接给出可信的存档路径（Steam 读的是它自己的云同步清单）。拿不到可信来源的一律**手动添加**，绝不按路径模板猜。
 - **封面与图标只影响外观**：它们是可再生的派生数据，取不到时显示占位，不影响备份、恢复与导出。
 - 不论哪一档，手动添加游戏与存档位置始终可用；探测结果也要你确认后才会进入游戏库。
 
-## 质量门禁
+## 开发与贡献
 
-```shell
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy
-uv run pytest                               # 用例(覆盖率口径见下面那段)
-uv run python scripts/run_tests_local.py    # 分片执行全量
-uv run deptry .       # 依赖卫生(未声明 / 多余 / 传递依赖)
-```
+开发相关的内容不再写在这份 README 里，免得两处口径漂移：
 
-上面这些除了最后一项之外都在本地提交钩子与 CI 里跑；其中用例在 Windows、Ubuntu、macOS 三个平台各跑一遍（见 [testing.md](./docs/testing.md) 第 4 节），`ruff` / `mypy`（宿主平台各一次）/ `deptry` 属于公共检查，CI 只在 Ubuntu 跑一次（与平台无关的结论项带 `env=common`，归入报告的 `Common` 环境）；覆盖平台专属分支的 mypy 检查（`--platform win32` / `darwin`）分别在那个平台上跑，结论归入各自的 `Windows` / `macOS` 环境，与那个平台的测试结果一起看。CI 还会额外跑一次与平台无关的静态分析与依赖检查：`bandit -r src`（源码危险模式）、`pip-audit`（依赖漏洞）、`radon` / `xenon`（复杂度，门槛与 Ruff 的 `mccabe` 同为 10 分）。详见 [development.md](./docs/development.md) 的"质量门禁"一节。
-
-**覆盖率是硬门禁（`fail_under = 100`），但它按平台口径判**：`uv run pytest --cov` 给的是**合并口径**的粗数字（pytest-cov 在导入根 conftest 之前就构造好了 Coverage 对象，套不上平台排除），按门禁核要走两步 `coverage run --rcfile=.coverage-platform.rc` + `coverage report -m`（那份 rc 由 `uv run python scripts/coverage_platform.py write` 生成、不入库），见 [CONTRIBUTING.md](./CONTRIBUTING.md) 第三节。
-
-提交钩子只运行本次变动的静态检查与最高严重等级的单元测试（快速反馈）；CI 在 Windows、Ubuntu、macOS 上运行全量测试（见 [testing.md](./docs/testing.md) 第 4 节），并单独执行性能基准与安全测试（安全测试在三个平台各跑一遍），最后合并成一份 Allure 报告。测试分类、基准阈值与报告内容见[testing.md](./docs/testing.md)。
-
-## 打包
-
-```shell
-uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
-```
-
-构建读取 `packaging.py` 中的源码版本，在**仓库根**执行，产出 `dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是它产的** —— 那是发布工作流（`.github/workflows/release.yml` 的 `Prepare build files`）在构建之后自己打包的，它在构建前还会先跑 `uv run python scripts/build_icon.py --check`（位图与 `app.svg` 不一致就拦住）。构建与发布流程见 [development.md](./docs/development.md)。
-
-应用图标只有一份可编辑的真相 `src/archive_management/resources/app.svg`，界面与打包读的是它生成的位图（`uv run python scripts/build_icon.py`；改了 SVG 时提交钩子会自动重画），见[development.md 的「应用图标」](./docs/development.md)。
+- **要动手改代码**：[CONTRIBUTING.md](./CONTRIBUTING.md) —— 第二节是**常用命令速查**（环境与运行、静态门禁、用例与分片、覆盖率、报告与打包、文档），后面几节是提交前要过的门禁、覆盖率那个硬门禁的口径、测试怎么写、代码与界面约定、两个常见的坑，以及提交与 PR 的流程。
+- **想了解机制**：[development.md](./docs/development.md)（命令行、配置文件、质量门禁、打包与发布、应用图标流水线）与 [testing.md](./docs/testing.md)（测试分类、基准阈值、分片与报告自检）。
 
 ---
 

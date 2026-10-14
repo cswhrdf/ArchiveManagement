@@ -1,8 +1,6 @@
 # 测试体系重构计划(2026-10-07)
 
-> 本文档是**执行中的计划**: 每完成一步就在对应条目把 `[ ]` 改成 `[x]`;
-> "明确不做"一节记录的是**识别结论**(为什么不动), 防止下一轮重复劳动。
-> 现状描述见 `docs/testing.md`, 两者不重复。
+> 本文档是**执行中的计划**: 每完成一步就在对应条目把 `[ ]` 改成 `[x]`; "明确不做"一节记录的是**识别结论**(为什么不动), 防止下一轮重复劳动。现状描述见 `docs/testing.md`, 两者不重复。
 
 ## 一、盘点结论(识别阶段, 已完成)
 
@@ -73,6 +71,5 @@
 1. `ast` 的 `lineno` 不含装饰器 → `@pytest.mark.blocker` 丢过(S7 首版), 修复为起点取 `min(lineno, 装饰器行)`;
 2. 依赖闭包传递方向写反(被引用者应继承引用者的文件集), 修复后 helper 归属才准;
 3. 散布在 defs 之间的模块级常量/模块级调用赋值(如 `verifier = _load_verifier()`、`_COVERAGE_XML`)首版没搬 → F821, 修复为顶层赋值一律进归属流程, 只有 imports/try/`pytestmark` 属于 header;
-4. header 里基于 `__file__` 的锚点(`_REPO_ROOT`)在 support 移到 `tests/` 根后少一层, 手工上移一层并注释。
-support 模块必须放 `tests/` 根(`--import-mode=importlib` 下子目录不在 `pythonpath`, 与 `gui_support.py` 同位); ruff 对 fixture 参数按"使用"处理, `from gui_support import gui_app` 不会被 unused-import 误删。
+4. header 里基于 `__file__` 的锚点(`_REPO_ROOT`)在 support 移到 `tests/` 根后少一层, 手工上移一层并注释。 support 模块必须放 `tests/` 根(`--import-mode=importlib` 下子目录不在 `pythonpath`, 与 `gui_support.py` 同位); ruff 对 fixture 参数按"使用"处理, `from gui_support import gui_app` 不会被 unused-import 误删。
 

@@ -23,9 +23,9 @@ on:
       - ".github/prompts/**"
   pull_request:
     branches: *ci_branches
-  # 由 nightly.yml 调用(带 `ref: dev`): 全量 + 报告, 只在 dev 24h 内有过合入时跑。
-  # **定时触发不在这里** —— 这一份只描述流水线, "今晚要不要跑"由 nightly.yml 的 gate 作业
-  # 判断; 被调用时 `github.event_name` 仍是调用方的事件(`schedule`)。
+  # 由 nightly.yml 调用(带 `ref: dev`): 全量 + 报告, 每晚一轮。
+  # **定时触发不在这里** —— 这一份只描述流水线, 何时跑由调用方决定; 被调用时
+  # `github.event_name` 仍是调用方的事件(`schedule`), 而每一轮都是全量。
   workflow_call:
     inputs:
       ref:
@@ -34,7 +34,7 @@ on:
         type: string
 
 # 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(一轮 16 个作业
-# 实例; push 分层后更少 —— 被跳过的报告作业不占 runner, 而 PR 与 nightly 都是全量)。
+# 实例; 纯文档改动那一轮更少 —— 被跳过的作业不占 runner)。
 # 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。
 # 注意 `always()` 的语义是“即使被取消也返回 true”: 取消后就不该再启动的作业要用
 # `always() && !cancelled()` 表达(见 pytest-report / allure-summary 的作业条件),
@@ -68,8 +68,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
-      ui: ${{ steps.decide.outputs.ui }}
-      backend: ${{ steps.decide.outputs.backend }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -79,12 +77,14 @@ jobs:
       - name: Detect files that require CI
         id: filter
         # 被 nightly 调用时 `event_name` 是 `schedule` —— 定时那轮没有"上一个提交"可比,
-        # dorny 给不出路径集合, 所以这一步跳过, 由 decide 补"层全绿 + 照跑"的答案。
+        # dorny 给不出路径集合, 所以这一步跳过, 由 decide 补一个"照跑"的答案。
         # 它若失败, needs: [changes] 的所有作业跟着跳过, 整轮就死了。
         if: github.event_name != 'schedule'
         uses: dorny/paths-filter@v4
         with:
           filters: |
+            # 只判"要不要跑": 纯文档改动 (`.md` / `docs/**` / 指令与提示词) 不跑整套 CI。
+            # 这里**不再区分前后端两层**(2026-10-14 回退): 每一轮都跑全量。
             should_run:
               - '**'
               - '!**/*.md'
@@ -92,54 +92,19 @@ jobs:
               - '!.github/instructions/**'
               - '!.github/prompts/**'
 
-            # push 按改动路径分层(2026-10-09 换向): ui 层 = UI 专属路径 + 共享基础设施;
-            # 冒烟用例全部挂在 test_gui_* 上、带 smoke+ui 双标记, 所以 `-m "ui"` 天然含冒烟。
-            # 共享基础设施(pyproject / uv.lock / conftest / 分片器 / 这份工作流)同时会被
-            # backend 层的兜底 `**` 命中 —— 它们影响所有用例, 只跑一层等于拿半套证据赌合并。
-            ui:
-              - 'src/archive_management/ui/**'
-              - 'tests/integration/test_gui_*.py'
-              - 'tests/visual-baselines/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - 'tests/conftest.py'
-              - 'tests/sharding.py'
-              - 'tests/ci_workflow.py'
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/nightly.yml'
-
-            # backend 层 = "除文档与 UI 专属路径外的一切"(兜底 `**`), 不是白名单:
-            # 分不清归哪层的改动(新目录、杂项文件)都落到这一层, 宁可多跑不漏跑。
-            backend:
-              - '**'
-              - '!**/*.md'
-              - '!docs/**'
-              - '!.github/instructions/**'
-              - '!.github/prompts/**'
-              - '!src/archive_management/ui/**'
-              - '!tests/integration/test_gui_*.py'
-              - '!tests/visual-baselines/**'
-
-      - name: Decide which layers to run
+      - name: Decide whether CI should run
         id: decide
         # 各作业统一从 decide 取输出: 被 nightly 调用时(filter 步因 `schedule` 被跳过、
-        # 输出为空)要在这里补一个"层全绿 + 照跑"的答案 —— "今晚要不要跑"不归本文件管,
-        # 那是 nightly.yml 的 gate 作业(没变化的一轮根本不会调用到这里)。
+        # 输出为空)要在这里补"照跑"的答案。
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           FILTERED_SHOULD_RUN: ${{ steps.filter.outputs.should_run }}
-          FILTERED_UI: ${{ steps.filter.outputs.ui }}
-          FILTERED_BACKEND: ${{ steps.filter.outputs.backend }}
         run: |
           if [ "$EVENT_NAME" = "schedule" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "ui=true" >> "$GITHUB_OUTPUT"
-            echo "backend=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=$FILTERED_SHOULD_RUN" >> "$GITHUB_OUTPUT"
-            echo "ui=$FILTERED_UI" >> "$GITHUB_OUTPUT"
-            echo "backend=$FILTERED_BACKEND" >> "$GITHUB_OUTPUT"
           fi
 
   required-check:
@@ -406,11 +371,11 @@ jobs:
 
   pytest:
     needs: [changes]
-    # PR 与 nightly 跑**全量**(不分层): 合并前要完整证据, nightly 是唯一出报告的那一轮。
-    # **只有 push** 按改动路径选层 —— 合并那一轮只为"确认没改坏", 合并报告留到 nightly。
+    # 每一次触发都跑**全量**(2026-10-14 起): 三平台各 3 片, 四段 pytest 与静态检查一个不少。
+    # 之前那条"只有 push 按改动路径选层"的规则已回退 —— 合并那一轮也照跑全量。
     # 纯文档改动在触发层就被挡掉(push 的 `paths-ignore` / PR 的 dorny), should_run=false
     # 会跳过整个作业(与 quality 作业按 should_run 跳过同一个模式, 必需检查由
-    # required-check 兜底)。作业级不再看事件: 至少有一层命中的保证留在步骤级。
+    # required-check 兜底)。
     if: needs.changes.outputs.should_run == 'true'
     # 套件按平台拆成几片并行跑, 各片只负责自己那部分用例, 由后续的 pytest-report
     # 作业把 Allure 结果与覆盖率数据合并成一份报告 —— 墙钟时间只取决于最慢的一片。
@@ -592,14 +557,12 @@ jobs:
       # 第二段的条件带 `always() && !cancelled()`: 第一段有普通红(断言失败)时 UI 段照跑 ——
       # 一半用例的失败不该吞掉另一半的结果; 整轮被取消则不再起新进程。
       #
-      # 分层(2026-10-09 换向): **只有 push** 上每一段按 changes 作业的层输出放行 ——
-      # backend 层(非 UI 的 src / 测试 / 基础设施)跑 "not ui" 段, ui 层
-      # (src/archive_management/ui、test_gui_*、视觉基线)跑 "ui" 段; PR 与 nightly
-      # 无视层输出、两段全跑(PR 要给合并前的完整证据, nightly 是唯一出报告的那一轮)。
-      # 作业级的 if 只要求 should_run(至少有一层命中), 所以总有一段把结果与覆盖率
-      # 写出来 —— 上传步的 `if-no-files-found: error` 不会因为某段被跳过而误伤。
+      # 不再按改动路径选层(2026-10-14 回退): 每一轮四段都跑, 段的条件只看平台与
+      # "第一段跑完 / 整轮没被取消"。作业级的 if 只要求 should_run(纯文档改动才为假),
+      # 所以总有一段把结果与覆盖率写出来 —— 上传步的 `if-no-files-found: error` 不会
+      # 因为某段被跳过而误伤。
       - name: Pytest with coverage, non-UI suite first (Linux)
-        if: runner.os == 'Linux' && (github.event_name != 'push' || needs.changes.outputs.backend == 'true')
+        if: runner.os == 'Linux'
         env:
           # 每片写一份自己的覆盖率数据(合并放到 pytest-report 作业里)。
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
@@ -615,13 +578,13 @@ jobs:
       # 窗口一过脚本自动透传不再重试, 守卫测试(tests/unit/test_ci_diagnostics.py)同时变红,
       # 催着人回来移除这层包装或明确续期。
       - name: Pytest with coverage, UI suite in its own process (Linux)
-        if: always() && !cancelled() && runner.os == 'Linux' && (github.event_name != 'push' || needs.changes.outputs.ui == 'true')
+        if: always() && !cancelled() && runner.os == 'Linux'
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         run: xvfb-run -a uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Pytest with coverage, non-UI suite first (Windows/macOS)
-        if: runner.os != 'Linux' && (github.event_name != 'push' || needs.changes.outputs.backend == 'true')
+        if: runner.os != 'Linux'
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         # 单片覆盖率天生偏低, 所以这里关掉报告与门槛(--cov-report= / --cov-fail-under=0):
@@ -629,7 +592,7 @@ jobs:
         run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
       - name: Pytest with coverage, UI suite in its own process (Windows/macOS)
-        if: always() && !cancelled() && runner.os != 'Linux' && (github.event_name != 'push' || needs.changes.outputs.ui == 'true')
+        if: always() && !cancelled() && runner.os != 'Linux'
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         run: uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
@@ -774,10 +737,7 @@ jobs:
     # 但**被取代的运行不必再出报告**: 这一条要用 `!cancelled()` 表达, 不能只写 `always()`
     # —— `always()` 连“整轮被取消”也返回 true, 那样旧的那一轮会在取消后照样启动本作业
     # (合并/生成/上传白跑一遍, 而且被取消的作业按已用时长计费)。
-    # 并且**不是 push 就跑**(PR 与 nightly 都要出报告): 这两个事件下四段 pytest 都是全量,
-    # 而 push 只跑选中层(切片覆盖率天生偏低, 在那里判门槛等于自造假红) —— 它的证据是
-    # 分片作业的日志与分片产物(allure-results-<os>-<shard> / coverage-data-*)。
-    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true' && github.event_name != 'push'
+    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1182,9 +1142,9 @@ jobs:
 
   security:
     needs: [changes]
-    # 安全用例验的是后端语义(越权 / 路径逃逸 / 副作用防护, 不开窗口), 归 backend 层:
-    # **只有 push** 上按层放行(纯 UI 的 push 跳过它), PR 与 nightly 照跑。
-    if: needs.changes.outputs.should_run == 'true' && (github.event_name != 'push' || needs.changes.outputs.backend == 'true')
+    # 安全用例验的是后端语义(越权 / 路径逃逸 / 副作用防护, 不开窗口), 每一轮都跑
+    # (2026-10-14 起不再按改动路径挑层)。
+    if: needs.changes.outputs.should_run == 'true'
     name: 安全测试 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1269,8 +1229,7 @@ jobs:
     name: Allure 汇总报告
     needs: [changes, quality, pytest-report, security]
     # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
-    # 完整报告与原生质量门与 pytest-report 同一条规则(不是 push 就跑)。
-    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true' && github.event_name != 'push'
+    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
     # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure

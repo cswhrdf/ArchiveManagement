@@ -17,6 +17,14 @@
    改调度/切主题都会改它; 只读接口拼出的状态签名(:func:`backend_signature`)对不上
    时, "还原数据"比"重建窗口"更贵也更险, 直接重建。
 
+第四件事: **用完即关**(2026-10 起)。会话夹具在收集完成后把"用例 → 池"的声明交给
+:meth:`SharedUiRegistry.declare_users`(数据源就是 ``tests/conftest.py`` 的
+``_SHARED_UI_SESSIONS``); 一个池的**最后一个**用例退出 ``test_scope`` 时, 窗口就地
+关闭, 不再陪跑到会话末。为什么必须: 按字母序先跑完的池(copy_quality 那类)会挂着一
+扇用不着的真窗陪完全场, 分片并行时两片各挂各的, "多开 UI 互相拖慢"的一大来源就是
+它们。收尾判据与会的收尾完全一致(调度线程基线刷成"此刻实存量"再收); 没做过声明的
+注册表退回旧行为(会话末统一收) —— 宁可晚关, 不可错关。
+
 哪些用例**不**入池: 每条用例要不同构造参数的模块(尺寸/布局/生命周期/根窗口守卫)与会
 重度改后端数据的大户(主页/导入导出)维持"每用例一窗"的原状 —— 它们复用不到, 硬塞只
 会换来每次重建(比不复用还慢)。
@@ -32,7 +40,9 @@ from __future__ import annotations
 import contextlib
 import os
 import queue
-from collections.abc import Callable, Iterator, Sequence
+import re
+import sys
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -337,15 +347,47 @@ def _record_rebuild(reason: str, teardown: Sequence[str]) -> None:
     allure.dynamic.parameter("共享UI重建", reason)
 
 
+#: pytest 在 ``PYTEST_CURRENT_TEST`` 末尾缀上的阶段标记("... (setup)" 等)。
+_PHASE_SUFFIX = re.compile(r" \((?:setup|call|teardown)\)$")
+
+
+def _current_nodeid() -> str | None:
+    """当前正在跑的用例 nodeid(剥掉阶段后缀); 不在用例里时返回 ``None``.
+
+    用结尾正则而不是 ``rpartition(" (")``: 参数化 id 里也可能出现 "(", 只有缀在
+    结尾的 " (setup|call|teardown)" 才是 pytest 自己加的。
+    """
+    return _PHASE_SUFFIX.sub("", os.environ.get("PYTEST_CURRENT_TEST", "")) or None
+
+
+def _record_early_close(key: str, node: str, teardown: Sequence[str]) -> None:
+    """把"池的窗口用完即关"记进 Allure 并在终端留一行 —— 静默关闭看不出时机与收益."""
+    import allure
+
+    detail = (
+        f"共享 UI 会话: 池 {key} 的用例已全部结束, 窗口就地关闭(不陪跑到会话末)\n"
+        f"最后一个用例: {node}\n收尾: {list(teardown) or '干净'}"
+    )
+    allure.attach(
+        detail, name="共享 UI: 池用完即关", attachment_type=allure.attachment_type.TEXT
+    )
+    allure.dynamic.parameter("共享UI池", f"{key}: 用完即关")
+    print(f"[ui_sharing] {detail}", file=sys.stderr)
+
+
 class _Pool:
     """一个工厂对应的一份共享窗口(建/重建/基线管理; 生命周期纪律见模块文档)."""
 
-    def __init__(self, factory: Callable[[], Any]) -> None:
+    def __init__(self, factory: Callable[[], Any], key: str) -> None:
         self.factory = factory
+        #: 池在注册表里的键(工厂身份, 见 ``SharedUiRegistry._pool_for``)。
+        self.key = key
         self.app: Any = None
         self.baseline: UiState | None = None
         #: 重建原因账本(会话级守卫与报告读它; 空列表 = 一直没重建过)。
         self.rebuilds: list[str] = []
+        #: 是否被"用完即关"收过(之后再有使用者, acquire 会如实写重建理由)。
+        self.retired = False
 
     def acquire(self) -> Any:
         """确保池里有活窗口: 没建过或根没了就(重新)建."""
@@ -356,6 +398,8 @@ class _Pool:
         reason = (
             "共享窗口的根已经不在(用例销毁了它, 或 Tk 崩了)"
             if self.app is not None
+            else "池在上一批用例结束后已提前关闭, 现按需重建"
+            if self.retired
             else "首次创建共享窗口"
         )
         self._rebuild_or_create(reason)
@@ -413,19 +457,41 @@ class SharedUiRegistry:
                 application.wait_window = _hook   # 量模态框的钩子, 退出时自动还原
                 yield application
 
-    会话末尾 :meth:`close` 把池里所有窗口交给 :func:`gui_support.close_apps` ——
-    与逐用例收尾同一条"保证拆干净"路径, 拆不干净同样判红。
+    一个池的最后一个用例退出 ``test_scope`` 时窗口就地关闭(用完即关, 见
+    :meth:`declare_users` / :meth:`_retire_current`); 会话末尾 :meth:`close` 再把
+    还开着的窗口交给 :func:`gui_support.close_apps` —— 与逐用例收尾同一条
+    "保证拆干净"路径, 拆不干净同样判红。
     """
 
     def __init__(self) -> None:
         self._pools: dict[str, _Pool] = {}
         self.closed = False
+        #: 用完即关的三本账(见 :meth:`declare_users`): 用例 → 池名 / 池名 → 还没
+        #: 跑的用例 / 工厂键 → 它服务过的池名。没声明过时三者皆空, 提前关闭不触发。
+        self._pool_of_node: dict[str, str] = {}
+        self._remaining_users: dict[str, set[str]] = {}
+        self._names_by_factory: dict[str, set[str]] = {}
+        #: "池提前关了"的账本(会话末守卫/报告读它; 空列表 = 没发生过)。
+        self.early_closes: list[str] = []
+
+    def declare_users(self, groups: Mapping[str, str]) -> None:
+        """声明"哪些用例用哪个池"(nodeid → 池名), 供"用完即关"判定.
+
+        会话夹具在收集完成后调一次(数据源 ``tests/conftest.py`` 的
+        ``_SHARED_UI_SESSIONS``)。不调用就不知道"还有谁要用这个池", 退回
+        "会话末统一收"的旧行为 —— 宁可晚关, 不可错关。
+        """
+        self._pool_of_node = dict(groups)
+        remaining: dict[str, set[str]] = {}
+        for node_id, name in groups.items():
+            remaining.setdefault(name, set()).add(node_id)
+        self._remaining_users = remaining
 
     def _pool_for(self, factory: Callable[[], Any]) -> _Pool:
         key = getattr(factory, "__qualname__", None) or repr(factory)
         pool = self._pools.get(key)
         if pool is None:
-            pool = _Pool(factory)
+            pool = _Pool(factory, key)
             self._pools[key] = pool
         return pool
 
@@ -433,16 +499,22 @@ class SharedUiRegistry:
     def test_scope(
         self, factory: Callable[[], Any], *, patched_attrs: Sequence[str] = ()
     ) -> Iterator[Any]:
-        """一条用例的共享窗口边界: 进入前对齐基线, 退出后识别漂移并还原/重建."""
+        """一条用例的共享窗口边界: 进入前对齐基线, 退出后识别漂移并还原/重建.
+
+        退出时若这个池已没有后续使用者, 直接收池(跳过 settle —— 窗口都要拆了,
+        还原/重建都是白做), 见 :meth:`_retire_current`。
+        """
         pool = self._pool_for(factory)
         app = pool.acquire()
+        self._remember_pool_name(pool)
         self._align(pool)
         saved = _snapshot_attrs(app, patched_attrs)
         try:
             yield app
         finally:
             _restore_attrs(app, saved)
-            self._settle(pool)
+            if not self._retire_current(pool):
+                self._settle(pool)
 
     @contextlib.contextmanager
     def group_scope(self, factory: Callable[[], Any]) -> Iterator[_Pool]:
@@ -458,9 +530,10 @@ class SharedUiRegistry:
         original = pool.baseline
         assert original is not None  # acquire 一定建过基线
         yield pool
-        with contextlib.suppress(Exception):
-            restore(pool.app, original)
-            pump(pool.app)
+        if pool.app is not None:  # 池可能已在组内最后一条用例退出时被"用完即关"收掉
+            with contextlib.suppress(Exception):
+                restore(pool.app, original)
+                pump(pool.app)
         pool.baseline = original
 
     def _align(self, pool: _Pool) -> None:
@@ -510,6 +583,66 @@ class SharedUiRegistry:
         if remaining:
             pool._rebuild_or_create("用例后状态还原不到位: " + "; ".join(remaining))
 
+    def _remember_pool_name(self, pool: _Pool) -> None:
+        """记下"这个工厂服务哪个池名"(按当前用例的声明), 供"用完即关"判定."""
+        node = _current_nodeid()
+        if node is None:
+            return
+        name = self._pool_of_node.get(node)
+        if name is not None:
+            self._names_by_factory.setdefault(pool.key, set()).add(name)
+
+    def _retire_current(self, pool: _Pool) -> bool:
+        """当前用例退出后这个池还有没有已声明的后续使用者; 没有就当场收掉.
+
+        返回是否收了(收了就跳过 :meth:`_settle`): 窗口都要拆了, "还原 → 验证 →
+        重建"那套全是白做 —— 尤其"改了后端数据 → 重建", 重建出的窗马上又拆掉。
+        """
+        node = _current_nodeid()
+        if node is not None:
+            name = self._pool_of_node.get(node)
+            users = self._remaining_users.get(name) if name is not None else None
+            if users is not None:
+                users.discard(node)
+        served = self._names_by_factory.get(pool.key)
+        if not served:
+            return False  # 没声明过使用关系: 退回"会话末统一收"的旧行为
+        if any(self._remaining_users.get(other) for other in served):
+            return False  # 还有后续用例要用这个池, 窗口留着
+        self._close_pool(pool)
+        # 同一批池名下挂着的别的工厂(如共享会话自检模块里的替身工厂)一并收掉:
+        # 它们同样没有后续使用者, 留着只是陪跑。
+        for key, names in self._names_by_factory.items():
+            if key == pool.key or not names:
+                continue
+            if any(self._remaining_users.get(other) for other in names):
+                continue
+            sibling = self._pools.get(key)
+            if sibling is not None:
+                self._close_pool(sibling)
+        return True
+
+    def _close_pool(self, pool: _Pool) -> None:
+        """提前关掉一个池的窗口(收尾纪律与 :meth:`close` 完全一致, 只是提前)."""
+        import gui_support
+
+        app = pool.app
+        pool.app = None
+        pool.baseline = None
+        pool.retired = True
+        if app is None:
+            return
+        gui_support.unprotect_shared_root(app)
+        # 判据与会的收尾同一条: 池窗建得早, 期间别的用例攒下的调度线程是存量,
+        # 基线刷成"此刻实存量", 收尾就只判"拆这扇窗不得新增线程"。
+        app._scheduler_baseline = gui_support.scheduler_thread_count()
+        broken = gui_support.close_apps([app])
+        node = _current_nodeid() or "<不在用例里>"
+        self.early_closes.append(f"{pool.key}(由 {node} 收尾): {broken or '干净'}")
+        _record_early_close(pool.key, node, broken)
+        if broken:
+            pytest.fail("\n\n".join(broken), pytrace=False)
+
     def pools(self) -> tuple[_Pool, ...]:
         """现有各池(守卫/报告读: 重建账本、基线是否还在)."""
         return tuple(self._pools.values())
@@ -522,19 +655,21 @@ class SharedUiRegistry:
             return
         self.closed = True
         # 会话收尾要真销毁这些窗: 先撤销"共享根"登记, 让 close_apps 的兜底能看见它们。
+        # 已被"用完即关"收掉的池(app=None)自然跳过。
         for pool in self._pools.values():
             if pool.app is not None:
                 gui_support.unprotect_shared_root(pool.app)
         # 线程判据换成"会话末的实存量": 池窗建在会话早期, 它建窗时的基线(常常是 0)没法
         # 代表整批用例跑完后的进程 —— 期间"只建真后端不建窗"的用例攒下的调度线程是存量
         # (gui_support.scheduler_thread_count 的说明), 用旧基线会把存量算到收尾头上。
+        apps = [pool.app for pool in self._pools.values() if pool.app is not None]
+        if not apps:
+            return  # 每个池都"用完即关"过了: 没有要拆的窗, 不再走一遍空收尾
         current = gui_support.scheduler_thread_count()
         for pool in self._pools.values():
             if pool.app is not None:
                 pool.app._scheduler_baseline = current
-        broken = gui_support.close_apps(
-            [pool.app for pool in self._pools.values() if pool.app is not None]
-        )
+        broken = gui_support.close_apps(apps)
         if broken:
             pytest.fail("\n\n".join(broken), pytrace=False)
 

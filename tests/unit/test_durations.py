@@ -3,9 +3,10 @@
 ``sharding.cost_of`` 从"目录经验单价"升级成"实测优先、单价兜底"之后, 有两类失败
 必须被钉住: **实测值被静默忽略**(那会退回按条数装箱, 慢用例堆在同一片, 墙钟
 悄悄变长却没有任何红灯), 以及**坏数据文件让整套测试起不来**(加载要响亮报错,
-报错里要能指着文件修)。此外 ``scripts/run_tests_local.py`` 对 ``--record-durations``
-的"每片各记一份、收尾合并"改写也在这里锁住 —— 那条路坏了的话, 双片会互相覆盖
-记录, 刷出来的数据只剩后结束那一片。
+报错里要能指着文件修)。此外 ``scripts/run_tests_local.py`` 的两条路也在这里锁住:
+``--record-durations`` 的"每片各记一份、收尾合并"(坏了的话两片会互相覆盖记录),
+以及 ``--coverage`` 的"每片一份数据 + 收尾 combine/report + 退出码计入汇总"
+(少了 ``-m`` 这种错会把整片直接跑挂)。
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -295,3 +296,89 @@ def test_the_runner_does_not_clobber_without_any_records(
 
     assert not target.exists()
     assert "一份分片记录都没找到" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------ 覆盖率模式
+
+
+def test_the_coverage_shards_get_their_own_data_files(tmp_path: Path) -> None:
+    """两片各写一份覆盖率数据: 同一个 ``COVERAGE_FILE`` 被两个进程写会只剩后写的."""
+    env0 = runner._shard_coverage_env(tmp_path, 0)
+    env1 = runner._shard_coverage_env(tmp_path, 1)
+
+    assert env0["COVERAGE_FILE"] == str(tmp_path / ".coverage.shard-0")
+    assert env1["COVERAGE_FILE"] == str(tmp_path / ".coverage.shard-1")
+
+
+def test_the_coverage_shards_run_through_coverage_run(tmp_path: Path) -> None:
+    """``--coverage`` 时命令要包一层 ``coverage run --rcfile=<rc> -m pytest``.
+
+    少写 ``-m`` 是这次实现里真踩到的坑(coverage 会把它当文件名报
+    ``No file to run: ...pytest``), 所以这里把整条命令的形状钉住。
+    """
+    covered = runner._shard_command("uv", 2, 0, ["-q"], coverage=True)
+    plain = runner._shard_command("uv", 2, 1, ["-q"], coverage=False)
+
+    assert covered == [
+        "uv",
+        "run",
+        "coverage",
+        "run",
+        f"--rcfile={runner.COVERAGE_RC}",
+        "-m",
+        "pytest",
+        "--shard-count",
+        "2",
+        "--shard-index",
+        "0",
+        "-q",
+    ]
+    assert plain == [
+        "uv",
+        "run",
+        "pytest",
+        "--shard-count",
+        "2",
+        "--shard-index",
+        "1",
+        "-q",
+    ]
+
+
+def test_the_coverage_rc_is_generated_only_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rc 在就不动它; 不在才生成一次(生成失败要说清怎么手动补)."""
+    rc = tmp_path / ".coverage-platform.rc"
+    monkeypatch.setattr(runner, "COVERAGE_RC", rc)
+
+    rc.write_text("", encoding="utf-8")
+    assert runner._ensure_coverage_rc() is None
+
+    rc.unlink()
+    monkeypatch.setattr(
+        runner.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1)
+    )
+    assert "coverage_platform.py write" in str(runner._ensure_coverage_rc())
+
+
+def test_the_coverage_merge_skips_when_no_shard_wrote_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """一片数据都没有时不合并(硬崩溃后也不该拿半份数据报覆盖率)."""
+    assert runner._merge_coverage("uv", 2, tmp_path) != 0
+    assert "一片数据都没有" in capsys.readouterr().err
+
+
+def test_the_coverage_step_counts_into_the_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """覆盖率不达标要能从脚本退出码看出来(与各片退出码取最大值)."""
+    log = tmp_path / "shard-0.log"
+    log.write_text("1 passed\n", encoding="utf-8")
+    shards: list[tuple[int, Any, Path]] = [(0, SimpleNamespace(), log)]
+    codes = {0: 0}
+
+    assert runner._report(shards, codes, 1.0, coverage_code=2) == 2
+    assert "覆盖率没过" in capsys.readouterr().out
+    assert runner._report(shards, codes, 1.0, coverage_code=0) == 0

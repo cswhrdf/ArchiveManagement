@@ -371,6 +371,7 @@ def pytest_collection_modifyitems(
             config.hook.pytest_deselected(items=deselected)
 
     _apply_shard(config, items)
+    _cluster_shared_ui_sessions(items)
 
 
 @pytest.hookimpl(trylast=True)
@@ -439,6 +440,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 # 用例的工厂(改过下拉选项 / 换过长文案后端, 污染不出去)。
 # 新增一个共享池模块时在这里登记; 守卫(tests/unit/test_sharding.py)会反过来要求
 # "真的在用共享会话的模块都登记了", 漏登记会让它悄悄退回"每片各建一份"。
+# 这份登记有三个消费者: 分片装箱(groups)、"用完即关"(ui_shared 夹具把它声明给
+# SharedUiRegistry.declare_users —— 池在最后一个用例结束时就地关闭, 不陪跑到
+# 会话末), 以及片内聚段(sharding.cluster_groups 把同池模块连成一段, 池窗不再隔着
+# 无关模块闲置挂着)。
 _SHARED_UI_SESSIONS: dict[str, str] = {
     "tests/integration/test_gui_copy_quality.py": "copy-quality",
     "tests/integration/test_gui_dropdown.py": "dropdown",
@@ -502,6 +507,32 @@ def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
     items[:] = [item for item in items if item.nodeid in mine]
     if deselected:
         config.hook.pytest_deselected(items=deselected)
+
+
+def _cluster_shared_ui_sessions(items: list[pytest.Item]) -> None:
+    """同池的共享 UI 模块连成一段执行(纯逻辑见 ``sharding.cluster_groups``).
+
+    按文件名字母序, demo-app 池的 6 个模块之间隔着十几个每用例自建窗的模块 ——
+    池窗在这段空档里全程闲置挂着(2026-10 实测约 225s, 占它开着时间的 ~87%), 双片
+    并行时还平白多一份 GUI/合成层负载。聚成一段后, 池窗只在它那一段里存在, 与
+    "用完即关"正好衔接: 段尾即收。
+
+    放在分片**之后**: 池成员本就整组同片(``_apply_shard`` 的 ``groups``), 无论全量
+    还是分片视角, 聚出的相对顺序都一致。没有共享会话时(如只跑单元)是恒等重排,
+    一行打印都不出。
+    """
+    groups = _shared_ui_groups(items)
+    if not groups:
+        return
+    ordered = sharding.cluster_groups([item.nodeid for item in items], groups)
+    if ordered == [item.nodeid for item in items]:
+        return
+    by_nodeid = {item.nodeid: item for item in items}
+    items[:] = [by_nodeid[node_id] for node_id in ordered]
+    print(
+        "[order] 共享 UI 会话的同池模块已聚成一段执行: "
+        + ", ".join(sorted(set(groups.values())))
+    )
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -618,15 +649,19 @@ def _close_gui_apps() -> Iterator[None]:
 
 
 @pytest.fixture(scope="session")
-def ui_shared() -> Iterator[ui_sharing.SharedUiRegistry]:
-    """: 共享 UI 会话注册表(机制与三条纪律见 ``tests/ui_sharing.py``).
+def ui_shared(request: pytest.FixtureRequest) -> Iterator[ui_sharing.SharedUiRegistry]:
+    """: 共享 UI 会话注册表(机制与纪律见 ``tests/ui_sharing.py``).
 
-    session 级: 池里的窗口活过整批用例 —— 每条用例前后由 ``test_scope`` 做
-    "对齐基线 / 识别漂移并还原(还原不过就重建整窗)"; 会话末尾统一走
+    session 级: 池里的窗口只服务**它的用例** —— 每条用例前后由 ``test_scope`` 做
+    "对齐基线 / 识别漂移并还原(还原不过就重建整窗)"; 一个池的最后一个用例结束时
+    窗口就地关闭(收集期把"用例 → 池"声明给 ``declare_users``, 数据源就是
+    ``_SHARED_UI_SESSIONS``), 不再陪跑到会话末 —— 分片并行时每片挂着的闲置共享窗
+    由此从"最多三扇陪全程"降到"正在用的那扇"。会话末尾统一走
     ``gui_support.close_apps`` 收尾, 拆不干净与逐用例收尾一样判红。不用它的
     用例零开销: 注册表是空的, 收尾是空操作。
     """
     registry = ui_sharing.SharedUiRegistry()
+    registry.declare_users(_shared_ui_groups(list(request.session.items)))
     yield registry
     registry.close()
 

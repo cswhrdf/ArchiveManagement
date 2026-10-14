@@ -24,9 +24,8 @@ description: '本仓库 Allure 报告体系的用法与不变式: 配置的唯�
 | `merge_allure_results.py`（`pytest-report`）                                 | 合并后的 `allure-results` + `allure-manifest.json` → 产物 `allure-resources-<镜像名>`（只含历史 + 清单）与 `allure-report-<镜像名>`（tar.gz） | 人；下一轮取历史       |
 | `allure-summary`                                                             | `allure-resources-final`（`.allure/history.jsonl`）+ `allure-report-final`（单个 tar.gz）                                                     | 人                     |
 
-两条硬边界：
+一条硬边界：
 
-- **只有非 push 的轮次出报告**（PR 与 nightly）：push 只跑选中的层，切片覆盖率天生偏低、结果也不全，在那里出报告等于自造假红；它的证据是分片产物与日志。守卫 `test_ci_publishes_only_verified_report`。
 - **报告不在产出数据的平台上生成**（两台报告机器都是 Ubuntu）：合并 / 汇总 / 生成 / 自检全是纯文件操作。代价是"这份结论算哪个平台"必须由**参数**给出，**绝不能读 `runner.os`** —— 那台机器上它恒为同一个值，拿它当平台名会把所有平台的结论标错，而且没有任何一步会失败。
 
 ## 2. 配置的唯一真相：`allurerc.mjs`

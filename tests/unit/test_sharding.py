@@ -109,7 +109,58 @@ def test_shard_plan_keeps_a_shared_ui_session_in_one_piece() -> None:
     owners = [len(set(session) & set(bucket)) for bucket in buckets]
     assert sorted(owners) == [0, 0, len(session)], f"共享会话被拆开: {owners}"
     merged = [node for bucket in buckets for node in bucket]
-    assert sorted(merged) == sorted(session + others)
+    assert sorted(merged) == sorted(session + others), "聚组装箱也不重不漏"
+
+
+def test_cluster_groups_collects_each_group_into_one_block() -> None:
+    """聚段: 同组用例平移到组内首条的位置连成一块, 组内外相对顺序都不乱.
+
+    按文件名字母序收集时, 一个共享池的模块散在多个位置 —— 池窗在中间的空档里闲置
+    挂着(conftest 的 ``_cluster_shared_ui_sessions`` 靠本函数把它们聚到一起)。
+    """
+    node_ids = [
+        "tests/a.py::t1",
+        "tests/pool.py::t1",
+        "tests/b.py::t1",
+        "tests/c.py::t1",
+        "tests/pool.py::t2",
+        "tests/b.py::t2",
+        "tests/pool.py::t3",
+    ]
+    groups = {
+        "tests/pool.py::t1": "demo-app",
+        "tests/pool.py::t2": "demo-app",
+        "tests/pool.py::t3": "demo-app",
+    }
+
+    clustered = sharding.cluster_groups(node_ids, groups)
+
+    assert sorted(clustered) == sorted(node_ids), "聚类只是重排, 不重不漏"
+    assert clustered[:3] == [
+        "tests/a.py::t1",
+        "tests/pool.py::t1",
+        "tests/pool.py::t2",
+    ], "整组要平移到组内首条出现的位置连成一块(组内保持原相对顺序)"
+    assert clustered[3] == "tests/pool.py::t3", "同组必须连成一段, 中间不得插别的用例"
+    assert [n for n in clustered if n not in groups] == [
+        "tests/a.py::t1",
+        "tests/b.py::t1",
+        "tests/c.py::t1",
+        "tests/b.py::t2",
+    ], "组外用例只被整体推后, 相对顺序不变"
+
+
+def test_cluster_groups_without_groups_is_the_identity() -> None:
+    """没有组要聚时原样返回: 只跑单元/严重等级过滤后的会话不该看到顺序变化."""
+    node_ids = [f"tests/unit/test_x.py::t{index}" for index in range(5)]
+
+    assert sharding.cluster_groups(node_ids, {}) == node_ids
+    assert (
+        sharding.cluster_groups(
+            node_ids, {"tests/unit/test_x.py::t9": "不存在于输入的组"}
+        )
+        == node_ids
+    ), "输入里没有组成员时也是恒等重排"
 
 
 def test_shard_plan_without_groups_packs_case_by_case() -> None:

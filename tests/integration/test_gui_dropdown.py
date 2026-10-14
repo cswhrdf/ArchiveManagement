@@ -181,11 +181,24 @@ def test_clicking_the_arrow_opens_the_dropdown(app: Any) -> None:
     冒泡到顶层窗口, 而浮层挂了"点窗口别处就收起" —— 当场挂绑定 = 刚开就被这次点击收起。
     直接调 ``_open_dropdown_menu`` 量不到这条闭环(那一步没有点击事件), 所以这里按控件
     自己的坐标点箭头, 让事件走一遍 canvas 的 tag 绑定与顶层窗口的绑定。
+
+    **起点必须显式摆正**: 共享池里的选择框会带着上一条用例留下的"下一次点击是收起"
+    (实测: 先让同一个选择框开着浮层, 再点箭头 —— 这一下会把浮层**收起**而不是打开, 断言就报
+     "点箭头没打开下拉"; 双片跑时正是这条报红, 单跑该模块 9 passed)。这条用例量的是"点箭头
+    能打开", 所以先把浮层关掉、把开关拨回"下一次点击是打开"。
+
+    坐标**量之前先确认那一格已经排好版**: ``winfo_width()`` 在控件还没落地时给出的是 1,
+    此时 ``width - 4`` 是个负数, 点下去什么都不会发生 —— 那会伪装成"点箭头没反应"。
     """
     combo = app._home_page._page_size_box
     combo.configure(values=list(_MANY_VALUES))
+    combo._dropdown_menu.close()
+    combo._close_on_next_click = False
     canvas = combo._canvas
-    arrow_x = int(canvas.winfo_width()) - 4
+    app.update_idletasks()
+    width = int(canvas.winfo_width())
+    assert width > 8, f"箭头那一格还没排好版, 量不出可点的地方(宽 {width})"
+    arrow_x = width - 4
     arrow_y = int(canvas.winfo_height()) // 2
     canvas.event_generate("<Button-1>", x=arrow_x, y=arrow_y)
     _pump(app)
