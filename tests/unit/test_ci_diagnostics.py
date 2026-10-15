@@ -26,6 +26,8 @@ from types import ModuleType
 
 import pytest
 
+import crash_capture
+
 pytestmark = [
     pytest.mark.minor,
     pytest.mark.epic("工程与发布"),
@@ -744,15 +746,17 @@ def test_the_crash_retry_window_has_not_been_forgotten() -> None:
     """到期日起这条测试必须红: "临时缓解"不许悄悄烂尾(用户 2026-10-05 的要求).
 
     这不是普通的回归测试 —— 它就是到期提醒本身: 变红即"该回来处理这层包装了",
-    要么移除, 要么写清上游仍未修复的依据后**明确续期**(改 RETRY_UNTIL)。
+    要么移除, 要么写清上游仍未修复的依据后**明确续期**(改 RETRY_UNTIL)。包装现在管两种
+    死法(原生崩溃与用例超时), 窗口也是共用的。
     """
     module = _load_script("run_pytest_with_crash_retry")
     today = dt.datetime.now(dt.UTC).date()
 
     assert today <= module.RETRY_UNTIL, (
-        f"原生崩溃重试的窗口已在 {module.RETRY_UNTIL} 到期: 请移除这层临时包装"
+        f"崩溃/超时重试的窗口已在 {module.RETRY_UNTIL} 到期: 请移除这层临时包装"
         "(ci.yml 两个 UI 步骤外面包的 scripts/run_pytest_with_crash_retry.py, 以及"
-        " docs/testing.md 的说明), 或确认上游(macOS 26 + Tcl/Tk 9.0)仍未修复后明确续期"
+        " docs/testing.md 的说明), 或确认上游(macOS 26 + Tcl/Tk 9.0)与 Windows 的"
+        "卡顿仍未修复后明确续期"
     )
 
 
@@ -865,8 +869,236 @@ def test_the_retry_passes_through_once_the_window_has_expired(
     assert "过期" in capsys.readouterr().err, "失效不能是静默的"
 
 
+# ---- 超时重试(2026-10-16): 与崩溃同一层包装, 但判据是"留证痕迹"而不是退出码 ----
+
+# 出事的用例(2026-10-16 run 38758273842 真的卡在这条上; 用它当 nodeid 只是为了让日志可读)。
+_TIMEOUT_NODEID = (
+    "tests/integration/test_gui_lifecycle.py::test_run_gui_reports_every_config_state"
+)
+
+# 子进程剧本(超时): 每遍都记一行计数、往被看护目录写"本次的残缺结果"、把自己的命令行**覆盖**
+# 写进 argv 日志(第三遍有没有带上 --deselect 就靠它); 按 mode 决定装不装"卡到 60s 上限":
+#   once       —— 只有第一遍卡住(写结果/附件/dump), 之后正常退出 0;
+#   always     —— 只要命令行里没有 --deselect 就卡住(第二遍仍卡 ⇒ 逼出第三遍的 deselect);
+#   no-results —— 每遍都卡住, 但只落 dump(没配 --alluredir 的形态, 拿不到 nodeid)。
+# 卡住时退出码 1(``tests/timeout_guard.py`` 是 ``os._exit(1)``), 正常退出 0 —— 关键是这两种
+# 退出码**都不在** CRASH_EXIT_CODES 里, 所以"能不能认出超时"全靠痕迹。
+_TIMEOUT_CHILD_SCRIPT = (
+    "import json, pathlib, sys\n"
+    "counter = pathlib.Path(sys.argv[1])\n"
+    "runs = counter.read_text(encoding='utf-8').count('run') if counter.exists() else 0\n"
+    "with counter.open('a', encoding='utf-8') as handle:\n"
+    "    handle.write('run\\n')\n"
+    "watched = pathlib.Path(sys.argv[2])\n"
+    "watched.mkdir(parents=True, exist_ok=True)\n"
+    "pathlib.Path(sys.argv[3]).write_text(' '.join(sys.argv), encoding='utf-8')\n"
+    "(watched / f'partial-run{runs}.json').write_text('{}', encoding='utf-8')\n"
+    "mode, node = sys.argv[4], sys.argv[5]\n"
+    "hangs = '--deselect' not in sys.argv and (mode != 'once' or runs == 0)\n"
+    "if hangs:\n"
+    "    stem = f'{runs}-9f2c'\n"
+    "    (watched / f'{stem}-threads.txt').write_text('pytest 主线程', encoding='utf-8')\n"
+    "    (watched / f'{stem}-notes.txt').write_text('notes', encoding='utf-8')\n"
+    "    if mode != 'no-results':\n"
+    "        payload = {'uuid': stem, 'fullName': 'archive-management.timeout.' + node,\n"
+    "                   'name': '超时留证: ' + node, 'status': 'broken',\n"
+    "                   'attachments': [{'name': 'threads.txt', 'source': f'{stem}-threads.txt'},\n"
+    "                                   {'name': 'notes.txt', 'source': f'{stem}-notes.txt'}]}\n"
+    "        (watched / f'{stem}-result.json').write_text(\n"
+    "            json.dumps(payload, ensure_ascii=False), encoding='utf-8')\n"
+    "    dumps = pathlib.Path('crash-dumps')\n"
+    "    dumps.mkdir(parents=True, exist_ok=True)\n"
+    "    dump = dumps / ('tests_integration_test_gui_lifecycle.py__'\n"
+    "                    'test_run_gui_reports_every_config_state_timeout.dump')\n"
+    "    dump.write_text('dump ' * (runs + 1), encoding='utf-8')\n"
+    "raise SystemExit(1 if hangs else 0)\n"
+)
+
+
+def _run_timeout_child(
+    module: ModuleType,
+    tmp_path: Path,
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[int, Path, Path, Path]:
+    """按剧本跑一遍包装, 返回 ``(退出码, 计数文件, argv 日志, 结果目录)``."""
+    monkeypatch.chdir(tmp_path)
+    counter = tmp_path / "counter.txt"
+    argv_log = tmp_path / "argv.txt"
+    results = tmp_path / "allure-results"
+    results.mkdir(exist_ok=True)
+    # 预置"前一段进程"留下的结果: 清理不许碰它。
+    (results / "from-not-ui-step.json").write_text("{}", encoding="utf-8")
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _TIMEOUT_CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            str(argv_log),
+            mode,
+            _TIMEOUT_NODEID,
+        ]
+    )
+    return rc, counter, argv_log, results
+
+
+def test_a_timeout_triggers_one_plain_rerun_and_drops_the_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """超时: 原样重跑一遍; 这一遍过了就把那条"超时留证"清掉(用户 2026-10-16 的决定).
+
+    清掉的理由: 那条结论描述的是**上一次意外卡顿**, 不是这次运行的结论; 重跑已经证明这次
+    没事。但清理只动**本次新增**的条目, 前一段进程(not ui)写的结果在快照之外 —— 不许碰。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    summary = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    rc, counter, argv_log, results = _run_timeout_child(
+        module, tmp_path, "once", monkeypatch
+    )
+
+    assert rc == 0, "重跑成功就按 0 收场"
+    assert counter.read_text(encoding="utf-8").count("run") == 2, "只原样重跑一次"
+    assert not list(results.glob("*-result.json")), (
+        "那条 `超时留证` 与它的附件要清掉, 不然报告里留着一个不会再出现的卡顿"
+    )
+    assert (results / "from-not-ui-step.json").exists(), "快照之外的结果不许被动"
+    assert not (results / "partial-run0.json").exists(), "卡住那次的残缺结果要清"
+    assert (results / "partial-run1.json").exists()
+    assert "--deselect" not in argv_log.read_text(encoding="utf-8"), (
+        "第一遍过了就没必要 deselect"
+    )
+    assert list((tmp_path / "crash-dumps").glob("*_timeout.dump")), (
+        "dump 是现场证据, 不清(它不进报告, 但 artifact 里有)"
+    )
+    captured = capsys.readouterr()
+    assert "::warning::" in captured.err
+    assert "超时" in captured.err, "重试不能是静默的"
+    text = summary.read_text(encoding="utf-8")
+    assert "### 用例超时重试" in text
+    assert "退出码 0" in text
+
+
+def test_a_second_timeout_deselects_the_hung_case_and_keeps_its_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """两遍都卡住 ⇒ 第三遍把它 deselect 掉跑完其余用例, 而那条超时结论**留在报告里**.
+
+    为什么留: 挂住是真信号。清掉它, 那条用例就从报告里静默消失了 —— 比一份"卡住"的结论
+    危险得多。为什么 deselect: 2026-10-16 那次事故真正的代价是**其余 34 条用例与覆盖率没了**。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    summary = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    rc, counter, argv_log, results = _run_timeout_child(
+        module, tmp_path, "always", monkeypatch
+    )
+
+    assert rc == 0, "deselect 之后其余用例过了, 这一遍就该是绿的"
+    assert counter.read_text(encoding="utf-8").count("run") == 3, "一共跑了三遍"
+    assert f"--deselect {_TIMEOUT_NODEID}" in argv_log.read_text(encoding="utf-8"), (
+        "第三遍要把挂住的那条挑出去"
+    )
+    assert sorted(entry.name for entry in results.glob("*-result.json")) == [
+        "1-9f2c-result.json"
+    ], "第二次的 `超时留证` 要留着(挂住是真信号), 而它的残缺结果要清掉"
+    assert (results / "1-9f2c-threads.txt").exists(), "结论的附件也要留着, 不然是空链"
+    assert (results / "1-9f2c-notes.txt").exists()
+    assert not (results / "partial-run1.json").exists(), (
+        "第二遍的残缺结果要清掉, 免得同一用例在报告里两份结论"
+    )
+    assert (results / "partial-run2.json").exists(), "第三遍的结果是有效的, 不许动"
+    assert (results / "from-not-ui-step.json").exists()
+    err = capsys.readouterr().err
+    assert "::warning::" in err
+    assert "--deselect" in err or "deselect" in err
+    text = summary.read_text(encoding="utf-8")
+    assert "deselect" in text
+    assert "留在报告里" in text
+
+
+def test_a_timeout_without_any_result_file_reruns_once_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """拿不到 nodeid(没配 --alluredir)时: 只靠 dump 认出超时, 重跑一次就收手, 什么都不删.
+
+    不猜 nodeid、也不清第二遍的结果 —— 那些结果(含超时结论)是这场事故的全部证据。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    rc, counter, argv_log, results = _run_timeout_child(
+        module, tmp_path, "no-results", monkeypatch
+    )
+
+    assert rc == 1, "两遍都卡住, 按最后一遍的退出码收场"
+    assert counter.read_text(encoding="utf-8").count("run") == 2, "拿不到 id 就不再重跑"
+    assert "--deselect" not in argv_log.read_text(encoding="utf-8")
+    assert (results / "partial-run1.json").exists(), "没有 deselect 就什么都不删"
+    assert list((tmp_path / "crash-dumps").glob("*_timeout.dump"))
+    err = capsys.readouterr().err
+    assert "::warning::" in err
+    assert "拿不到" in err, "收场理由要写清, 别让人以为是漏了"
+
+
+def test_the_timeout_retry_shares_the_crash_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """窗口过期后: 超时照常透传失败(缓解自然失效), 但要把"该处理了"喊出来."""
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        module, "RETRY_UNTIL", dt.datetime.now(dt.UTC).date() - dt.timedelta(days=1)
+    )
+
+    rc, counter, _, results = _run_timeout_child(
+        module, tmp_path, "always", monkeypatch
+    )
+
+    assert rc == 1
+    assert counter.read_text(encoding="utf-8").count("run") == 1, "过期后不再重试"
+    assert (results / "partial-run0.json").exists(), "没有重试就没有清理"
+    assert "过期" in capsys.readouterr().err, "失效不能是静默的"
+
+
+def test_the_timeout_marker_matches_what_the_guard_writes() -> None:
+    """两边必须对得上: 包装靠 fullName 前缀与 ``_timeout.dump`` 认超时 —— 那边一改这边就瞎了.
+
+    这条守卫同时钉住 dump 目录的默认值: 包装的 ``--timeout-dump-dir`` 与 conftest 的
+    ``--crash-dump-dir`` 不一致时, 兜底信号永远看不到(超时就彻底认不出来了)。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    guard = (REPO_ROOT / "tests" / "timeout_guard.py").read_text(encoding="utf-8")
+
+    assert module.TIMEOUT_FULL_NAME == "archive-management.timeout."
+    assert f'f"{module.TIMEOUT_FULL_NAME}{{item.nodeid}}"' in guard, (
+        "tests/timeout_guard.py 写的 fullName 前缀与包装认的不是同一个"
+    )
+    assert '"source": target.name' in guard, "包装按 attachments[].source 认附件名"
+    dump = crash_capture.dump_target(
+        "tests/x.py::test_y [timeout]", directory=Path("crash-dumps")
+    )
+    assert dump.name.endswith(module.TIMEOUT_DUMP_SUFFIX), (
+        "dump 文件名要带 [timeout] 才有 _timeout 后缀, 包装就靠它兜底"
+    )
+    assert module.parse_args(["--", "pytest"]).timeout_dump_dir == Path(
+        crash_capture.DUMP_DIRECTORY
+    ), "dump 目录的默认值要与 conftest 的 --crash-dump-dir 一致"
+
+
 def test_ui_steps_are_wrapped_in_the_crash_retry_guard() -> None:
-    """两个 UI 段要套上"只认原生崩溃"的重试包装; not ui 段不许被碰."""
+    """两个 UI 段要套上重试包装(崩溃与超时同一层); not ui 段不许被碰.
+
+    同时钉住 deselect 那条路的前提: 被包装的 pytest 命令必须配着 ``--alluredir=allure-results``
+    —— 挂住的用例 id 只能从那边的 ``超时留证`` 结论里读出来, 没配就没法 deselect。
+    """
     job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
 
     for name in (
@@ -876,6 +1108,9 @@ def test_ui_steps_are_wrapped_in_the_crash_retry_guard() -> None:
         step = _step(job, name)
         assert "scripts/run_pytest_with_crash_retry.py" in step, name
         assert "--watch-dir allure-results" in step, f"{name}: 重试前要清残缺结果"
+        assert "--alluredir=allure-results" in step, (
+            f"{name}: 没配 --alluredir 就读不到挂住的用例 id, deselect 那条路直接废掉"
+        )
     for name in (
         "Pytest with coverage, non-UI suite first (Linux)",
         "Pytest with coverage, non-UI suite first (Windows/macOS)",

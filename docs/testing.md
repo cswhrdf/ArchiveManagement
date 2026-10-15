@@ -197,6 +197,7 @@ GUI 用例把建窗期的 TclError 写成 `pytest.skip("tk 环境不可用: ..."
 
 - **不得留下 Tk 根**：`_default_root` 上挂着不能用 / 没拆干净的解释器时，后面每条用例贴图都报"图片不存在"。收尾做验证并补救，断裂按失败报。
 - **不得攒下后台调度线程**：`BackgroundScheduler()` 构造即 `start()`，释放入口必须是 `destroy()` 也会走的幂等 `ArchiveApp._release_background()`。守卫：`test_gui_roots.py::test_a_real_backend_does_not_outlive_its_window`（故意绕开收尾、只走产品关窗路径）+ 收尾里的**相对基线**判据——同进程里非 GUI 用例也会建真后端，绝对判据会把别人的存量算到当前用例头上。
+- **会话末一个都不许剩**：上面那条相对判据只对"自己建了窗口"的用例生效（没有窗口可归因就不判），**没有窗口的用例**因此是盲区——`test_run_gui_reports_every_config_state` 用替身窗口跑了三次 `run_gui`（替身的 `mainloop` 就地返回，而真窗口那条路是"关窗时释放后台资源"），三个后端各留一个 `APScheduler` 线程一路活到会话末，直到它们挂住别的东西（2026-10-16 的 Windows 片：那条用例卡到 60s 超时上限，之后的用例与覆盖率一起没了）。兜底在 `tests/conftest.py`：逐用例只**记账**（进出各量一次线程数，比"收尾后再等"便宜），会话末等一次（最多 2s）、判一次——那时还活着的只可能是漏，点名可疑用例并**把会话判红**。举证的量法是"该用例自己收尾"，所以真有替身/裸后端的新用例要自己 `shutdown()`。
 
 ### 只在某个平台红的分片失败：先把那份平台差异搬回本地
 
@@ -412,7 +413,7 @@ uv run python scripts/verify_allure_report.py allure-report --manifest allure-ma
 崩溃不在本仓库代码，在**解释器自带的 Tcl/Tk**：uv python install 装的 python-build-standalone 构建在 macOS 捆绑 Tcl/Tk 9.0，UI 用例死在 9.0 的 Aqua 位图绘制 use-after-free（EXC_BAD_ACCESS，栈停在 `-[NSCGSContext dealloc]` → `_invalidate` 一族）。处置（三层都有守卫）：
 
 - **从依赖层规避**：pytest 的 macOS 片换成 `setup-python` 的 python.org 构建（自带 8.6）+ `UV_PYTHON_PREFERENCE=only-system`，且自检一步同时断言 `TkVersion < 9`（解释器又带回 9.x 时当场红，提示见这条注释）。
-- **重跑包装降级为「偶发崩溃的通用兜底」（保留，带到期日）**：UI 段的 pytest 外面包一层 `scripts/run_pytest_with_crash_retry.py`——只有"进程被信号/原生异常杀死"的退出码（SIGTRAP=133 / SIGSEGV=139 这一类，含 Windows 的 0xC0000005 / 0xC0000409）才触发重跑；断言失败、门禁不过都是普通退出码，**一次都不会重跑**，真回归不会被重试稀释或掩盖。重跑前先清掉崩溃那次新写进 allure-results 的半套结果（快照之前的一律不动，否则重跑后的报告缺半边、同用例出现两份结论）；覆盖率不用清（pytest-cov 只在会话结束落盘，崩溃那次什么都没写）。只重跑一次：第二次仍崩就按它的退出码失败，faulthandler.log 与 .ips 照常由 if: always() 的上传步收走；重跑在运行日志留 `::warning::` 注解、在运行摘要页写一段说明。**这层包装带到期日**（脚本里的 `RETRY_UNTIL`）：过期后直接透传不再重试并打提醒，`tests/unit/test_ci_diagnostics.py` 里"窗口没被忘记"的守卫从到期次日起变红——要么移除这层包装，要么确认仍有值得兜底的偶发崩溃后**明确续期**。
+- **重跑包装降级为「偶发崩溃与偶发超时的通用兜底」（保留，带到期日）**：UI 段的 pytest 外面包一层 `scripts/run_pytest_with_crash_retry.py`——两种死法同一类事故（**进程死了，它后面的一切都没了**）：① 崩溃只认"进程被信号/原生异常杀死"的退出码（SIGTRAP=133 / SIGSEGV=139 这一类，含 Windows 的 0xC0000005 / 0xC0000409）；② 超时**不看退出码**，只认 `tests/timeout_guard.py` 留下的痕迹（`fullName` 以 `archive-management.timeout.` 开头的那条结论，或 `*_timeout.dump`）。断言失败、门禁不过两者都没有，**一次都不会重跑**，真回归不会被重试稀释或掩盖。重跑前先清掉死掉那次新写进 allure-results 的半套结果（快照之前的一律不动，否则重跑后的报告缺半边、同用例出现两份结论）；覆盖率不用清（pytest-cov 只在会话结束落盘，那次什么都没写）。崩溃只重跑一次；超时那条路多一步：先原样重跑一遍（环境卡顿多半不会连着来，这一遍就全过了，那条超时结论也随之清掉），若仍超时，第三遍把挂住的那条用例 `--deselect` 掉——**其余用例与覆盖率先拿到手，而那次超时的结论留在报告里**（挂住是真信号，不许静默消失）。每次重跑都在运行日志留 `::warning::` 注解、在运行摘要页写一段说明。**这层包装带到期日**（脚本里的 `RETRY_UNTIL`）：过期后直接透传不再重试并打提醒，`tests/unit/test_ci_diagnostics.py` 里"窗口没被忘记"的守卫从到期次日起变红——要么移除这层包装，要么确认仍有值得兜底的偶发后**明确续期**。
 
 一次真实的偶发就是靠它断的（2026-09-30）：一条 GUI 用例整轮全量里红过一次（单跑、整模块连跑两遍都不复现），手里只剩一个测试名。事后从 crash-dumps 里那次失败留下的 dump 读出根因——`OperationalError: unsupported file format`，栈最深一帧是 `MonitoredDirectoryRepository.list_all()` 的 `connection.execute(`，异常穿过 `_on_scan` 的 `except ArchiveManagementError` 冒到用例：**环境级偶发**（临时 SQLite 文件在那一刻被读成非 SQLite 内容），不是"等得不够"的时序问题。两条可复用的做法：① **先读现场再动手**——dump 是**失败当刻**写的且**写盘**（与有没有 --alluredir 无关），`coredumpy peek crash-dumps` 就能找到是哪条用例的；② 本地跑全量最好照 CI 的写法带上 `--alluredir=allure-results`，否则截图与其余附件不落盘。
 
@@ -426,6 +427,8 @@ uv run python scripts/verify_allure_report.py allure-report --manifest allure-ma
 ```
 
 要点：结论走**终端写入器**不走 print（pytest 捕获 stdout，`os._exit` 跳过收尾会把缓冲区一起丢）；**先倒出捕获内容**（"卡死之前程序自己打了什么"往往比栈更能说明问题）；覆盖率控制器挂在 pytest-cov 私有插件名 `_cov`、Allure 目录选项叫 `allure_report_dir`（猜错只会静默不写）；dump 超 25 MiB 只记落点。报告里是一条 broken 结论（标题"超时留证: <用例>"、critical），**故意不写 framework/testCategory 标签**（不该改变质量门口径）。留证不改变结局：最后照样以 1 退出（超时本来就不该被"想写证据"拖住）。守卫 `tests/unit/test_timeout_guard.py`，其中两条是接线守卫：钩子必须真挂在 `tests/conftest.py` 上、`pyproject.toml` 里必须仍然是 `--timeout-method=thread`（改成 signal，接管就永远不会生效，"超时后什么都没有"的老问题会静默回来）。
+
+**留证的真正价值在下一个回合**：`os._exit(1)` 也让那之后的用例与覆盖率全没（2026-10-16 的 Windows 片：252 vs 282 条 e2e、覆盖率 99.51% 判红）。所以 CI 外面那层重跑包装还会**接着处置**这次超时（见上一节）：先原样重跑，仍超时就把这条 `--deselect` 掉跑完其余用例，并把这条结论留在报告里当信号。判据只看"这一遍有没有新的超时痕迹"（新写下的那条结论，或 dump 文件**内容变了**——同一条用例再挂一次会覆盖同名 dump，所以只比文件名是不够的）。
 
 ### 分片执行与结果合并
 

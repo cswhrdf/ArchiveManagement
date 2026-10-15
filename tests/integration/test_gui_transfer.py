@@ -172,6 +172,9 @@ def _exported_package(tmp_path: Path, *, app_id: int | None = 730) -> Path:
     service.run_backup_now(str(game.id))
     package = tmp_path / "源游戏.archive.zip"
     service.run_export(str(game.id), str(package))
+    # 这只后端只为**造包**而建(与界面无关, 没人替它收尾): 不关掉就留一个 APScheduler
+    # 线程活到会话末(2026-10-16 的会话末守卫点名到这里)。
+    service.shutdown()
     return package
 
 
@@ -473,6 +476,8 @@ def _exported_batch(tmp_path: Path, *, count: int = 2) -> Path:
         game_ids.append(game_id)
     package = tmp_path / "batch.archive.zip"
     service.run_export_batch(game_ids, str(package))
+    # 同 _exported_package: 这只后端只为造包而建, 没人替它收尾(会话末守卫会点名)。
+    service.shutdown()
     return package
 
 

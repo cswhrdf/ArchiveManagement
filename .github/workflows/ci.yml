@@ -568,15 +568,21 @@ jobs:
           COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
         run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
 
-      # UI 段外面包了一层"原生崩溃重试"(2026-10-05, scripts/run_pytest_with_crash_retry.py):
-      # macOS 26.6.2 + Tcl/Tk 9.0 的 Tk Aqua 位图绘制 use-after-free 会把 pytest 进程整个
-      # 杀死(同一用例在 Linux/Windows 都过), 崩溃点之后的用例全部没结果、分片报缺。包装
-      # **只认**"死于信号/原生异常"的退出码(SIGTRAP=133/SIGSEGV=139 这一类) —— 断言失败、
-      # 门禁不过都是普通退出码, 一次都不会重跑, 真回归不会被重试稀释或掩盖。重试前会清掉
-      # 崩溃那次新写进 allure-results 的半套结果(同一用例不能有两份结论), 覆盖率不用清
-      # (pytest-cov 只在会话结束才落盘, 崩溃那次什么都没写)。这是**带到期日的临时缓解**:
-      # 窗口一过脚本自动透传不再重试, 守卫测试(tests/unit/test_ci_diagnostics.py)同时变红,
-      # 催着人回来移除这层包装或明确续期。
+      # UI 段外面包了一层"死法重试"(2026-10-05, scripts/run_pytest_with_crash_retry.py):
+      # 原生崩溃(macOS 26.6.2 + Tcl/Tk 9.0 的 Tk Aqua 位图绘制 use-after-free 会把 pytest
+      # 进程整个杀死, 同一用例在 Linux/Windows 都过)与**用例超时**(2026-10-16 的 Windows 片:
+      # 一条 GUI 用例卡到 60s 上限, timeout_guard 写完现场就 os._exit(1), 那之后的 34 条用例
+      # 与覆盖率一起没了)是同一类事故 —— 进程死了, 它后面的一切都没了 —— 所以一并接管。
+      # 判据都是**硬的**: 崩溃只认"死于信号/原生异常"的退出码(SIGTRAP=133/SIGSEGV=139 这一类),
+      # 超时只认 timeout_guard 留下的痕迹(那条 `超时留证` 结论或 `*_timeout.dump`) ——
+      # 断言失败、门禁不过都是普通退出码且没有这两个痕迹, 一次都不会重跑, 真回归不会被稀释。
+      # 重试前会清掉死掉那次新写进 allure-results 的半套结果(同一用例不能有两份结论), 只清
+      # 快照之后新增的(前一段进程的结果不动); 覆盖率不用清(pytest-cov 只在会话结束才落盘)。
+      # 超时那条路多一步: 先原样重跑一遍(环境卡顿多半不会连着来, 这一遍就全过了, 那条超时结论
+      # 也随之清掉); 若仍超时, 第三遍把挂住的那条用例 --deselect 掉 —— 其余用例与覆盖率先拿到
+      # 手, 而那次超时的结论**留在报告里**(挂住是真信号, 不许静默消失)。
+      # 这是**带到期日的临时缓解**: 窗口一过脚本自动透传不再重试, 守卫测试
+      # (tests/unit/test_ci_diagnostics.py)同时变红, 催着人回来移除这层包装或明确续期。
       - name: Pytest with coverage, UI suite in its own process (Linux)
         if: always() && !cancelled() && runner.os == 'Linux'
         env:

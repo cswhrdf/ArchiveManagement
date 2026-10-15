@@ -69,6 +69,7 @@ import pytest
 
 import crash_capture
 import durations
+import gui_support
 import sharding
 import timeout_guard
 import tk_guard
@@ -440,19 +441,82 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 # 无条件累加(每条用例三次字典操作, 开销可忽略), 是否落盘由会话结束时的选项决定.
 _DURATION_SAMPLES: dict[str, float] = {}
 
+# 后台调度线程的存量账(会话末守卫用, 见 :func:`_check_scheduler_leaks`): 每条用例进/出时量
+# 一次线程数, 只在"出去时比进来时多"记一笔 —— 会话末还有活着的线程时能有名字可点。
+_SCHEDULER_BEFORE: dict[str, int] = {}
+_SCHEDULER_SUSPECTS: list[tuple[str, int, int]] = []
+
+# 可疑用例最多留这么多条: 真出漏时常常是一批用例都留了线程, 全量列出来会把日志刷没。
+_MAX_SCHEDULER_SUSPECTS = 10
+
+
+def _note_scheduler_growth(report: pytest.TestReport) -> None:
+    """量这条用例进/出时的后台调度线程存量(判据本身在会话末, 见 ``_check_scheduler_leaks``).
+
+    为什么不在用例收尾直接判: 产品的 ``shutdown`` 是异步的(``wait=False``), 收尾那一刻还数
+    得到线程是正常的; 逐条等待又太贵(每条最多 2s, 几千条用例就白等几十分钟)。所以这里只记账,
+    会话末等一次、判一次 —— 那时还活着的才是真泄漏。
+    """
+    if report.when == "setup":
+        _SCHEDULER_BEFORE[report.nodeid] = gui_support.scheduler_thread_count()
+        return
+    if report.when != "teardown":
+        return
+    before = _SCHEDULER_BEFORE.pop(report.nodeid, None)
+    if before is None:  # setup 报告没到过(只用例头跑不了: 不影响判定)
+        return
+    after = gui_support.scheduler_thread_count()
+    if after > before:
+        _SCHEDULER_SUSPECTS.append((report.nodeid, before, after))
+        del _SCHEDULER_SUSPECTS[:-_MAX_SCHEDULER_SUSPECTS]
+
+
+def _check_scheduler_leaks(session: pytest.Session) -> None:
+    """会话末不许有活着跑掉的后台调度线程; 有就点名并**判红**.
+
+    为什么要有这一道(2026-10-16 run 38758273842): Windows 的 UI 段里
+    ``test_run_gui_reports_every_config_state`` 用**替身窗口**跑了三次 ``run_gui`` —— 替身的
+    ``mainloop`` 就地返回, 而真窗口那条路是"关窗时释放后台资源", 于是三个真实后端各留一个
+    APScheduler 线程。逐用例收尾的判据是**相对**的, 而且只对"自己建了窗口"的用例生效
+    (见 ``gui_support.close_apps``): 没有窗口可归因就不判 —— 这些线程于是活到会话末,
+    直到它们挂住别的东西(那轮 60s 超时的现场里就挂着它们)。
+
+    这里的判据是绝对的("会话末一个都不能有"): 会话走到这一步, 所有用例与所有共享 UI 会话都
+    已经收尾, 还活着的只可能是漏。(只有真泄漏才会等满 2s: 数到 0 立即返回。)
+    """
+    left = gui_support._wait_for_scheduler_threads_at_most(0, timeout=2.0)
+    if left == 0:
+        return
+    suspects = "、".join(
+        f"{nodeid}({before}→{after})" for nodeid, before, after in _SCHEDULER_SUSPECTS
+    )
+    print(
+        f"[scheduler] 会话末还有 {left} 个活着的后台调度线程: "
+        f"{'; '.join(gui_support._scheduler_threads())}\n"
+        "[scheduler] 进出时存量变多的用例(最多 "
+        f"{_MAX_SCHEDULER_SUSPECTS} 条, 越靠后越近): {suspects or '无'}"
+    )
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     """把每个阶段报告的耗时并进当前用例的累计(见 ``tests/durations.py``)."""
     durations.accumulate(_DURATION_SAMPLES, report.nodeid, report.duration)
+    _note_scheduler_growth(report)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """带 ``--record-durations`` 时把本会话的每条用例耗时落盘.
+    """会话末先查后台调度线程有没有漏, 再(按选项)把本会话的每条用例耗时落盘.
 
-    空会话(``--collect-only``)不覆盖已有数据: 那份文件是全量跑出来的, 别被一次
-    "什么都没跑"的调用清空。部分运行会**整体覆盖**属于既定行为 —— 记录的就是
+    调度线程那道**即使已经红了也要查**: 漏线程往往就是别的东西挂住的根因, 那正是最需要
+    这份点名的时候。
+
+    耗时落盘: 空会话(``--collect-only``)不覆盖已有数据 —— 那份文件是全量跑出来的,
+    别被一次"什么都没跑"的调用清空。部分运行会**整体覆盖**属于既定行为 —— 记录的就是
     "这次跑了什么"。
     """
+    _check_scheduler_leaks(session)
+
     path = session.config.getoption("--record-durations")
     if path is None:
         return

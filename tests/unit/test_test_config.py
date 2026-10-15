@@ -26,6 +26,7 @@ import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import allure
@@ -35,6 +36,7 @@ from allure_pytest.utils import allure_name
 
 import ci_workflow
 import conftest
+import gui_support
 import tk_guard
 from archive_management.services.platforms import PLATFORM_LABELS
 
@@ -841,3 +843,100 @@ def test_report_config_categorises_the_known_environment_problems() -> None:
         compiled = re.compile(pattern, re.IGNORECASE)
         missing = [m for m in tk_guard.KNOWN_TK_SKIP_MARKERS if not compiled.search(m)]
         assert not missing, f"这些已知症状没进分类规则 /{pattern}/: {missing}"
+
+
+# ---- 会话末的后台调度线程守卫(2026-10-16): 漏线程要能被点名, 而且要判红 ----
+
+
+# 替身会话: 守卫只写它的 exitstatus。
+class _SessionStub:
+    """只带 ``exitstatus`` 的会话替身(真实 ``pytest.Session`` 也只有这个位置可写)。"""
+
+    def __init__(self) -> None:
+        self.exitstatus = 0
+
+
+def _report(nodeid: str, when: str) -> pytest.TestReport:
+    """只带守卫要用的两个字段的阶段报告替身."""
+    return cast(pytest.TestReport, SimpleNamespace(nodeid=nodeid, when=when))
+
+
+def test_the_scheduler_ledger_names_the_tests_that_left_threads_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进出存量变多的用例要记下来(会话末点名靠它); 没变多的不记, call 阶段不量."""
+    counts = iter([1, 4, 4, 4])
+    monkeypatch.setattr(conftest, "_SCHEDULER_BEFORE", {})
+    monkeypatch.setattr(conftest, "_SCHEDULER_SUSPECTS", [])
+    monkeypatch.setattr(gui_support, "scheduler_thread_count", lambda: next(counts))
+
+    conftest._note_scheduler_growth(_report("tests/unit/test_x.py::test_a", "setup"))
+    conftest._note_scheduler_growth(_report("tests/unit/test_x.py::test_a", "call"))
+    conftest._note_scheduler_growth(_report("tests/unit/test_x.py::test_a", "teardown"))
+
+    assert conftest._SCHEDULER_SUSPECTS == [("tests/unit/test_x.py::test_a", 1, 4)], (
+        "这条用例进出时多出 3 个调度线程, 会话末要能点到它的名字"
+    )
+    assert conftest._SCHEDULER_BEFORE == {}, "账要销掉, 不然会话末会误报"
+
+
+def test_a_test_that_cleans_up_is_not_a_suspect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进出存量不变(收干净了)的用例不许记进可疑名单."""
+    monkeypatch.setattr(conftest, "_SCHEDULER_BEFORE", {})
+    monkeypatch.setattr(conftest, "_SCHEDULER_SUSPECTS", [])
+    monkeypatch.setattr(gui_support, "scheduler_thread_count", lambda: 5)
+
+    conftest._note_scheduler_growth(_report("tests/unit/test_x.py::test_b", "setup"))
+    conftest._note_scheduler_growth(_report("tests/unit/test_x.py::test_b", "teardown"))
+
+    assert conftest._SCHEDULER_SUSPECTS == []
+
+
+def test_surviving_scheduler_threads_fail_the_session(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """会话末还活着调度线程 ⇒ 点名(线程清单 + 可疑用例)并把会话判红.
+
+    判红而不是记一笔: 这些线程活过会话末就是漏, 而它们挂住别的东西时受害的是**别的**用例
+    (2026-10-16 的 Windows 分片就是被它们顶到 60s 超时上限的)。
+    """
+    session = _SessionStub()
+    monkeypatch.setattr(conftest, "_SCHEDULER_SUSPECTS", [("tests/x.py::test_y", 0, 2)])
+    monkeypatch.setattr(conftest, "_SCHEDULER_BEFORE", {})
+    monkeypatch.setattr(
+        gui_support,
+        "_wait_for_scheduler_threads_at_most",
+        lambda allowed, timeout=2.0: 2,
+    )
+    monkeypatch.setattr(
+        gui_support,
+        "_scheduler_threads",
+        lambda: ["APScheduler_1(daemon=True)", "APScheduler_2(daemon=True)"],
+    )
+
+    conftest._check_scheduler_leaks(cast(pytest.Session, session))
+
+    out = capsys.readouterr().out
+    assert "APScheduler_1(daemon=True)" in out, "线程清单要打出来(不然不知道漏了什么)"
+    assert "tests/x.py::test_y(0→2)" in out, "要能点到可疑用例的名字"
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_clean_session_is_not_touched(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """没有残留时: 一个字都不打, 退出码不动(这条守卫不许干扰正常会话)."""
+    session = _SessionStub()
+    monkeypatch.setattr(conftest, "_SCHEDULER_SUSPECTS", [])
+    monkeypatch.setattr(
+        gui_support,
+        "_wait_for_scheduler_threads_at_most",
+        lambda allowed, timeout=2.0: 0,
+    )
+
+    conftest._check_scheduler_leaks(cast(pytest.Session, session))
+
+    assert session.exitstatus == 0
+    assert capsys.readouterr().out == ""

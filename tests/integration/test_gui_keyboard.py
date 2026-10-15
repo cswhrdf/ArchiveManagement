@@ -808,8 +808,17 @@ def _measure(app: Any, palette: Palette) -> list[str]:
     return problems
 
 
+@pytest.mark.timeout(150)
 def test_every_screen_is_reachable_by_keyboard(app: Any) -> None:
-    """纯键盘走一遍全部界面: Tab 到得了、焦点看得见、Esc/回车接得上."""
+    """纯键盘走一遍全部界面: Tab 到得了、焦点看得见、Esc/回车接得上.
+
+    单独一条把超时上限抬到 150s(全局 `--timeout=60` 是**卡死**探测器, 这里只是活多):
+    它逐控件做 聚焦/失焦 + 全量 `update()`, 实测本机单跑 **9.7s**、带覆盖率追踪 **12.0s**,
+    而双片 + 覆盖率追踪满载时会涨到 **60s 以上** —— 卡到上限的代价不是"这条红了", 而是
+    `tests/timeout_guard.py` 直接 `os._exit(1)` 把**整片**杀死(那一片的用例没跑完、
+    `.coverage.shard-<片>` 也没写出来 ⇒ 收尾只合并到 1 份、覆盖率假低)。2026-10-16 双片
+    全量连咬两轮都是它。真正的卡死仍有上限兜着, CI 那侧还有重跑包装接着处置。
+    """
     palette = DARK
     _UNMEASURED.clear()
     problems = _measure(app, palette)

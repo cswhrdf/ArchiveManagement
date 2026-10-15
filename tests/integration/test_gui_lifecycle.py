@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+import gui_support
 from gui_support import gui_app
 
 try:
@@ -1030,6 +1031,12 @@ def test_run_gui_reports_every_config_state(
     """``run_gui`` 读配置的三个分支: 干净 / 只坏一项(修复) / 整份坏掉(还原).
 
     窗口在这里用替身: 这条用例要的是"读配置之后的三个分支", 真窗口由冒烟那条用例覆盖。
+
+    但**真后端**是这条用例自己起的, 收尾也得自己收(2026-10-16): 真窗口那条路是"关窗时释放
+    后台资源"(``ArchiveApp._on_close`` → ``_release_background``), 而替身的 ``mainloop``
+    就地返回 —— 三个后端各留一个 APScheduler 线程活到会话末, 直到它们挂住别的东西
+    (Windows 分片那次 60s 超时的现场里挂着它们)。所以末尾逐个 ``shutdown``(幂等),
+    并当场核对线程数没有净增; 会话末还有残留则由 ``tests/conftest.py`` 的守卫点名。
     """
     import archive_management.ui.main_window as main_window_mod
     from archive_management.ui.main_window import run_gui
@@ -1043,9 +1050,10 @@ def test_run_gui_reports_every_config_state(
             opened.append(backend)
 
         def mainloop(self) -> None:
-            """替身不进入事件循环."""
+            """替身不进入事件循环(后台资源因此不会被自动释放, 见上面收尾那段)."""
 
     monkeypatch.setattr(main_window_mod, "ArchiveApp", _StubApp)
+    baseline = gui_support.scheduler_thread_count()
 
     def run_once(name: str, config_text: str | None) -> None:
         paths = ApplicationPaths.default(override_root=tmp_path / name).ensure()
@@ -1053,10 +1061,19 @@ def test_run_gui_reports_every_config_state(
             paths.config_path.write_text(config_text, encoding="utf-8")
         assert run_gui(paths=paths) == 0
 
-    run_once("fresh", None)
-    run_once("repaired", '{"version": 1, "theme": "neon"}')
-    run_once("reset", "{")
-    assert len(opened) == 3, "三次启动都要真的装配过后端"
+    try:
+        run_once("fresh", None)
+        run_once("repaired", '{"version": 1, "theme": "neon"}')
+        run_once("reset", "{")
+        assert len(opened) == 3, "三次启动都要真的装配过后端"
+    finally:
+        for backend in opened:
+            backend.shutdown()
+
+    assert gui_support._wait_for_scheduler_threads_at_most(baseline) <= baseline, (
+        "三次启动留下的后台调度线程必须收干净: "
+        + "、".join(gui_support._scheduler_threads())
+    )
 
 
 def test_a_second_start_brings_the_window_back_to_the_front(tmp_path: Path) -> None:

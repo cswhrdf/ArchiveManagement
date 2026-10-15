@@ -3,7 +3,7 @@ applyTo: "tests/integration/test_*.py,tests/gui_support.py,tests/unit/test_*.py,
 description: '写或改 GUI 端到端用例(以及它们量到的那几处界面代码)时的实测坑: CI 上的窗口尺寸不由用例决定、字体度量会变、合成键盘事件走焦点窗口(焦点可能压根不在对话框里)、尺寸夹取要看请求高度并收敛、延后的布局任务要与控件一起撤、行/卡片会被重渲染销毁(等待之后必须重新取引用)、平台默认值(-topmost/尾随空行计高)必须显式写掉、父窗口还没落地时算出来的居中/相对位置是错的(冷启动首次打开)、一个进程里只能有一个 Tk 根(没拆干净的根会让后面所有用例贴图报 image "pyimageN" does not exist, 而收尾断裂本身要按失败处理、不只记一笔). 遇到"本机绿、CI 红(尤其只有 Windows 或只有 Linux 红)"的布局/尺寸/文字截断/按键失败时先读这篇。'
 ---
 
-# GUI 端到端用例在 CI 上: 十三条实测出来的坑与写法
+# GUI 端到端用例在 CI 上: 十四条实测出来的坑与写法
 
 本仓库的 GUI 用例跑在真 Tk 上(本地 Windows、CI 的 ubuntu(xvfb) + windows runner), 下面每条都是 **实测踩过**的: 失败形态都是"本机全绿、CI 上某几台红", 而且红的那几条看起来像产品 bug, 其实是用例的假设不成立(2026-09-30 那一轮: 7 条 GUI 端到端失败里 6 条属于这一类)。
 
@@ -230,9 +230,17 @@ def _widget_spot(view: TreeView, canvas_x: float, canvas_y: float) -> tuple[int,
 14. 收尾时留下的脏状态(没拆掉的根、没撤的 `after`、没关的附属窗口)最终**判给谁**? 补救之后这条用例还是绿的吗? 如果是, 它就会变成下一条用例的"偶发红"。
 15. 这条用例(或它走的夹具)里有"建窗口失败后重试"的路径吗? 失败那一次留下的根要收掉, 否则之后每条用例建起来的窗口都**不是**默认根 —— 症状会在很久之后的另一条用例上出现。
 16. 收尾报错时看清了是哪一种吗: 是"根真的留下"(缺陷, 要判红)、还是"某个控件的命令账本与解释器不一致" (`can't delete Tcl command`)? 后者要照 CI 现场造样本(`bind` 之后 `tk.deletecommand`), 不是造一个已经没了的窗口。
+17. 这条用例(或它用的 helper)**自己建了真后端/调度器吗**(替身窗口、只为造数据/造包的 `SqlArchiveService(...)`)? 那就得自己 `shutdown()` —— 它有窗口可归因时逐用例收尾会兜住, 没有窗口时只能靠会话末那份点名(见第 13 条)。
 
 ## 12. 想量"用户打字"就真按键: 直接 `insert` 会绕过一半机制(2026-10-14 实测)
 
 - `CTkEntry` 的 `placeholder_text` **不是提示层, 而是真写进 Entry 的内容**(占位激活时 `get()` 恒返回 `""`), 靠它自己的 `<FocusIn>` 取消。所以**类级补丁往内层控件绑事件时必须 `add="+"`** —— 我们的 `make_reachable` 早先直接 `inner.bind("<FocusIn>", ...)`, 把它顶掉了: 用户敲的字接在提示文案后面、 `get()` 一直为空 —— 搜索框"看着能打字、点搜索/回车没反应、提示还不消失"(用户实测报的正是这一串)。同病相怜的是批量导出/导入对话框顶部的筛选框(它也带占位文字)。守卫: `test_gui_keyboard.py::test_our_wiring_never_replaces_the_widgets_own_handlers` —— 结构上断言 `_entry_focus_in` 还在, 行为上真按键之后占位必须已取消、`get()` 就是敲进去的那个字。
 - 用例里量"打字有没有反应"一律走 `gui_support.type_text(app, inner, "zz")`(**真** `<KeyPress>`/`<KeyRelease>`, 字符由 Tk 自己插入), 别用 `entry.insert(...)`: 后者绕过占位、输入法与撤销。2026-10-14 那一版的搜索用例就是 `insert` 过的 —— 全绿, 而用户按真键盘一个字都进不去。
 - `type_text` 只认得 ASCII(Tk 没有中文 keysym, 传中文报 `unknown keysym`) —— 要"打中文"就换个断言: "名字里没有这串字 ⇒ 筛成空", 别去造中文按键。
+
+## 13. 自己建的真后端要自己收: 不建窗口的用例是逐用例收尾的盲区(2026-10-16 实测)
+
+- `SqlArchiveService(...)` **一建就起一个 APScheduler 线程**(`BackgroundScheduler()` 构造即 `start()`), 释放入口是幂等的 `shutdown()`。走真窗口的用例不用管(关窗路径会释放), 但**替身窗口**与**只为造数据/造包而建的后端**没人替它收: 那条线程会活到会话末, 直到它顶住别的东西(2026-10-16 的 Windows 分片就是被这么顶到 60s 超时上限的)。
+- 逐用例收尾(`gui_support.close_apps`)的判据是**相对**的, 而且**只对"自己建了窗口"的用例生效**(没有窗口可归因就不判)⇒ 不建窗口的用例是盲区。兜底在会话末: `tests/conftest.py` 逐用例只**记账**(进/出各量一次线程数, 便宜), 会话末等一次(最多 2s)判一次 —— 还活着就**点名"进出时存量变多的用例"并把会话判红**(不是记一笔)。
+- **实测咬出来的三处**(都已修, 可作为样板): 替身窗口跑三次 `run_gui` 的 `test_gui_lifecycle.py::test_run_gui_reports_every_config_state`(`_StubApp.mainloop` 就地返回 ⇒ `finally` 里逐个 `backend.shutdown()`); `test_gui_transfer.py` 里两个**造包** helper(`_exported_package` / `_exported_batch` —— 只服务造包, 用完即 `service.shutdown()`); `test_pipeline_backup_restore.py::test_backup_history_survives_node_delete_and_reopen` 里模拟"重启后再开"的那只后端(不传 `scheduler=` 就是真调度器 ⇒ 量完要 `reopened.shutdown()`)。
+- 自查口径: 单跑那个模块, 只要日志里出现 `[scheduler] 会话末还有 ...` 就是还有漏; 一个字都不打才算干净(正常会话是零开销的: 数到 0 立即返回)。

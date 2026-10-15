@@ -192,4 +192,7 @@ def test_backup_history_survives_node_delete_and_reopen(
     )
     assert len(reopened.list_backups(game_id)) == 1
     assert BackupRepository(database).count(int(game_id)) == 1
+    # 这只后端不传 scheduler ⇒ 默认起真的 APScheduler: 模拟"重启"的同时也要把它关掉,
+    # 否则那个调度线程会活到会话末(会话末守卫会点名, 见 tests/conftest.py)。
+    reopened.shutdown()
     assert "backup.delete" in " ".join(audit_log)

@@ -2718,6 +2718,30 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
 - **基线更新(用户看过后要求"用最新的图更新")**: 直接从这份报告的视觉结论项附件里取 `actual.png`(每项都挂着 `actual.png` / `baseline.png` / `diff.png` / `fonts.txt`) —— 那就是这一轮的 CI 截图(Linux + Noto CJK, 与基线同一口径), 不必再下载 `visual-baselines-candidates` 产物。7 张全部覆盖进 `tests/visual-baselines/`(逐文件 SHA256 与导出的图一致)。**与旧基线的差异实测**(逐像素外接框): 7 张**都**在左上 `(16,10)-(46,40)` 那 843 px 上有变化(品牌位图标), 01/02 另在时间列/卡片上还有变化(冻结时钟那一天) —— 前者是既有改动(上一轮用户提到的"工具图标偏移"), 后者是本次冻结时钟的预期结果, 两者都由用户确认过。
 - **顺带记两笔**: ① 报告里 36 条 `new` 是上一轮提交带进去的新用例(命名真新, 不是回归); ② 结论项的**描述文本在 `descriptionHtml` 里**(`statusDetails.message` 是空的), 读报告定位失败时别只看后者 —— 这一轮的 SSIM/哈希数字全在那段里。
 
+## 61. Windows 上"一条用例超时"带崩了小半片结果与覆盖率(2026-10-16, 用户要求"按 A+B 做")
+
+读用户下载的这一轮报告(run 38758273842): **Windows 的 UI 段死在 60s 超时上限**, 那之后的一切都没了 —— e2e 只跑出 252 条(别的平台 282), 集成 591(别处 595), 合并后的覆盖率 **99.51%** < 100%, 于是 `Coverage report(Windows)` 判红。**红的数字是真的**(截断后算出来的覆盖率确实低), 该修的是"截断"本身。
+
+- **病根一(包装漏了这种死法)**: `tests/timeout_guard.py` 落完现场(线程栈 + 覆盖率存盘 + 主线程帧的 coredumpy dump + 一条 `超时留证` 结论)后 `os._exit(1)` —— 那个 **1 不在 `CRASH_EXIT_CODES` 里**, 于是 `scripts/run_pytest_with_crash_retry.py` 一次都没重跑。**超时和原生崩溃是同一类事故: 进程死了, 它后面的一切都没了。**
+- **病根二(线索)**: 那条用例是 `test_gui_lifecycle.py::test_run_gui_reports_every_config_state`, 栈停在 `database.migrate()` 的 `connection.execute(statement)`。三次启动各有自己的目录 ⇒ 不是锁冲突; 与 §15.9 记的那条"Windows runner 上 SQLite/fsync 偶发卡顿"同一个形状。但 CI 的线程 dump 里**还挂着两三个 `APScheduler` 线程** —— 它们是同一段里被这条用例漏出来的(见下), 这条用例自己也因此更容易被拖进卡顿。
+- **A 修法(包装接管超时, 判据是痕迹不是退出码)**:
+  1. 判"这一遍是不是死于超时"只认 `timeout_guard` 留下的东西 —— 结果文件 `fullName` 以 `archive-management.timeout.` 开头, 或 `*_timeout.dump`。断言失败/门禁不过这两样都没有 ⇒ **一次都不会重跑**(原有性质不变)。
+  2. 第一次超时: 清掉这一遍新增的残缺结果(含那条超时结论, 用户明确要求"重跑成功后清掉") + **原样重跑**; 环境卡顿多半不会连着来。
+  3. 重跑又超时: 把挂住的那条 `--deselect` 掉再跑一遍 —— 先保住**其余用例与覆盖率**(那才是那次事故真正的代价), 而这次**那条超时结论留在报告里**(挂住是真信号, 清掉等于让它静默消失)。
+  4. 拿不到 nodeid(没配 `--alluredir`)时: 只靠 dump 兜底认一次, 重跑一遍就收手, **什么都不删**(那遍结果与结论就是全部证据)。
+- **两个真坑(写完先被自己的守卫咬出来)**:
+  - **dump 是故意留着的证据**, 所以"这一遍有没有新痕迹"不能只比**文件名** —— 同一条用例再挂一次会覆盖同名文件(会漏判), 而留着不删的旧 dump 又永远"不在基线里"(会误判)。改成按 `(大小, mtime)` 快照判"新或变过"; 判第二遍时的那份快照要在**清完之后**重拍, 否则第一遍那个 dump 会被当成本遍的痕迹 ⇒ 明明重跑成功却走进 deselect 分支。
+  - 那个误判分支原先还会**删掉重跑出来的好结果**(清第二遍产物发生在"确认能 deselect"之前)。改成**只在真要 deselect 时才清**, 且清的时候把这遍的超时结论与附件留在原地(否则报告的结论会变成空链)。
+- **B 修法(漏线程的来源与兜底)**:
+  - `test_run_gui_reports_every_config_state` 用**替身窗口**跑三次 `run_gui`: 替身的 `mainloop` 就地返回, 而真窗口那条路是"关窗时释放后台资源"(`ArchiveApp._on_close` → `_release_background`) ⇒ 三个真后端各留一个 `APScheduler` 线程。修法: `finally` 里逐个 `backend.shutdown()`(幂等) + 当场核对线程数没有净增。
+  - 逐用例收尾的判据是**相对**的, 且只对"自己建了窗口"的用例生效(没有窗口可归因就不判)⇒ **没有窗口的用例是盲区**。`tests/conftest.py` 新增会话末兜底: 逐用例只**记账**(进出各量一次线程数), 会话末等一次(最多 2s)判一次, 还活着就点名"进出时存量变多的用例"并把**会话判红**(不是记一笔)。
+- **咬合验证(都真跑过)**: A —— ① 清空 deselect 那遍的 `keep` ⇒ 那条守卫报"`超时留证` 没留着"红; ② 重跑前不清 ⇒ "残缺结果没清"红; ③ dump 只比文件名 ⇒ 兜底那条红(**它把"又超时"误报成"重跑就过了"**); ④ `TIMEOUT_FULL_NAME` 少个句点 ⇒ 接线守卫红。B —— ⑤ 会话末不判红 / 记账不重量 ⇒ 两条守卫各自红; ⑥ **端到端**: 把 `finally` 里的 `shutdown()` 挖掉, 单跑那条用例 ⇒ 会话末打出 `3 个活着的后台调度线程` + `test_run_gui_reports_every_config_state(0→3)` 并判红(和 CI 上量到的一模一样), 恢复后 29 passed 且一个字都不打。
+- **守卫**: `tests/unit/test_ci_diagnostics.py` 新增 5 条(超时原样重跑、两遍超时 deselect、拿不到 id 时收手、窗口过期、`TIMEOUT_FULL_NAME`/dump 后缀/dump 目录默认值三处接线), 并把"UI 段套着包装"那条加上 `--alluredir=allure-results` 的前提(没配就读不到挂住的用例 id, deselect 那条路直接废掉); `tests/unit/test_test_config.py` 新增 4 条(记账点名、收干净的用例不进名单、有残留判红、干净时不打扰)。
+- **B 的第二轮: 会话末守卫一上线就咬出三处新漏点**(都在"不建窗口"的那一批里, 正是逐用例收尾的盲区): `test_gui_transfer.py` 里**造包**用的两个 helper(`_exported_package` / `_exported_batch` —— 只服务造包, 没人替它收)与 `test_pipeline_backup_restore.py::test_backup_history_survives_node_delete_and_reopen` 里模拟"重启后再开"的那只后端(不传 `scheduler=` 就是真调度器)。修法一律是"谁建谁收"(`shutdown()` 幂等), 修完单跑那两个模块日志里一个字都不打(正常会话零开销: 数到 0 立即返回)。
+- **同一轮里那条键盘用例真的卡了一次**(本机双片 + 覆盖率追踪下): `test_gui_keyboard.py::test_every_screen_is_reachable_by_keyboard` 卡到 60s 上限, `timeout_guard` 落完现场 `os._exit(1)` ⇒ **那一片当场死掉**: 它后面的用例没跑, 而且 `.coverage.shard-<片>` 没写出来(`os._exit` 跳过整条 atexit)⇒ 收尾的 combine 只合并到 **1 份**, 覆盖率报 **94%** 判红。**这就是"覆盖率莫名低了"的第二种成因**(第一种是 §15.9 那条"卡顿让用例超时"): 看到 `Combined 1 file` 就该去看那一片日志的最后几行有没有 `timeout_guard.on_timeout` 的栈。局部核实: 单跑该模块 **10 passed ×2**(各 17s) ⇒ 并发/负载引起的偶发; 主线程栈是 `window.update()` ← 用例自己的 `_settle`, dump 在 `crash-dumps/..._timeout.dump`。**CI 上这类死法现在会被 A 那层包装接住**(重跑 → 仍卡就 deselect 掉跑完其余用例, 覆盖率照旧拿到手), 本机没这层包装, 所以偶发红照旧要按 `.github/instructions/local-full-run.instructions.md` 的第四条核实。
+- **它咬了两轮(两轮都把那一片杀掉)之后按"活多"治了**: 这条用例逐控件做 聚焦/失焦 + 全量 `update()`, 实测单跑 **9.7s**、带覆盖率追踪 **12.0s**、双片 + 覆盖率满载 **60s 以上** ⇒ 单独 `@pytest.mark.timeout(150)`(pyproject 明确允许个别慢用例覆盖), 注释里留着这几组数字; 真正的卡死仍有上限兜着。两轮红的表现一模一样(覆盖率 94%、`Combined 1 file`、那一片日志末尾是 `timeout_guard.on_timeout` 的栈), 所以这轮也顺手把"看到覆盖率莫名低先看是不是超时杀片"写进了本地全量的说明。
+- **文档同步**: `ci.yml` 两个 UI 步骤上面的注释块、`docs/testing.md`(「macOS 原生崩溃」那条 + 「超时留证」那节 + 「界面用例收尾」加第三条不变式"会话末一个都不许剩")、`.github/instructions/local-full-run.instructions.md`(第四条已知偶发: 超时杀片 ⇒ 覆盖率假低)与 `.github/instructions/gui-tests-on-ci.instructions.md`(新增第 13 条"自己建的真后端要自己收" + 收工自检第 17 条)。
+
 ---
 
 # !这部分以下的内容识别时忽略，仅为个人记录灵感，输出的内容要写在上面不允许超过上面的分隔线
