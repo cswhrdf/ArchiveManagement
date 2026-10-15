@@ -503,6 +503,11 @@ def test_hovering_the_same_card_twice_paints_once(
     ``_set_hover`` 的"同一个 game_id 直接返回"这一支以前只被 GUI 时序偶然走到(2026-10-15 的
     报告里 CI 的 Windows 那份覆盖率就少了 1 行 + 1 条分支, 门槛 100% 因此不过) —— 这里显式
     调两次把它钉成稳定覆盖, 不再靠"谁顺手多悬停一次"。
+
+    **起点要自己摆正**(第一版没摆, 上 CI 就红了): 建窗口 + 泵事件之后指针可能正停在某张卡片
+    上, 于是 ``_hover_id`` 不是 None —— Windows 那一轮量到 ``['endless-space', 'outer-wilds']``
+    (第一次悬停顺带把"上一张"重绘了一遍, 那是正确行为)。所以先 ``_set_hover(None)`` 清干净,
+    再替换 ``_paint_row`` 记数。
     """
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -511,6 +516,7 @@ def test_hovering_the_same_card_twice_paints_once(
     try:
         _pump(app)
         page = app._home_page
+        page._set_hover(None)  # 清掉可能残留的悬停(指针停在哪张卡片上不由用例决定)
         painted: list[str] = []
         page._paint_row = painted.append
 
