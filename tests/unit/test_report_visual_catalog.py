@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sys
+from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -552,3 +556,54 @@ def test_missing_conclusions_are_loud_in_the_ledger_and_as_broken_items(
     assert module.main(["--expect-platforms", "Windows,macOS,Linux"]) == 0
     again = (tmp_path / "allure-run-ledger.md").read_text(encoding="utf-8")
     assert _conclusion_table(again) == table, "重复跑汇总脚本时结论清单必须稳定"
+
+
+def test_the_capture_pins_the_clock_so_baselines_stop_drifting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """拍图必须在**固定的"现在"**里跑, 而且那个"现在"真的钉住了演示数据与读时钟的两处.
+
+    出处(用户 2026-10-15 实测): 两个涉及主页的截图里"最近备份/最近活动"是按当天算出来的, 界面
+    又把它渲染成绝对时间 —— 同一份代码每天重采一次基线; 按 14 天窗口统计的"最近活跃"计数也会
+    跟着动。演示数据的时间戳是**导入时**算的(``ui/__init__.py`` 早早把它带进来), 所以只换模块里
+    绑定的 ``datetime`` 不够, 还得重载一次; 这里守三件事:
+
+    ① ``capture_screens`` 整段包在 ``frozen_clock`` 里(拆掉那层 `with` 就红);
+    ② 进到里面以后, 演示数据与 ``application.home`` 读到的都是 ``FROZEN_NOW``;
+    ③ 退出后还回真实时钟 —— 否则同一进程里后面的用例会拿到钉死那一年的演示数据。
+    """
+    module = _load_script("create_allure_visual")
+    from archive_management.application import home as home_module
+    from archive_management.ui import demo_backend
+
+    real_frozen_clock = module.frozen_clock
+    today_anchor = demo_backend._recent(0, 9, 40)  # pyright: ignore[reportPrivateUsage]
+
+    with real_frozen_clock():
+        assert home_module._now(None) == module.FROZEN_NOW  # pyright: ignore[reportPrivateUsage]
+        assert demo_backend._just_now() == module.FROZEN_NOW
+        yesterday = (module.FROZEN_NOW - timedelta(days=1)).date()
+        demo_moment = demo_backend._recent(1, 21, 15)  # pyright: ignore[reportPrivateUsage]
+        assert demo_moment.date() == yesterday, (
+            "演示数据要按固定时钟重建: 它原本是导入时按「今天/昨天」算出来的"
+        )
+        assert demo_moment.hour == 21, "时刻本身不变, 变的只是它落在哪一天"
+
+    assert demo_backend._recent(0, 9, 40) == today_anchor, (  # pyright: ignore[reportPrivateUsage]
+        "退出时要把演示数据还回真实时钟那一份, 不然会污染同一进程里的后续用例"
+    )
+
+    entered: list[str] = []
+
+    @contextlib.contextmanager
+    def spy() -> Iterator[None]:
+        entered.append("in")
+        try:
+            yield
+        finally:
+            entered.append("out")
+
+    monkeypatch.setattr(module, "frozen_clock", spy)
+    monkeypatch.setattr(module, "_capture_screens", lambda *_args: ([], [], {}))
+    assert module.capture_screens(tmp_path, ModuleType("grab")) == ([], [], {})
+    assert entered == ["in", "out"], "整段拍摄都要在固定时钟里跑(建窗口 + 拍每一张)"

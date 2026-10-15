@@ -236,16 +236,13 @@ CustomTkinter 在**每个**窗口建好 **200ms** 后自己去贴 `CustomTkinter
 
 守卫两处：`tests/integration/test_gui_window_icon.py`（真窗口 + 泵事件到 200ms 之后，看那次 `iconbitmap` 收到哪个文件；已咬过一口：把接线断开时它量到的正是 `CustomTkinter_icon_Windows.ico`）与 `tests/unit/test_icon_assets.py`（两个窗口类都换成了我们的实现、再调一次是空操作）。
 
-### CI 怎么验这条流水线（两件事分开）
+### CI 怎么验这条流水线
 
-**判断「位图和 SVG 一致」不需要 ffmpeg，判断「CI 自己能不能画」才需要** —— 所以 `release.yml` 里是两条步骤：
+`release.yml` 里只有**一条**步骤: `Check the application icon is up to date`（硬门禁）—— `--check` 只比指纹, 不一致就判红。发布**不依赖** runner 上有渲染工具, 也**不在 CI 上重画**。
 
-1. `Check the application icon is up to date`（硬门禁）：`--check` 只比指纹，不一致就判红。发布**不依赖** runner 上有渲染工具。
-2. `Probe the icon pipeline on this runner (informational)`：打印 runner 上那个 ffmpeg 的版本行，然后往 `%TEMP%` 里重画一遍并与入库产物逐字节比对。没装 ffmpeg / 那份 ffmpeg 没有 librsvg / 字节不同 —— 都只记一条 `::warning::`，**照常发布**（入库位图已由第 1 步证明与 SVG 一致）。
+**2026-10-15 起 CI 不再渲染图标**（用户要求）: 原来还有一条信息步骤（`Probe the icon pipeline on this runner`，打印 runner 上那个 ffmpeg 版本行、往 `%TEMP%` 里重画一遍并与入库产物逐字节比对，失败只记 `::warning::`）与一个只做 `workflow_dispatch` 的 `Icon probe` 工作流（`.github/workflows/icon-probe.yml`，渲染到 `icon-probe-out/` 并上传 artifact），两个都删了 —— 判定 "改了 SVG 忘了重画" 靠 `--check` 就够了, 而 "这台 runner 能不能画" 不再是流水线要关心的事（图标只在本地更新: `uv run python scripts/build_icon.py --force`，它就地重画并更新指纹）。
 
-顺序不能反：探针会重写 `app-icon.stamp`，先探针再 `--check` 就查不出「入库产物陈旧」了（守卫 `test_the_release_workflow_checks_the_icon_before_packaging` 镢住这条顺序）。
-
-要**单独**回答「runner 能不能画」（不切发布）就手动跑 `Icon probe` 工作流（`.github/workflows/icon-probe.yml`，只 `workflow_dispatch`）：它用与发布作业相同的安装形状（`--no-install-project`）渲染到 `icon-probe-out/` 并把结果作为 artifact 上传，可以直接看渲染质量。
+想在本机看不改仓库的渲染结果, 用 `uv run python scripts/build_icon.py --force --out-dir icon-probe-out`（落点已在 `.gitignore` 里）。
 
 > **为什么位图入库而不是靠 CI 现画**：位图五个文件合计约 **53 KB**；不入库的话，干净检出时界面会缺一块（顶栏退回纯色方块、窗口无图标），而且 `fail_under=100` 会逼着**每个 pytest 作业（三平台×三片）**都装 ffmpeg 并先生成位图（“有位图就用图”那条分支得被走到），最后发布还得赌 runner 上那份 ffmpeg 带 librsvg。换来的只是 53 KB。
 

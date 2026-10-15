@@ -589,6 +589,37 @@ def test_a_failed_reload_keeps_the_last_picture(
     assert app._feedbacks == [("read-failure", "database is locked")]
 
 
+def test_an_unchanged_revision_does_not_recompute_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """数据版本没变时不重算占用(轮询每 100ms 一次, 扫备份目录很贵).
+
+    "版本没变"这一支以前只被别的用例偶然走到(2026-10-15 的报告里 CI 的 Linux/macOS 两份
+    覆盖率因此各少 1 条分支, 门槛 100% 不过) —— 这里显式调两次把它钉成稳定覆盖。
+    """
+    app = _app(monkeypatch)
+    app._game_id = None  # 走到"没有选中游戏"就返回, 后面几步与这条判据无关
+    app._page = None
+    app._revision = 7
+    refreshes: list[int] = []
+    app._refresh_usage = lambda: refreshes.append(1)
+    app._render_task = lambda _status: None
+    app.backend = SimpleNamespace(
+        task_status=lambda _game_id: SimpleNamespace(revision=7)
+    )
+
+    app._reload_data_now(None)
+
+    assert refreshes == [], "版本没变不该重算占用"
+
+    app.backend = SimpleNamespace(
+        task_status=lambda _game_id: SimpleNamespace(revision=8)
+    )
+    app._reload_data_now(None)
+
+    assert refreshes == [1], "版本变了要重算一次(否则上面那条会退化成「永远不算」)"
+
+
 def test_repainting_all_cards_hands_the_palette_to_the_kit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -495,6 +495,35 @@ def test_cards_highlight_on_hover_without_losing_the_selection(
         app.destroy()
 
 
+def test_hovering_the_same_card_twice_paints_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一张卡片再次悬停不重绘: 鼠标在同一条里挪动会重复发 ``<Enter>``.
+
+    ``_set_hover`` 的"同一个 game_id 直接返回"这一支以前只被 GUI 时序偶然走到(2026-10-15 的
+    报告里 CI 的 Windows 那份覆盖率就少了 1 行 + 1 条分支, 门槛 100% 因此不过) —— 这里显式
+    调两次把它钉成稳定覆盖, 不再靠"谁顺手多悬停一次"。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    try:
+        _pump(app)
+        page = app._home_page
+        painted: list[str] = []
+        page._paint_row = painted.append
+
+        page._set_hover("outer-wilds")
+        page._set_hover("outer-wilds")  # 同一张: 直接返回
+        assert painted == ["outer-wilds"], "同一张卡片不该重绘第二遍"
+
+        page._set_hover(None)
+        assert painted == ["outer-wilds", "outer-wilds"], "离开时只重绘离开的那一张"
+    finally:
+        app.destroy()
+
+
 def test_poster_card_keeps_its_meta_below_the_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

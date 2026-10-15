@@ -40,16 +40,31 @@ SSIM **0.9819**(主页工具栏/筛选那一行整体位移), 已知的真缺陷
 ## 拍什么(两套画面: 有数据的 + 空库)
 
 **有数据的那一套**用**演示后端**(``ui/demo_backend.py``): 它的数据是模块级常量(名字/平台/
-备份/时间都是固定值), 不联网、不读 ``dev-data``、不写盘, 每次跑出来完全一样 —— 与空库
-一样适合跨运行比较, 但**覆盖到了真正的布局**(列表的列宽与名称裁剪、状态列、海报网格、
-详情页表头、发现与启停两个分区)。空库那几张画面里一行数据都没有, 上面这些一个都没被
-覆盖到 —— 而视觉回归要拦的正是它们。最后一张仍然是**空库**(删光演示数据), 保留"一条
-数据都没有时界面长什么样"这条。
+备份都是固定值), 不联网、不读 ``dev-data``、不写盘 —— 与空库一样适合跨运行比较, 但
+**覆盖到了真正的布局**(列表的列宽与名称裁剪、状态列、海报网格、详情页表头、发现与启停
+两个分区)。空库那几张画面里一行数据都没有, 上面这些一个都没被覆盖到 —— 而视觉回归要
+拦的正是它们。最后一张仍然是**空库**(删光演示数据), 保留"一条数据都没有时界面长什么
+样"这条。
 
 **画面名带着 `NN-` 编号, 而报告里的列表顺序就是它**: 处理顺序是 ``sorted(produced)``
 (即字母序), 而每张结果的开始时间由"基准 + 序号"给出(见 :func:`write_result`) —— 两件事
 合起来保证"报告里的先后 = 编号大小"。所以**新加一张画面时编号要接在末尾**, 或者重排
 编号时一并改 ``tests/visual-baselines/README.md`` 里的表(两者必须一致)。
+
+## 时间: 快照里的"现在"是固定的
+
+演示数据里**唯一不固定**的就是时间: ``_recent()`` 那些时间戳按"今天/昨天"算(那是故意的 ——
+写死绝对日期会被主页默认的"最近一个月"静默筛掉, 见 ``demo_backend`` 里那段说明), 界面又把
+它们渲染成**绝对时间**。于是同样的代码今天拍与明天拍不一样:"最近备份/最近活动"那两列会
+跳, 按 14 天窗口统计的"最近活跃"计数也会跟着变 —— 基线永远对不上。
+
+所以拍图全程在 :func:`frozen_clock` 里跑: 把三个读"现在"的模块(演示后端 + 
+``application.home`` + ``ui.main_window``)钉在 :data:`FROZEN_NOW`。演示数据的时间戳是
+**导入时**算的, 所以那里得重载一次模块(细节见 :func:`frozen_clock`)。
+
+注: 图上写的是 UTC 日期, 而 ``format_moment`` 按**本机时区**渲染 —— 所以这几张图本机与
+CI 本来就不一致(基线只能从 CI 采, 见 ``tests/visual-baselines/README.md``)。固定时钟
+管的是"同一份基线在不同日子也拍得出来", 不是"本机与 CI 一致"。
 
 ## 前提: 画面得先画得出汉字
 
@@ -82,6 +97,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as datetime_module
+import importlib
 import json
 import os
 import platform
@@ -90,11 +107,12 @@ import shutil
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from archive_management.domain import HomeLayout
 from archive_management.infrastructure.paths import ApplicationPaths
@@ -154,6 +172,101 @@ ASCII_SAMPLE = "ArchiveManagement 0123456789"
 BITMAP_FAMILIES = frozenset(
     {"fixed", "6x13", "6x12", "9x15", "10x20", "cursor", "nil2", "clean"}
 )
+
+# 快照里的"现在" = 固定的这一刻(UTC), 见模块说明"时间"那一节。
+#
+# 取该日 23:58 而不是随手一个时刻: 演示数据里"今天"的那几条最晚到 11:05(见
+# ``demo_backend`` 的 ``_BACKUPS``), "现在"必须**晚于**它们, 否则界面上会出现
+# "今天 11:05"却还没到的怪画面(时间范围筛选也同样看这个"现在")。
+FROZEN_NOW = datetime(2026, 1, 2, 23, 58, 0, tzinfo=UTC)
+
+# 演示后端: 它的时间戳是**导入时**按"今天/昨天"算出来的(模块级常量), 所以 `frozen_clock`
+# 要临时换掉 `datetime` 模块里的 `datetime` 再重载它一次。
+DEMO_BACKEND_MODULE = "archive_management.ui.demo_backend"
+
+# 另外两处读"现在"的模块(它们读的是当前时刻, 与重载无关, 直接换模块里绑定的符号):
+# - ``application.home``: 判"最近/陈旧"并统计最近活跃 → 主页那几列的计数与时间;
+# - ``ui.main_window``: 算时间范围筛选的阈值 → 主页工具栏那一行。
+_NOW_MODULES = (
+    "archive_management.application.home",
+    "archive_management.ui.main_window",
+)
+
+
+class FrozenDatetime(datetime):
+    """``datetime`` 的替身: ``now()`` 固定在 :data:`FROZEN_NOW`, 其余行为与真货一样.
+
+    是个子类而不是替换整个模块: ``isinstance(x, datetime)`` 之类的判断照旧成立。
+    """
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> FrozenDatetime:
+        """固定时刻的"现在" —— ``tz=None`` 时按老规矩给 naive 值, 否则换算到那个时区."""
+        moment = (
+            FROZEN_NOW.replace(tzinfo=None) if tz is None else FROZEN_NOW.astimezone(tz)
+        )
+        return cls(
+            moment.year,
+            moment.month,
+            moment.day,
+            moment.hour,
+            moment.minute,
+            moment.second,
+            moment.microsecond,
+            tzinfo=moment.tzinfo,
+        )
+
+
+@contextlib.contextmanager
+def frozen_clock() -> Iterator[None]:
+    """把界面读到的"现在"钉在 :data:`FROZEN_NOW`(退出时连数据一起还回去).
+
+    为什么要动两处(见模块说明"时间"一节):
+
+    - **演示数据**: 它的时间戳是导入时算的(``demo_backend`` 的 ``_BACKUPS``/``_DETAILS``
+      是模块级常量, 由 ``_recent()`` 按"今天/昨天"给出)。而 ``ui/__init__.py`` 会在第一次
+      导入任何 ``ui`` 子模块时就把它带进来 —— 也就是本脚本 import 业务代码的那一刻, 那时
+      还没冻。所以这里把 ``datetime`` 模块里的 ``datetime`` 暂时换成替身, 再**重载**演示
+      后端: 重载 = 按替身时钟重建那份模块级数据, 于是"今天 09:40"落在 FROZEN_NOW 那一天。
+    - **读"现在"的那两个模块**(:data:`_NOW_MODULES`): 换掉它们模块里已经绑定的同名符号。
+
+    退出时三样都还回去: 换掉的符号、``datetime`` 模块里的类、以及**重载回真实时钟**下的
+    演示数据 —— 最后一样是为了不污染同一进程里的后续代码(测试会用到这个上下文管理器)。
+    """
+    original = datetime_module.datetime
+    cast(Any, datetime_module).datetime = FrozenDatetime
+    try:
+        _reload_demo_backend()
+    finally:
+        cast(Any, datetime_module).datetime = original
+    swapped = _replace_now(FrozenDatetime)
+    try:
+        yield
+    finally:
+        for module, previous in swapped:
+            cast(Any, module).datetime = previous
+        _reload_demo_backend()
+
+
+def _reload_demo_backend() -> None:
+    """重载演示后端: 它的演示数据是导入时造的, 只有重载才会按当前时钟重生一份."""
+    importlib.reload(importlib.import_module(DEMO_BACKEND_MODULE))
+
+
+def _replace_now(
+    replacement: type[datetime],
+) -> list[tuple[ModuleType, type[datetime]]]:
+    """把 :data:`_NOW_MODULES` 里已绑定的 ``datetime`` 换成 ``replacement``, 返回原值.
+
+    换的是**模块里那个名字**(它们写的是 ``from datetime import datetime``): ``cast(Any)``
+    是因为按类型看模块只有它声明过的属性, 而这里动的就是那个名字本身。
+    """
+    swapped: list[tuple[ModuleType, type[datetime]]] = []
+    for name in _NOW_MODULES:
+        module = importlib.import_module(name)
+        swapped.append((module, cast(Any, module).datetime))
+        cast(Any, module).datetime = replacement
+    return swapped
 
 
 def ensure_utf8_output() -> None:
@@ -260,8 +373,9 @@ def build_demo_app(root: Path) -> ArchiveApp:
 
     为什么不用"真实 SQLite + 空库": 空库那几张画面里一行数据都没有, 界面真正的布局(列表
     列宽与名称裁剪、状态列、海报网格、详情页表头)压根没被覆盖到 —— 而视觉回归要拦的正是
-    那些。演示后端的数据是模块级常量(名字/平台/备份/时间都是固定值), 不联网、不读
-    ``dev-data``、不写盘, 每次跑出来完全一样, 因此同样适合跨运行比较。
+    那些。演示后端的数据是模块级常量(名字/平台/备份都是固定值), 不联网、不读
+    ``dev-data``、不写盘, 适合跨运行比较; 其中**只有时间**需要先钉住, 所以这个函数必须在
+    :func:`frozen_clock` 里调用(见模块说明"时间"那一节)。
 
     ``paths`` 仍然指向工作目录: 应用的日志与配置要落在能整目录删掉的地方。
     """
@@ -378,10 +492,18 @@ def record_a_folded_subtree(
 def capture_screens(
     screens_dir: Path, grab: ModuleType
 ) -> tuple[list[str], list[str], dict[str, Any]]:
-    """建窗口、拍两套画面(有数据的 + 空库), 返回 ``(产出的文件名, 被跳过的说明, 字体探针)``.
+    """拍两套画面 —— 整个过程都在**固定的"现在"**下进行(见 :func:`frozen_clock`).
 
     调用方负责先把工作目录清干净(见 :func:`capture_or_error`): 这里只管往里写。
     """
+    with frozen_clock():
+        return _capture_screens(screens_dir, grab)
+
+
+def _capture_screens(
+    screens_dir: Path, grab: ModuleType
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """建窗口、拍两套画面(有数据的 + 空库), 返回 ``(产出的文件名, 被跳过的说明, 字体探针)``."""
     screens_dir.mkdir(parents=True, exist_ok=True)
     app = build_demo_app(WORK_DIRECTORY / "demo-root")
     produced: list[str] = []

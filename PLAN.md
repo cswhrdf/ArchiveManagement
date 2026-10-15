@@ -2677,6 +2677,38 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
   ⇒ 属 §40.5 记过的既有对齐抖动(表头对齐任务在并发 + 覆盖率追踪下没收敛, 见 `home_page._align_table_header` 的 `_ALIGN_MAX_ATTEMPTS`), 与本次改动无关(只加两个收集期标记, 不碰 Tk 几何/事件循环)。
   已把这一族(含三个已观测用例名与 14/16/27px 指纹)写进 `.github/instructions/local-full-run.instructions.md` 的已知偶发清单; 根治要把"等对齐"的判据改硬, 留给单独一轮。
 
+## 59. 下载报告里的覆盖率缺口 / 视觉基线每天在变 / 删掉 Icon probe 工作流(2026-10-15, 用户要求)
+
+用户三件事: ① 看最新下载的报告, "其中覆盖率不足 100% 了"; ② 更新视觉回归的图片, 并解决"两张主页截图记录了时间、每天都会变"的问题; ③ 删掉 `.github/workflows/icon-probe.yml`(图标只在本地更新, 不必在 CI 上重画)。
+
+### 59.1 覆盖率不是掉了, 是两条分支只被"顺路"走到
+
+- **现场(下载的报告, run 38624202827)**: 8849 条结果里只有 3 条 failed, 而那 3 条**都是** `Coverage report` 结论项本身 —— 也就是说没有任何一条用例红, 差的是数字: Windows **99.99% 行**(16668/16669)+ 99.97% 分支(3667/3668), Linux 与 macOS 行 100% / 分支 99.97%。
+- **点名到行**(探针读报告里的覆盖率结论): Windows 缺 `ui/home_page.py` 第 1905 行 + 分支 `1904->1905`; Linux/macOS 缺 `ui/main_window.py` 的分支 `1856->1858`。两处都是老代码(`git blame` 2026-09-28 / 2026-09-13), 对应两条早退: `HomePage._set_hover` 的"同一个 game_id 再进来直接返回"(鼠标在同一条里挪动会重复发 `<Enter>`)与 `MainWindow._reload_data_now` 的"数据版本没变就不重算占用"。
+- **为什么会时有时无**: 这两条弧线此前只被别处的 GUI 时序**顺路**走到 —— 本机量过: 只跑原来那条悬停用例时 `1904->1905` 压根不存在(只有 `1904->1906`); 而 `1856->1858` 在本机被别的用例顺路走到、在 CI 的 Linux/macOS 分片上没有 ⇒ 三个平台的 100% 门禁各差一点点。
+- **修法(两条确定性用例, 直接调那两处)**: `tests/integration/test_gui_home.py::test_hovering_the_same_card_twice_paints_once`(把 `_paint_row` 换成记录器, 同 id 连调两次悬停 ⇒ 只重绘一次, 离开时再重绘一次)与 `tests/unit/test_ui_page_failures.py::test_an_unchanged_revision_does_not_recompute_usage`(版本 7 调一次 ⇒ 不重算; 换 8 ⇒ 重算一次)。
+- **咬合验证(都真跑过)**: 单跑新用例 ⇒ `home_page.py` 的 arcs 是 `(1904,1905)` 与 `(1904,1906)`、1905 已执行; **把新用例挑掉**只留原来那条悬停用例 ⇒ 弧线只剩 `(1904,1906)`、1905 不执行(证明它确实是这条用例补上的); 单跑新的单测 ⇒ `main_window.py` 的 arcs 是 `(1856,1857)` 与 `(1856,1858)`。
+- **口径**: 这不是"覆盖率掉了", 而是**判据在依赖时序**。两条用例的注释都写清出处(哪一轮、缺哪一行/哪条分支), 免得下一个人以为它们多余。
+
+### 59.2 两张主页截图每天在变: 把快照里的"现在"钉住
+
+- **病根(三件事叠在一起)**: 演示数据的时间戳由 `demo_backend` 的 `_recent()`/`_just_now()` 按"今天/昨天"算(那是**故意**的: 写死绝对日期会被主页默认的"最近一个月"筛掉, §48.11 吃过一次日期炸弹), 界面又把它渲染成**绝对时间**(`models.format_moment`), 而"最近活跃"那个计数按 14 天窗口现算(`application.home`) ⇒ 同一份代码今天拍与明天拍不一样, 基线永远对不上。
+- **落点**: `scripts/create_allure_visual.py` 新增 `FROZEN_NOW = 2026-01-02 23:58 UTC` 与 `frozen_clock()`, `capture_screens` 整段包在它里面。**两件事都要做**(只换一处不够):
+  1. **演示数据是导入时算的**(`ui/__init__.py` 早早把 `demo_backend` 带进来) ⇒ 先把 `datetime` 模块里的 `datetime` 临时换成替身, 再 `importlib.reload(demo_backend)`(重载 = 按替身时钟重建那份模块级数据), 然后立刻把模块里那个类还回去 —— 替身只在重载那一瞬当班, 不撒到整轮拍摄里;
+  2. 已经导入过的 `application.home` / `ui.main_window` 换掉它们模块里绑定的 `datetime`(它们读的是"现在", 与重载无关)。
+- **取 23:58 的理由**: 演示数据里"今天"那几条最晚到 11:05, 而"现在"必须**晚于**它们, 否则界面上会出现"今天 11:05"却还没到(时间范围筛选看的也是这个"现在")。
+- **退出时全部还回去**(包括**再重载一次**回到真实时钟下那份数据): 测试会用到这个上下文管理器, 不还回去会把后面用例的演示数据钉死在 2026-01-02。
+- **守卫**: `tests/unit/test_report_visual_catalog.py::test_the_capture_pins_the_clock_so_baselines_stop_drifting` —— ① 拍摄过程包在 `frozen_clock` 里(用替身记录进出); ② 里面读到的是 `FROZEN_NOW`(含"演示数据按固定时钟重建": `_recent(1, 21, 15)` 落在 `FROZEN_NOW - 1 天`); ③ 退出后演示数据回到真实时钟。**咬合验证**: 把重载那句挖掉 ⇒ ② 红(实测 `_just_now()` 仍是当天); 把 `with frozen_clock()` 换成 `nullcontext` ⇒ ① 红。
+- **本机实测(端到端跑了一遍脚本)**: 7 张图正常产出, 列表视图上"最近备份/最近活动"是 `2026/01/02 19:05`(钉住的那一天, 本机时区 UTC+8)且数据一行不少; 探针另测: 真实时钟下是当天的 `2026/10/15 19:05`, 退出后恢复。
+- **基线怎么更新(回答用户的第 2 问)**: 基线只能从 CI 采(本机是 Windows 渲染 + Roboto, CI 是 Ubuntu + Noto CJK, 度量不同), 而且**必须取包含这次改动的那一轮**的 `visual-baselines-candidates` —— 两张主页图里带着 `FROZEN_NOW` 那一天的日期, 拿改之前那一轮的产物提交上去, 下一轮照样红。`tests/visual-baselines/README.md` 与 `.github/instructions/allure-reporting.instructions.md` 第 11 节的对照表都写明了这条前提, 并把原来那句"演示数据的时间每次跑出来完全一样"改掉(它是错的)。
+
+### 59.3 删掉 `Icon probe` 工作流
+
+- **要求(用户原话)**: "将这个删除吧, 我确定 ico 图标要在本地更新了, 不用在 action 时候重新编译"。
+- **落点**: 删除 `.github/workflows/icon-probe.yml`(只做 `workflow_dispatch` 的那条)**与** `release.yml` 里那条 `Probe the icon pipeline on this runner (informational)`(用户追加要求: 画不出就不该在 CI 上重画, 图标只在本地更新), 一并删掉它们的守卫 —— `test_the_manual_probe_workflow_only_runs_on_demand` 与 `test_the_release_probe_cannot_block_the_release`(以及只被后者用到的 `_step` 助手); `test_the_release_workflow_checks_the_icon_before_packaging` 改成"`--check` 在打包之前 + **没有**重画步骤回来(`--out-dir`/`--force` 都不许出现在发布作业里)"; `release.yml` 的注释、`.gitignore` 里 `icon-probe-out/` 的注释(落点本身仍要用 —— 本地 `build_icon.py --force --out-dir` 会写它)与 `docs/development.md` 那节(标题从"两件事分开"改成"CI 怎么验这条流水线")都改成"2026-10-15 起 CI 不再渲染图标"。
+- **`--check` 保留的理由**(不是删干净): 它不需要 ffmpeg, 拦的是"改了 SVG 忘了重画" —— 那件事一旦漏掉, 发布包里就是旧图标。发布链因此完全不依赖 runner 上的渲染工具。
+- **验证**: `tests/unit/test_icon_assets.py` 29 passed(删掉一条探针守卫); ruff / mypy 干净; 全库只有那 6 个文件提到过 `icon-probe`, 已逐处处理(`ci_workflow` 那侧的作业名与路径是具名常量, 不按 glob 扫工作流目录, 所以删文件不会让别的守卫变红)。
+
 ---
 
 # !这部分以下的内容识别时忽略，仅为个人记录灵感，输出的内容要写在上面不允许超过上面的分隔线

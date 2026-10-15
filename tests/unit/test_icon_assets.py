@@ -257,52 +257,22 @@ def test_the_packaging_spec_declares_the_icon_and_fails_without_it() -> None:
     assert "raise SystemExit" in text, "缺图标时要当场失败, 不能默默发出默认图标"
 
 
-def _step(body: str, name: str) -> str:
-    """取作业正文里某一步那一段(到下一个步骤名为止; 断言别拿整个作业当替身)."""
-    start = body.index(f"- name: {name}")
-    rest = body[start:]
-    end = rest.find("\n      - name:", 1)
-    return rest if end < 0 else rest[:end]
-
-
 def test_the_release_workflow_checks_the_icon_before_packaging() -> None:
-    """发布流水线: 先用指纹判"改了 SVG 忘了重画", 再打包(顺序不能反)."""
+    """发布流水线: 先用指纹判"改了 SVG 忘了重画", 再打包.
+
+    2026-10-15 起**不再在 CI 上重画**: 原来还有一条信息探针(`--out-dir` 到 `%TEMP%` 重画一遍并
+    逐字节比对)与一个只做 `workflow_dispatch` 的 `Icon probe` 工作流, 都删了 —— 图标只在本地更新
+    (`uv run python scripts/build_icon.py --force`)。所以这条只钉两件事: `--check` 在打包之前 +
+    **没有**重画步骤回来(它会在 runner 上真跑 ffmpeg, 而发布链不该赌那个)。
+    """
     text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
     body = ci_workflow.job_block(text, "build")
     assert "scripts/build_icon.py --check" in body
     check = body.index("build_icon.py --check")
-    probe = body.index("--out-dir")
     build = body.index("uv run pyinstaller --noconfirm --clean")
-    hint = "先判指纹、再跑探针、最后打包: 探针会重写指纹, 先跑它就查不出入库产物陈旧"
-    assert check < probe < build, hint
-
-
-def test_the_release_probe_cannot_block_the_release() -> None:
-    """探针只是去看看"这台 runner 能不能画", 画不出来不许拦发布(入库位图已够用)."""
-    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    body = ci_workflow.job_block(text, "build")
-    probe = _step(body, "Probe the icon pipeline on this runner (informational)")
-    assert "continue-on-error: true" in probe, "探针失败不该把发布卡死"
-    assert "--out-dir" in probe, "产物写到仓库外, 免得把工作区弄脏"
-    assert "::warning::" in probe, "画不出来要留一条看得见的警告(不是静默跳过)"
-    assert "$LASTEXITCODE" in probe, "uv 失败要自己接住, 不能直接把作业拖红"
-
-
-def test_the_manual_probe_workflow_only_runs_on_demand() -> None:
-    """那条探针工作流只能手动跑: 它不跑用例、不出报告, 没理由跟着 push/PR 烧额度."""
-    text = (_REPO_ROOT / ".github" / "workflows" / "icon-probe.yml").read_text(
-        encoding="utf-8"
-    )
-    head, _, body = text.partition("\njobs:")
-    triggers = head.split("\non:", 1)[1]
-    assert "workflow_dispatch" in triggers
-    for other in ("push", "pull_request", "schedule", "workflow_call"):
-        assert other not in triggers, f"探针不该被 {other} 触发"
-    assert "windows-latest" in body, "发布只做 Windows, 探针也只在那台 runner 上有意义"
-    assert "--out-dir" in body
-    assert "actions/upload-artifact@" in body, "渲染结果要能下来人眼看一眼"
-    assert "astral-sh/setup-uv@" in body, "用了 uv 就要先装它(与其它工作流同一条规矩)"
-    assert "--no-install-project" in body, "探针要验证的正是发布作业那个环境"
+    assert check < build, "先判指纹、再打包: 入库产物陈旧要在打包前拦住"
+    assert "--out-dir" not in body, "发布作业里不该再重画图标(那是本地的事)"
+    assert "--force" not in body, "同上: 发布只核对入库产物, 不改写它"
 
 
 def test_the_icon_script_runs_without_an_installed_project(tmp_path: Path) -> None:
