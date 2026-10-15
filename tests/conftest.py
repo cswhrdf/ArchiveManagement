@@ -451,11 +451,10 @@ _MAX_SCHEDULER_SUSPECTS = 10
 
 
 def _note_scheduler_growth(report: pytest.TestReport) -> None:
-    """量这条用例进/出时的后台调度线程存量(判据本身在会话末, 见 ``_check_scheduler_leaks``).
+    """量这条用例进/出时的后台调度线程存量(判据在用例自己的收尾上, 见 :func:`_leak_message`).
 
-    为什么不在用例收尾直接判: 产品的 ``shutdown`` 是异步的(``wait=False``), 收尾那一刻还数
-    得到线程是正常的; 逐条等待又太贵(每条最多 2s, 几千条用例就白等几十分钟)。所以这里只记账,
-    会话末等一次、判一次 —— 那时还活着的才是真泄漏。
+    逐条只做两件轻活: 记下这条用例开始时的存量、出去时再量一次 —— 只有**变多**的那些才会去
+    等(见 :func:`_surviving_scheduler_threads`), 干净用例零开销。
     """
     if report.when == "setup":
         _SCHEDULER_BEFORE[report.nodeid] = gui_support.scheduler_thread_count()
@@ -471,8 +470,32 @@ def _note_scheduler_growth(report: pytest.TestReport) -> None:
         del _SCHEDULER_SUSPECTS[:-_MAX_SCHEDULER_SUSPECTS]
 
 
+def _surviving_scheduler_threads(nodeid: str) -> int | None:
+    """这条用例收尾后还多出来的调度线程数(收干净了返回 ``None``).
+
+    只在**看出变多**时才等: 产品的 ``shutdown`` 是异步的(``wait=False``), 收尾那一刻还数得到
+    线程是正常的(见 ``gui_support._wait_for_scheduler_threads_at_most``)。干净用例一次等都不等。
+    """
+    before = _SCHEDULER_BEFORE.get(nodeid)
+    if before is None:
+        return None
+    left = gui_support._wait_for_scheduler_threads_at_most(before, timeout=2.0)
+    return left - before if left > before else None
+
+
+def _leak_message(nodeid: str, extra: int) -> str:
+    """逐用例判红时给人看的一句话(含还活着的线程与最常见的两个出口)."""
+    return (
+        f"收尾后多出 {extra} 个活着的后台调度线程: "
+        + "、".join(gui_support._scheduler_threads())
+        + "。真后端 ``SqlArchiveService(...)`` 一建就起一个 APScheduler 线程, "
+        "而只有走真窗口的用例会被关窗路径释放 —— 替身窗口与只为造数据/造包而建的"
+        "后端要自己 ``shutdown()``(幂等); 带窗口的用例用 ``gui_support.close_apps`` 收。"
+    )
+
+
 def _check_scheduler_leaks(session: pytest.Session) -> None:
-    """会话末不许有活着跑掉的后台调度线程; 有就点名并**判红**.
+    """会话末兜底: 这时还有活着跑掉的调度线程就点名、判红, 并**写进报告**.
 
     为什么要有这一道(2026-10-16 run 38758273842): Windows 的 UI 段里
     ``test_run_gui_reports_every_config_state`` 用**替身窗口**跑了三次 ``run_gui`` —— 替身的
@@ -481,21 +504,31 @@ def _check_scheduler_leaks(session: pytest.Session) -> None:
     (见 ``gui_support.close_apps``): 没有窗口可归因就不判 —— 这些线程于是活到会话末,
     直到它们挂住别的东西(那轮 60s 超时的现场里就挂着它们)。
 
-    这里的判据是绝对的("会话末一个都不能有"): 会话走到这一步, 所有用例与所有共享 UI 会话都
-    已经收尾, 还活着的只可能是漏。(只有真泄漏才会等满 2s: 数到 0 立即返回。)
+    2026-10-16 的第二轮(质量作业 red、报告全绿): 这种会话级不变量**不属于任何一条用例**,
+    只在日志里喊一声、再改退出码, 报告里就一点痕迹都没有 ⇒ 这里额外写一条 broken 结论项
+    (见 ``gui_support.write_leak_result``)。逐用例那道(见 ``pytest_runtest_makereport``)
+    能覆盖的它不重复喊; 走到这里的是"归不到某一条用例头上"的残余。
+
+    判据是绝对的("会话末一个都不能有"): 会话走到这一步, 所有用例与所有共享 UI 会话都
+    已经收尾。(只有真泄漏才会等满 2s: 数到 0 立即返回。)
     """
     left = gui_support._wait_for_scheduler_threads_at_most(0, timeout=2.0)
     if left == 0:
         return
+    threads = gui_support._scheduler_threads()
     suspects = "、".join(
         f"{nodeid}({before}→{after})" for nodeid, before, after in _SCHEDULER_SUSPECTS
     )
     print(
-        f"[scheduler] 会话末还有 {left} 个活着的后台调度线程: "
-        f"{'; '.join(gui_support._scheduler_threads())}\n"
+        f"[scheduler] 会话末还有 {left} 个活着的后台调度线程: {'; '.join(threads)}\n"
         "[scheduler] 进出时存量变多的用例(最多 "
         f"{_MAX_SCHEDULER_SUSPECTS} 条, 越靠后越近): {suspects or '无'}"
     )
+    written = gui_support.write_leak_result(
+        session.config, suspects=_SCHEDULER_SUSPECTS, threads=threads
+    )
+    if written is not None:
+        print(f"[scheduler] 已写成一条 broken 结论项: {written.name}")
     session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
@@ -658,7 +691,10 @@ def pytest_runtest_makereport(
     - 钩子跑在**阶段报告生成时**, 也就是任何 teardown 夹具之前: 那时界面窗口还活着,
       截图才拍得到现场(``tests/gui_support.py`` 的登记表由夹具在用例结束后清空);
     - 只处理失败的报告; 每个用例只留一次现场(失败后 teardown 常跟着报第二次错);
-    - 留证自身出错也只是附件里的一句话, 绝不影响用例结果与退出码。
+    - 留证自身出错也只是附件里的一句话, 绝不影响用例结果与退出码;
+    - teardown 阶段额外判一条**收尾纪律**: 这条用例有没有攒下活着的后台调度线程
+      (2026-10-16 起). 判红要落在这条用例自己的报告上, 报告里才点得到名字 —— 只在会话末
+      判的话, 红的是"这一次运行", 而报告里一条用例的痕迹都没有(见 ``_check_scheduler_leaks``)。
     """
     report = yield
     if report.failed:
@@ -681,6 +717,13 @@ def pytest_runtest_makereport(
         if message is not None:
             report.outcome = "failed"
             report.longrepr = message
+    elif report.when == "teardown":
+        # 已经红了的用例不再补一刀(收尾夹具自己报的现场更具体, 比如"根没拆掉"),
+        # 所以放在 `attach_failure_evidence` 之后: 判上去的是**干净收尾之外的唯一错**。
+        extra = _surviving_scheduler_threads(report.nodeid)
+        if extra is not None:
+            report.outcome = "failed"
+            report.longrepr = _leak_message(report.nodeid, extra)
     return report
 
 

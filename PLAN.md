@@ -2742,6 +2742,17 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
 - **它咬了两轮(两轮都把那一片杀掉)之后按"活多"治了**: 这条用例逐控件做 聚焦/失焦 + 全量 `update()`, 实测单跑 **9.7s**、带覆盖率追踪 **12.0s**、双片 + 覆盖率满载 **60s 以上** ⇒ 单独 `@pytest.mark.timeout(150)`(pyproject 明确允许个别慢用例覆盖), 注释里留着这几组数字; 真正的卡死仍有上限兜着。两轮红的表现一模一样(覆盖率 94%、`Combined 1 file`、那一片日志末尾是 `timeout_guard.on_timeout` 的栈), 所以这轮也顺手把"看到覆盖率莫名低先看是不是超时杀片"写进了本地全量的说明。
 - **文档同步**: `ci.yml` 两个 UI 步骤上面的注释块、`docs/testing.md`(「macOS 原生崩溃」那条 + 「超时留证」那节 + 「界面用例收尾」加第三条不变式"会话末一个都不许剩")、`.github/instructions/local-full-run.instructions.md`(第四条已知偶发: 超时杀片 ⇒ 覆盖率假低)与 `.github/instructions/gui-tests-on-ci.instructions.md`(新增第 13 条"自己建的真后端要自己收" + 收工自检第 17 条)。
 
+### 61.1 会话级不变量必须写进报告(2026-10-16 run 38777794002: 质量作业红、报告全绿)
+
+用户在那一轮的质量作业里发现: `pytest tests/performance` 那一步**退出码 1**(14 passed), 而 Allure 报告上**一点痕迹都没有**(性能结论项还写着"通过")。根因是 **B 的守卫是会话级不变量** —— 它不属于任何一条用例, 只喊日志 + 改退出码, 报告就看不见; 而这一轮它咬到的是 `tests/performance/` 里两处真漏(那两条用例各建一只真后端只为量一次, 没人收): CI 才跑 `tests/performance`, 本机默认 `testpaths` 不含它, 所以本机全量跑不出来。
+
+- **修法分两层, 都是"让报告能看见"**:
+  1. **逐条用例判红**(`tests/conftest.py` 的 `pytest_runtest_makereport`, teardown 阶段): 这条用例进/出时多出来的线程 2s 内没退回去 ⇒ 改这条用例的报告 `outcome="failed"` + 写明线程清单与两个出口 ⇒ 报告里点得到是哪一条(与那条钩子里"未知 Tk 跳过改成失败"同一手法)。只在"看出变多"时才等, 干净用例零开销; 已经红了的用例不补刀(收尾夹具自己报的现场更具体)。
+  2. **会话末兜底也写结论项**(`gui_support.write_leak_result`): 归不到某条用例头上的残余, 写一条 broken 结论项(`fullName=archive-management.scheduler-leak`, 带 env/severity, 描述里有点名与口径) —— 与超时留证同一种做法; 没配 `--alluredir` 就只判退出码。
+- **顺带**: `timeout_guard._results_dir(item)` 抽成公开的 `timeout_guard.allure_results_dir(config)`(会话末只有 `session.config`, 两边必须是同一份真相)。
+- **咬合验证(真跑过)**: 把 `test_home_scale.py::test_backend_home_response_time` 的 `shutdown()` 挖掉 ⇒ 那一轮 14 passed + **`ERROR at teardown of test_backend_home_response_time`**(失败信息里有 `APScheduler(daemon=True)` 与 `shutdown()`), 同时那条 broken 结论项也写出来了; 恢复后 14 passed、日志一个字都不打。新增 4 条守卫(逐条判红 / 收干净不许误伤 / 写结论项 / 没配 `--alluredir` 时不写)都咬合过。
+- **教训(值得记住)**: **纯会话级/进程级的失败必须自己写一条结果进报告** —— 退出码与日志对"看报告的人"等于不存在。仓库里已有的同类做法就是 `timeout_guard`(超时)与 `collect_job_diagnostics`(作业崩溃): 它们都手写一条 broken 结论项。
+
 ---
 
 # !这部分以下的内容识别时忽略，仅为个人记录灵感，输出的内容要写在上面不允许超过上面的分隔线

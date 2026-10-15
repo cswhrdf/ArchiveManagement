@@ -21,9 +21,10 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -848,17 +849,45 @@ def test_report_config_categorises_the_known_environment_problems() -> None:
 # ---- 会话末的后台调度线程守卫(2026-10-16): 漏线程要能被点名, 而且要判红 ----
 
 
-# 替身会话: 守卫只写它的 exitstatus。
+# 替身会话: 守卫只写它的 ``exitstatus`` 与读它的 ``config``(取 ``--alluredir``).
 class _SessionStub:
-    """只带 ``exitstatus`` 的会话替身(真实 ``pytest.Session`` 也只有这个位置可写)。"""
+    """只带守卫要用的两样东西的会话替身.
 
-    def __init__(self) -> None:
+    ``pytest.Session`` 上能写的也只有 ``exitstatus``; ``config`` 只实现守卫用到的那一个选项
+    查询(找得到就写结论项, 找不到就不写)。
+    """
+
+    def __init__(self, *, alluredir: Path | None = None) -> None:
         self.exitstatus = 0
+        self._alluredir = alluredir
+
+    @property
+    def config(self) -> Any:
+        """只实现 ``getoption("allure_report_dir")``(auure-pytest 把这个选项的 dest 定成它)."""
+        alluredir = self._alluredir
+
+        def getoption(name: str, default: Any = None) -> Any:
+            if name == "allure_report_dir" and alluredir is not None:
+                return str(alluredir)
+            return default
+
+        return SimpleNamespace(getoption=getoption)
 
 
 def _report(nodeid: str, when: str) -> pytest.TestReport:
-    """只带守卫要用的两个字段的阶段报告替身."""
-    return cast(pytest.TestReport, SimpleNamespace(nodeid=nodeid, when=when))
+    """带守卫要用的那几个字段的阶段报告替身(默认是"通过"的那一份)."""
+    return cast(
+        pytest.TestReport,
+        SimpleNamespace(
+            nodeid=nodeid,
+            when=when,
+            outcome="passed",
+            duration=0.0,
+            longrepr=None,
+            failed=False,
+            skipped=False,
+        ),
+    )
 
 
 def test_the_scheduler_ledger_names_the_tests_that_left_threads_behind(
@@ -901,6 +930,7 @@ def test_surviving_scheduler_threads_fail_the_session(
 
     判红而不是记一笔: 这些线程活过会话末就是漏, 而它们挂住别的东西时受害的是**别的**用例
     (2026-10-16 的 Windows 分片就是被它们顶到 60s 超时上限的)。
+    没配 ``--alluredir`` 时不写结论项(照旧只判退出码 + 打日志)。
     """
     session = _SessionStub()
     monkeypatch.setattr(conftest, "_SCHEDULER_SUSPECTS", [("tests/x.py::test_y", 0, 2)])
@@ -922,6 +952,107 @@ def test_surviving_scheduler_threads_fail_the_session(
     assert "APScheduler_1(daemon=True)" in out, "线程清单要打出来(不然不知道漏了什么)"
     assert "tests/x.py::test_y(0→2)" in out, "要能点到可疑用例的名字"
     assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_the_session_leak_also_becomes_a_report_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """会话末抓到漏时要**写进报告**: 只有日志与退出码的话就是"红的作业配绿的报告".
+
+    2026-10-16 run 38777794002 的真实形状: 质量作业里 ``pytest tests/performance`` 因为
+    这条守卫退出码 1, 而报告里 14 条性能用例全绿、性能结论项也写着"通过" —— 因为它是
+    **会话级**不变量, 不属于任何一条用例。
+    """
+    session = _SessionStub(alluredir=tmp_path / "allure-results")
+    monkeypatch.setattr(conftest, "_SCHEDULER_SUSPECTS", [("tests/x.py::test_y", 0, 1)])
+    monkeypatch.setattr(conftest, "_SCHEDULER_BEFORE", {})
+    monkeypatch.setattr(
+        gui_support,
+        "_wait_for_scheduler_threads_at_most",
+        lambda allowed, timeout=2.0: 1,
+    )
+    monkeypatch.setattr(
+        gui_support, "_scheduler_threads", lambda: ["APScheduler_1(daemon=True)"]
+    )
+
+    conftest._check_scheduler_leaks(cast(pytest.Session, session))
+
+    written = list((tmp_path / "allure-results").glob("*-result.json"))
+    assert len(written) == 1, "会话末的漏要写成一条结论项(否则报告里一点痕迹都没有)"
+    payload = json.loads(written[0].read_text(encoding="utf-8"))
+    assert payload["fullName"] == gui_support.LEAK_FULL_NAME
+    assert payload["status"] == "broken", "它是「没能干净收尾」, 不是断言没过"
+    assert payload["name"] == gui_support.LEAK_TITLE
+    labels = {item["name"]: item["value"] for item in payload["labels"]}
+    assert labels["env"], "结论项要落在对应平台的环境里(与超时留证同一条口径)"
+    assert labels["severity"] == "critical"
+    assert "tests/x.py::test_y" in payload["description"]
+    assert "APScheduler_1(daemon=True)" in payload["description"]
+    assert written[0].name in capsys.readouterr().out, "写了哪一条要看得见"
+
+
+def _reported(hook: Generator[None, Any, Any], report: pytest.TestReport) -> Any:
+    """把报告喂回钩子, 取回它返回的那一份(wrapper 钩子收尾时抛 ``StopIteration`` 带出)."""
+    next(hook)
+    try:
+        hook.send(report)
+    except StopIteration as stop:
+        return stop.value
+    raise AssertionError("钩子没有把报告交回来")
+
+
+def test_a_test_that_leaves_threads_behind_is_marked_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """逐用例判红: 漏线程要落在**它自己**的报告上(报告里才点得到是哪一条).
+
+    这条与上面那条分工: 这一条负责"报告里看得见", 会话末那条只管归不到某条用例头上的残余。
+    """
+    nodeid = "tests/unit/test_x.py::test_a"
+    monkeypatch.setattr(conftest, "_SCHEDULER_BEFORE", {nodeid: 1})
+    monkeypatch.setattr(gui_support, "scheduler_thread_count", lambda: 2)
+    monkeypatch.setattr(
+        gui_support,
+        "_wait_for_scheduler_threads_at_most",
+        lambda allowed, timeout=2.0: 2,
+    )
+    monkeypatch.setattr(
+        gui_support, "_scheduler_threads", lambda: ["APScheduler_7(daemon=True)"]
+    )
+
+    hook = conftest.pytest_runtest_makereport(
+        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid)),
+        call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
+    )
+    report = cast(pytest.TestReport, _reported(hook, _report(nodeid, "teardown")))
+
+    assert report.outcome == "failed", "收尾留下活线程的用例要在报告里变红"
+    message = str(report.longrepr)
+    assert "APScheduler_7(daemon=True)" in message
+    assert "shutdown()" in message, "失败信息里要给出最常见的两个出口"
+
+
+def test_a_test_that_cleans_up_is_not_marked_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """收尾干净的用例: 通知报告照旧是"通过"(钩子一律碰一遍报告的写法会误伤全库)."""
+    nodeid = "tests/unit/test_x.py::test_b"
+    monkeypatch.setattr(conftest, "_SCHEDULER_BEFORE", {nodeid: 3})
+    monkeypatch.setattr(gui_support, "scheduler_thread_count", lambda: 4)
+    monkeypatch.setattr(
+        gui_support,
+        "_wait_for_scheduler_threads_at_most",
+        lambda allowed, timeout=2.0: 3,
+    )
+
+    hook = conftest.pytest_runtest_makereport(
+        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid)),
+        call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
+    )
+    report = cast(pytest.TestReport, _reported(hook, _report(nodeid, "teardown")))
+
+    assert report.outcome == "passed"
+    assert report.longrepr is None
 
 
 def test_a_clean_session_is_not_touched(

@@ -231,6 +231,9 @@ def test_backend_backup_listing_response(
         items = service.list_backups(str(game_id))
 
     assert len(items) == NODE_COUNT
+    # 这只后端只为量一次而建, 没人替它收尾: 不关掉就留一个 APScheduler 线程活到会话末
+    # (2026-10-16 的会话末守卫在 CI 的质量作业里点名到这里)。
+    service.shutdown()
 
 
 def _warm(root: Path) -> None:

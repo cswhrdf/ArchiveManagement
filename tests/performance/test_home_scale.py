@@ -157,3 +157,5 @@ def test_backend_home_response_time(
     assert len(board.games) == board.stats.total
     assert board.stats.total + board.stats.archived == GAME_COUNT
     assert status.backend_ok is True
+    # 同 test_backup_scale: 只为量一次而建的真后端要自己收(否则留一个调度线程到会话末)。
+    service.shutdown()

@@ -14,16 +14,22 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sys
 import threading
 import time
+import uuid
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
+
+import timeout_guard
+from archive_management.services.platforms import current_platform, platform_label
 
 # 本次用例创建过、还没销毁的窗口(由夹具在用例结束时清空)。
 _LIVE_APPS: list[Any] = []
@@ -364,6 +370,71 @@ def _wait_for_scheduler_threads_at_most(allowed: int, timeout: float = 2.0) -> i
         time.sleep(0.02)
         count = len(_scheduler_threads())
     return count
+
+
+#: 会话末调度线程泄漏那条结论项的标题/身份(见 :func:`write_leak_result`).
+LEAK_TITLE = "会话末的调度线程泄漏"
+LEAK_FULL_NAME = "archive-management.scheduler-leak"
+
+
+def write_leak_result(
+    config: pytest.Config,
+    *,
+    suspects: Sequence[tuple[str, int, int]],
+    threads: Sequence[str],
+) -> Path | None:
+    """把"会话末还有活着的后台调度线程"写成一条 Allure 结论项(没配 ``--alluredir`` 就不写).
+
+    为什么要写(2026-10-16 run 38777794002): 质量作业里 ``pytest tests/performance`` 因为这条
+    守卫**退出码 1**, 而报告里 14 条性能用例全绿、性能结论项也写着"通过" —— **红的作业与绿的
+    报告并存**。根因是它是**会话级不变量**: 不属于任何一条用例, 不写进结果目录就只有运行日志
+    看得见。所以这里手写一条 broken 结论项(与 ``timeout_guard.write_allure_result`` 同一种
+    做法): 它进得了报告、也进得了质量门(maxFailures: 0)。
+
+    ``suspects`` 是"进出时存量变多的用例"(点名用), ``threads`` 是还活着的线程清单。
+    """
+    directory = timeout_guard.allure_results_dir(config)
+    if directory is None:
+        return None
+    listing = "; ".join(threads) or "未知"
+    ledger = (
+        "、".join(f"{nodeid}({before}→{after})" for nodeid, before, after in suspects)
+        or "无"
+    )
+    timestamp = time.time_ns() // 1_000_000
+    result_id = str(uuid.uuid4())
+    payload: dict[str, Any] = {
+        "uuid": result_id,
+        "historyId": str(uuid.uuid5(uuid.NAMESPACE_URL, LEAK_FULL_NAME)),
+        "fullName": LEAK_FULL_NAME,
+        "name": LEAK_TITLE,
+        "status": "broken",
+        "stage": "finished",
+        "start": timestamp,
+        "stop": timestamp,
+        "labels": [
+            {"name": "suite", "value": LEAK_TITLE},
+            {"name": "epic", "value": "工程与发布"},
+            {"name": "feature", "value": "测试基础设施"},
+            {"name": "story", "value": "用例收尾纪律"},
+            {"name": "env", "value": platform_label(current_platform())},
+            {"name": "severity", "value": "critical"},
+        ],
+        "statusDetails": {"message": f"会话末还有 {len(threads)} 个活着的后台调度线程"},
+        "description": (
+            f"会话结束后 {len(threads)} 个后台调度线程还活着: {listing}\n\n"
+            f"- 进出时存量变多的用例(最多 10 条, 越靠后越近): {ledger}\n"
+            "- 口径: 真后端 `SqlArchiveService(...)` 一建就起一个 APScheduler 线程, "
+            "替身窗口/只为造数据而建的后端没人替它收 ⇒ 释放入口是幂等的 `shutdown()`。\n"
+            "- 这条结论项只在本该「零线程」的会话末出现: 它意味着某个用例(或它用的 helper) "
+            "漏了一个后端。"
+        ),
+    }
+    target = directory / f"{result_id}-result.json"
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return target
 
 
 def close_child_windows(app: Any) -> None:

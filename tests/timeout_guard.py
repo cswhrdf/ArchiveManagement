@@ -394,20 +394,29 @@ def _write_allure_result(
     return f"{target.name}({len(attachments)} 个附件)"
 
 
-def _results_dir(item: pytest.Item) -> Path | None:
-    """当前运行的 Allure 结果目录(没配 --alluredir 时返回 None).
+def allure_results_dir(config: pytest.Config) -> Path | None:
+    """当前运行的 Allure 结果目录(没配 ``--alluredir`` 时返回 ``None``).
 
     这里试两个名字: allure-pytest 把这个选项的 ``dest`` 定成了 ``allure_report_dir``
     (命令行拼写是 ``--alluredir``), 直接用拼写去 ``getoption`` 会**静静地**拿到默认值 ——
     2026-10-01 就是这么白丢了一条结论。
+
+    公开版(2026-10-16): 会话末的调度线程守卫也要往同一个目录写结论项, 两边必须是同一份
+    真相(它没有 ``item``, 只有 ``session.config``)。
     """
     for name in ("allure_report_dir", "alluredir"):
         with contextlib.suppress(Exception):
-            value = item.config.getoption(name, None)
+            value = config.getoption(name, None)
             if value:
                 directory = Path(str(value))
                 directory.mkdir(parents=True, exist_ok=True)
                 return directory
+    return None
+
+
+def _results_dir(item: pytest.Item) -> Path | None:
+    """当前运行的 Allure 结果目录(见 :func:`allure_results_dir`)."""
+    return allure_results_dir(item.config)
     return None
 
 
