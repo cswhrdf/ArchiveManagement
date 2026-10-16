@@ -10,11 +10,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
@@ -78,10 +77,7 @@ def test_gui_export_writes_the_package_the_user_picked(
 
     monkeypatch.setattr(main_mod, "pick_save_file", save_file)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game_id)
@@ -120,10 +116,7 @@ def test_gui_export_cancelled_by_the_picker_writes_nothing(
         monkeypatch, tmp_path, export_path=None
     )
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game_id)
@@ -216,10 +209,7 @@ def test_gui_import_package_creates_the_game_and_selects_it(
     )
     monkeypatch.setattr(main_mod, "import_package_dialog", choose)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 
@@ -291,10 +281,7 @@ def test_gui_import_package_merges_into_the_matched_game(
 
     monkeypatch.setattr(main_mod, "import_package_dialog", choose)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game_id)
@@ -335,10 +322,7 @@ def test_gui_import_picker_cancelled_imports_nothing(
         main_mod, "import_package_dialog", lambda *args, **kwargs: opened.append(args)
     )
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 
@@ -380,10 +364,7 @@ def test_gui_import_of_a_broken_package_reports_an_error(
         main_mod, "import_package_dialog", lambda *args, **kwargs: opened.append(args)
     )
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 
@@ -408,10 +389,7 @@ def test_gui_import_dialog_cancelled_imports_nothing(
         monkeypatch, tmp_path, import_package_path=str(package), import_choice=None
     )
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 
@@ -517,10 +495,7 @@ def test_gui_export_batch_writes_the_package_the_user_ticked(
     monkeypatch.setattr(main_mod, "export_batch_dialog", choose)
     monkeypatch.setattr(main_mod, "pick_save_file", save_file)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 
@@ -563,10 +538,7 @@ def test_gui_export_batch_cancel_paths_write_nothing(
     """对话框取消 / 一个都没勾 / 保存框取消: 三种都不写文件、不进忙碌态."""
     service, game_ids = _real_service_with_games(monkeypatch, tmp_path, ["甲游戏"])
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 
@@ -614,10 +586,7 @@ def test_gui_export_batch_hides_archived_games_and_reports_an_empty_library(
 
     monkeypatch.setattr(main_mod, "export_batch_dialog", choose)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         service.set_game_archived(game_ids[1], True)
@@ -679,10 +648,7 @@ def test_gui_import_batch_imports_the_whole_batch_per_choice(
     )
     monkeypatch.setattr(main_mod, "batch_import_dialog", choose)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 
@@ -728,10 +694,7 @@ def test_gui_import_batch_cancel_paths_import_nothing_extra(
         monkeypatch, tmp_path, import_package_path=None
     )
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
 

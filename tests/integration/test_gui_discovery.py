@@ -10,11 +10,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
     import customtkinter as ctk  # 既校验可导入, 也用于构造测试用父容器
 except Exception as exc:  # pragma: no cover - 取决于运行环境
@@ -67,10 +66,7 @@ def test_discovery_panel_scans_filters_and_imports_candidate(
     from archive_management.ui.palette import Palette
 
     _patch_dialogs(monkeypatch, ask_text="空洞骑士")
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         panel = DiscoveryPanel(
@@ -139,10 +135,7 @@ def test_discovery_clear_results_keeps_imported_and_remembers_ignores(
 
     _patch_dialogs(monkeypatch)
     monkeypatch.setattr(disc_mod, "confirm_dialog", lambda *_a, **_k: True)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         panel = DiscoveryPanel(
@@ -383,10 +376,7 @@ def test_discovery_panel_defaults_to_candidates_and_switches_pages(
     from archive_management.ui.palette import Palette
 
     _patch_dialogs(monkeypatch)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         panel = DiscoveryPanel(
@@ -475,10 +465,7 @@ def test_discovery_default_filter_is_pending_with_filter_aware_empty_state(
     monkeypatch.setattr(LocalGameScanner, "scan", fake_scan)
     service = SqlArchiveService(db, backup_root=tmp_path / "backups")
     service.add_monitored_directory(str(games))
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         panel = DiscoveryPanel(
@@ -569,10 +556,7 @@ def test_discovery_rows_clip_long_paths_and_ignore_stale_refits(
     monkeypatch.setattr(LocalGameScanner, "scan", fake_scan)
     service = SqlArchiveService(db, backup_root=tmp_path / "backups")
     service.add_monitored_directory(str(games))
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         # 面板必须被**框定宽度**: 没被摆放的容器里每个控件都按内容自适应宽度, 标签宽度

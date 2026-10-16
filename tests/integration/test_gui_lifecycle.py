@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 import gui_support
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
@@ -90,10 +90,7 @@ def test_empty_database_polling_does_not_crash(
     db = Database(tmp_path / "empty.db")
     db.migrate()
     service = SqlArchiveService(db, backup_root=tmp_path / "backups")
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         assert app._game_id is None
@@ -139,10 +136,7 @@ def test_window_build_survives_a_transient_database_failure(
         return original(self)
 
     monkeypatch.setattr(MonitoredDirectoryRepository, "list_all", flaky)
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         # 故障期间: 面板空着, 但既没抛异常也没弹出模态框。
@@ -181,10 +175,7 @@ def test_polling_survives_a_transient_database_failure(
         raise sqlite3.OperationalError("unsupported file format")
 
     monkeypatch.setattr(service, "task_status", broken)
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         asked_before = calls["n"]
@@ -520,10 +511,7 @@ def test_workspace_nav_keeps_a_single_window_open(
     _patch_dialogs(monkeypatch)
     monkeypatch.setattr(main_mod, "ScheduleWindow", _factory)
     monkeypatch.setattr(main_mod, "SettingsWindow", _factory)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
 
@@ -786,10 +774,7 @@ def test_service_status_shows_storage_usage_without_hotkey(
     service.add_location(game.game_id, path=str(save_dir), kind="directory")
     service.run_backup_now(game.game_id)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         text = app._service_label.cget("text")

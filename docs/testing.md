@@ -188,6 +188,7 @@ GUI 用例把建窗期的 TclError 写成 `pytest.skip("tk 环境不可用: ..."
 - **白名单只列 Tcl 自己的库数据文件名**：把 `couldn't read file` 这类通用说法整个收进来，会把"应用自己要读的文件打不开"也归成环境问题。两种拼法都能被文件名命中，不必放宽。
 - 前缀是"tk 环境不可用"但症状不在清单里时，conftest 的报告钩子把它改成**失败**——要么修掉要么删掉，不留下永远不跑的用例。
 - `gui_support.gui_app` 同理：非已知抖动的 TclError 不重试直接抛。
+- **建窗必须走 `gui_support`（`gui_app` / `build_with_retry`），不许在用例里手写 `except TclError: pytest.skip(...)`**：同进程的 Tcl 抖动由它自动重试（`TK_RETRY_ATTEMPTS` 次内成功就继续跑，耗尽才以"tk 环境不可用(重试 N 次)"跳过）；手写的旧样板一次抖动就丢一条用例（2026-10-16 Windows 报告：一条 e2e 用例 14ms 被 skip，绕过了重试，同用例在 Linux 上是过的）。守卫：`test_integration_cases_do_not_bypass_the_retry_with_a_raw_skip`。
 
 与 Tk 无关的跳过不受影响。守卫：`tests/unit/test_gui_retry.py`（含反向守卫：应用侧读文件失败不许被当成环境问题）。
 

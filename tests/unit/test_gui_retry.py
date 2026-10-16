@@ -266,3 +266,26 @@ def test_conftest_turns_an_unknown_tk_skip_into_a_failure() -> None:
 
     assert "tk_guard.unknown_tk_skip_message" in hook, "钩子没有接上跳过纪律"
     assert 'report.outcome = "failed"' in hook, "跳过要真的改成失败"
+
+
+def test_integration_cases_do_not_bypass_the_retry_with_a_raw_skip() -> None:
+    """集成用例不许再手写"建窗失败就跳过"(2026-10-16 Windows 报告的教训).
+
+    现场: 那轮报告里一条 e2e 用例 **14ms** 就被跳过, 消息是
+    ``tk 环境不可用: Can't find a usable tk.tcl ...`` —— 没有"(重试 N 次)"字样,
+    说明它走的是用例自带的 ``except TclError: pytest.skip(...)`` 旧样板, 完全绕开了
+    :func:`gui_support.build_with_retry`: 一次 Tcl 抖动 = 一条用例静默消失(同用例在
+    Linux 上是过的)。迁移后所有建窗都必须经 gui_support(先重试
+    :data:`TK_RETRY_ATTEMPTS` 次, 耗尽才以"tk 环境不可用(重试 N 次)"跳过), 所以
+    集成文件里再出现这条裸跳过就是回退。
+    """
+    offenders = [
+        p.name
+        for p in sorted((_TESTS_ROOT / "integration").glob("test_gui_*.py"))
+        if 'pytest.skip(f"tk 环境不可用' in p.read_text(encoding="utf-8")
+    ]
+
+    assert not offenders, (
+        "这些文件绕过了 Tk 抖动重试(建窗必须走 gui_support.gui_app / "
+        f"build_with_retry): {offenders}"
+    )

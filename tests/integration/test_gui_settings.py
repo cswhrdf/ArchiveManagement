@@ -11,11 +11,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
@@ -314,10 +313,7 @@ def test_auto_activation_polls_only_when_switched_on(
     service = SqlArchiveService(
         db, backup_root=tmp_path / "backups", process_provider=provider
     )
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         assert app._activation is False
@@ -743,7 +739,8 @@ def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
     finally:
         app.destroy()
 
-    reloaded = _new_app(
+    reloaded = build_with_retry(
+        _new_app,
         DemoArchiveService(delay=0),
         hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
         paths=paths,

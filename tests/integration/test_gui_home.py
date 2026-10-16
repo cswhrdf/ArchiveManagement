@@ -12,11 +12,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app, type_text
+from gui_support import build_with_retry, gui_app, type_text
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
     import customtkinter as ctk  # 既校验可导入, 也用于构造测试用父容器
 except Exception as exc:  # pragma: no cover - 取决于运行环境
@@ -323,10 +322,7 @@ def test_home_page_hides_the_table_and_footer_when_the_library_is_empty(
     db = Database(tmp_path / "empty.db")
     db.migrate()
     service = SqlArchiveService(db, backup_root=tmp_path / "backups")
-    try:
-        app = _new_app(service)
-    except TclError as exc:  # pragma: no cover - 取决于运行环境
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         page = app._home_page

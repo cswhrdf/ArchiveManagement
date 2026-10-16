@@ -9,11 +9,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
@@ -140,10 +139,7 @@ def test_delete_branch_root_asks_for_confirmation(
         return False
 
     monkeypatch.setattr(main_mod, "confirm_dialog", declining)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         app._select_game("outer-wilds")
@@ -393,10 +389,7 @@ def test_sql_backend_backup_creates_node_and_unfinished_actions_report_clearly(
     (save_dir / "slot1.dat").write_text("progress", encoding="utf-8")
     service.add_location(game.game_id, path=str(save_dir), kind="directory")
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game.game_id)
@@ -449,10 +442,7 @@ def test_gui_backup_reports_unchanged_save_with_dialog(
     (save_dir / "slot1.dat").write_text("v1", encoding="utf-8")
     service.add_location(game.game_id, path=str(save_dir), kind="directory")
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game.game_id)
@@ -501,10 +491,7 @@ def test_gui_backup_button_writes_snapshot_through_service(
     (save_dir / "nested" / "b.sav").write_text("two", encoding="utf-8")
     service.add_location(game.game_id, path=str(save_dir), kind="directory")
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game.game_id)
@@ -547,10 +534,7 @@ def test_gui_restore_writes_files_back_through_service(
     (save_dir / "slot1.dat").write_text("v1", encoding="utf-8")
     service.add_location(game.game_id, path=str(save_dir), kind="directory")
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game.game_id)
@@ -594,10 +578,7 @@ def test_gui_safety_point_stays_out_of_branch_view(
     (save_dir / "slot1.dat").write_text("v1", encoding="utf-8")
     service.add_location(game.game_id, path=str(save_dir), kind="directory")
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game.game_id)
@@ -647,10 +628,7 @@ def test_gui_restore_reports_snapshot_damage(
     (save_dir / "slot1.dat").write_text("v1", encoding="utf-8")
     service.add_location(game.game_id, path=str(save_dir), kind="directory")
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         app._select_game(game.game_id)

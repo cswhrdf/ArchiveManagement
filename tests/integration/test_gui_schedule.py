@@ -9,11 +9,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
     import customtkinter as ctk  # 既校验可导入, 也用于构造测试用父容器
 except Exception as exc:  # pragma: no cover - 取决于运行环境
@@ -54,10 +53,7 @@ def test_schedule_window_edits_interval_and_keep_count(
     from archive_management.ui.schedule_window import ScheduleWindow
 
     _patch_dialogs(monkeypatch, schedule_result=("1h", "5"))
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         window = ScheduleWindow(
@@ -124,10 +120,7 @@ def test_schedule_window_rejects_invalid_keep_count(
     monkeypatch.setattr(
         sched_mod, "info_dialog", lambda *_a, **k: errors.append(k["message"])
     )
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         window = ScheduleWindow(
@@ -208,10 +201,7 @@ def test_schedule_window_add_picks_game_from_filterable_dialog(
         return None
 
     monkeypatch.setattr(sched_mod, "add_schedule_dialog", fake_add)
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         window = ScheduleWindow(
@@ -254,10 +244,7 @@ def test_game_without_locations_cannot_be_scheduled(
     monkeypatch.setattr(
         sched_mod, "info_dialog", lambda *_a, **k: notes.append(k["message"])
     )
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         changed = edit_schedule(

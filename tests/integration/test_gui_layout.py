@@ -26,11 +26,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
     import customtkinter as ctk
 except Exception as exc:  # pragma: no cover - 取决于运行环境
@@ -359,10 +358,7 @@ def test_poster_view_gives_the_games_area_equal_margins() -> None:
 
 def test_workspace_window_borders_are_visible() -> None:
     """设置与定时任务窗口里的卡片四边框都必须可见."""
-    try:
-        app = _new_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app)
     try:
         _pump(app)
         for opener in (app._on_open_settings, app._on_open_schedules):
@@ -415,10 +411,7 @@ def test_detail_page_and_manage_window_borders_are_visible() -> None:
     """详情页与管理窗口的卡片四边框也必须可见."""
     from archive_management.ui.manage_window import ManageGameWindow
 
-    try:
-        app = _new_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app)
     try:
         assert _wait_mapped(app)
         page = app._home_page
@@ -460,10 +453,7 @@ def test_the_manage_header_text_block_is_vertically_centered() -> None:
     """
     from archive_management.ui.manage_window import ManageGameWindow
 
-    try:
-        app = _new_app()
-    except TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app)
     try:
         assert _wait_mapped(app)
         page = app._home_page

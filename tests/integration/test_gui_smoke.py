@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import pytest
 
+from gui_support import build_with_retry
+
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
     import customtkinter  # noqa: F401 - 校验 customtkinter 可导入
 except Exception as exc:
@@ -39,15 +40,13 @@ def test_gui_smoke_build_theme_manage_and_destroy() -> None:
     from archive_management.ui.manage_window import ManageGameWindow
     from archive_management.ui.palette import Palette
 
-    try:
-        app = ArchiveApp(
-            DemoArchiveService(delay=0),
-            title="冒烟",
-            # 冒烟测试不注册系统级快捷键, 避免遗留键盘钩子.
-            hotkeys=GlobalHotkeyService(backend=UnavailableBackend("冒烟测试禁用")),
-        )
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(
+        ArchiveApp,
+        DemoArchiveService(delay=0),
+        title="冒烟",
+        # 冒烟测试不注册系统级快捷键, 避免遗留键盘钩子.
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("冒烟测试禁用")),
+    )
 
     def _pump() -> None:
         app.update_idletasks()

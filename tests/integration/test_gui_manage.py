@@ -9,11 +9,10 @@ from typing import Any
 
 import pytest
 
-from gui_support import gui_app
+from gui_support import build_with_retry, gui_app
 
 try:
     import tkinter  # noqa: F401 - 校验 tkinter 可导入
-    from tkinter import TclError
 
 except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
@@ -494,10 +493,7 @@ def test_manage_window_location_actions(
         ask_text=dir_target,
         confirm=True,
     )
-    try:
-        app = _new_app(DemoArchiveService(delay=0))
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
         manager = _open_manager(
@@ -594,10 +590,7 @@ def test_deleting_a_game_shows_the_package_path_and_really_exports_it(
 
     monkeypatch.setattr(mgr_mod, "confirm_dialog", record_confirm)
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         manager = _manage_game_window(
@@ -700,10 +693,7 @@ def test_manage_window_delete_original_blocks_backup_root(
     (inside / "slot1.dat").write_text("v1", encoding="utf-8")
     service.add_location(game.game_id, path=str(inside), kind="directory")
 
-    try:
-        app = _new_app(service)
-    except TclError as exc:
-        pytest.skip(f"tk 环境不可用: {exc}")
+    app = build_with_retry(_new_app, service)
     try:
         _pump(app)
         manager = _open_manager(
