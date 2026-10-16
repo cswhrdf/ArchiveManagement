@@ -265,7 +265,7 @@ def test_the_release_workflow_checks_the_icon_before_packaging() -> None:
     (`uv run python scripts/build_icon.py --force`)。所以这条只钉两件事: `--check` 在打包之前 +
     **没有**重画步骤回来(它会在 runner 上真跑 ffmpeg, 而发布链不该赌那个)。
     """
-    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    text = ci_workflow.RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
     body = ci_workflow.job_block(text, "build")
     assert "scripts/build_icon.py --check" in body
     check = body.index("build_icon.py --check")

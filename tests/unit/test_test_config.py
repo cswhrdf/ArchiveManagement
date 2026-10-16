@@ -67,13 +67,13 @@ _CI_ONLY_SUITES = ("performance", "security")
 # 2026-10-06: 报告不再发布 Pages, 但 PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
 # `dorny/paths-filter`、`required-check` 只 `echo` 一行, 都不需要 Python 环境, 所以
 # 按这条登记; 列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
-# 2026-10-17 又添三个: 打包门禁那两个(`windows-package` 是**纯调用作业** —— 它 `uses:`
-# release.yml, 自己没有步骤; `packaging-gate` 只判上游的 result)与 release.yml 的
-# `publish`(只下产物 + `gh release`, 同样不装 Python 环境)。
+# 2026-10-17 又添一个: release.yml 的 `publish`(只下产物 + `gh release`, 同样不装 Python 环境)。
+# 打包门禁那个 `windows-package` 不在这里登记 —— 它是**纯转调作业**(只有一条 `uses:`、自己没有
+# 步骤), 由 :func:`_calls_another_workflow` 自动豁免; 真正装环境、跑命令的是它调用的
+# release-build.yml(那份工作流照旧走完整的分组检查)。
 _UV_FREE_JOBS: set[str] = {
     "changes",
     "required-check",
-    "windows-package",
     "packaging-gate",
     "publish",
 }
@@ -273,6 +273,22 @@ def _without_comments(text: str) -> str:
     )
 
 
+def _calls_another_workflow(job_body: str) -> bool:
+    """作业是否只是**转调**另一份工作流(``uses: ./.github/workflows/*.yml``), 自己没有步骤.
+
+    这类作业(如 `ci.yml` 的 `windows-package`、`release.yml` 的 `build`)一行命令都不跑: 命令、
+    依赖分组与 `UV_NO_SYNC` 全在被调用的那一份工作流里 —— 那份自己也在这个循环里, 所以这里跳过
+    不算放水。反向自查也在这一处: 转调作业里不许出现 `steps:` 或 `run:`(GitHub 同样不允许两者共存)。
+    """
+    if "uses: ./.github/workflows/" not in job_body:
+        return False
+    assert "steps:" not in job_body, "转调作业不能同时有自己的步骤"
+    assert not re.search(r"^\s+run:", job_body, re.MULTILINE), (
+        "转调作业里不该有自己的命令"
+    )
+    return True
+
+
 def _dev_groups() -> dict[str, list[str]]:
     """读出 pyproject 的开发依赖分组."""
     with (_REPO_ROOT / "pyproject.toml").open("rb") as handle:
@@ -343,12 +359,15 @@ def test_ci_installs_only_the_dependency_groups_each_job_needs() -> None:
     步骤需要的组必须都在那次 `uv sync` 里列出来; ② 同一个环境里的每次 `uv sync` 必须是同一套
     参数(否则修复步骤那一次会把刚装好的组又删掉)。
 
-    **不碰 uv 的作业**在 :data:`_UV_FREE_JOBS` 里登记(清单现在是空的: 原来那个只做下载/解压/发布的
-    Pages 作业已与汇总合并); 登记项会被反向自查"真的一条 uv 命令都没有", 免得它变成绕过分组检查的后门。
+    **不碰 uv 的作业**在 :data:`_UV_FREE_JOBS` 里登记(登记项会被反向自查"真的一条 uv 命令都没有",
+    免得它变成绕过分组检查的后门); 而**纯转调作业**("`uses:` 另一个工作流 + 自己没有步骤")自动
+    豁免: 命令与分组都在被调用的那一份里, 那份自己也在这个循环里。
     """
-    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+    for workflow in ci_workflow.UV_STEP_WORKFLOWS:
         text = workflow.read_text(encoding="utf-8")
         for name, body in ci_workflow.jobs(text).items():
+            if _calls_another_workflow(body):
+                continue
             commands = _without_comments(body)
             environments = _environments(body)
             synced = [line for plan in environments.values() for line in plan.syncs]
@@ -401,7 +420,7 @@ def test_ci_only_installs_the_project_where_the_cli_smoke_needs_it() -> None:
     安装可用”就没人验证了。
     """
     installed_somewhere = False
-    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+    for workflow in ci_workflow.UV_STEP_WORKFLOWS:
         text = workflow.read_text(encoding="utf-8")
         for name, body in ci_workflow.jobs(text).items():
             commands = _without_comments(body)
@@ -422,9 +441,9 @@ def test_uv_run_does_not_silently_sync_the_default_groups() -> None:
 
     `uv run` 默认先 sync 一次, 而 sync 装的是**默认组**: 实测在"只装了测试组"的环境里跑一次
     `uv run pytest`, uv 又装回 51 个包(ruff / mypy / bandit / pip-audit / pyinstaller 全回来了)。
-    所以两个工作流都在顶层设 `UV_NO_SYNC=1`, 环境只由每个作业自己那句 `uv sync` 决定。
+    所以三个工作流都在顶层设 `UV_NO_SYNC=1`, 环境只由每个作业自己那句 `uv sync` 决定。
     """
-    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+    for workflow in ci_workflow.UV_STEP_WORKFLOWS:
         text = workflow.read_text(encoding="utf-8")
         head = text.split("\njobs:", 1)[0]
 
@@ -446,7 +465,7 @@ def test_every_uv_job_installs_uv_and_keeps_the_cache_inputs_on_it() -> None:
     所以这里把两条不变式都钉住: ① 作业正文里出现 uv 命令就必须有 `astral-sh/setup-uv`;
     ② `enable-cache` / `save-cache` 只许出现在 setup-uv 那一步里。
     """
-    for workflow in (ci_workflow.WORKFLOW, ci_workflow.RELEASE_WORKFLOW):
+    for workflow in ci_workflow.UV_STEP_WORKFLOWS:
         text = workflow.read_text(encoding="utf-8")
         for name, body in ci_workflow.jobs(text).items():
             commands = _without_comments(body)

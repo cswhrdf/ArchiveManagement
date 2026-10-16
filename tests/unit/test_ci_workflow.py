@@ -216,6 +216,13 @@ def _version_tuple(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in text.split("."))
 
 
+def _without_comments(text: str) -> str:
+    """去掉整行注释——注释里会拿上游作业名与报错原文举例, 不能算作"这里真的写了它"."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith("#")
+    )
+
+
 def test_per_platform_reports_skip_the_native_gate() -> None:
     """逐平台的报告生成要用**不带质量门**的配置 —— 3.20.0 起 generate 阶段也会跑门.
 
@@ -305,9 +312,7 @@ def test_every_job_that_drives_the_allure_cli_installs_it() -> None:
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     for name, body in ci_workflow.jobs(workflow).items():
-        commands = "\n".join(
-            line for line in body.splitlines() if not line.strip().startswith("#")
-        )
+        commands = _without_comments(body)
         if not re.search(
             r"\ballure (?:generate|quality-gate|open|--version)\b", commands
         ):
@@ -1269,30 +1274,34 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
 
 
 def test_the_release_workflow_only_publishes_from_main() -> None:
-    """release.yml 三个入口的口径: 被 ci.yml 调用(门禁) / push 到 main(发布) / 手动.
+    """release.yml 两个入口的口径: push 到 main(发布) / 手动; 构建交给只读的 release-build.yml.
 
-    两条最容易改错的判据: ① **发布只在 push 或显式要求时发生** —— 被 ci.yml 调用那一档
-    `github.event_name` 不是 `push`(是调用方的事件名或 `workflow_call`), 所以门禁天然发不出
-    Release; ② **写权限只在发布作业上**, 顶层仍是 `contents: read`: 调用方是 PR 那次运行,
-    拿到的写权限越少越好。另外 `pull_request:` 这个触发已经删掉 —— 它的判据挂在来源分支名上
-    (dev / bugfix/*), 从别的分支合入 main 就不构建, 而那正是发布该覆盖的情形。
+    三条最容易改错的判据: ① **发布只在 push 或显式要求时发生**; ② **写权限只在发布作业上**,
+    顶层仍是 `contents: read` —— 而门禁那一档**不能**调用这份工作流(嵌套权限是静态校验的,
+    见下一条守卫), 所以它调的是 release-build.yml; ③ `pull_request:` 这个触发已经删掉 —— 它的
+    判据挂在来源分支名上(dev / bugfix/*), 从别的分支合入 main 就不构建, 而那正是发布该覆盖的情形。
     """
     text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
     head = text.split("\njobs:", 1)[0]
 
-    assert "workflow_call:" in head, "PR 门禁要能调用它(跨工作流触发挂不到那个 PR 上)"
-    hint = "门禁那一档由 ci.yml 调用, release.yml 自己不再监听 PR"
+    hint = "PR 门禁调的是只读的 release-build.yml: 这一份带着写权限, 不能被 PR 那次运行调用"
+    assert "workflow_call:" not in head, hint
+    hint = "门禁那一档由 ci.yml 直接调 release-build.yml, 这里不再监听 PR"
     assert "pull_request:" not in head, hint
     assert re.search(r"^  push:\n    branches: \[main\]$", head, re.MULTILINE), (
         "合入 main 之后由 push 触发(不再按来源分支名判)"
     )
     assert "workflow_dispatch:" in head, "手动档要留着: dev 只有这一个入口"
-    hint = "checks 档位要在两个触发里都声明(手动档也能选)"
-    assert head.count("build-only") >= 2, hint
-    assert head.count("publish:") >= 2, "publish 开关要在两个触发里都声明"
+    assert head.count("build-only") == 1, "手动档仍要能选检查档位"
+    assert head.count("publish:") == 1, "publish 开关只属于手动档(push 档天然发布)"
     assert re.search(r"^permissions:\n  contents: read$", head, re.MULTILINE), (
         "顶层保持只读, 写权限只给发布作业"
     )
+
+    build = ci_workflow.job_block(text, "build")
+    hint = "构建只有一处定义: 门禁与发布档调的是同一份 release-build.yml"
+    assert "uses: ./.github/workflows/release-build.yml" in build, hint
+    assert "steps:" not in build, "构建步骤都在被调用的那份里, 这里只转调"
 
     publish = ci_workflow.job_block(text, "publish")
     hint = "发布拿的是同一个运行里构建的产物"
@@ -1310,6 +1319,9 @@ def test_the_release_workflow_only_publishes_from_main() -> None:
     # (不给它时 gh 把新 tag 指向默认分支的当前 HEAD, 而不是这次发布的提交)。
     assert '--repo "$GITHUB_REPOSITORY"' in publish
     assert '--target "$GITHUB_SHA"' in publish
+    hint = "产物名与版本号是被调用的构建工作流透传出来的(workflow_call 的 outputs)"
+    assert "needs.build.outputs.version" in publish, hint
+    assert "needs.build.outputs.label" in publish, hint
 
 
 def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
@@ -1317,14 +1329,15 @@ def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
 
     **为什么必须在 PR 那次运行里**: 跨工作流触发(`workflow_run`)产生的检查挂不到那个 PR 上,
     永远进不了分支保护的必需检查 —— 想让"CI 通过才允许合入"成立, 编译就得是 PR 运行的一部分。
-    所以它是 ci.yml 里一个 `uses:` release.yml 的作业, 而不是 release.yml 自己的触发。
+    所以它是 ci.yml 里一个 `uses:` release-build.yml 的作业(只读的那一份, 下一条守卫讲为什么),
+    而不是 release.yml 自己的触发。
     `needs` 要盖住**产出结论**的那几个作业(报告的覆盖率门槛与原生质量门也算结论 —— 漏掉它们
     等于放行一个覆盖率还没判过的 PR), 同时**不重复跑用例**(同一轮 CI 已经跑过三平台全量)。
     """
     text = ci_workflow.workflow_text()
     block = ci_workflow.job_block(text, "windows-package")
 
-    assert "uses: ./.github/workflows/release.yml" in block, (
+    assert "uses: ./.github/workflows/release-build.yml" in block, (
         "构建只留一处定义: 门禁与发布跑同一份步骤, 不会各自漂移"
     )
     assert ci_workflow.needs_of(text, "windows-package") == {
@@ -1340,7 +1353,50 @@ def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
     hint = "只给合入 main 的 PR 付这份编译成本"
     assert "github.base_ref == 'main'" in condition, hint
     assert "checks: build-only" in block, "不重复跑全量用例(同一轮 CI 已经跑过)"
-    assert "publish: false" in block, "门禁只出 artifact"
+    hint = "这份工作流没有发布开关(发布只属于 release.yml), 所以不该出现 publish"
+    assert "publish" not in _without_comments(block), hint
+
+
+def test_the_packaging_gate_path_never_holds_write_permission() -> None:
+    """PR 门禁那条路上没有任何写权限 —— 这是"构建与发布必须拆成两份工作流"的由来.
+
+    GitHub 对**嵌套工作流**的权限是**逐作业静态校验**的(与运行期的 `if` 无关): 被调用的那份里
+    有一个作业声明 `contents: write`、而调用方只给得起 `contents: read`, 整份工作流就判
+    "not valid", 报错发生在**解析阶段**, 连一个 job 都起不来 —— 2026-10-17 实测原文:
+    `The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`
+    (当时门禁调的是带着 publish 作业的 release.yml, `publish: false` 拦不住解析期的校验)。
+    所以构建单独成一份只读的 release-build.yml: 否则想让门禁跑起来, 就得给 PR 那次运行发一个
+    带写权限的 token —— 而 PR 里的代码是会被拉下来执行的。
+    """
+    build = ci_workflow.RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
+    head = build.split("\njobs:", 1)[0]
+
+    assert "workflow_call:" in head, "它存在的意义就是被门禁与发布调用"
+    assert re.search(r"^permissions:\n  contents: read$", head, re.MULTILINE), (
+        "这一份必须只读: 调用它的那次运行是 PR"
+    )
+    assert "contents: write" not in _without_comments(build), (
+        "只读的构建里不许出现写权限(说明里引用报错原文不算)"
+    )
+    hint = "门禁只传这两样(要构建哪个 ref、检查档位); 发布开关属于 release.yml"
+    assert set(re.findall(r"\n      ([a-z]+):\n", head)) == {
+        "ref",
+        "checks",
+        "version",
+        "label",
+    }, hint
+    gate = _without_comments(
+        ci_workflow.job_block(ci_workflow.workflow_text(), "windows-package")
+    )
+    assert "contents: write" not in gate, "调用方也不能为了跑门禁去要写权限"
+    assert "permissions:" not in gate, "门禁用顶层那份只读权限就够了"
+    target = re.search(r"uses: \./\.github/workflows/([\w.-]+)", gate)
+    assert target is not None, "门禁作业要转调一份工作流(构建只留一处定义)"
+    called = (
+        ci_workflow.REPO_ROOT / ".github" / "workflows" / target.group(1)
+    ).read_text(encoding="utf-8")
+    hint = "门禁调的那一份里不许有写权限作业 —— 嵌套权限是静态校验的, 整份工作流会被判 not valid"
+    assert "contents: write" not in _without_comments(called), hint
 
 
 def test_the_packaging_gate_always_reports_a_conclusion() -> None:

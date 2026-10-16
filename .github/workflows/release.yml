@@ -1,29 +1,16 @@
-name: Build Windows Package
+name: Release Windows Package
 
-# 三个入口(口径见 docs/development.md 的「打包」「发布」两节):
-#   ① `workflow_call` —— ci.yml 在"合入 main 的 PR 且 CI 全绿"时调用它做**打包门禁**: 只构建 + 上传 artifact;
-#   ② `push` 到 main —— 合入之后构建并发布 Release; 版本没变就只构建、不重复发;
-#   ③ `workflow_dispatch` —— 手动编任意分支/提交(dev 只有这一个入口)。
-# **PR 那一档必须是"被 ci.yml 调用"**: 跨工作流触发(`workflow_run`)产生的检查挂不到那个 PR 上,
-# 永远进不了分支保护的必需检查 —— 想让"CI 通过才允许合入"成立, 编译就得发生在 PR 那次运行里。
+# 两个入口(口径见 docs/development.md 的「打包」「发布」两节):
+#   ① `push` 到 main —— 合入之后构建并发布 Release; 版本没变就只构建、不重复发;
+#   ② `workflow_dispatch` —— 手动编任意分支/提交(dev 只有这一个入口)。
+# 构建本身在 .github/workflows/release-build.yml 里(只读, 一个作业): 这里只转调它, 再加一个
+# 专门管发布的作业 —— 于是"构建步骤只有一处定义"与"写权限只出现在这一份"同时成立。
+# **PR 打包门禁不在这里**(2026-10-17 起): 门禁是 ci.yml 的 `windows-package` 作业**直接**调
+# release-build.yml。两条理由: ① 跨工作流触发(`workflow_run`)产生的检查挂不到那个 PR 上, 永远
+# 进不了分支保护的必需检查, 所以编译必须发生在 PR 那次运行里; ② 一旦 PR 那次运行调到这份工作流,
+# 下面 `publish` 作业要的 `contents: write` 会让整份工作流判 "not valid"(嵌套权限是**逐作业静态
+# 校验**的, 运行期的 `if` 拦不住), 报错原文见 release-build.yml 的开头。
 on:
-  workflow_call:
-    inputs:
-      ref:
-        description: "要构建的分支或提交, 留空 = 触发这次运行的那个提交"
-        required: false
-        default: ""
-        type: string
-      checks:
-        description: "构建前的检查档位: full(ruff/格式/mypy/pytest --cov) | build-only(只构建, 给 CI 已经跑过全量的门禁档用)"
-        required: false
-        default: full
-        type: string
-      publish:
-        description: "构建完是否发布 GitHub Release"
-        required: false
-        default: false
-        type: boolean
   push:
     branches: [main]
     # 与 ci.yml 同一份"纯文档改动"忽略清单: 只改 md / docs / instructions 的合入既不跑 CI, 也不该出包。
@@ -56,141 +43,30 @@ on:
 permissions:
   contents: read
 
-# 与 ci.yml 同理: 关掉 `uv run` 的隐式 sync, 否则它会按 pyproject 的**默认组**把整套开发
-# 依赖装回来(这个作业已经显式装了 test / quality / package 三组)。
+# 这个工作流自己没有 uv 命令(构建在被调用的那一份里), 留着这一行只为与 release-build.yml 口径一致
+# —— 守卫要求每个工作流顶层都关掉 `uv run` 的隐式 sync。
 env:
   UV_NO_SYNC: "1"
 
 jobs:
   build:
-    # 不写作业级 `if:`: 三个入口都要构建 —— "该不该构建"由触发层决定(ci.yml 只在合入 main 的 PR 上
-    # 调用它, 纯文档合入在 push 的 `paths-ignore` 就被挡掉)。原来那条 `pull_request: closed` + 来源
-    # 分支名(dev / bugfix/*)的判据有个盲区: 从别的分支(如 hotfix/x)合入 main 就不构建 —— 已换成 push。
+    # 只转调, 自己没有步骤: 命令、依赖分组与 `UV_NO_SYNC` 都在被调用的那份里(那种"纯调用作业"
+    # 不装 Python 环境, 见 tests/unit/test_test_config.py 的 `_calls_another_workflow`)。
+    # 两个档的输入原样透传: push 档取不到 `inputs`(空串) —— 空串不等于 build-only, 所以照跑 full。
     name: 构建 Windows 发布包
-    runs-on: windows-latest
-    outputs:
-      version: ${{ steps.build.outputs.version }}
-      label: ${{ steps.build.outputs.label }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          # 被调用时 `github.sha` 是**调用方**的提交(PR 轮次里就是那个 PR 的合并预览提交) —— 正是要构建的
-          # 东西; 手动/发布档没给 `ref` 时也同样落在触发这次运行的那个提交上。
-          ref: ${{ inputs.ref || github.sha }}
-
-      - name: Resolve build metadata
-        id: build
-        shell: pwsh
-        env:
-          INPUT_REF: ${{ inputs.ref }}
-          # PR 轮次里 `github.ref_name` 是 `<PR 号>/merge`, 所以来源分支要单独排在它前面。
-          HEAD_REF: ${{ github.head_ref }}
-          DEFAULT_REF: ${{ github.ref_name }}
-        run: |
-          # 产物名里的 ref 依次取: 显式传入的 ref → PR 的来源分支 → 触发这次运行的分支。
-          $ref = if ($env:INPUT_REF) {
-            $env:INPUT_REF
-          } elseif ($env:HEAD_REF) {
-            $env:HEAD_REF
-          } else {
-            $env:DEFAULT_REF
-          }
-          $source = Get-Content src/archive_management/packaging.py -Raw
-          $match = [regex]::Match($source, '__version__\s*=\s*"([^"]+)"')
-          if (-not $match.Success) {
-            throw "Could not find __version__ in packaging.py"
-          }
-          $version = $match.Groups[1].Value
-          $safe_ref = $ref -replace '[^A-Za-z0-9._-]', '-'
-          "ref=$ref" >> $env:GITHUB_OUTPUT
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "label=$safe_ref-build-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: false
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        # 只装这个作业要用的组(见 pyproject 的 [dependency-groups]): 构建前的门禁要
-        # 质量组(ruff/mypy)与测试组(pytest --cov), 打包要 package 组(pyinstaller)。
-        # `--no-install-project`: 打包靠 spec 里的 pathex 指向 src, 不需要把项目装进 .venv
-        # (见 pyproject 的 [tool.uv]; 与 ci.yml 的其它作业一致)。
-        # 门禁档(`checks: build-only`)跑的是同一套组 —— 为了省一次 sync 而拆两套环境不划算, 而
-        # 且下面那批守卫是**按命令**算该装哪几组的。
-        run: uv sync --locked --no-default-groups --group test --group quality --group package --no-install-project
-
-      - name: Run build checks
-        # 门禁档传 `checks: build-only`: 同一轮 CI 已经跑过三平台的用例与静态检查, 再在 Windows
-        # runner(2 倍计价)上跑一遍只是多花时间。发布/手动档默认 full, 留着这一轮自证。
-        # 注意三种触发里只有 push 取不到 `inputs`(空串) —— 空串不等于 build-only, 所以照跑。
-        if: ${{ inputs.checks != 'build-only' }}
-        run: |
-          uv run ruff check .
-          uv run ruff format --check .
-          uv run mypy src
-          uv run pytest --cov
-
-      - name: Check the application icon is up to date
-        # 硬门禁: 入库的位图必须出自当前这份 resources/app.svg("改了 SVG 忘了重画"就在这里判红)。
-        # 这一步**不需要 ffmpeg**(只比指纹), 所以发布不依赖 runner 上有渲染工具 —— 也从不在
-        # CI 上重画: 图标只在本地更新(2026-10-15 拆掉了原来的信息探针与 `Icon probe` 工作流,
-        # 见 docs/development.md)。
-        run: uv run python scripts/build_icon.py --check
-
-      - name: Build onedir and onefile packages
-        run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
-
-      # ← 产物冒烟就落在这里(构建之后、打 release/ 之前): 「能编」与「产物能起」是两件事 ——
-      #   产物跑不起来就不该上传一个"看起来能发"的包。内容是四条判据(无参数启动 / `--version` /
-      #   `doctor` / `gui --smoke`) × onedir 与 onefile, 外加单实例闸门, 全部指向临时 `--root`;
-      #   每条都要限时(窗口起不来时 `gui` 会一直等), 判据取"退出码 + 侧效应"(临时 root 下真的出现
-      #   配置/数据/日志三处), 不读 stdout —— 窗口化产物没有控制台。
-
-      - name: Prepare build files
-        shell: pwsh
-        env:
-          BUILD_LABEL: ${{ steps.build.outputs.label }}
-          BUILD_VERSION: ${{ steps.build.outputs.version }}
-          BUILD_REF: ${{ steps.build.outputs.ref }}
-        run: |
-          New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path dist/ArchiveManagement/* -DestinationPath "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.zip"
-          Copy-Item "dist/ArchiveManagement-onefile.exe" "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.exe"
-          $files = Get-ChildItem release -File
-          $hashes = foreach ($file in $files) {
-            $hash = Get-FileHash $file.FullName -Algorithm SHA256
-            "$($hash.Hash.ToLowerInvariant())  $($file.Name)"
-          }
-          $hashes | Set-Content release/SHA256SUMS.txt -Encoding ascii
-          @{
-            application = "ArchiveManagement"
-            version = $env:BUILD_VERSION
-            ref = $env:BUILD_REF
-            platform = "windows-x64"
-            commit = "${{ github.sha }}"
-            built_at = (Get-Date).ToUniversalTime().ToString("o")
-          } | ConvertTo-Json | Set-Content release/build-metadata.json -Encoding utf8
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: ArchiveManagement-${{ steps.build.outputs.label }}-windows-x64
-          path: release/
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ inputs.ref }}
+      checks: ${{ inputs.checks }}
 
   publish:
-    # 发布只在"合入 main 之后"或"手动要求"时进行。被 ci.yml 调用时 `github.event_name`
-    # 是 `pull_request`(或 `workflow_call`)而**不是** push, 所以门禁那一档天然走不到这里;
-    # 调用方那句 `permissions: contents: read` 也天然封住写权限 —— 这正是把写权限放在作业级的原因。
+    # 发布只在"合入 main 之后"或"手动要求"时进行。被 ci.yml 调用那一档根本不存在(它调的是
+    # release-build.yml), 所以这里只判 push 与显式开关。
     name: 发布 GitHub Release
     needs: [build]
     if: ${{ inputs.publish == true || github.event_name == 'push' }}
-    # 只有这一处需要写权限(顶层仍是 `contents: read`)。
+    # 只有这一处需要写权限(顶层仍是 `contents: read`); 构建那一份则完全只读 —— 一份工作流里的
+    # 写权限必须由**调用它的人**先给得起, 这也是构建与发布拆成两份的原因。
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -206,9 +82,9 @@ jobs:
           path: release
 
       - name: Decide whether this version still needs a release
-        # 版本号是**手动维护的单一真相**: 同一个版本合入两次是家常便饭(小修、文档、
-        # 只改守卫), 所以"版本没变"是**正常出口而不是失败**。判据是那个 tag/release 已经存在,
-        # 与"这一轮改了哪些文件"无关 —— 比路径过滤可靠(不必猜哪些文件算"该发版")。
+        # 版本号是**手动维护的单一真相**: 同一个版本合入两次是家常便饭(小修、文档、只改守卫),
+        # 所以"版本没变"是**正常出口而不是失败**。判据是那个 tag/release 已经存在, 与"这一轮改了
+        # 哪些文件"无关 —— 比路径过滤可靠(不必猜哪些文件算"该发版")。
         id: decision
         run: |
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

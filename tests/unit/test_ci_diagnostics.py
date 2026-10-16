@@ -42,9 +42,9 @@ ALLURE_CONFIG = REPO_ROOT / "allurerc.mjs"
 
 # 轻量门禁作业(路径过滤 + 必需检查结论)不跑测试、不产生 Allure 结果或覆盖率,
 # 没有"兜底现场"可收 —— 所以它们不在这对步骤的适用范围内。
-# 2026-10-17 又添两个: 打包门禁那一对 —— `windows-package` 是**纯调用作业**(`uses: release.yml`,
-# 自己没有步骤), `packaging-gate` 只读上游的 result 并 echo 一行; 真正构建与冒烟的步骤在
-# release.yml 里(那个工作流没有这套诊断步骤)。
+# 2026-10-17 又添两个: 打包门禁那一对 —— `windows-package` 是**纯转调作业**(`uses:
+# release-build.yml`, 自己没有步骤), `packaging-gate` 只读上游的 result 并 echo 一行; 真正构建
+# 与冒烟的步骤在 release-build.yml 里(那个工作流没有这套诊断步骤)。
 _GATE_ONLY_JOBS = {
     "changes",
     "required-check",

@@ -215,7 +215,7 @@ CI 的 pytest 作业是**分片执行**的（三平台各 3 片并行，报告�
 | 时机   | 做什么                                                                                                                        |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | 提交时 | pre-commit 的 `build-icon` 钩子**只在 `app.svg` 有改动时**触发，重画后自己 `git add`（与 `compact-json` 同一条路）            |
-| 发布时 | `release.yml` 打包前跑 `--check`，不一致判红。**故意不自动重画** —— 那会把一个陈旧的提交默默修好，没人发现                    |
+| 发布时 | `release-build.yml` 打包前跑 `--check`，不一致判红。**故意不自动重画** —— 那会把一个陈旧的提交默默修好，没人发现              |
 | 启动时 | 软件只**核对**并把结果写进日志（`应用图标: …`）；不一致时日志里直接给出该跑的那条命令。不重画的原因同上（软件不执行外部程序） |
 
 改了 SVG 而本机又没有 ffmpeg 时，唯一会失败的是「提交」那一步（钩子报错里给出 `--ffmpeg` 与环境变量两条路）；此时你也可以只提交 SVG、让有工具的人补产物 —— 但发布前 `--check` 一定会拦住。
@@ -238,7 +238,7 @@ CustomTkinter 在**每个**窗口建好 **200ms** 后自己去贴 `CustomTkinter
 
 ### CI 怎么验这条流水线
 
-`release.yml` 里只有**一条**步骤: `Check the application icon is up to date`（硬门禁）—— `--check` 只比指纹, 不一致就判红。发布**不依赖** runner 上有渲染工具, 也**不在 CI 上重画**。
+`release-build.yml` 的构建作业里只有**一条**图标步骤: `Check the application icon is up to date`（硬门禁）—— `--check` 只比指纹, 不一致就判红。发布**不依赖** runner 上有渲染工具, 也**不在 CI 上重画**。
 
 **2026-10-15 起 CI 不再渲染图标**（用户要求）: 原来还有一条信息步骤（`Probe the icon pipeline on this runner`，打印 runner 上那个 ffmpeg 版本行、往 `%TEMP%` 里重画一遍并与入库产物逐字节比对，失败只记 `::warning::`）与一个只做 `workflow_dispatch` 的 `Icon probe` 工作流（`.github/workflows/icon-probe.yml`，渲染到 `icon-probe-out/` 并上传 artifact），两个都删了 —— 判定 "改了 SVG 忘了重画" 靠 `--check` 就够了, 而 "这台 runner 能不能画" 不再是流水线要关心的事（图标只在本地更新: `uv run python scripts/build_icon.py --force`，它就地重画并更新指纹）。
 
@@ -257,7 +257,7 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 - 构建前应先通过全部门禁：`uv sync --locked`、Ruff（`check` + `format`）、mypy、pytest；位图也要是最新的（`uv run python scripts/build_icon.py --check`，CI 在构建前就跑这一句）。
 - **在仓库根执行**：命令里的 `packaging/archive-management.spec` 是相对路径，`dist/` / `build/` 也落在当前目录下。
 - 版本直接读取 `packaging.py` 中的源码版本。
-- **本地产物**：`dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是这一条命令产的** —— 那是 `.github/workflows/release.yml` 的 `Prepare build files` 步骤在构建之后自己打包出来的，别把本地构建与发布产线混为一谈。
+- **本地产物**：`dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是这一条命令产的** —— 那是 `.github/workflows/release-build.yml` 的 `Prepare build files` 步骤在构建之后自己打包出来的，别把本地构建与发布产线混为一谈。
 - **双击就能用**：窗口化产物（`console=False`）不带子命令启动时会直接开界面（见「命令行」那条）；验证方式是双击（或直接启动 exe）后日志里应多一行 `界面启动`，而不是只有 `初始化完成`。
 - 产物为 Windows x64 的 **onedir** 压缩包、**onefile** 可执行文件、SHA-256 校验文件与构建元数据；发布包不得包含凭据、开发机绝对路径或测试数据。`spec` 文件显式声明入口模块、图标与 CustomTkinter 主题资源，并按需补充隐藏导入。
 - GitHub Actions 在 Windows runner 上构建并上传 `dist` 产物（手动触发也支持）。当前以Windows 为首要发布平台，macOS/Linux 打包未纳入。
@@ -265,16 +265,20 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
 ## 发布
 
-`release.yml`（Build Windows Package）有三个入口，分工见下表；判据与取舍落在 `docs/testing.md` 第 6 节。
+构建与发布分成**两份**工作流（判据与取舍落在 `docs/testing.md` 第 6 节）：
 
-| 入口                                | 什么时候                                                              | 编什么                                       | 发布?                          |
-| ----------------------------------- | --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------ |
-| 被 `ci.yml` 调用（`workflow_call`） | **合入 `main` 的 PR**，且 CI 的结论（含覆盖率门槛与原生质量门）都过了 | 该 PR 的**合并预览提交**                     | ❌ 只上传 artifact（打包门禁） |
-| `push` 到 `main`                    | 合入之后                                                              | 那个合并提交                                 | 版本号变了才发                 |
-| `workflow_dispatch`                 | 手动                                                                  | `ref` 指的分支或提交（`dev` 只有这一个入口） | 看 `publish` 开关              |
+- [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml)（Build Windows Package，**只读**）：真正的构建作业 —— 装依赖、跑构建前检查、`--check` 图标指纹、PyInstaller、产物冒烟、上传 artifact。有两个调用方（见下表）。
+- [`.github/workflows/release.yml`](.github/workflows/release.yml)（Release Windows Package）：只负责“什么时候发”—— `push` 到 `main` 或手动触发；它先 `uses:` 上面那一份拿到产物，再由 `publish` 作业建 Release（写权限只在这一份里）。
 
-- **打包门禁**：门禁那一档由 `ci.yml` 的 `windows-package` 作业调用本工作流（`checks: build-only`：同一轮 CI 已经跑过三平台全量，不再在 Windows 上重跑一遍），构建完跑产物冒烟（无参数启动 / `--version` / `doctor` / `gui --smoke` 四条判据 × onedir 与 onefile，外加单实例闸门，全部指向临时 `--root`）。分支保护里要勾的必需检查是 **`CI required packaging status`**（`packaging-gate` 那个恒跑的“结论”作业）—— 干活的那个作业在纯文档改动的 PR 上会被跳过，被跳过的必需检查会永久停在 pending，所以结论交给另一个作业。
+| 入口                                 | 什么时候                                                              | 编什么                                       | 发布?                          |
+| ------------------------------------ | --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------ |
+| `ci.yml` 的 `windows-package` 作业   | **合入 `main` 的 PR**，且 CI 的结论（含覆盖率门槛与原生质量门）都过了 | 该 PR 的**合并预览提交**                     | ❌ 只上传 artifact（打包门禁） |
+| `release.yml` 的 `push` 到 `main`    | 合入之后                                                              | 那个合并提交                                 | 版本号变了才发                 |
+| `release.yml` 的 `workflow_dispatch` | 手动                                                                  | `ref` 指的分支或提交（`dev` 只有这一个入口） | 看 `publish` 开关              |
+
+- **为什么构建与发布不能合成一份**（2026-10-17 实测，不是设计洁癖）：GitHub 对**嵌套工作流**的权限是**逐作业静态校验**的 —— 一份工作流里只要有作业声明 `contents: write`，而调用它那次运行（PR）只给得起 `contents: read`，整份工作流就判 `not valid`（原文：`The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`），报错在**解析阶段**，一个 job 都起不来，运行期的 `publish: false` 拦不住。所以门禁调的是只读的 `release-build.yml` —— 否则想让门禁跑起来，就得给 PR 那次运行发一个带写权限的 token，而 PR 里的代码是会被拉下来执行的。
+- **打包门禁**：`ci.yml` 的 `windows-package` 作业在 `release-build.yml` 上跑 `checks: build-only`（同一轮 CI 已经跑过三平台全量，不在 Windows 上重跑一遍），构建完跑产物冒烟（无参数启动 / `--version` / `doctor` / `gui --smoke` 四条判据 × onedir 与 onefile，外加单实例闸门，全部指向临时 `--root`）。分支保护里要勾的必需检查是 **`CI required packaging status`**（`packaging-gate` 那个恒跑的“结论”作业）—— 干活的那个作业在纯文档改动的 PR 上会被跳过，被跳过的必需检查会永久停在 pending，所以结论交给另一个作业。
 - **为什么门禁不能写成 `workflow_run`**：跨工作流触发产生的检查挂不到那个 PR 上，永远进不了必需检查 —— 想让“CI 通过才允许合入”成立，编译就得发生在 PR 那次运行里。
 - **发布口径**：版本号由提交者手改 `packaging.py`，CI 只读不改（不注入 tag 版本）。**同一个版本合入两次是正常的事**（小修、文档、只改守卫），所以 `v<版本号>` 已经存在时这一轮只构建、不重复发 Release（记一条 `::notice::`，不算失败）。真的发了就建 `v<版本号>` 的 Release，附上 zip、单文件 exe、`SHA256SUMS.txt` 与 `build-metadata.json`。
-- **手动重编/补发**：Actions → _Build Windows Package_ → Run workflow（给 `ref`，需要发布时把 `publish` 打开）。
-- 构建前仍要过全部门禁（`ruff` / `mypy` / `pytest --cov`，见 `release.yml` 的 `Run build checks`，发布与手动档默认跑、门禁档跳过）与图标指纹检查；产物只上传 `release/` 目录（zip、onefile、校验和、元数据）。
+- **手动重编/补发**：Actions → _Release Windows Package_ → Run workflow（给 `ref`，需要发布时把 `publish` 打开）。
+- 构建前仍要过全部门禁（`ruff` / `mypy` / `pytest --cov`，见 `release-build.yml` 的 `Run build checks`，发布与手动档默认跑、门禁档跳过）与图标指纹检查；产物只上传 `release/` 目录（zip、onefile、校验和、元数据）。

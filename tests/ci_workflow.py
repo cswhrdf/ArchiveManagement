@@ -16,8 +16,13 @@ from pathlib import Path
 # 仓库根目录: 本文件在 tests/ 下, 差一级.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-# 发布工作流也要守同一批不变式(依赖分组、uv run 的隐式 sync)。
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+# 只读的构建工作流: ci.yml 的打包门禁与 release.yml 的发布档都调它(命令都在这一个文件里, 见
+# `UV_STEP_WORKFLOWS`)。
+RELEASE_BUILD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-build.yml"
+# 守"依赖分组 / `uv run` 的隐式 sync / 缓存输入"这批不变式的工作流: 构建那一份是上面两个的**共同
+# 下游**(门禁与发布各调它一次), 所以它一个不少地参与。
+UV_STEP_WORKFLOWS = (WORKFLOW, RELEASE_WORKFLOW, RELEASE_BUILD_WORKFLOW)
 
 # runner 镜像 → 报告里的平台展示名(与 allurerc.mjs 的 matcher、runner.os 一致).
 OS_PLATFORMS = {
