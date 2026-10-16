@@ -1,5 +1,5 @@
 """
-发现与候选: 监控目录 CRUD、扫描导入、忽略/恢复/迁移、候选建议与来源选择、本地化名行。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+发现与候选: 监控目录 CRUD、扫描导入、忽略/恢复/迁移、候选建议与来源选择、本地化名行。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-游戏档案 CRUD 与删除导出: 改名/启停/删除级联、删除前导出包与失败回滚、未知游戏守卫。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+游戏档案 CRUD 与删除导出: 改名/启停/删除级联、删除前导出包与失败回滚、未知游戏守卫。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

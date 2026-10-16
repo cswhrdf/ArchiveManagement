@@ -1,5 +1,5 @@
 """
-质量项与本地钩子: severity 声明、质量项通过/失败双态、复杂度门与 ruff 上限一致、pre-commit 格式化重试与 cp1252 控制台。拆自 test_report_verification.py(见 docs/test-refactor-plan.md S8)。
+质量项与本地钩子: severity 声明、质量项通过/失败双态、复杂度门与 ruff 上限一致、pre-commit 格式化重试与 cp1252 控制台。拆自 test_report_verification.py。
 """
 
 from __future__ import annotations

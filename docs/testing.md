@@ -11,7 +11,7 @@ tests/
   conftest.py            # 严重等级 + 四层 Allure 标签 + 审计日志夹具
   helpers.py             # 跨模块共享的测试数据构造器与环境信息
   reporting.py           # 性能基准与安全结论的记录器
-  button_support.py      # GUI 按钮测试共享基建(拆自 test_gui_buttons.py, 见 test-refactor-plan.md)
+  button_support.py      # GUI 按钮测试共享基建(拆自 test_gui_buttons.py)
   report_support.py      # 报告/CI 断言共享基建(拆自 test_report_verification.py)
   sql_support.py         # SQLite 后端用例共享基建(拆自 test_sql_backend.py)
   ui_sharing.py          # 共享 UI 会话(见第 2 节)
@@ -19,7 +19,7 @@ tests/
   durations.py           # 分片权重实测档案的记录/加载/合并(守卫 tests/unit/test_durations.py)
   durations.json         # 档案本体(nodeid → 秒), 由第 7 节的命令刷新
   unit/                  # 纯逻辑与单一边界: 不会真正触达用户数据的临时目录/SQLite
-  unit/conftest.py       # 单元层共享 fixture(逐字相同才上提, 见 test-refactor-plan.md)
+  unit/conftest.py       # 单元层共享 fixture(逐字相同才上提)
   integration/           # 真实跨层协作: 配置 + 数据库 + 备份/恢复 + 审计日志 + UI 后端
   performance/           # 规模基准: 数据量与阈值必须显式声明（只在 CI 执行）
   security/              # 不可信输入与危险操作防护（只在 CI 执行）
@@ -156,16 +156,22 @@ with perf_recorder.duration("home.load_home", scale=SCALE, budget_seconds=15.0):
             ┌── quality (ubuntu): 静态检查 + 静态分析 + 性能基准 + 视觉回归
 push/PR ────┼── pytest (win/mac/linux) × 3 片: 单元+集成(两段: 先 not ui 再 ui)
             ├── security (win/mac/linux): 安全测试
-            └── required-check: 纯文档改动跳过时的兜底
+            ├── required-check: 纯文档改动跳过时的兜底
+            └── packaging-gate: 打包门禁的“结论”作业(恒跑, 见下面那条)
                  │
                  ▼  (下面两步在 push / PR 每一轮都跑)
             pytest-report (ubuntu × 3 平台): 合并各片结果 + 生成 Allure 报告 + 自检
                  │
                  ▼
             allure-summary: 汇总三平台 + 覆盖率合并 + 原生质量门 + 总账 + 报告 artifact
+
+合入 main 的 PR 额外: … ── windows-package (调 release.yml: 构建 + 产物冒烟, 只出 artifact)
 ```
 
-- **作业数量也是额度**：每一轮（push / PR）16 个实例（3 平台 ×（3 pytest 片 + security）+ 2 报告 + quality + changes + required-check）。GitHub 按并发作业计价，多开一个分片 = 少一份留给别的 CI 的额度。
+- **打包门禁（2026-10-17 新增，只针对合入 `main` 的 PR）**：“用例绿”与“能编 + 产物能起”是两件事 —— 后者只有真跑一次 PyInstaller 才知道。所以 `ci.yml` 里的 `windows-package` 作业（`uses: ./.github/workflows/release.yml`）在 `quality` / `pytest` / `pytest-report` / `security` / `allure-summary` 都过了之后，拿这个 PR 的**合并预览提交**构建 onedir + onefile 并跑产物冒烟；它**只上传 artifact、不发 Release**（`checks: build-only`、`publish: false`：同一轮 CI 已经跑过三平台全量，不在 Windows 上重跑一遍）。
+- **必需检查是 `CI required packaging status`（要在仓库设置的 Rules / branch protection 里勾上）**：分支保护里的必需检查不能由一个会被条件跳过的作业兼任 —— 纯文档改动的 PR 会跳过 `windows-package`，那样检查会永久停在 pending（与 `required-check` 同一条理由，见 `ci.yml` 开头的注释）。所以门禁=两个作业：干活的“`windows-package`”+ 恒跑的“结论”`packaging-gate`（三种情况给绿：纯文档改动 / 不是合入 main 的 PR / 编译成功；上游红了导致它被跳过 = `skipped` 也判红）。守卫：`tests/unit/test_ci_workflow.py` 里那三条（`test_the_release_workflow_only_publishes_from_main` / `test_the_packaging_gate_gates_pull_requests_into_main` / `test_the_packaging_gate_always_reports_a_conclusion`）。
+- **发布只在合入之后（`release.yml` 的 `push: branches: [main]`）**：版本号（`packaging.py`）没变就只构建、不重复发 Release（`v<版本号>` 已存在是正常出口）；变了则建 Release 并附上 zip / exe / `SHA256SUMS.txt` / `build-metadata.json`。`dev` **没有**自动档（只有手动 `workflow_dispatch`）。触发与口径见 `docs/development.md` 的「发布」一节。
+- **作业数量也是额度**：每一轮（push / PR）16 个实例（3 平台 ×（3 pytest 片 + security）+ 2 报告 + quality + changes + required-check）；**合入 main 的 PR 再多 1 个 Windows 实例**（`windows-package`），另加一个秒级的 `packaging-gate`（ubuntu，不装任何工具 —— 它必须恒跑，理由见上）。GitHub 按并发作业计价，多开一个分片 = 少一份留给别的 CI 的额度。
 - **跳过只发生在"纯文档改动"上（分桶在 changes 作业）**：纯文档（`**/*.md` / `docs/**` / `.github/instructions/**` / `.github/prompts/**`）在 push 上被 `paths-ignore` 挡在触发之外，在 PR 上由 `changes` 作业的 dorny 过滤给出 `should_run=false` 从而跳过重量级作业；`required-check`（总是成功）兜住分支保护规则的必需检查。**2026-10-14 起不再按改动路径挑层** —— 那条 ui / backend 两层分桶的规则（2026-10-09 落地）已回退：PR / push 每一轮的四段 pytest 与 security 都跑全量（步骤条件里只剩平台与"第一段跑完 / 整轮没被取消"）。守卫：`test_every_trigger_runs_the_full_suite`。
 - **`pytest-report` 与 `allure-summary`（覆盖率门槛 100% 与完整报告）每一轮都跑**：push 与 PR 都是全量，覆盖率门槛与完整报告在哪个事件下都判得出（2026-10-14 起 push 也出报告：之前那条排除理由——"push 只跑选中的层，切片覆盖率天生偏低、在那里判门槛等于自造假红"——随选层回退一起失效了）。守卫：`test_every_trigger_runs_the_full_suite`。
 - **省额度的三条**：① concurrency 取消被取代的运行（报告作业的条件必须是 `always() && !cancelled()`，否则前面被取消时报告不生成、上一轮的报告继续留在页面上冒充最新）；② 纯文档 push 用 `paths-ignore`、PR 用 `changes` 作业判路径 + `required-check` 兜底；③ 与平台无关的检查合进 quality、平台专属检查塞进 pytest 片 0（不新开作业）。完整的优化清单与取舍落在 `tests/unit/test_ci_workflow.py`。

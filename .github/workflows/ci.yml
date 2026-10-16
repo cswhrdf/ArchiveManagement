@@ -704,6 +704,57 @@ jobs:
           path: job-diagnostics/
           if-no-files-found: error
 
+  windows-package:
+    # 打包门禁: **合入 main 的 PR** 在 CI 的检查都过了之后, 才拿这个 PR 的合并预览提交去构建。
+    # 「用例绿」与「能编 + 产物能起」是两件事 —— 后者只有真跑一次 PyInstaller 才知道, 而它最容易
+    # 悄悄坏(资源没进包、spec 少一行、隐藏导入失效), 等到发布那一刻才发现就晚了。
+    # 为什么用 `uses:` 调 release.yml 而不在这里抄一遍构建步骤: 构建只有一处定义, 门禁这条路与
+    # 发布那条路(push 到 main)跑的是同一份步骤, 不会各自漂移。
+    # 为什么门禁是"这个作业 + 下面的聚合结论"两个, 而不是把它自己写进必需检查: 纯文档改动的 PR 会
+    # 跳过它(见 changes 作业), 被跳过的必需检查会停在 pending —— 必需检查得交给"总会报一次结论"
+    # 的作业(与 required-check 同一套理由, 见文件开头的注释)。
+    name: 打包 Windows 产物 (仅合入 main 的 PR)
+    needs: [changes, quality, pytest, pytest-report, security, allure-summary]
+    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && needs.changes.outputs.should_run == 'true' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      # 同一轮 CI 已经跑过三平台的全量用例与静态检查: 这一档只构建 + 产物冒烟。
+      checks: build-only
+      # 门禁只出 artifact, 不发 Release —— 发布是合入之后的那条路。
+      publish: false
+
+  packaging-gate:
+    # 给分支保护用的**必需检查**: 恒有一份结论(跳过也是结论), 所以它不会停在 pending。
+    # 三种情况: ① 纯文档改动 ⇒ 不需要编译, 绿; ② 不是合入 main 的 PR ⇒ 不在这条门禁范围内, 绿;
+    # ③ 合入 main 的 PR ⇒ 上面那个作业必须真的成功(被跳过也算不成功 —— 那意味着前置检查红了,
+    # 那时本来就该拦住合入)。
+    name: CI required packaging status
+    needs: [changes, windows-package]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the packaging gate decision
+        shell: bash
+        env:
+          SHOULD_RUN: ${{ needs.changes.outputs.should_run }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PACKAGE_RESULT: ${{ needs.windows-package.result }}
+        run: |
+          if [ "$SHOULD_RUN" != "true" ]; then
+            echo "纯文档改动: 本轮不需要编译, 打包门禁按通过计。"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$BASE_REF" != "main" ]; then
+            echo "不是合入 main 的 PR: 打包门禁不适用, 按通过计。"
+            exit 0
+          fi
+          if [ "$PACKAGE_RESULT" != "success" ]; then
+            echo "::error::打包未通过(结果=$PACKAGE_RESULT) —— 合入 main 前必须能构建并通过产物冒烟"
+            exit 1
+          fi
+          echo "打包与产物检查通过。"
+
   pytest-report:
     # 每个平台一份报告: 把该平台各片的 Allure 结果与覆盖率数据合并成一份。
     # **两台机器都在 Ubuntu 上**(矩阵里只列平台, 不再列 runner): 合并、覆盖率汇总、报告生成

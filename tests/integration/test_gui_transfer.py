@@ -1,5 +1,5 @@
 """
-导入导出包的 GUI 端到端: 单包导出/导入、批量勾选、取消与损坏包不落盘。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+导入导出包的 GUI 端到端: 单包导出/导入、批量勾选、取消与损坏包不落盘。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

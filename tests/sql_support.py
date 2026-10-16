@@ -1,5 +1,5 @@
 """
-由 test_sql_backend.py 拆分出的共享测试基建(被多个主题文件引用), 拆分原则与映射见 docs/test-refactor-plan.md。
+由 test_sql_backend.py 拆分出的共享测试基建(被多个主题文件引用)。
 """
 
 from __future__ import annotations

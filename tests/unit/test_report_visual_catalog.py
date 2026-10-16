@@ -1,5 +1,5 @@
 """
-视觉回归门与结论目录: CJK 绘制拒绝、独立起始时间、Tk 版本记录、quality 作业接线、目录与脚本/上游作业同步。拆自 test_report_verification.py(见 docs/test-refactor-plan.md S8)。
+视觉回归门与结论目录: CJK 绘制拒绝、独立起始时间、Tk 版本记录、quality 作业接线、目录与脚本/上游作业同步。拆自 test_report_verification.py。
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-备份/恢复/分支动作: 快照写入、危险分支根确认、取消与损坏报告、游戏运行拦截。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+备份/恢复/分支动作: 快照写入、危险分支根确认、取消与损坏报告、游戏运行拦截。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

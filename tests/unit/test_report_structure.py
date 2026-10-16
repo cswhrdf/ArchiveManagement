@@ -1,5 +1,5 @@
 """
-报告目录结构校验(verify_report 脚本): 缺文件/数量不符/悬空引用/嵌套目录/环境缺失逐项点名, 退出码可判。拆自 test_report_verification.py(见 docs/test-refactor-plan.md S8)。
+报告目录结构校验(verify_report 脚本): 缺文件/数量不符/悬空引用/嵌套目录/环境缺失逐项点名, 退出码可判。拆自 test_report_verification.py。
 """
 
 from __future__ import annotations

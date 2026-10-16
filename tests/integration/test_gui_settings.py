@@ -1,5 +1,5 @@
 """
-设置窗口与配置: 主题/快捷键记录、语言切换重建、配置修复、应用失败回滚。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+设置窗口与配置: 主题/快捷键记录、语言切换重建、配置修复、应用失败回滚。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

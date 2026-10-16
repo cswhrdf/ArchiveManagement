@@ -1,5 +1,5 @@
 """
-存档位置: 首位置自动主位/去重/同一目录异写拒绝/路径规范化/校验状态/删除预览与回收站。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+存档位置: 首位置自动主位/去重/同一目录异写拒绝/路径规范化/校验状态/删除预览与回收站。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

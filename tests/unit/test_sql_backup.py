@@ -1,5 +1,5 @@
 """
-备份节点与分支树: 默认标题/子节点/分支标记/改名/删除级联与提示、快照校验与取消、哈希回填后台任务。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+备份节点与分支树: 默认标题/子节点/分支标记/改名/删除级联与提示、快照校验与取消、哈希回填后台任务。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

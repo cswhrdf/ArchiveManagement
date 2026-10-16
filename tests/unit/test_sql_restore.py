@@ -1,5 +1,5 @@
 """
-恢复动作: 预览目标与多余文件、写回并保持当前指针、默认安全点、取消报告。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+恢复动作: 预览目标与多余文件、写回并保持当前指针、默认安全点、取消报告。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

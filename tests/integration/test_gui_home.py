@@ -1,5 +1,5 @@
 """
-主页库: 视图切换、海报/列表外观、分页与滚动、筛选与标签、封面缓存。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+主页库: 视图切换、海报/列表外观、分页与滚动、筛选与标签、封面缓存。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-导出/导入包: 单包导出三种形态、检视不改库、导入策略(新建/合并/跳过)、批量勾选与忙碌拒绝、失败日志与取消。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+导出/导入包: 单包导出三种形态、检视不改库、导入策略(新建/合并/跳过)、批量勾选与忙碌拒绝、失败日志与取消。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

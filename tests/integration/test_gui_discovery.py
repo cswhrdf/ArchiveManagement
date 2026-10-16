@@ -1,5 +1,5 @@
 """
-发现页: 扫描与导入候选、忽略记忆、监控目录管理、空态与本地化名。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+发现页: 扫描与导入候选、忽略记忆、监控目录管理、空态与本地化名。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

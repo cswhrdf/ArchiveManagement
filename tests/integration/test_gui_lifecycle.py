@@ -1,5 +1,5 @@
 """
-窗口生命周期与兜底守卫: 轮询抗故障、窗口复用、工作区导航、激活页、冒烟启动与配置状态报告。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+窗口生命周期与兜底守卫: 轮询抗故障、窗口复用、工作区导航、激活页、冒烟启动与配置状态报告。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

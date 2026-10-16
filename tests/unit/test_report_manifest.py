@@ -1,5 +1,5 @@
 """
-分片清单(manifest)与平台结论完整性: 缺片/计数不符点名, 缺省模式失败, expect-platforms 决定结论。拆自 test_report_verification.py(见 docs/test-refactor-plan.md S8)。
+分片清单(manifest)与平台结论完整性: 缺片/计数不符点名, 缺省模式失败, expect-platforms 决定结论。拆自 test_report_verification.py。
 """
 
 from __future__ import annotations

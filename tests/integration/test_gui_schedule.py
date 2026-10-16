@@ -1,5 +1,5 @@
 """
-定时任务窗口与任务卡: 间隔/保留数编辑、增删启停、归档拒绝、对话框过滤。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+定时任务窗口与任务卡: 间隔/保留数编辑、增删启停、归档拒绝、对话框过滤。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

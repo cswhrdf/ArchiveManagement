@@ -1,5 +1,5 @@
 """
-CI workflow 结构断言: 作业拓扑/平台矩阵/工件去重/发布只发校验过的报告/macOS Tk9 规避/硬崩溃留证。拆自 test_report_verification.py(见 docs/test-refactor-plan.md S8)。
+CI workflow 结构断言: 作业拓扑/平台矩阵/工件去重/发布只发校验过的报告/macOS Tk9 规避/硬崩溃留证。拆自 test_report_verification.py。
 """
 
 from __future__ import annotations
@@ -1266,3 +1266,100 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     assert "co-author-trailers:end" in template
     assert "不要手工编辑" in template
     assert "最终提交说明" in template
+
+
+def test_the_release_workflow_only_publishes_from_main() -> None:
+    """release.yml 三个入口的口径: 被 ci.yml 调用(门禁) / push 到 main(发布) / 手动.
+
+    两条最容易改错的判据: ① **发布只在 push 或显式要求时发生** —— 被 ci.yml 调用那一档
+    `github.event_name` 不是 `push`(是调用方的事件名或 `workflow_call`), 所以门禁天然发不出
+    Release; ② **写权限只在发布作业上**, 顶层仍是 `contents: read`: 调用方是 PR 那次运行,
+    拿到的写权限越少越好。另外 `pull_request:` 这个触发已经删掉 —— 它的判据挂在来源分支名上
+    (dev / bugfix/*), 从别的分支合入 main 就不构建, 而那正是发布该覆盖的情形。
+    """
+    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    head = text.split("\njobs:", 1)[0]
+
+    assert "workflow_call:" in head, "PR 门禁要能调用它(跨工作流触发挂不到那个 PR 上)"
+    hint = "门禁那一档由 ci.yml 调用, release.yml 自己不再监听 PR"
+    assert "pull_request:" not in head, hint
+    assert re.search(r"^  push:\n    branches: \[main\]$", head, re.MULTILINE), (
+        "合入 main 之后由 push 触发(不再按来源分支名判)"
+    )
+    assert "workflow_dispatch:" in head, "手动档要留着: dev 只有这一个入口"
+    hint = "checks 档位要在两个触发里都声明(手动档也能选)"
+    assert head.count("build-only") >= 2, hint
+    assert head.count("publish:") >= 2, "publish 开关要在两个触发里都声明"
+    assert re.search(r"^permissions:\n  contents: read$", head, re.MULTILINE), (
+        "顶层保持只读, 写权限只给发布作业"
+    )
+
+    publish = ci_workflow.job_block(text, "publish")
+    hint = "发布拿的是同一个运行里构建的产物"
+    assert ci_workflow.needs_of(text, "publish") == {"build"}, hint
+    condition = ci_workflow.job_condition(text, "publish")
+    assert "github.event_name == 'push'" in condition
+    assert "inputs.publish == true" in condition, "手动档要能显式要求发布"
+    assert re.search(
+        r"^    permissions:\n      contents: write$", publish, re.MULTILINE
+    ), "写权限只给这一个作业"
+    # "版本没变就跳过"是**正常出口**(同一个版本合入两次是家常便饭), 判据是那个 tag 已经存在。
+    assert "gh release view" in publish
+    assert 'echo "publish=false" >> "$GITHUB_OUTPUT"' in publish
+    # 两个参数不能省: `--repo`(这个作业没有 checkout, gh 推断不出仓库)与 `--target`
+    # (不给它时 gh 把新 tag 指向默认分支的当前 HEAD, 而不是这次发布的提交)。
+    assert '--repo "$GITHUB_REPOSITORY"' in publish
+    assert '--target "$GITHUB_SHA"' in publish
+
+
+def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
+    """打包门禁只在"合入 main 的 PR"上跑, 且必须等 CI 的结论都出来才构建.
+
+    **为什么必须在 PR 那次运行里**: 跨工作流触发(`workflow_run`)产生的检查挂不到那个 PR 上,
+    永远进不了分支保护的必需检查 —— 想让"CI 通过才允许合入"成立, 编译就得是 PR 运行的一部分。
+    所以它是 ci.yml 里一个 `uses:` release.yml 的作业, 而不是 release.yml 自己的触发。
+    `needs` 要盖住**产出结论**的那几个作业(报告的覆盖率门槛与原生质量门也算结论 —— 漏掉它们
+    等于放行一个覆盖率还没判过的 PR), 同时**不重复跑用例**(同一轮 CI 已经跑过三平台全量)。
+    """
+    text = ci_workflow.workflow_text()
+    block = ci_workflow.job_block(text, "windows-package")
+
+    assert "uses: ./.github/workflows/release.yml" in block, (
+        "构建只留一处定义: 门禁与发布跑同一份步骤, 不会各自漂移"
+    )
+    assert ci_workflow.needs_of(text, "windows-package") == {
+        "changes",
+        "quality",
+        "pytest",
+        "pytest-report",
+        "security",
+        "allure-summary",
+    }, "门禁要等齐产出结论的作业"
+    condition = ci_workflow.job_condition(text, "windows-package")
+    assert "github.event_name == 'pull_request'" in condition
+    hint = "只给合入 main 的 PR 付这份编译成本"
+    assert "github.base_ref == 'main'" in condition, hint
+    assert "checks: build-only" in block, "不重复跑全量用例(同一轮 CI 已经跑过)"
+    assert "publish: false" in block, "门禁只出 artifact"
+
+
+def test_the_packaging_gate_always_reports_a_conclusion() -> None:
+    """必需检查必须是"总会报结论"的作业 —— 被跳过的必需检查会永久停在 pending.
+
+    三种情况各一条出口(纯文档改动 / 非 main 的 PR / 编译成功), 其余判红; **"上游红了导致这个
+    作业被跳过"也判红**(`needs.windows-package.result` 那时是 `skipped`)。这条与 `required-check`
+    是同一条理由: 分支保护里的必需检查不能由一个会被条件跳过的作业兼任。
+    """
+    text = ci_workflow.workflow_text()
+
+    assert ci_workflow.needs_of(text, "packaging-gate") == {
+        "changes",
+        "windows-package",
+    }
+    assert ci_workflow.job_condition(text, "packaging-gate") == "always()"
+
+    block = ci_workflow.job_block(text, "packaging-gate")
+    assert block.count("exit 0") == 2, "两种'不适用'各一条出口, 不能多"
+    assert '!= "success"' in block, "上游被跳过(result=skipped)也要判红"
+    assert "exit 1" in block
+    assert "::error::" in block, "判红时要在日志里说清原因"

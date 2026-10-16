@@ -1,5 +1,5 @@
 """
-结论计算: 安全/性能/覆盖率结论的分红绿破三态、覆盖率项的附件与阈值来源、台账列与证据。拆自 test_report_verification.py(见 docs/test-refactor-plan.md S8)。
+结论计算: 安全/性能/覆盖率结论的分红绿破三态、覆盖率项的附件与阈值来源、台账列与证据。拆自 test_report_verification.py。
 """
 
 from __future__ import annotations

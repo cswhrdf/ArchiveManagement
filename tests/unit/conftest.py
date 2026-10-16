@@ -1,6 +1,6 @@
 """单元层的共享 fixture.
 
-只有**逐字相同**的 fixture 定义才上提到这里(识别结论见 docs/test-refactor-plan.md);
+只有**逐字相同**的 fixture 定义才上提到这里;
 构造特定游戏/备份状态的业务种子仍由各用例显式调用 ``helpers`` 表达。
 """
 
@@ -29,7 +29,7 @@ def service() -> DemoArchiveService:
     return DemoArchiveService(delay=0)
 
 
-# 拆分 test_report_verification.py 时上提: 6 个报告测试文件共享的报告布局 fixture(见 docs/test-refactor-plan.md S8).
+# 拆分 test_report_verification.py 时上提: 6 个报告测试文件共享的报告布局 fixture.
 
 
 @pytest.fixture

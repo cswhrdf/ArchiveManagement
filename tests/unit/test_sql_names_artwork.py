@@ -1,5 +1,5 @@
 """
-名称缓存与美术资源: 候选名预取/语言切换重用、封面自定义与图标派生、下载重入与缓存失败降级。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+名称缓存与美术资源: 候选名预取/语言切换重用、封面自定义与图标派生、下载重入与缓存失败降级。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

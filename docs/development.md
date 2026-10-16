@@ -265,5 +265,16 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
 ## 发布
 
-- 自动构建在 `dev` 或 `bugfix/**` 分支的 Pull Request 合并到 `main` 后触发，也支持在Actions 中手动指定分支或提交重新构建。
-- 正式 GitHub Release 的触发条件与版本生成方式尚未确定，当前不会由该流程自动创建 Release。可选方案是提交时手动维护源码版本，或由 CI 生成不写回源码的构建版本。
+`release.yml`（Build Windows Package）有三个入口，分工见下表；判据与取舍落在 `docs/testing.md` 第 6 节。
+
+| 入口                                | 什么时候                                                              | 编什么                                       | 发布?                          |
+| ----------------------------------- | --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------ |
+| 被 `ci.yml` 调用（`workflow_call`） | **合入 `main` 的 PR**，且 CI 的结论（含覆盖率门槛与原生质量门）都过了 | 该 PR 的**合并预览提交**                     | ❌ 只上传 artifact（打包门禁） |
+| `push` 到 `main`                    | 合入之后                                                              | 那个合并提交                                 | 版本号变了才发                 |
+| `workflow_dispatch`                 | 手动                                                                  | `ref` 指的分支或提交（`dev` 只有这一个入口） | 看 `publish` 开关              |
+
+- **打包门禁**：门禁那一档由 `ci.yml` 的 `windows-package` 作业调用本工作流（`checks: build-only`：同一轮 CI 已经跑过三平台全量，不再在 Windows 上重跑一遍），构建完跑产物冒烟（无参数启动 / `--version` / `doctor` / `gui --smoke` 四条判据 × onedir 与 onefile，外加单实例闸门，全部指向临时 `--root`）。分支保护里要勾的必需检查是 **`CI required packaging status`**（`packaging-gate` 那个恒跑的“结论”作业）—— 干活的那个作业在纯文档改动的 PR 上会被跳过，被跳过的必需检查会永久停在 pending，所以结论交给另一个作业。
+- **为什么门禁不能写成 `workflow_run`**：跨工作流触发产生的检查挂不到那个 PR 上，永远进不了必需检查 —— 想让“CI 通过才允许合入”成立，编译就得发生在 PR 那次运行里。
+- **发布口径**：版本号由提交者手改 `packaging.py`，CI 只读不改（不注入 tag 版本）。**同一个版本合入两次是正常的事**（小修、文档、只改守卫），所以 `v<版本号>` 已经存在时这一轮只构建、不重复发 Release（记一条 `::notice::`，不算失败）。真的发了就建 `v<版本号>` 的 Release，附上 zip、单文件 exe、`SHA256SUMS.txt` 与 `build-metadata.json`。
+- **手动重编/补发**：Actions → _Build Windows Package_ → Run workflow（给 `ref`，需要发布时把 `publish` 打开）。
+- 构建前仍要过全部门禁（`ruff` / `mypy` / `pytest --cov`，见 `release.yml` 的 `Run build checks`，发布与手动档默认跑、门禁档跳过）与图标指纹检查；产物只上传 `release/` 目录（zip、onefile、校验和、元数据）。

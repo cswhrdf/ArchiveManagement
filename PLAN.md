@@ -990,7 +990,7 @@ timeline/
 - **追加（2026-10-11，J-3 开工前先修掉的一个真缺陷）**：用户编完第一版发现**两个 exe 双击都没反应**。查清是**默认命令**的问题：窗口化产物（`console=False`）没有控制台，而不带子命令时 CLI 默认跑 `init` —— 它把报告打进一个不存在的控制台就退出，屏幕上什么都没有。修法：`app.default_command()` 按 `sys.frozen` 分派（打包版 = `gui`，源码版仍是 `init`），判据取"解析后的子命令为空"，所以只给 `--root` 也会开界面；顺带修掉 `args.smoke` 在"默认补出来的 gui"上不存在的老写法（`getattr`，这条是守卫当场抓到的）。**验收方式（已实测 onedir 与 onefile 各一遍）**：直接启动 exe（不带参数）后日志里必须多一行 `界面启动` 且进程仍在（窗口开着），而不是只有 `初始化完成`；这条要进 J-3 的 CI 判据（①之前先跑一次"无参数启动"）。守卫三条在 `tests/unit/test_cli.py`（打包版无子命令→gui、只给全局参数→gui、显式子命令不被顶掉）。
 - 判据：**退出码 + 侧效应**（目录与 `logs/archive-management.log` 真的出现）。窗口化 exe 唯一可靠的"它真的干活了"的证据就是日志文件 —— 所以这一条同时替代了"读 stdout"。
 - **追加（2026-10-12，单实例闸门的验收，见 §49.1）**：用同一个临时 `--root` 先起第一个进程（`gui --root <临时> --smoke 30`，它会自己退，不占 runner），再起第二个。**可自动判的**是"第二个进程没有建界面且退 3"：那份 `--root` 的日志里**只有一条** `界面启动`，且第二个进程的退出码是 3（现在它不再弹模态框，所以退出码也能量得着）。
-- 坑：①一次冒烟必须**限时**（窗口起不来时 `gui` 会一直等 → 用外部超时兜住），onefile 首次启动要解包到 `%TEMP%\_MEIxxxx`，比 onedir 慢，超时给它留够（先量一次再定数字）；②`gui` 需要交互式桌面 —— windows runner 有会话，但**第一次上 CI 必须实看一眼**（本机绿说明不了 runner 绿）；③往 `release.yml` 加步骤会撞上 `tests/unit/test_test_config.py` 那四条工作流守卫（依赖分组、`--no-install-project`、`UV_NO_SYNC`、setup-uv 与缓存输入）—— 这批守卫是 `ci.yml` 与 `release.yml` **共用**的，新命令若引入新的组，还要在 `_CI_COMMAND_GROUPS` 里登记。
+- 坑：①一次冒烟必须**限时**（窗口起不来时 `gui` 会一直等 → 用外部超时兜住），onefile 首次启动要解包到 `%TEMP%\_MEIxxxx`，比 onedir 慢，超时给它留够（先量一次再定数字）；②`gui` 需要交互式桌面 —— windows runner 有会话，但**第一次上 CI 必须实看一眼**（本机绿说明不了 runner 绿）；③往 `release.yml` 加步骤会撞上 `tests/unit/test_test_config.py` 那四条工作流守卫（依赖分组、`--no-install-project`、`UV_NO_SYNC`、setup-uv 与缓存输入）—— 这批守卫是 `ci.yml` 与 `release.yml` **共用**的，新命令若引入新的组，还要在 `_CI_COMMAND_GROUPS` 里登记。（**落点已留好**：`release.yml` 的 `build` 作业里 `Build onedir and onefile packages` 之后有一段 `← J-3 的"产物冒烟"就落在这里` 的注释，按那个位置插即可 —— 门禁档与发布档会一起拿到它。）
 
 **J-4 打包版与开发版的逐屏比对（第 8 条的落地，拆五步）**
 
@@ -1030,17 +1030,17 @@ timeline/
 
 **不在本阶段**（免得被顺手做掉）：macOS 的 `.app`、Linux 打包（两条都是阶段 K 第 6 条）、代码签名 / 公证、自动更新、安装器（Inno Setup / MSI）—— 后三条没排期，真要做先在 §10 的"后续阶段（未排期）"里单独立项。
 
-**工作量与排期**：约 **2 天量级**（J-1 + J-2 半天；J-3 半天；J-4 一天 —— 大头是种子数据与"能自动到达的状态"清单；J-5 / J-6 / J-7 半天）。**不阻塞阶段 K**，但两者用的是**同一份 spec**：先做完 J-1 / J-2 / J-3 再动 K，免得同一处改两遍。
+**工作量与排期**：约 **2 天量级**（J-1 + J-2 半天；J-3 半天；J-4 一天 —— 大头是种子数据与"能自动到达的状态"清单；J-5 / J-6 / J-7 半天）。**不阻塞阶段 K**，但两者用的是**同一份 spec**：先做完 J-1 / J-2 / J-3 再动 K，免得同一处改两遍。（2026-10-17 追加：按用户要求，K 的**触发链路**先落地了 —— 门禁档/发布档的分工见 §64，J-3 的步骤在 `release.yml` 的 `build` 作业里留了落点注释；"同一处改两遍"因此没有发生：构建步骤只有一处定义，门禁与发布共用。）
 
 ### 阶段 K：自动发布流程
 
 阶段 I 完成后，使用 `.github/workflows/release.yml` 执行自动构建：
 
-1. `dev` 或 `bugfix/**` 分支的 Pull Request 合并到 `master` 后触发；也支持手动指定分支或提交重新构建。
+1. **三个入口（2026-10-17 落地，见 §64）**: ① 合入 `main` 的 PR 由 `ci.yml` 调用它做**打包门禁**(只构建 + 产物冒烟, 不发 Release); ② `push` 到 `main`(合入之后)构建并发布; ③ 手动 `workflow_dispatch` 编任意分支或提交(`dev` 只有这一个入口)。已删掉原来那条 `pull_request: closed` + 来源分支名(`dev` / `bugfix/*`)的判据 —— 它有个盲区: 从别的分支(如 `hotfix/x`)合入 `main` 就不构建。
 2. 在 Windows runner 上运行完整质量检查，并使用 `packaging/archive-management.spec` 构建 onedir 与 onefile 产物。
 3. 直接读取 `packaging.py` 中的源码版本，不修改源码，不使用 Git tag 注入版本。
 4. 生成 Windows x64 压缩包、单文件可执行文件、SHA-256 校验文件和构建元数据。
-5. 自动上传 Actions artifact；正式 GitHub Release 的触发条件和版本生成方式待定。
+5. 自动上传 Actions artifact；**Release 的触发与版本口径已定（2026-10-17，见 §64）**: 合入 `main` 之后建 `v<版本号>` 的 Release(版本号仍由提交者手改 `packaging.py`, CI 只读不改), 同一个版本只发一次(`v<版本号>` 已存在则只构建 + 记一条 `::notice::`)。**仍待定的是**: 接不接 `--generate-notes`、要不要发 prerelease、Release 正文的模板(现在是写死的“版本 + 提交 + 构建号”)。
 6. **平台范围待定（从阶段 I 的清点表挪过来）**：`release.yml` 当前只构建 Windows，Linux / macOS 的包（含 macOS 的 `.app`）都没纳入 —— 当时只做首要发布平台（见阶段 J 第 7 条）。真要做时这一条要一起定：目标平台、构建镜像、产物命名，以及 macOS 侧是否走签名 / 公证。
 
 版本方案候选：
@@ -2777,6 +2777,22 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
 - **文档同步**: `docs/testing.md` 对比度判据一节的"另请第三方库 color-contrast 再算一遍(独立实现 WCAG 公式, 比值须落 ±0.005 内)"整句删掉。
 - **代价写明**: 那条 WCAG 公式从此**没有外部对照**了 —— 我们的公式、登记表与门槛出自同一支笔, 一起写错时彼此印证不出来(这正是当初引入它的理由)。要恢复这层保护就得另找一个独立实现来对账, 不限于这个库。
 - **历史不动**: §17.1 留着当初保留它的理由与实测数据, 只在开头加了一行指针说明它已移除。
+
+## 64. release.yml 允许编 main 与 dev: 三入口 + 打包门禁 + 合入后发布(2026-10-17, 用户要求"在执行 J-3 之前先评估")
+
+用户的三个要求: ① 合入 `main` 的 PR 在 CI 通过后编译并做 J-3 的检查; ② 合入 `main` 之后编译并发布(阶段 K); ③ `dev` 的编译口径给个建议。评估后用户拍板四条: 门禁做成**必需检查** / 版本没变就**跳过发布** / 门禁档**不重复跑全量用例** / `dev` **只留手动触发**(标签触发暂不做)。
+
+- **触发矩阵(落地形状)**: ① `release.yml` 新增 `workflow_call`(输入 `ref` / `checks` / `publish`), 由 `ci.yml` 的 `windows-package` 作业在"合入 main 的 PR 且 CI 的结论都出来之后"调用: 拿这个 PR 的**合并预览提交**构建 + 跑 J-3 的产物冒烟, 只出 artifact(`checks: build-only` / `publish: false`); ② `push: branches: [main]` 取代原来的 `pull_request: closed` + 来源分支名判据(原判据的盲区: 从 `hotfix/x` 之类别的分支合入 main 就不构建), 构建完按版本号发布; ③ `workflow_dispatch` 保留并加 `publish` 开关 —— **`dev` 只有这一个入口**。
+- **门禁为什么必须是"被 ci.yml 调用"而不是 `workflow_run`**: 跨工作流触发产生的检查挂不到那个 PR 上, 永远进不了分支保护的必需检查。"CI 通过才允许合入"要成立, 编译就得是 **PR 那次运行**的一部分。
+- **必需检查是 `packaging-gate`(`CI required packaging status`)而不是干活的那个作业**: 纯文档改动的 PR 会跳过 `windows-package`, 而被跳过的必需检查会**永久停在 pending**(与 `required-check` 同一条理由)。所以门禁是"干活 + 恒跑的结论"两个作业; 结论作业三种情况给绿(纯文档 / 非 main 的 PR / 编译成功), 上游红了导致它被跳过(`result=skipped`)判红。**人工前置**: 仓库设置的分支保护里要把 `CI required packaging status` 勾成必需检查。
+- **`needs` 盖住报告链**: `[changes, quality, pytest, pytest-report, security, allure-summary]` —— 覆盖率门槛在 `pytest-report`、原生质量门在 `allure-summary`, 漏掉它们等于放行一个"还没判过覆盖率"的 PR。代价是门禁比最快的检查晚 3~5 分钟才开始; 想缩短就把那两个从 `needs` 去掉(一行改动, 但要接受上面那句话)。
+- **发布口径(阶段 K 定下来的一部分)**: 合入 `main` 之后建 `v<版本号>` 的 GitHub Release(版本号仍由提交者手改 `packaging.py`, CI 只读不改), 附件是 zip / onefile / `SHA256SUMS.txt` / `build-metadata.json`; **同一个版本只发一次** —— `v<版本号>` 已存在时只构建、记一条 `::notice::` 并正常退出(用户明确要求"版本没变应该跳过"; 反过来"没抬版本就判红"会让一次文档合入也红)。两个容易漏的参数: `gh release create` 必须带 `--repo`(那个作业没有 checkout, gh 推断不出仓库)与 `--target "$GITHUB_SHA"`(不给它时新 tag 指向**默认分支的当前 HEAD**, 而不是这次发布的提交)。写权限只给 `publish` 作业(顶层仍是 `contents: read`)—— 被 ci.yml 调用那一档 `github.event_name` 不是 `push`、调用方又是 `contents: read`, 所以门禁天然发不出 Release。
+- **产物名的 ref 解析修正**: 原 `Resolve build metadata` 用 `github.event.pull_request.head.ref`, 换掉 PR 触发后那个上下文不存在; 改取 `inputs.ref → github.head_ref → github.ref_name`(PR 轮次里 `github.ref_name` 是 `<PR 号>/merge`, 所以来源分支要排在它前面)。
+- **J-3 的位置留好了、步骤还没写**: `release.yml` 的 `build` 作业里、`Build onedir and onefile packages` 之后有一段 `← J-3 的"产物冒烟"就落在这里` 的注释 —— 门禁档与发布档共用这一处, 落地时只有一个插入点(内容见上面的 J-3 节: 四条判据 × onedir/onefile + 单实例闸门, 全部限时)。
+- **守卫(都咬合验证过: 改坏一处 → 对应用例变红 → 还原)**: `test_the_release_workflow_only_publishes_from_main`(`workflow_call` 在、`pull_request:` 已删、`push` 只对 main、发布条件含 `push` 与 `inputs.publish`、写权限只在发布作业、`--repo`/`--target`、版本未变跳过)、`test_the_packaging_gate_gates_pull_requests_into_main`(调用 release.yml、`needs` 集合、`if` 钉住事件与 `base_ref == main`、`checks: build-only`)、`test_the_packaging_gate_always_reports_a_conclusion`(`always()`、两条 `exit 0`、`!= "success"` 判红)。另加两处**登记**才能不红(都是全量跑时才咬到的坑): ① `tests/unit/test_test_config.py` 的 `_UV_FREE_JOBS` —— 那四条共用守卫会遍历两个工作流的**每个**作业并要求一次 `uv sync`, 纯调用作业(`windows-package`)与只跑 `gh` 的 `publish` 不登记就当场红; ② `tests/unit/test_ci_diagnostics.py` 的 `_GATE_ONLY_JOBS` —— 它要求 ci.yml 里每个**带 `runs-on`** 的作业都有一对"收集/上传失败现场"的步骤(新加的两个作业不登记就红, 2026-10-17 首轮全量的 shard 1 正是这两条)。
+- **文档同步**: `docs/testing.md` §6(流程图 + 作业数量那行 + 打包门禁三条)、`docs/development.md` 的「发布」(换成三入口表)、`CONTRIBUTING.md` 第二节、`.github/pull_request_template.md` 顶部。
+- **仍然待定(留给阶段 K)**: 接不接 `--generate-notes`、要不要发 prerelease、平台范围(仍只 Windows, 见 K-6)、macOS 的签名/公证。
+- **没做的**: `dev` 的自动档(用户暂不做标签触发)、J-3 的冒烟步骤本身、门禁档产物的保留期策略(artifact 默认 90 天, 没额外配)。
 
 ---
 

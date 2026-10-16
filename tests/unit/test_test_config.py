@@ -67,7 +67,16 @@ _CI_ONLY_SUITES = ("performance", "security")
 # 2026-10-06: 报告不再发布 Pages, 但 PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
 # `dorny/paths-filter`、`required-check` 只 `echo` 一行, 都不需要 Python 环境, 所以
 # 按这条登记; 列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
-_UV_FREE_JOBS: set[str] = {"changes", "required-check"}
+# 2026-10-17 又添三个: 打包门禁那两个(`windows-package` 是**纯调用作业** —— 它 `uses:`
+# release.yml, 自己没有步骤; `packaging-gate` 只判上游的 result)与 release.yml 的
+# `publish`(只下产物 + `gh release`, 同样不装 Python 环境)。
+_UV_FREE_JOBS: set[str] = {
+    "changes",
+    "required-check",
+    "windows-package",
+    "packaging-gate",
+    "publish",
+}
 # 跨模块共享的测试辅助模块.
 _SHARED_MODULES = ("helpers.py", "reporting.py")
 

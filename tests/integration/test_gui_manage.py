@@ -1,5 +1,5 @@
 """
-管理窗口: 改名/封面/位置动作的守卫与反馈、删除原始目录、归档全禁用。拆自 test_gui_buttons.py(见 docs/test-refactor-plan.md S7)。
+管理窗口: 改名/封面/位置动作的守卫与反馈、删除原始目录、归档全禁用。拆自 test_gui_buttons.py。
 """
 
 from __future__ import annotations

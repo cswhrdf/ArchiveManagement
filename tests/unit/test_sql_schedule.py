@@ -1,5 +1,5 @@
 """
-定时备份: 间隔/保留数持久化、启动恢复、暂停与禁用联动、跳过未变更、失败记录与任务边角静默。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+定时备份: 间隔/保留数持久化、启动恢复、暂停与禁用联动、跳过未变更、失败记录与任务边角静默。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-主页汇总与杂项守卫: 主页看板/筛选/归档标签、忙碌二次操作拒绝、验证策略来源、主题名、激活轮询修订号。拆自 test_sql_backend.py(见 docs/test-refactor-plan.md S9)。
+主页汇总与杂项守卫: 主页看板/筛选/归档标签、忙碌二次操作拒绝、验证策略来源、主题名、激活轮询修订号。拆自 test_sql_backend.py。
 """
 
 from __future__ import annotations
