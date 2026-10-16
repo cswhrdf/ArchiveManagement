@@ -16,9 +16,6 @@ from pathlib import Path
 # 仓库根目录: 本文件在 tests/ 下, 差一级.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-# 定时那轮只有"调用"(见 nightly.yml 顶部): 不含任何作业定义的副本 —— 全量链与报告链
-# 只有 ci.yml 一份, 免得两份文件各写一遍分片矩阵, 改一处忘了另一处。
-NIGHTLY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly.yml"
 # 发布工作流也要守同一批不变式(依赖分组、uv run 的隐式 sync)。
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
@@ -46,7 +43,7 @@ def jobs(text: str) -> dict[str, str]:
     """取出 ``jobs:`` 下每个作业的名字与正文(名字 → 那一节文本).
 
     作业键的缩进由文件自己决定 —— 仓库里两种排版并存(``ci.yml`` / ``release.yml`` 两个
-    空格, ``nightly.yml`` / ``wiki.yml`` 四个), 所以取 ``jobs:`` 之后**最浅的那一档**键
+    空格, ``wiki.yml`` 四个), 所以取 ``jobs:`` 之后**最浅的那一档**键
     作为作业层: 更深的都是作业内部的键。前面还有 ``on:`` / ``env:`` 这类顶层键, 所以只从
     ``jobs:`` 之后开始扫。没有 ``jobs:`` 行时按整段扫: 用例里手写的合成文本就属于这种,
     真实工作流都有这行。

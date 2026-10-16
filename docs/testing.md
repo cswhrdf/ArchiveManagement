@@ -158,18 +158,16 @@ push/PR ────┼── pytest (win/mac/linux) × 3 片: 单元+集成(两
             ├── security (win/mac/linux): 安全测试
             └── required-check: 纯文档改动跳过时的兜底
                  │
-nightly ───── ci.yml@dev(nightly.yml 每晚无条件调用一次, 带 ref: dev)
-                 │
-                 ▼  (下面两步在 push / PR / nightly 每一轮都跑)
+                 ▼  (下面两步在 push / PR 每一轮都跑)
             pytest-report (ubuntu × 3 平台): 合并各片结果 + 生成 Allure 报告 + 自检
                  │
                  ▼
             allure-summary: 汇总三平台 + 覆盖率合并 + 原生质量门 + 总账 + 报告 artifact
 ```
 
-- **作业数量也是额度**：每一轮（push / PR / nightly）16 个实例（3 平台 ×（3 pytest 片 + security）+ 2 报告 + quality + changes + required-check）。GitHub 按并发作业计价，多开一个分片 = 少一份留给别的 CI 的额度。
-- **跳过只发生在"纯文档改动"上（分桶在 changes 作业）**：纯文档（`**/*.md` / `docs/**` / `.github/instructions/**` / `.github/prompts/**`）在 push 上被 `paths-ignore` 挡在触发之外，在 PR 上由 `changes` 作业的 dorny 过滤给出 `should_run=false` 从而跳过重量级作业；`required-check`（总是成功）兜住分支保护规则的必需检查。**2026-10-14 起不再按改动路径挑层** —— 那条 ui / backend 两层分桶的规则（2026-10-09 落地）已回退：PR / push / nightly 每一轮的四段 pytest 与 security 都跑全量（步骤条件里只剩平台与"第一段跑完 / 整轮没被取消"）。守卫：`test_every_trigger_runs_the_full_suite`。
-- **`pytest-report` 与 `allure-summary`（覆盖率门槛 100% 与完整报告）每一轮都跑**：push / PR / nightly 都是全量，覆盖率门槛与完整报告在哪个事件下都判得出（2026-10-14 起 push 也出报告：之前那条排除理由——"push 只跑选中的层，切片覆盖率天生偏低、在那里判门槛等于自造假红"——随选层回退一起失效了）。nightly 由 `nightly.yml` 每晚无条件带 `ref: dev` 调用 `ci.yml`（之前那个"dev tip < 24h 才跑"的门已按用户要求删掉）。守卫：`test_every_trigger_runs_the_full_suite`。
+- **作业数量也是额度**：每一轮（push / PR）16 个实例（3 平台 ×（3 pytest 片 + security）+ 2 报告 + quality + changes + required-check）。GitHub 按并发作业计价，多开一个分片 = 少一份留给别的 CI 的额度。
+- **跳过只发生在"纯文档改动"上（分桶在 changes 作业）**：纯文档（`**/*.md` / `docs/**` / `.github/instructions/**` / `.github/prompts/**`）在 push 上被 `paths-ignore` 挡在触发之外，在 PR 上由 `changes` 作业的 dorny 过滤给出 `should_run=false` 从而跳过重量级作业；`required-check`（总是成功）兜住分支保护规则的必需检查。**2026-10-14 起不再按改动路径挑层** —— 那条 ui / backend 两层分桶的规则（2026-10-09 落地）已回退：PR / push 每一轮的四段 pytest 与 security 都跑全量（步骤条件里只剩平台与"第一段跑完 / 整轮没被取消"）。守卫：`test_every_trigger_runs_the_full_suite`。
+- **`pytest-report` 与 `allure-summary`（覆盖率门槛 100% 与完整报告）每一轮都跑**：push 与 PR 都是全量，覆盖率门槛与完整报告在哪个事件下都判得出（2026-10-14 起 push 也出报告：之前那条排除理由——"push 只跑选中的层，切片覆盖率天生偏低、在那里判门槛等于自造假红"——随选层回退一起失效了）。守卫：`test_every_trigger_runs_the_full_suite`。
 - **省额度的三条**：① concurrency 取消被取代的运行（报告作业的条件必须是 `always() && !cancelled()`，否则前面被取消时报告不生成、上一轮的报告继续留在页面上冒充最新）；② 纯文档 push 用 `paths-ignore`、PR 用 `changes` 作业判路径 + `required-check` 兜底；③ 与平台无关的检查合进 quality、平台专属检查塞进 pytest 片 0（不新开作业）。完整的优化清单与取舍落在 `tests/unit/test_ci_workflow.py`。
 - 每个 pytest 作业上传自己的 `allure-results-<platform>-shard<N>`；汇总用 `download-artifact` 的 pattern + `merge-multiple: true` 一次拉齐，`pytest-report` 沿用 `.allure/history.jsonl` 累积历史。
 - **历史趋势靠 artifact 活着**（与报告怎么发布无关）：两个报告作业各自走"找上一次**带着同名产物**的运行（不问成败）→ 取回 `.allure/history.jsonl` → `allure generate` 读它并追加本次一行 → 新的 history.jsonl 传回 artifact"（`pytest-report` 用 `allure-resources-<平台>`，`allure-summary` 用 `allure-resources-final`）。要点：① 趋势寿命 = artifact 寿命（默认 90 天），窗口内没有一轮留着它就从零开始（不报错，曲线断了）；② 基线**不要求**那轮 success——失败轮的历史本该出现在趋势里，Allure 的趋势正是用来看失败的（只认成功运行时，连续失败的时期接不上任何一轮基线）；那一轮是否真的传了产物由 finder 的 artifact 检查把关；③ 报告只作为 artifact 存在（2026-10-06 起不再发布到 GitHub Pages），站点是否可达与历史链条无关；④ 恢复要认**两种 artifact 布局**——单路径上传时 `history.jsonl` 落在压缩包根部、多路径时带 `.allure/` 前缀，两种都探测、都找不到时响亮退出；⑤ **质量门不许写历史**——`allure quality-gate` 子命令同样遵循 `appendHistory`，会在半套结果的时点追加一条假快照，跑之前把真历史改名为同目录临时文件（改名即回、不跨设备）、跑完放回。守卫：`tests/unit/test_ci_history.py`。
@@ -311,7 +309,7 @@ uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tk
 | 大字号 / 图标 / 按钮文字 on 按钮底 | ≥ 3:1           | text on primary / secondary / danger 底             |
 | 交互组件描边与状态指示             | ≥ 3:1           | primary / danger 描边 on bg / surface / card        |
 
-守卫逐对 parametrize（两套主题各量一遍），失败信息直接给两个 token 名与实测值。兜底四条：每个文字 token 都必须被判过、主要表面色都当过一次底色、登记规模钉死、两套主题的 accent/danger/text_muted/text_disabled 不许同值。另请第三方库 color-contrast 再算一遍（独立实现 WCAG 公式，比值须落 ±0.005 内）。
+守卫逐对 parametrize（两套主题各量一遍），失败信息直接给两个 token 名与实测值。兜底四条：每个文字 token 都必须被判过、主要表面色都当过一次底色、登记规模钉 死、两套主题的 accent/danger/text_muted/text_disabled 不许同值。
 
 坑：**探针量表要比守卫登记表更全**（探针也要跟着调色板走）；**别把装饰性描边塞进 3:1**（"不要求"也要登记：1.2:1 下限+理由）；**"不要求"与"要求"写在不同档位里就要拆 token**（输入框与面板曾共用 border，拆出 input_border；候选色要对全部表面色量、先量 CTk 默认 border_width 才动手；守卫：`tests/unit/test_ui_input_border.py` 的 AST 完整性守卫 + `test_gui_theme_repaint` 切主题后单挑输入控件量）；**悬停底色也是文字底色必须一起登记**（漏登记时悬停态文字对比度从来没被算过）。
 

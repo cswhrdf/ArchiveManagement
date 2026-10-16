@@ -6,10 +6,6 @@
 
 登记表是"只增不减"的: 新加一个文字色却忘了判它, 兜底断言
 (:func:`test_every_text_token_is_judged`) 会变红, 而不是静默放过。
-
-除了本仓库的公式, 每一对还会请**第三方库** ``color-contrast`` 再算一遍: 它与我们出自
-不同作者, 一起写错的概率极低 —— 这是我们那条公式唯一的"外部对照"
-(见 :func:`test_the_third_party_oracle_agrees_with_us_on_every_pair`)。
 """
 
 from __future__ import annotations
@@ -17,7 +13,6 @@ from __future__ import annotations
 from dataclasses import fields
 
 import pytest
-from color_contrast import check_contrast
 
 from archive_management.ui.contrast import (
     DISABLED_MINIMUM,
@@ -209,60 +204,3 @@ def test_relative_luminance_matches_the_reference_values() -> None:
     assert relative_luminance("#000000") == pytest.approx(0.0, abs=1e-9)
     assert relative_luminance("#ffffff") == pytest.approx(1.0, abs=1e-9)
     assert relative_luminance("#808080") == pytest.approx(0.2159, abs=1e-3)
-
-
-# 第三方库(``color-contrast``)实现了同一条 WCAG 公式, 这里拿它当"第二把算尺".
-# 它只给**布尔**结论(``check_contrast`` 不返回比值), 所以反着用: 把门槛卡在我们的比值
-# 上下各 _ORACLE_TOLERANCE, 两个方向它都答对, 就等于"它算出的比值与我们相差不超过这个容差".
-# 容差只留给浮点: 公式真写错(漏了 sRGB 线性化、权重写反、通道取错)差的是量级, 不是末位.
-_ORACLE_TOLERANCE = 0.005
-
-
-def _oracle_problems(theme: str, palette: Palette, pair: tuple[str, str]) -> list[str]:
-    """把一对颜色的对账结果整理成问题清单(空列表表示两边一致).
-
-    只对**比值**下判据, 不另判一次"过不过门槛": 两边都用 ``>=`` 比门槛, 结论翻转需要这一对
-    正好贴在门槛上(小于容差) —— 实测登记表里最贴线的一对(浅色 ``accent_soft_text`` on
-    ``accent_soft``, 4.5206:1 对 4.5:1)还有 0.0206 的余量, 146 次量测里没有一次落进容差,
-    所以"过不过"的断言在这里必然是绿的(空转), 交给上面的比值断言覆盖。
-    """
-    foreground, background = pair
-    first, second = _color(palette, foreground), _color(palette, background)
-    ratio = contrast_ratio(first, second)
-    where = f"{theme}: {foreground} on {background}"
-    problems: list[str] = []
-    if not check_contrast(first, second, level=ratio - _ORACLE_TOLERANCE):
-        problems.append(f"{where} 我们算 {ratio:.2f}:1, 第三方算得更低")
-    if check_contrast(first, second, level=ratio + _ORACLE_TOLERANCE):
-        problems.append(f"{where} 我们算 {ratio:.2f}:1, 第三方算得更高")
-    return problems
-
-
-def test_the_third_party_oracle_agrees_with_us_on_every_pair() -> None:
-    """第三方库(colour 系)独立实现的 WCAG 公式必须与我们的结论一致.
-
-    这条断言的价值在**实现是别人写的**: 我们的公式与登记表出自同一支笔, 一起写错时
-    彼此印证不出来。它对 **73 对登记色、两套主题共 146 次量测**各算一遍, 比值必须落在
-    我们的 ±容差内 —— 而门槛判定(3 / 4.5 / 2.5 / 1.2)由此自然一致: 要翻转需要某对颜色
-    贴在门槛上, 而实测最贴线的一对还有 0.0206 的余量(见 :func:`_oracle_problems`)。
-    """
-    problems = [
-        problem
-        for theme, palette in sorted(THEMES.items())
-        for pair in ALL_PAIRS
-        for problem in _oracle_problems(theme, palette, pair)
-    ]
-    assert not problems, "第三方对比度实现与我们的结论不一致: " + " | ".join(problems)
-
-
-def test_the_third_party_oracle_matches_the_reference_extremes() -> None:
-    """两端行为对账: 黑白约 21:1、同色 1:1、与前后顺序无关.
-
-    它自己的档位枚举 ``AccessibilityLevel.AA18 = 3`` 命名反直觉(18pt 那一档才是 3:1),
-    所以我们只用它的**数值**门槛接口(``level=<float>``), 这条断言就是钉住这件事。
-    """
-    assert check_contrast("#000000", "#ffffff", level=20.99) is True
-    assert check_contrast("#ffffff", "#000000", level=20.99) is True
-    assert check_contrast("#000000", "#ffffff", level=21.01) is False
-    assert check_contrast("#123456", "#123456", level=1.0) is True
-    assert check_contrast("#123456", "#123456", level=DECORATION_MINIMUM) is False

@@ -23,15 +23,6 @@ on:
       - ".github/prompts/**"
   pull_request:
     branches: *ci_branches
-  # 由 nightly.yml 调用(带 `ref: dev`): 全量 + 报告, 每晚一轮。
-  # **定时触发不在这里** —— 这一份只描述流水线, 何时跑由调用方决定; 被调用时
-  # `github.event_name` 仍是调用方的事件(`schedule`), 而每一轮都是全量。
-  workflow_call:
-    inputs:
-      ref:
-        description: "要检出并测试的 ref(不传则用本次运行的 SHA)"
-        required: false
-        type: string
 
 # 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(一轮 16 个作业
 # 实例; 纯文档改动那一轮更少 —— 被跳过的作业不占 runner)。
@@ -71,15 +62,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.sha }}
 
       - name: Detect files that require CI
         id: filter
-        # 被 nightly 调用时 `event_name` 是 `schedule` —— 定时那轮没有"上一个提交"可比,
-        # dorny 给不出路径集合, 所以这一步跳过, 由 decide 补一个"照跑"的答案。
         # 它若失败, needs: [changes] 的所有作业跟着跳过, 整轮就死了。
-        if: github.event_name != 'schedule'
         uses: dorny/paths-filter@v4
         with:
           filters: |
@@ -94,18 +80,12 @@ jobs:
 
       - name: Decide whether CI should run
         id: decide
-        # 各作业统一从 decide 取输出: 被 nightly 调用时(filter 步因 `schedule` 被跳过、
-        # 输出为空)要在这里补"照跑"的答案。
+        # 各作业统一从 decide 取输出: 触发只剩 push / PR, dorny 的答案直接透传。
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
           FILTERED_SHOULD_RUN: ${{ steps.filter.outputs.should_run }}
         run: |
-          if [ "$EVENT_NAME" = "schedule" ]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_run=$FILTERED_SHOULD_RUN" >> "$GITHUB_OUTPUT"
-          fi
+          echo "should_run=$FILTERED_SHOULD_RUN" >> "$GITHUB_OUTPUT"
 
   required-check:
     name: CI required status
@@ -139,8 +119,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -421,8 +399,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -779,8 +755,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -1166,8 +1140,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -1251,8 +1223,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.sha }}
 
       - name: Install uv
         # 这一步不能少: 下面每一句都是 `uv ...`, 而 runner 上并不预装 uv —— 少了它要到
@@ -1378,8 +1348,8 @@ jobs:
             });
             const candidates = runs.data.workflow_runs.filter(
               (r) =>
-                // 与逐平台作业同一理由: 历史链跨 CI / Nightly 两份工作流。
-                ["CI", "Nightly"].includes(r.name) &&
+                // 与逐平台作业同一理由: 历史链只认本工作流(名字是 "CI")的运行。
+                r.name === "CI" &&
                 r.id !== context.runId &&
                 r.status === "completed",
             );

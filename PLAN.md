@@ -1405,6 +1405,8 @@ Windows 分片在 `test_pipeline_backup_restore.py` 里挂了 60s, 被 `--timeou
 
 ### 17.1 pre-commit 那一层: 最后只留 `color-contrast`
 
+**后话(2026-10-17)**: 这个第三方库已按用户要求全部移除, 见 §63 —— 本节是当时的决策记录, 不改写。
+
 曾经加了三个钩子（`tkinter-a11y-lint` 1.72s / `color-contrast` 0.81s / `pylint -E` 1.45s, 合计 ≈4.0s —— **没达到计划里写的 "< 1s"**）, 后来撤掉两个:
 
 - **撤 `tkinter-a11y-lint`**: 读源码 + 实测 —— 上游包**只认 `tkinter` 的导入**, 而本仓库控件全是 `ctk.CTk*`, 在整棵 `ui/` 上实测 **0 条**报告（这条钩子会静默变成"永远绿"）。它那两条判据也与本仓库设计冲突: "每个 Button/Label 必须有 `text=`"（我们的控件常由 `UiKit` 统一创建/稍后 configure）、"交互控件必须有 `takefocus=`"（`takefocus` 是在 `ui/keyboard.py` 里**运行期**统一接线的）—— 静态判据会全树报红。我补的两条 C91xx 确实真抓到两处缺陷, 但那属"静态配色"一类, 已被 `test_gui_theme_repaint`（运行期、整屏逐控件断言颜色属于当前调色板）覆盖得更彻底 → 留着只是每次提交多付 ≈1.7s。两个脚本（`scripts/a11y_lint.py` / `scripts/pylint_ctk_a11y.py`）与 `pylint`、`tkinter-a11y-lint` 两个依赖一并移除, deptry 里为它们加的例外也撤了。
@@ -2752,6 +2754,29 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
 - **顺带**: `timeout_guard._results_dir(item)` 抽成公开的 `timeout_guard.allure_results_dir(config)`(会话末只有 `session.config`, 两边必须是同一份真相)。
 - **咬合验证(真跑过)**: 把 `test_home_scale.py::test_backend_home_response_time` 的 `shutdown()` 挖掉 ⇒ 那一轮 14 passed + **`ERROR at teardown of test_backend_home_response_time`**(失败信息里有 `APScheduler(daemon=True)` 与 `shutdown()`), 同时那条 broken 结论项也写出来了; 恢复后 14 passed、日志一个字都不打。新增 4 条守卫(逐条判红 / 收干净不许误伤 / 写结论项 / 没配 `--alluredir` 时不写)都咬合过。
 - **教训(值得记住)**: **纯会话级/进程级的失败必须自己写一条结果进报告** —— 退出码与日志对"看报告的人"等于不存在。仓库里已有的同类做法就是 `timeout_guard`(超时)与 `collect_job_diagnostics`(作业崩溃): 它们都手写一条 broken 结论项。
+
+## 62. 删除 nightly 工作流(2026-10-17, 用户要求)
+
+用户要求删除 `.github/workflows/nightly.yml`, 并把代码仓里与它相关的描述一并清掉。
+
+- **删除**: `nightly.yml` 整份; `ci.yml` 里只服务它的三样 —— `workflow_call` 触发(唯一调用方就是 nightly, release.yml 不调用它)、6 处检出的 `ref: ${{ inputs.ref || github.sha }}`(检出回落到触发 SHA 的默认行为)、`changes` 作业里 schedule 事件的特例(filter 步的 `if: github.event_name != 'schedule'` 与 decide 步的专门分支 —— 触发只剩 push / PR 后都不可达)。
+- **历史链里的名字也删了**: 初版想保留 `allure-summary` 找基线脚本里的 `["CI", "Nightly"]`(以为旧 nightly 运行还带产物), 用户指出**该流水线从未跑过、没有历史可接** —— 改成与逐平台作业同款的 `r.name === "CI"`。守卫里也不留 nightly 字样(用户明确不要这种内容): `test_every_trigger_runs_the_full_suite` 的断言只钉当前结构(无 schedule / 无 workflow_call / 无 inputs.ref / 过滤步无事件名条件 / decide 直通透传), 消息不再提被删的工作流。
+- **守卫同步**: `test_every_trigger_runs_the_full_suite` 去掉 nightly 结构断言, 改为钉"痕迹不回潮"(无 workflow_call / 无 schedule / 无 inputs.ref / 过滤步无事件名条件 / decide 直通透传); `test_ci_workflow_only_uses_top_level_keys_github_knows` 不再扫 nightly.yml; `tests/ci_workflow.py` 删 `NIGHTLY_WORKFLOW` 常量; `tests/durations.json` 删掉早已改名的 `test_pr_and_nightly_run_full_while_push_selects_layers` 陈旧条目。
+- **文档同步**: `CONTRIBUTING.md` 第二节(nightly 那条 + 覆盖率结论那句)、`.github/pull_request_template.md` 顶部门禁说明、`docs/testing.md` 第 6 节(流程图 nightly 那行 + 三处"push / PR / nightly")。
+- **历史小节不动**: PLAN.md §56/§57 是当时的决策记录, 按惯例不改写历史。
+
+---
+
+## 63. 删掉 `color-contrast` 第三方库的所有运用(2026-10-17, 用户要求)
+
+用户要求"删除代码仓中对 color-contrast 这个库的所有运用"。这个库只在对比度门禁里当过**第二把算尺**(来历见 §17.1), 不参与任何判定, 因此整条链是"拆外部对照"而不是"换实现":
+
+- **依赖**: `pyproject.toml` 的 `quality` 组去掉 `color-contrast>=0.1.1`; deptry 的 `DEP004` 例外名单去掉 `color_contrast`(连同那条专门为它写的注释)—— 那个例外本来就是为它开的。`uv lock` 重解析, `uv.lock` 里连带移除它唯一的依赖 `colour`。
+- **用例**: `tests/unit/test_ui_contrast.py` 删掉 `test_the_third_party_oracle_agrees_with_us_on_every_pair` 与 `test_the_third_party_oracle_matches_the_reference_extremes`(以及两者共用的 `_oracle_problems` / `_ORACLE_TOLERANCE` / 那段"第二把算尺"的注释 / 模块 docstring 末尾的说明)。守卫本身**一条没少**: 比值仍由 `ui/contrast.py` 算、门槛仍在同一处, 逐对 parametrize 的断言与四条兜底(每个文字 token 都被判过 / 主要表面色都当过底色 / 登记规模钉住 / 两套主题不许共用修过的颜色)照旧。
+- **钩子改名**: `.pre-commit-config.yaml` 里 `id: color-contrast` / `name: color-contrast (WCAG 对比度)` → `contrast-guard`。它跑的一直是**我们自己的**守卫(`pytest tests/unit/test_ui_contrast.py -q`), 但旧名会让人以为还在用那个库; `CONTRIBUTING.md` 的钩子表同步改名。钩子数量与触发条件不变, 只影响 `SKIP=<id>` 的写法。
+- **文档同步**: `docs/testing.md` 对比度判据一节的"另请第三方库 color-contrast 再算一遍(独立实现 WCAG 公式, 比值须落 ±0.005 内)"整句删掉。
+- **代价写明**: 那条 WCAG 公式从此**没有外部对照**了 —— 我们的公式、登记表与门槛出自同一支笔, 一起写错时彼此印证不出来(这正是当初引入它的理由)。要恢复这层保护就得另找一个独立实现来对账, 不限于这个库。
+- **历史不动**: §17.1 留着当初保留它的理由与实测数据, 只在开头加了一行指针说明它已移除。
 
 ---
 

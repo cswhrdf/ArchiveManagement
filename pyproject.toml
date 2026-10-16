@@ -57,7 +57,6 @@ quality = [
     "ruff>=0.16",
     "mypy>=2.3",
     "pre-commit>=4",
-    "color-contrast>=0.1.1",
 ]
 
 analysis = [
@@ -252,9 +251,6 @@ exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-result
 # 出现在 tests/ 里是正常的(DEP004 默认只在"运行时代码"里才该报警);
 # coredumpy 同理: 它只在用例失败时留现场(见 tests/crash_capture.py);
 # coverage 是 CI 里直接调用的工具(合并/报告覆盖率), 用例也用它验证"跨平台合并"这件事。
-# color_contrast: 它是对比度门禁的**第三方算尺**, 只被 tests/unit/test_ui_contrast.py
-# 使用 —— 声明在 quality 组、又不在 src 里用, 因此必须 列在这里, 
-# 否则 deptry 会把"开发依赖出现在用例里"当成越界。
 # imagehash / skimage: 同理, 它们是视觉回归的算尺(声明在 visual 组), 只被
 # scripts/create_allure_visual.py 使用, 不在 src 里出现。
 # pytest_timeout: 超时留证的接管点(见 tests/timeout_guard.py)—— 我们调它的钩子
@@ -265,7 +261,6 @@ DEP004 = [
   "allure_pytest",
   "coredumpy",
   "coverage",
-  "color_contrast",
   "imagehash",
   "skimage",
   "pytest_timeout",

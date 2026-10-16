@@ -107,7 +107,7 @@ uv run python scripts/build_icon.py --check                                # 只
 | `compact JSON`              | 把 `src/archive_management/resources/` 顶层的固定数据清单压回单行紧凑格式 |
 | `mypy`                      | 宿主平台上的类型检查（strict）                                            |
 | `deptry`                    | 依赖卫生：未声明 / 多余 / 传递依赖（依赖清单或导入变了都会重跑）          |
-| `color-contrast`            | 调色板的对比度守卫（只在调色板/对比度相关文件变动时跑）                   |
+| `contrast-guard`            | 调色板的对比度守卫（只在调色板/对比度相关文件变动时跑）                   |
 | `pytest (blocker+critical)` | 最高两档严重等级的用例 = 数据安全 + 核心逻辑                              |
 
 想手动跑同一套：`uv run --no-sync pre-commit run --all-files`。
@@ -116,9 +116,8 @@ uv run python scripts/build_icon.py --check                                # 只
 
 - **PR**：三个平台各跑一遍**全量**（三平台各 3 片），分片只影响墙钟，不影响结论；静态检查、性能基准、视觉回归也在这轮跑，并出**覆盖率门禁**与**完整 Allure 报告**。
 - **push 到 `dev` / `main`**：与 PR 同口径跑**全量**（2026-10-14 起不再按改动路径挑层，报告与覆盖率门禁也照出）。
-- **nightly（UTC 19:00 = 北京次日凌晨 3 点）**：`nightly.yml` 每晚带 `ref: dev` 调用 `ci.yml` 跑一轮全量 + 报告（不再判断 `dev` 有没有新提交）。全量链与报告链**只有 `ci.yml` 一份定义**（`nightly.yml` 只有"调用"，不复制任何作业）。
 - 公共检查（ruff / mypy / deptry / bandit / pip-audit / radon + xenon）只在 Ubuntu 跑一次，带 `env=common`。
-- 所以覆盖率结论在**每一轮**的报告里看（`Coverage report` 条目，push / PR / nightly 都有）。想在本机核，就按第四节跑那两步口径。
+- 所以覆盖率结论在**每一轮**的报告里看（`Coverage report` 条目，push 与 PR 都有）。想在本机核，就按第四节跑那两步口径。
 
 细节（矩阵、分片权重、报告自检、失败现场留证）见 [docs/testing.md](docs/testing.md) 第 4、6 节。
 

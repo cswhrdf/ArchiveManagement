@@ -66,13 +66,12 @@ repos:
         pass_filenames: false
         files: ^(src/|tests/|scripts/|pyproject\.toml$|uv\.lock$)
 
-      - id: color-contrast
+      - id: contrast-guard
         # 颜色对比度(WCAG): 跑那条既有守卫 —— 判据、登记表与阈值都在一处
         # (tests/unit/test_ui_contrast.py ↔ ui/contrast.py), 钩子不抄第二份会漂移的副本。
-        # 同一份用例里还请了**第三方库**再算一遍(``color-contrast`` 包的 check_contrast):
-        # 它只返回布尔值、报不出"差多少", 所以不拿它当引擎; 但"实现是别人写的"这点让
-        # 它可以给我们的公式当第二把算尺(分工与理由见 docs/testing.md 的对比度判据一节)。
-        name: color-contrast (WCAG 对比度)
+        # 判定只用我们自己的公式(ui/contrast.py): 它既算比值也定门槛, 失败信息能报出
+        # 具体差多少(2026-10-16 起不再引第三方库做第二把算尺)。
+        name: contrast-guard (WCAG 对比度)
         entry: uv run --no-sync pytest tests/unit/test_ui_contrast.py -q
         language: system
         pass_filenames: false

@@ -673,23 +673,21 @@ def test_ci_workflow_only_uses_top_level_keys_github_knows() -> None:
         "concurrency",
         "jobs",
     }
-    for path in (_WORKFLOW, ci_workflow.NIGHTLY_WORKFLOW):
-        workflow = path.read_text(encoding="utf-8")
-        found = {
-            match.group(1)
-            for line in workflow.splitlines()
-            # 只用顶层行: 注释与缩进行不算(块状字符串的内容都是缩进的)。
-            if line
-            and not line[0].isspace()
-            and not line.startswith("#")
-            and (match := re.match(r"([A-Za-z][\w-]*):", line)) is not None
-        }
+    found = {
+        match.group(1)
+        for line in workflow.splitlines()
+        # 只用顶层行: 注释与缩进行不算(块状字符串的内容都是缩进的)。
+        if line
+        and not line[0].isspace()
+        and not line.startswith("#")
+        and (match := re.match(r"([A-Za-z][\w-]*):", line)) is not None
+    }
 
-        assert found, f"{path.name}: 一个顶层键都没找到, 这条守卫失去了检查对象"
-        assert found <= allowed, (
-            f"{path.name} 顶层出现了 GitHub 不认的键: {sorted(found - allowed)}"
-            " —— 它们会让整份工作流报 Unexpected value 而不生效"
-        )
+    assert found, "一个顶层键都没找到, 这条守卫失去了检查对象"
+    assert found <= allowed, (
+        f"顶层出现了 GitHub 不认的键: {sorted(found - allowed)}"
+        " —— 它们会让整份工作流报 Unexpected value 而不生效"
+    )
 
 
 def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
@@ -763,63 +761,31 @@ def test_ci_cancels_superseded_runs_and_skips_docs_only_changes() -> None:
 
 
 def test_every_trigger_runs_the_full_suite() -> None:
-    """每一轮触发都跑**全量**: 不再按改动路径挑层, nightly 也不再判 24h(2026-10-14 回退).
+    """每一轮触发都跑**全量**: 不再按改动路径挑层(2026-10-14 回退).
 
-    - **全量 = PR / push / nightly 一视同仁**: 四段 pytest 与 security 都不看改动路径,
+    - **全量 = PR / push 一视同仁**: 四段 pytest 与 security 都不看改动路径,
       静态检查照旧每轮跑 —— 那条"基于前后端改动单独跑部分用例"的规则已回退;
     - **唯一会整体跳过的情形是纯文档改动**(push 的 `paths-ignore` 与 PR 的 dorny 过滤,
       由 `should_run` 表达), 那条另有守卫专门盯(`test_ci_cancels_superseded_runs_and_
       skips_docs_only_changes`);
-    - **报告仍只有 push 不出**: 这一轮只回退了"选层", 没动报告链;
-    - **nightly 只有"调用"**: 24h 门已删除(用户要求"每次都跑全部"), 那一轮无条件跑全量;
-      全量链与报告链仍只有 ci.yml 一份定义。
+    - **触发只有 push 与 PR**: ci.yml 不被其它工作流调用, 也没有定时轮 ——
+      全量链与报告链只有 ci.yml 一份定义。
     """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
 
-    # 定时那条线在 nightly.yml: 它现在只有"调用", 不复制作业定义、也不自己判要不要跑。
-    nightly = ci_workflow.NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
-    assert set(ci_workflow.jobs(nightly)) == {"full-run"}, (
-        "nightly 只留一个「调用 ci.yml」的作业: 24h 门已按用户要求删掉"
-    )
-    # 排版不参与判据: 仓库里两种缩进风格并存(见 tests/ci_workflow.py 的 jobs()), 这里只钉
-    # 结构 —— cron 挂在 schedule 下的列表里、调用 ci.yml 时紧跟 with/ref: dev。
-    schedule = re.search(r"^( *)schedule:\n( *)- cron: ", nightly, re.M)
-    assert schedule is not None, (
-        "nightly(schedule)触发丢了: 覆盖率门槛与完整报告要有它兜底"
-    )
-    assert len(schedule.group(2)) > len(schedule.group(1)), (
-        "cron 要挂在 schedule 下那一层列表里, 不是与它同层"
-    )
-    assert "uses: ./.github/workflows/ci.yml" in nightly, (
-        "nightly 要调用 ci.yml, 而不是复制一份流水线(两份分片矩阵迟早漂移)"
-    )
-    assert re.search(
-        r"uses: \./\.github/workflows/ci\.yml\n\s+with:\n\s+ref: dev\b", nightly
-    ), "nightly 调用 ci.yml 时必须带 `ref: dev`: 这一轮测的要是 dev 的代码"
-    assert "86400" not in nightly, "24h 门已删除: 不再拿提交年龄决定跑不跑"
-    assert "fetch-depth" not in nightly, (
-        "nightly 不再自己检出任何东西: 检出都在被调用的 ci.yml 里"
-    )
-    assert "actions/checkout" not in nightly, (
-        "nightly 不再自己检出任何东西: 检出都在被调用的 ci.yml 里"
-    )
-
-    # ci.yml 里不该再留定时触发与"今晚要不要跑"的判断。
+    # 触发只有 push 与 PR: 不该有 schedule、workflow_call 或 inputs.ref 这些
+    # 只为"定时轮 / 被其它工作流调用"服务的配置。
     code = "\n".join(
         line for line in workflow.splitlines() if not line.strip().startswith("#")
     )
     assert not re.search(r"^  schedule:", code, re.M), (
-        "定时触发已搬到 nightly.yml: ci.yml 里只留 workflow_call"
+        "ci.yml 不该有定时触发: 触发只有 push 与 PR"
     )
-    assert re.search(r"^  workflow_call:\n", code, re.M), (
-        "ci.yml 要能被 nightly 调用(workflow_call)"
+    assert not re.search(r"^  workflow_call:\n", code, re.M), (
+        "ci.yml 不被其它工作流调用: 不该有 workflow_call"
     )
-    assert "freshness" not in code, (
-        "freshness 早就不在 ci.yml 里了(它曾经是 nightly 的 24h 门, 现已删掉)"
-    )
-    assert code.count("ref: ${{ inputs.ref || github.sha }}") == code.count(
-        "actions/checkout@v7"
-    ), "每个检出都要认 inputs.ref, 否则 nightly 那一轮测的还是默认分支"
+    assert "inputs.ref" not in code, "检出不该认 inputs.ref: 没有调用方会传它"
+    assert "freshness" not in code, "freshness 门已不存在: 不拿提交年龄决定跑不跑"
 
     changes = ci_workflow.job_block(workflow, "changes")
     # 只留"要不要跑"一个输出: ui / backend 两个层输出已随选层规则一起删掉。
@@ -832,20 +798,19 @@ def test_every_trigger_runs_the_full_suite() -> None:
     )
     filter_step = changes.split("name: Detect files that require CI", 1)[1]
     filter_step = filter_step.split("- name:", 1)[0]
-    assert "if: github.event_name != 'schedule'" in filter_step, (
-        "schedule 下 dorny 没有基线可比: 要跳过它, 由 decide 步兜底"
+    assert "if:" not in filter_step, (
+        "push 与 PR 下 dorny 都有基线可比: 过滤步不需要事件名条件"
     )
     # 过滤器里只剩 should_run 一个键(纯文档改动的忽略清单), 不再有 ui / backend 两块。
     filters = filter_step.split("filters: |", 1)[1]
     assert re.findall(r"^ {12}([a-z_]+):", filters, re.M) == ["should_run"], (
         f"路径过滤器只剩 should_run: {filters!r}"
     )
-    assert "EVENT_NAME: ${{ github.event_name }}" in changes
-    assert '"$EVENT_NAME" = "schedule"' in changes, (
-        "decide 步在 schedule 下走专门分支(直接放行)"
+    assert "EVENT_NAME: ${{ github.event_name }}" not in changes, (
+        "decide 步不需要事件名: push 与 PR 共用同一条透传路径"
     )
-    assert 'echo "should_run=true"' in changes, (
-        "被 nightly 调用时直接放行: 每一轮都是全量"
+    assert 'echo "should_run=$FILTERED_SHOULD_RUN"' in changes, (
+        "decide 步把 dorny 的答案原样透传给所有重量级作业"
     )
     assert 'echo "ui=' not in changes, "decide 步不再输出层结果"
     assert 'echo "backend=' not in changes, "decide 步不再输出层结果"
