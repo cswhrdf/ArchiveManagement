@@ -675,6 +675,146 @@ def test_import_treats_an_unparsable_timestamp_as_missing(tmp_path: Path) -> Non
     assert _files_under(backup_root) != []
 
 
+def test_import_re_materializes_shared_content_for_each_node(tmp_path: Path) -> None:
+    """v2 包里共用内容的两个节点: 导入后仍是两个独立节点, 各有一份完整目录."""
+    source_root = tmp_path / "source"
+    database = helpers.migrated_database(source_root)
+    save = helpers.make_save_folder(source_root, content="state-0")
+    game_id = helpers.add_game(database, NAME, path=save)
+    backups = BackupService(database, backup_root=source_root / "backups")
+    backups.create_backup(game_id, title="第一次")
+    helpers.touch_save(source_root)
+    backups.create_backup(game_id, title="第二次")
+    # 存档改回与第一次完全相同的字节: 与"当前节点"不同(不会被跳过), 与第一次相同.
+    (save / "slot.dat").write_text("state-0", encoding="utf-8")
+    backups.create_backup(game_id, title="回到最初")
+    package = tmp_path / "Demo.archive.zip"
+    ExportService(database, backup_root=source_root / "backups").export_game(
+        game_id, package
+    )
+    target_database, backup_root, service = _target(tmp_path / "target")
+
+    inspection = service.inspect(package)
+    contents = fmt.read_package(package)
+    assert len(inspection.nodes) == 3
+    # 包里只有两份内容目录(第三份与第一份相同): 去重真的少装了一份重复内容.
+    assert len({entry.path.split("/", 2)[1] for entry in contents.entries}) == 2
+
+    result = service.import_package(inspection, locations={0: str(save)})
+
+    nodes = BackupRepository(target_database).list_for_game(result.game_id)
+    assert len(nodes) == 3, "共用内容的节点在导入后仍是独立节点"
+    slot_files = [path for path in _files_under(backup_root) if path.name == "slot.dat"]
+    assert len(slot_files) == 3, "每个节点各有一份自己的目录"
+    assert {path.read_text(encoding="utf-8") for path in slot_files} == {
+        "state-0",
+        "state-0+",
+    }
+
+
+def test_import_still_reads_legacy_version_1_packages(tmp_path: Path) -> None:
+    """v1 旧包(清单版本 1、节点无 ``content``、按 ``is_safety`` 分放两棵树)仍能体检并导入."""
+    source_root = tmp_path / "source"
+    database = helpers.migrated_database(source_root)
+    save = helpers.make_save_folder(source_root, content="state-0")
+    game_id = helpers.add_game(database, NAME, path=save)
+    backups = BackupService(database, backup_root=source_root / "backups")
+    nodes = [backups.create_backup(game_id, title="第一次")]
+    helpers.touch_save(source_root)
+    nodes.append(backups.create_backup(game_id, title="恢复前安全点", safety=True))
+
+    # 按旧布局手工拼包: 普通备份进 branches/, 安全点进 timeline/, 清单版本写 1.
+    members: list[tuple[str, Path]] = []
+    backups_config: list[dict[str, object]] = []
+    for position, node in enumerate(nodes):
+        key = Path(node.storage_relpath or "").name
+        prefix = fmt.TIMELINE_DIR if node.is_safety else fmt.BRANCHES_DIR
+        snapshot_root = backups.snapshot_root(node)
+        members.extend(
+            (
+                f"{prefix}/{key}/{path.relative_to(snapshot_root).as_posix()}",
+                path,
+            )
+            for path in sorted(
+                item for item in snapshot_root.rglob("*") if item.is_file()
+            )
+        )
+        backups_config.append(
+            {
+                "id": key,
+                "parent_id": None if position == 0 else backups_config[0]["id"],
+                "kind": "manual",
+                "title": node.title,
+                "note": "",
+                "branch_name": None,
+                "is_safety": node.is_safety,
+                "created_at": "2026-09-14T09:00:00+00:00",
+                "content_hash": node.content_hash,
+                "verify_mode": "sha256",
+                "current": position == 0,
+            }
+        )
+    entries = [
+        {
+            "path": path,
+            "size": source.stat().st_size,
+            "sha256": fmt.sha256_of_file(source),
+        }
+        for path, source in members
+    ]
+    manifest = {
+        "format": fmt.EXPORT_FORMAT,
+        "kind": fmt.PACKAGE_KIND,
+        "version": 1,
+        "created_at": "2026-09-14T09:00:00+00:00",
+        "tool_version": "legacy-test",
+        "game": {"name": NAME, "steam_app_id": APP_ID, "platform": "windows"},
+        "files": {
+            "count": len(entries),
+            "bytes": sum(int(str(item["size"])) for item in entries),
+        },
+        "entries": entries,
+    }
+    config = {
+        "game": {"name": NAME, "steam_app_id": APP_ID, "platform": "windows"},
+        "locations": [
+            {
+                "index": 0,
+                "path": str(save),
+                "path_kind": "directory",
+                "source": "manual",
+                "is_primary": True,
+                "original_machine": True,
+            }
+        ],
+        "backups": backups_config,
+        "schedule": None,
+    }
+    package = tmp_path / "legacy.archive.zip"
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(fmt.MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False))
+        archive.writestr(fmt.CONFIG_NAME, json.dumps(config, ensure_ascii=False))
+        for path, source in members:
+            archive.writestr(path, source.read_bytes())
+
+    target_database, backup_root, service = _target(tmp_path / "target")
+
+    inspection = service.inspect(package)
+    assert inspection.backup_count == 2
+    assert [node.is_safety for node in inspection.nodes] == [False, True]
+
+    result = service.import_package(inspection, locations={0: str(save)})
+
+    nodes_after = BackupRepository(target_database).list_for_game(result.game_id)
+    assert len(nodes_after) == 2
+    slot_files = [path for path in _files_under(backup_root) if path.name == "slot.dat"]
+    assert len(slot_files) == 2
+    assert {path.read_text(encoding="utf-8") for path in slot_files} == {
+        "state-0",
+        "state-0+",
+    }
+
+
 # -- 配置解析的拒绝与退化 ---------------------------------------------------
 
 

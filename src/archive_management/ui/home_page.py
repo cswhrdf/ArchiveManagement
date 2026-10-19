@@ -2137,7 +2137,9 @@ class HomePage:
             self._palette,
             title=tr("dialog.home_location_title"),
             text=tr("dialog.home_location_prompt"),
-            browse=lambda: pick_directory(title=tr("dialog.home_location_title")),
+            browse=lambda current: pick_directory(
+                title=tr("dialog.home_location_title"), start_from=current
+            ),
         )
         if not path:
             log_action("location.add", basic=True, result="cancelled")

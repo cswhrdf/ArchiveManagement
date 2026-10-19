@@ -34,8 +34,9 @@ class OperationCancelledError(ArchiveManagementError):
 class ContentUnchangedError(ArchiveManagementError):
     """存档内容与参照的备份节点完全一致, 因此不需要新建备份.
 
-    手动/分支备份由界面提示用户"存档未变化"; 自动备份与恢复前的安全点
-    直接跳过(写入 DEBUG 级日志), 不打扰用户。
+    手动备份由界面提示用户"存档未变化"(全局快捷键触发的那次与自动备份同口径
+    静默跳过); 自动备份与恢复前的安全点直接跳过(写入 DEBUG 级日志)。
+    **创建分支不做这个判定** —— 分支是显式动作, 无论内容是否变化都会创建。
     """
 
     def __init__(

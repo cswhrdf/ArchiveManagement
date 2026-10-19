@@ -2,10 +2,12 @@
 
 包里只放"用户在界面上确认过的逻辑信息 + 备份内容":
 
-- ``config.json``: 游戏配置、存档位置、分支关系与时间线元数据、定时任务配置;
-- ``branches/<节点>/`` 与 ``timeline/<节点>/``: 每个备份节点的快照目录**原样**搬过去
-  (节点自己的 ``snapshot.json`` 一起带走, 因此每个 ``loc-<序号>`` 原本对应哪个路径、
-  哪些条目是符号链接都能还原)。
+- ``config.json``: 游戏配置、存档位置、每个备份节点(时间线标识 + 分支归属 + 引用
+  的内容目录)、定时任务配置;
+- ``timeline/<内容>/``: 备份内容只按时间线存**一份** —— 内容相同的节点(例如恢复前
+  安全点与内容未变的下一次备份)共用同一份文件, 由各节点配置里的 ``content`` 字段
+  指过去, 不在包里重复装第二遍(内容目录带着它自己的 ``snapshot.json``, 因此每个
+  ``loc-<序号>`` 原本对应哪个路径、哪些条目是符号链接都能还原)。
 
 缓存图、译名缓存、探测结果这类可再生数据不进包; 存档位置的绝对路径来自**导出那台
 机器**, 在 ``config.json`` 里标记为 ``original_machine``, 导入时由用户确认映射。
@@ -42,7 +44,6 @@ from archive_management.infrastructure.repository import (
 )
 from archive_management.services.audit import log_action, redacted_path
 from archive_management.services.export_format import (
-    BRANCHES_DIR,
     EXPORT_FORMAT_VERSION,
     TIMELINE_DIR,
     BatchGame,
@@ -128,11 +129,13 @@ class ExportService:
         """
         game = self._require_game(game_id)
         nodes = self._nodes.list_for_game(game_id)
-        members = self._collect_members(game, nodes)
+        # 先决定"每个节点引用哪份内容": 内容相同的节点共用一份, 包里只装一遍.
+        content_of, owners = _content_plan(nodes)
+        members = self._collect_members(owners)
         summary = write_package(
             destination,
             game=_manifest_game(game),
-            config=self._build_config(game_id, game, nodes),
+            config=self._build_config(game_id, game, nodes, content_of),
             members=members,
             progress=progress,
             cancelled=cancelled,
@@ -229,15 +232,16 @@ class ExportService:
             exported.append((result, BatchGame(entry=entry, source=path)))
         return exported
 
-    def _collect_members(
-        self, game: Game, nodes: Sequence[BackupNode]
-    ) -> list[PackageFile]:
-        """把每个备份节点的快照目录展开成包内文件(分支与时间线分开存放)."""
+    def _collect_members(self, owners: Sequence[BackupNode]) -> list[PackageFile]:
+        """把每份内容的快照目录展开成包内文件(全部落在 ``timeline/`` 这棵树上).
+
+        ``owners`` 是 :func:`_content_plan` 判定需要落盘的节点; 其余节点不在这里
+        出现 —— 它们的内容与某个 owner 相同, config.json 用 ``content`` 字段指过去.
+        """
         members: list[PackageFile] = []
-        for node in nodes:
+        for node in owners:
             root = self._backups.snapshot_root(node)
-            prefix = TIMELINE_DIR if node.is_safety else BRANCHES_DIR
-            node_dir = f"{prefix}/{_node_key(node)}"
+            node_dir = f"{TIMELINE_DIR}/{_node_key(node)}"
             for path in sorted(root.rglob("*")):
                 if path.is_file():
                     relative = path.relative_to(root).as_posix()
@@ -245,9 +249,18 @@ class ExportService:
         return members
 
     def _build_config(
-        self, game_id: int, game: Game, nodes: Sequence[BackupNode]
+        self,
+        game_id: int,
+        game: Game,
+        nodes: Sequence[BackupNode],
+        content_of: Mapping[int | None, str],
     ) -> dict[str, object]:
-        """组装 config.json: 游戏、存档位置、备份结构与定时任务."""
+        """组装 config.json: 游戏、存档位置、备份结构与定时任务.
+
+        每个备份节点同时写明**时间线标识**(``id``, 它自己的目录名)与**分支归属**
+        (``parent_id``/``branch_name``/``is_safety``), 再用 ``content`` 指向它引用的
+        内容目录 —— 内容在包里只存一份, 两个视图的关系全靠这一份配置表达.
+        """
         keys = {node.id: _node_key(node) for node in nodes}
         current = self._games.current_backup(game_id)
         return {
@@ -255,7 +268,13 @@ class ExportService:
             "game": _game_config(game),
             "locations": self._location_configs(game_id),
             "backups": [
-                _backup_config(node, keys, current=node.id == current) for node in nodes
+                _backup_config(
+                    node,
+                    keys,
+                    content=content_of[node.id],
+                    current=node.id == current,
+                )
+                for node in nodes
             ],
             "schedule": self._schedule_config(game_id),
         }
@@ -312,11 +331,17 @@ def _game_config(game: Game) -> dict[str, object]:
 
 
 def _backup_config(
-    node: BackupNode, keys: Mapping[int | None, str], *, current: bool
+    node: BackupNode,
+    keys: Mapping[int | None, str],
+    *,
+    content: str,
+    current: bool,
 ) -> dict[str, object]:
     """config.json 里的一条备份节点(用包内稳定的目录名标识, 不泄露本机行 id)."""
     return {
         "id": _node_key(node),
+        # 该节点引用的内容目录名(相对 ``timeline/``): 内容相同的节点指向同一份.
+        "content": content,
         "parent_id": None if node.parent_id is None else keys.get(node.parent_id),
         "kind": node.node_kind,
         "title": node.title,
@@ -337,6 +362,45 @@ def _node_key(node: BackupNode) -> str:
     if not relative:  # pragma: no cover - snapshot_root 已先拒绝缺存储路径的节点
         raise ArchiveManagementError(f"备份节点缺少存储路径, 无法导出: #{node.id}")
     return Path(relative).name
+
+
+def _dedupe_key(node: BackupNode) -> str | None:
+    """返回可安全用于共享内容的去重键; 拿不出可靠键时返回 ``None``.
+
+    只有 ``verify_mode="sha256"`` 且记了整体内容哈希的节点才参与去重: 那份哈希
+    覆盖逐文件的路径/大小/哈希/链接目标, 相等即内容相同。名称模式下清单里没有
+    逐文件哈希, "路径 + 大小"相同的两份存档字节未必相同 —— 这类节点各存一份,
+    宁可多占空间也不冒认错内容的险.
+    """
+    if node.verify_mode == "sha256" and node.content_hash:
+        return node.content_hash
+    return None
+
+
+def _content_plan(
+    nodes: Sequence[BackupNode],
+) -> tuple[dict[int | None, str], list[BackupNode]]:
+    """决定每个节点引用哪份内容, 返回(节点 id -> 内容目录名, 需要落盘的节点).
+
+    相同去重键的节点共用**第一个**节点的目录: 包里只装一份, 其余节点在 config 里
+    用 ``content`` 指过去。去重只省包的体积, 不改变节点本身 —— 每个节点在配置里
+    仍是独立一条, 各自的时间线位置与分支归属原样保留.
+    """
+    content_of: dict[int | None, str] = {}
+    owners: list[BackupNode] = []
+    by_hash: dict[str, str] = {}
+    for node in nodes:
+        key = _node_key(node)
+        dedupe = _dedupe_key(node)
+        shared = by_hash.get(dedupe) if dedupe else None
+        if shared is not None:
+            content_of[node.id] = shared
+            continue
+        if dedupe:
+            by_hash[dedupe] = key
+        content_of[node.id] = key
+        owners.append(node)
+    return content_of, owners
 
 
 def _staging_dir(destination: Path) -> Path:

@@ -469,6 +469,97 @@ def test_gui_backup_reports_unchanged_save_with_dialog(
         app.destroy()
 
 
+def test_hotkey_backup_skips_unchanged_save_silently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """快捷键触发的备份遇到"存档未变化"不弹窗不提示(与自动备份同口径)."""
+    from archive_management.infrastructure.database import Database
+    from archive_management.ui.models import FeedbackKind
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    _patch_dialogs(monkeypatch)
+    notes: list[str] = []
+    monkeypatch.setattr(
+        main_mod, "info_dialog", lambda *_a, **k: notes.append(k["message"])
+    )
+    db = Database(tmp_path / "hotkey-quiet.db")
+    db.migrate()
+    service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+    game = service.add_game("快捷键静默")
+    save_dir = tmp_path / "save"
+    save_dir.mkdir()
+    (save_dir / "slot1.dat").write_text("v1", encoding="utf-8")
+    service.add_location(game.game_id, path=str(save_dir), kind="directory")
+    # 快捷键只对"启用中"的游戏生效(全局同一时刻只有一款), 新建游戏默认未启用.
+    service.set_game_enabled(game.game_id, True)
+
+    app = build_with_retry(_new_app, service)
+    try:
+        _pump(app)
+        app._select_game(game.game_id)
+        app._on_backup()
+        _drain(app)
+        assert len(service.list_backups(game.game_id)) == 1
+
+        from archive_management.services.hotkeys import ACTION_SAVE_NOW
+
+        app._run_hotkey(ACTION_SAVE_NOW)
+        _drain(app)
+
+        # 静默: 不新增节点、不弹窗、状态栏清空(不停在"正在备份…").
+        assert len(service.list_backups(game.game_id)) == 1
+        assert notes == []
+        assert app._busy is False
+        assert app._last_feedback == (FeedbackKind.INFO, "")
+    finally:
+        app.destroy()
+
+
+def test_hotkey_branch_creates_even_when_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """快捷键创建分支: 存档与选中节点一致时也照样建出分支节点(不弹窗)."""
+    from archive_management.infrastructure.database import Database
+    from archive_management.ui.models import FeedbackKind
+    from archive_management.ui.sql_backend import SqlArchiveService
+
+    _patch_dialogs(monkeypatch)
+    db = Database(tmp_path / "hotkey-branch.db")
+    db.migrate()
+    service = SqlArchiveService(db, backup_root=tmp_path / "backups")
+    game = service.add_game("快捷键分支")
+    save_dir = tmp_path / "save"
+    save_dir.mkdir()
+    (save_dir / "slot1.dat").write_text("v1", encoding="utf-8")
+    service.add_location(game.game_id, path=str(save_dir), kind="directory")
+    service.set_game_enabled(game.game_id, True)
+
+    app = build_with_retry(_new_app, service)
+    try:
+        _pump(app)
+        app._select_game(game.game_id)
+        app._on_backup()
+        _drain(app)
+        items = _service_backups(service, game.game_id)
+        assert len(items) == 1
+        app._select_backup(items[0])
+        _pump(app)
+
+        from archive_management.services.hotkeys import ACTION_CREATE_BRANCH
+
+        app._run_hotkey(ACTION_CREATE_BRANCH)
+        _drain(app)
+
+        items = _service_backups(service, game.game_id)
+        assert len(items) == 2
+        assert items[1].is_branch is True
+        assert app._last_feedback[0] == FeedbackKind.SUCCESS
+    finally:
+        app.destroy()
+
+
 def test_gui_backup_button_writes_snapshot_through_service(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -139,3 +139,88 @@ def test_pick_save_file_returns_choice_or_none(
     # 不预填名字时也要把选项传给对话框(Tk 收到空串 = 没有默认文件名).
     pickers.pick_save_file(title="导出游戏")
     assert seen[-1] == {"title": "导出游戏", "initialfile": ""}
+
+
+def test_resolve_start_dir_walks_to_the_nearest_existing_ancestor(
+    tmp_path: Path,
+) -> None:
+    """输入的地址能走到多近就走到多近: 目录原样, 文件取所在目录, 不存在退祖先."""
+    saves = tmp_path / "Saves"
+    saves.mkdir()
+    game = saves / "game.dat"
+    game.write_text("x", encoding="utf-8")
+
+    assert pickers.resolve_start_dir(f"  {saves} ") == str(saves)
+    assert pickers.resolve_start_dir(str(game)) == str(saves)
+    assert pickers.resolve_start_dir(str(saves / "NewGame")) == str(saves)
+    assert pickers.resolve_start_dir(str(saves / "NewGame" / "slots")) == str(saves)
+
+
+def test_resolve_start_dir_returns_none_when_unreachable() -> None:
+    """空白、相对路径、不存在的盘符都解析不出: 交给系统对话框用自己的默认."""
+    assert pickers.resolve_start_dir("   ") is None
+    assert pickers.resolve_start_dir("definitely/not/here") is None
+    assert pickers.resolve_start_dir("Q:/no/such/drive") is None
+
+
+def test_resolve_start_dir_expands_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``~`` 按用户主目录展开后再判断(用户从别处粘贴来的路径常带着它)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    assert pickers.resolve_start_dir("~") == str(tmp_path)
+    assert pickers.resolve_start_dir("~/saves-new") == str(tmp_path)
+
+
+def test_pick_directory_opens_at_the_typed_address(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """输入框有可解析内容时选择框直接在那里打开; 解析不出时不传位置."""
+    seen: list[dict[str, object]] = []
+
+    def ask_directory(**kwargs: object) -> str:
+        seen.append(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setattr(filedialog, "askdirectory", ask_directory)
+
+    picked = pickers.pick_directory(title="选择目录", start_from=str(tmp_path))
+
+    assert picked == str(tmp_path)
+    assert seen == [{"title": "选择目录", "initialdir": str(tmp_path)}]
+
+    pickers.pick_directory(title="选择目录", start_from="not/absolute")
+    assert seen[-1] == {"title": "选择目录"}
+
+
+def test_pick_file_preselects_the_typed_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """文件选择框: 输入指向文件时预选/预填文件名, 只剩目录时只开目录不猜名字."""
+    target = tmp_path / "slot1.dat"
+    target.write_text("x", encoding="utf-8")
+    seen: list[dict[str, object]] = []
+
+    def ask_open_file(**kwargs: object) -> str:
+        seen.append(kwargs)
+        return str(target)
+
+    monkeypatch.setattr(filedialog, "askopenfilename", ask_open_file)
+
+    pickers.pick_file(title="选择存档", start_from=str(target))
+    assert seen[-1] == {
+        "title": "选择存档",
+        "initialdir": str(tmp_path),
+        "initialfile": "slot1.dat",
+    }
+
+    pickers.pick_file(title="选择存档", start_from=str(tmp_path / "新档.dat"))
+    assert seen[-1]["initialfile"] == "新档.dat"
+
+    pickers.pick_file(title="选择存档", start_from=str(tmp_path))
+    assert "initialfile" not in seen[-1]
+
+    pickers.pick_file(title="选择存档", start_from="")
+    assert seen[-1] == {"title": "选择存档"}

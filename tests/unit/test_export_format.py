@@ -417,6 +417,22 @@ def test_read_package_rejects_an_unknown_format_version(tmp_path: Path) -> None:
         fmt.read_package(destination)
 
 
+def test_read_package_accepts_the_legacy_version_1(tmp_path: Path) -> None:
+    """版本 1 的旧包(branches/timeline 分放)仍可读: 用户手里的旧包不作废."""
+    destination = tmp_path / "legacy.archive.zip"
+    _write_raw_zip(
+        destination,
+        {
+            fmt.CONFIG_NAME: b"{}",
+            fmt.MANIFEST_NAME: _manifest_json(version=1),
+        },
+    )
+
+    contents = fmt.read_package(destination)
+
+    assert contents.manifest["version"] == 1
+
+
 def test_read_package_rejects_a_missing_or_broken_file(tmp_path: Path) -> None:
     """路径不存在、以及根本不是压缩包的文件."""
     missing = tmp_path / "nope.zip"

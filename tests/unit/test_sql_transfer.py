@@ -83,8 +83,8 @@ def test_run_export_writes_a_package_with_every_backup(tmp_path: Path) -> None:
         normalize_path(str(save))
     ]
     assert len(contents.config_list("backups")) == 1
-    # 手动备份进 branches/<节点>/, 而且内容真的搬了过去(不只是配置里记了一笔).
-    assert contents.member_paths("branches/") != ()
+    # 备份内容进 timeline/<内容>/, 而且内容真的搬了过去(不只是配置里记了一笔).
+    assert contents.member_paths("timeline/") != ()
     assert "备份 1 份" in message
     assert f"文件 {len(contents.entries)} 个" in message
     assert size_label(total) in message
@@ -204,7 +204,7 @@ def test_inspect_import_reads_a_package_without_changing_anything(
     assert inspection.game_name == "Demo"
     assert inspection.backup_count == 1
     # 包内文件数 = 节点目录下的成员减去该节点自己的快照清单.
-    assert inspection.file_count == len(contents.member_paths("branches/")) - 1
+    assert inspection.file_count == len(contents.member_paths("timeline/")) - 1
     assert inspection.matching_game_id is None
     assert [item.path for item in inspection.locations] == [normalize_path(str(save))]
     assert [item.exists_here for item in inspection.locations] == [True]

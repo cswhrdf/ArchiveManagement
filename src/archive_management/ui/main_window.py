@@ -414,7 +414,15 @@ class ArchiveApp(ctk.CTk):
 
         self._messages: queue.Queue[
             tuple[
-                Literal["ok", "err", "unchanged", "hotkey", "activation", "inspected"],
+                Literal[
+                    "ok",
+                    "err",
+                    "unchanged",
+                    "unchanged_quiet",
+                    "hotkey",
+                    "activation",
+                    "inspected",
+                ],
                 str,
             ]
         ] = queue.Queue()
@@ -2290,7 +2298,12 @@ class ArchiveApp(ctk.CTk):
         for button in self._stateful_buttons:
             self.kit.repaint_button(button, self.p)
 
-    def _on_backup(self) -> None:
+    def _on_backup(self, *, quick: bool = False) -> None:
+        """立即备份; ``quick=True`` 时(全局快捷键)存档未变化不弹窗, 静默跳过.
+
+        两种入口的**备份规则相同**(内容与当前节点一致就不建新节点), 差别只在
+        呈现: 手动点击弹窗告知, 快捷键与自动备份同口径静默(只留服务层 DEBUG 日志)。
+        """
         game = self._game
         if game is None or self._busy:
             return
@@ -2312,7 +2325,7 @@ class ArchiveApp(ctk.CTk):
             self._feedback(FeedbackKind.SUCCESS, message)
             self._reload_data()
 
-        self._submit(work, ok)
+        self._submit(work, ok, silent_unchanged=quick)
 
     def _on_cancel(self) -> None:
         """请求取消正在进行的备份(实际取消由后台线程在安全检查点响应)."""
@@ -2434,7 +2447,11 @@ class ArchiveApp(ctk.CTk):
         return tr(f"restore.problem_{code}")
 
     def _on_branch(self, *, quick: bool = False) -> None:
-        """创建分支; ``quick`` 为 True 时使用默认分支名且不弹窗(全局快捷键)."""
+        """创建分支; ``quick`` 为 True 时使用默认分支名且不弹窗(全局快捷键).
+
+        分支不受"存档未变化"限制: 无论内容与起点是否一致都会创建节点
+        (见 :meth:`archive_management.application.backup.BackupService.create_backup`)。
+        """
         game = self._game
         if game is None or self._backup_id is None or self._busy:
             return
@@ -3208,8 +3225,14 @@ class ArchiveApp(ctk.CTk):
         self,
         work: Callable[[], str],
         on_ok: Callable[[str], None],
+        *,
+        silent_unchanged: bool = False,
     ) -> None:
-        """在后台线程执行阻塞操作, 结果经队列回到主线程."""
+        """在后台线程执行阻塞操作, 结果经队列回到主线程.
+
+        ``silent_unchanged=True`` 时"存档未变化"不再提示用户(全局快捷键触发
+        的备份与自动备份同口径, 只留服务层 DEBUG 审计日志)。
+        """
         self._pending_ok = on_ok
         self._canceled = False
 
@@ -3217,7 +3240,12 @@ class ArchiveApp(ctk.CTk):
             try:
                 payload = work()
             except ContentUnchangedError as exc:
-                self._messages.put(("unchanged", exc.target_label))
+                self._messages.put(
+                    (
+                        "unchanged_quiet" if silent_unchanged else "unchanged",
+                        exc.target_label,
+                    )
+                )
             except Exception as exc:
                 self._messages.put(("err", str(exc)))
             else:
@@ -3316,7 +3344,7 @@ class ArchiveApp(ctk.CTk):
         if payload == ACTION_CREATE_BRANCH:
             self._on_branch(quick=True)
         else:
-            self._on_backup()
+            self._on_backup(quick=True)
 
     def _maybe_poll_activation(self) -> None:
         """到达当前间隔就在后台跑一次自动启停判断.
@@ -3391,7 +3419,9 @@ class ArchiveApp(ctk.CTk):
             self._feedback(FeedbackKind.INFO, tr("activation.auto_disabled", name=name))
 
     def _finish_message(
-        self, kind: Literal["ok", "err", "unchanged", "hotkey"], payload: str
+        self,
+        kind: Literal["ok", "err", "unchanged", "unchanged_quiet", "hotkey"],
+        payload: str,
     ) -> None:
         on_ok = self._pending_ok
         self._pending_ok = None
@@ -3403,6 +3433,12 @@ class ArchiveApp(ctk.CTk):
                 self._set_busy(False)
             return
         self._set_busy(False)
+        if kind == "unchanged_quiet":
+            # 快捷键触发的那次"存档未变化": 与自动备份同口径, 静默跳过(服务层
+            # 已留 DEBUG 日志)。把"正在备份…"的进行中提示一并清掉, 免得状态栏
+            # 永远停在一句已经结束的话上。
+            self._feedback(FeedbackKind.INFO, "")
+            return
         if kind == "unchanged":
             # 存档与参照备份完全一致: 弹窗告知, 不当作错误.
             message = tr("dialog.unchanged_backup", backup=payload)

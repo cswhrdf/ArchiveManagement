@@ -4,9 +4,10 @@
 本机草稿数据。包内结构固定::
 
     manifest.json            # 格式版本、导出时间、工具版本、游戏标识、逐条校验
-    config.json              # 游戏配置、存档位置、分支关系、时间线元数据、定时任务
-    branches/<节点>/...      # 分支树上的每个节点(内含该节点自己的快照清单)
-    timeline/<节点>/...      # 时间线上的安全点
+    config.json              # 游戏配置、存档位置、备份节点(时间线标识 + 分支归属 +
+                             # 内容引用)、定时任务
+    timeline/<内容>/...      # 备份内容只存一份: 内容相同的节点在 config.json 里用
+                             # ``content`` 指向同一个目录(含该内容自己的快照清单)
 
 本模块只做"格式"这一层: 写包时逐条算 sha256 并回读校验, 改名前先落在同级临时文件,
 因此**半成品不会出现在用户选择的路径上**; 读包时先按 zip 目录里的声明做上限检查
@@ -56,10 +57,15 @@ logger = logging.getLogger(__name__)
 
 #: 包格式标识(与版本号分开: 别的工具写的 zip 一眼能看出不是导出包).
 EXPORT_FORMAT = "archive-management.export"
-#: 包格式版本; 读包时只认这一个值, 未知版本直接拒绝.
-EXPORT_FORMAT_VERSION = 1
+#: 包格式版本(写侧): 2 起, 备份内容只按时间线存一份, 分支归属全部由 config.json
+#: 的节点字段表达, 内容相同的节点不再各装一遍.
+EXPORT_FORMAT_VERSION = 2
+#: 读侧支持的版本: 1 是"branches/ 与 timeline/ 分放、每个节点各存一份"的旧布局,
+#: 用户手里的旧包不作废, 读侧继续支持; 支持列表之外的版本直接拒绝, 不猜结构.
+SUPPORTED_FORMAT_VERSIONS = (EXPORT_FORMAT_VERSION, 1)
 MANIFEST_NAME = "manifest.json"
 CONFIG_NAME = "config.json"
+# 旧版(v1)包里普通备份所在的前缀; v2 起不再写出, 只为读旧包保留.
 BRANCHES_DIR = "branches"
 TIMELINE_DIR = "timeline"
 
@@ -529,7 +535,7 @@ def _read_json(archive: zipfile.ZipFile, name: str) -> Mapping[str, object]:
 def _check_manifest(
     manifest: Mapping[str, object], *, kind: str = PACKAGE_KIND
 ) -> None:
-    """校验格式标识、版本号与包类型(未知版本一律拒绝, 不猜结构).
+    """校验格式标识、版本号与包类型(支持列表之外的版本一律拒绝, 不猜结构).
 
     ``kind`` 的默认值是单游戏包, 因此**旧包(清单里没有 kind)照常能读**;
     两类包互喂时给出"需要什么、实际是什么"的可读报错, 而不是等更深一层才失败。
@@ -537,7 +543,7 @@ def _check_manifest(
     if manifest.get("format") != EXPORT_FORMAT:
         raise PackageError("这不是本工具的导出包")
     version = manifest.get("version")
-    if version != EXPORT_FORMAT_VERSION:
+    if version not in SUPPORTED_FORMAT_VERSIONS:
         raise PackageError(f"不支持的导出包格式版本: {version!r}")
     actual = manifest.get("kind", PACKAGE_KIND)
     if actual != kind:

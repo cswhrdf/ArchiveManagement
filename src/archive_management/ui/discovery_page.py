@@ -907,7 +907,9 @@ class DiscoveryPanel:
             self._palette,
             title=tr("dialog.monitor_add_title"),
             text=tr("dialog.monitor_add_prompt"),
-            browse=lambda: pick_directory(title=tr("dialog.monitor_add_title")),
+            browse=lambda current: pick_directory(
+                title=tr("dialog.monitor_add_title"), start_from=current
+            ),
         )
         if not path:
             log_action("monitor.add", basic=True, result="cancelled")
@@ -932,7 +934,9 @@ class DiscoveryPanel:
             title=tr("dialog.monitor_edit_title"),
             text=tr("dialog.monitor_edit_prompt"),
             initial=directory.path,
-            browse=lambda: pick_directory(title=tr("dialog.monitor_edit_title")),
+            browse=lambda current: pick_directory(
+                title=tr("dialog.monitor_edit_title"), start_from=current
+            ),
         )
         if not path:
             log_action("monitor.update", basic=True, result="cancelled")
@@ -1008,7 +1012,9 @@ class DiscoveryPanel:
             initial_paths=tuple(item.path for item in candidate.save_paths),
             add_text=tr("dialog.import_add_path"),
             confirm_text=tr("dialog.import_confirm"),
-            browse=lambda: pick_directory(title=tr("dialog.import_browse_title")),
+            browse=lambda current: pick_directory(
+                title=tr("dialog.import_browse_title"), start_from=current
+            ),
         )
         if chosen is None:
             log_action("discovery.import", basic=True, result="cancelled")
@@ -1083,7 +1089,9 @@ class DiscoveryPanel:
             title=tr("dialog.candidate_relocate_title"),
             text=tr("dialog.candidate_relocate_prompt"),
             initial=candidate.install_dir,
-            browse=lambda: pick_directory(title=tr("dialog.candidate_relocate_title")),
+            browse=lambda current: pick_directory(
+                title=tr("dialog.candidate_relocate_title"), start_from=current
+            ),
         )
         if not path:
             log_action("discovery.relocate", basic=True, result="cancelled")

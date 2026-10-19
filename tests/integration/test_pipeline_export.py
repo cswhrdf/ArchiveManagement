@@ -105,8 +105,8 @@ def test_export_carries_the_verification_mode_of_each_node(tmp_path: Path) -> No
     }
 
 
-def test_export_keeps_each_node_snapshot_under_its_own_prefix(tmp_path: Path) -> None:
-    """分支节点进 ``branches/``, 安全点进 ``timeline/``, 每个节点带自己的快照清单."""
+def test_export_keeps_content_under_the_single_timeline_tree(tmp_path: Path) -> None:
+    """v2 布局: 内容全部在 ``timeline/`` 下, 每个节点用 ``content`` 指向自己的内容目录."""
     database, game_id, _save = _fixture(tmp_path)
     service = ExportService(database, backup_root=tmp_path / "backups")
 
@@ -114,24 +114,53 @@ def test_export_keeps_each_node_snapshot_under_its_own_prefix(tmp_path: Path) ->
 
     contents = fmt.read_package(tmp_path / "Demo.archive.zip", verify_hashes=True)
     backups = contents.config_list("backups")
-    branches = [item["id"] for item in backups if not item["is_safety"]]
-    timeline = [item["id"] for item in backups if item["is_safety"]]
-    assert len(branches) == 2
-    assert len(timeline) == 1
-    for key in branches:
-        assert contents.member_paths(f"branches/{key}") != ()
-    assert contents.member_paths(f"timeline/{timeline[0]}") != ()
+    # 每个节点都带着内容引用, 引用的目录确实在包里; fixture 的三次备份内容各不相同,
+    # 因此每个节点各自独占一份内容(content 就是它自己的目录名).
+    for item in backups:
+        assert contents.member_paths(f"timeline/{item['content']}") != ()
+        assert item["content"] == item["id"]
+    assert not [
+        entry.path for entry in contents.entries if entry.path.startswith("branches/")
+    ], "v2 包里不再有 branches/ 这棵树"
     assert any(
         path.endswith("/snapshot.json")
-        for path in contents.member_paths(f"branches/{branches[-1]}")
+        for path in contents.member_paths(f"timeline/{backups[-1]['content']}")
     )
 
     staging = tmp_path / "staging"
     staging.mkdir()
     fmt.extract_package(contents, staging)
-    latest = sorted(staging.glob(f"branches/{branches[-1]}/loc-0/*"))
+    latest = sorted(staging.glob(f"timeline/{backups[-1]['content']}/loc-0/*"))
     assert [item.name for item in latest] == ["slot.dat"]
-    assert latest[0].read_text(encoding="utf-8") == "state-0+"
+    assert latest[0].read_text(encoding="utf-8") == "state-0++"
+
+
+def test_identical_content_is_packed_once_and_shared_by_config(tmp_path: Path) -> None:
+    """内容相同的节点在包里只装一份: 第三份备份与前一份共用同一个内容目录."""
+    database = helpers.migrated_database(tmp_path)
+    save = helpers.make_save_folder(tmp_path, content="state-0")
+    game_id = helpers.add_game(database, "Demo", path=save)
+    backups = BackupService(database, backup_root=tmp_path / "backups")
+    backups.create_backup(game_id, title="第一次")
+    helpers.touch_save(tmp_path)
+    backups.create_backup(game_id, title="第二次")
+    # 存档改回与第一次**完全相同**的字节: 与"当前节点"不同(不会被跳过),
+    # 但与前一份备份内容一致 —— 这正是去重要消除的重复.
+    (save / "slot.dat").write_text("state-0", encoding="utf-8")
+    backups.create_backup(game_id, title="回到最初")
+    service = ExportService(database, backup_root=tmp_path / "backups")
+
+    result = service.export_game(game_id, tmp_path / "Demo.archive.zip")
+
+    contents = fmt.read_package(tmp_path / "Demo.archive.zip", verify_hashes=True)
+    backups_config = contents.config_list("backups")
+    assert result.backups == len(backups_config) == 3
+    first, _second, third = backups_config
+    # 第三份引用第一份的内容目录; 包里只有两份内容, 3 份备份少装了一份重复内容.
+    assert third["content"] == first["id"]
+    assert third["content"] != third["id"]
+    content_dirs = {entry.path.split("/", 2)[1] for entry in contents.entries}
+    assert len(content_dirs) == 2
 
 
 def test_export_records_the_parent_and_current_node(tmp_path: Path) -> None:

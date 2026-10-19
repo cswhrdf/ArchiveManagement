@@ -50,6 +50,7 @@ from archive_management.exceptions import (
     ArchiveManagementError,
     ContentUnchangedError,
     OperationCancelledError,
+    SnapshotError,
 )
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
@@ -273,13 +274,16 @@ class BackupService:
             cancelled=cancelled,
             hash_files=policy.mode == "sha256",
         )
-        if parent is not None and parent.content_hash:
+        if parent is not None and kind != "branch":
+            # 分支是用户显式的"从这里分出去"动作: 无论存档是否变化都要落地,
+            # 因此不做"未变化"拒绝(全局快捷键的快速分支靠的就是这条)。
             self._reject_unchanged(
                 action=action,
                 game_id=game_id,
                 parent=parent,
                 destination=destination,
-                content_hash=result.content_hash,
+                result=result,
+                hashed=policy.mode == "sha256",
             )
         node = BackupNode(
             game_id=game_id,
@@ -689,14 +693,42 @@ class BackupService:
         game_id: int,
         parent: BackupNode,
         destination: Path,
-        content_hash: str,
+        result: SnapshotResult,
+        hashed: bool,
     ) -> None:
         """存档内容与参照节点一致时丢弃刚生成的快照并抛错.
 
-        "没有变化就不算一次新备份": 手动/分支备份由界面提示用户, 自动备份
-        与安全点由调用方静默跳过; 两种情形都会在这里留下 DEBUG 级日志。
+        "没有变化就不算一次新备份": 手动备份由界面提示用户(全局快捷键触发的
+        那次与自动备份同口径静默), 自动备份与安全点由调用方静默跳过; **创建
+        分支不走这里** —— 分支无论内容是否变化都会创建。判定为未变化与判定为
+        有变化两种情形都会留下 DEBUG 级日志。
+
+        比较按**双方共有的最严口径**进行。整体 ``content_hash`` 的口径随校验
+        方式变化: 名称模式算出的是"路径+大小"指纹, sha256 模式(或后台补齐
+        哈希之后)是内容指纹 —— 跨口径直接比字符串会把相同存档误判成"有变化"
+        (2026-10 用户实测: 名称模式备份被补齐哈希后, 重复备份相同存档被误建
+        新节点)。因此只有当本次算了哈希、且参照节点已补齐哈希时才比整体哈希;
+        否则退到忽略逐文件哈希的结构指纹(名称模式的固有精度)。参照节点缺
+        ``content_hash``(旧版导出包导入的节点等)时, 用它磁盘上的快照清单现算。
         """
-        if parent.content_hash != content_hash:
+        parent_entries = self._reference_entries(parent)
+        if parent_entries is not None:
+            strict = (
+                hashed and parent.verify_mode == "sha256" and bool(parent.content_hash)
+            )
+            unchanged = (
+                parent.content_hash == result.content_hash
+                if strict
+                else content_hash_of(parent_entries, include_hashes=False)
+                == content_hash_of(result.entries, include_hashes=False)
+            )
+        else:
+            # 参照快照读不出来(损坏或被手动删掉): 只能比字符串, 比不出就当有变化.
+            unchanged = bool(parent.content_hash) and (
+                parent.content_hash == result.content_hash
+            )
+        if not unchanged:
+            self._log_content_delta(action, game_id, parent, parent_entries, result)
             return
         remove_snapshot(destination)
         # 基础操作级别(DEBUG): 自动备份的重复跳过要留痕但不打扰用户.
@@ -706,12 +738,78 @@ class BackupService:
             game_id=game_id,
             result="skipped_unchanged",
             backup_id=parent.id,
-            hash=content_hash[:12],
+            hash=result.content_hash[:12],
         )
         raise ContentUnchangedError(
             f"存档内容与备份 #{parent.id} 完全一致, 本次备份已跳过",
             backup_id=parent.id,
             title=(parent.title or parent.branch_name or ""),
+        )
+
+    def _reference_entries(
+        self, parent: BackupNode
+    ) -> tuple[SnapshotEntry, ...] | None:
+        """读取参照节点的快照清单; 读不出来时返回 None(未变化判定退回字符串比较)."""
+        try:
+            return manifest_entries(self.snapshot_root(parent))
+        except (ArchiveManagementError, SnapshotError, OSError):
+            return None
+
+    @staticmethod
+    def _log_content_delta(
+        action: str,
+        game_id: int,
+        parent: BackupNode,
+        parent_entries: tuple[SnapshotEntry, ...] | None,
+        result: SnapshotResult,
+    ) -> None:
+        """判定"有变化"时留一份结构差异日志, 便于排查"明明没动却建了新备份".
+
+        例: 游戏在后台写了日志/云同步的临时文件时, 用户以为存档一点没变 —— 这条
+        DEBUG 日志直接给出新增/删除/大小变化/内容变化的文件数与前几个文件名,
+        不必再人工比对两份快照清单。参照清单读不出来时也留痕, 说明这次是按
+        "比不出的字符串"放行的。
+        """
+        if parent_entries is None:
+            log_action(
+                action,
+                basic=True,
+                game_id=game_id,
+                backup_id=parent.id,
+                result="changed",
+                reason="reference_manifest_unreadable",
+            )
+            return
+        reference = {entry.relative_path: entry for entry in parent_entries}
+        current = {entry.relative_path: entry for entry in result.entries}
+        added = sorted(current.keys() - reference.keys())
+        removed = sorted(reference.keys() - current.keys())
+        resized = sum(
+            1
+            for path, entry in current.items()
+            if path in reference and reference[path].size != entry.size
+        )
+        rehashed = sum(
+            1
+            for path, entry in current.items()
+            if path in reference
+            and reference[path].size == entry.size
+            and reference[path].sha256
+            and entry.sha256
+            and reference[path].sha256 != entry.sha256
+        )
+        log_action(
+            action,
+            basic=True,
+            game_id=game_id,
+            backup_id=parent.id,
+            result="changed",
+            added=len(added),
+            removed=len(removed),
+            resized=resized,
+            rehashed=rehashed,
+            added_sample=", ".join(added[:3]) or None,
+            removed_sample=", ".join(removed[:3]) or None,
         )
 
     def _resolve_parent(self, game_id: int, parent_id: int | None) -> BackupNode | None:

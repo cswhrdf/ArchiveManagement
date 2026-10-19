@@ -109,11 +109,9 @@ class PackageNode:
     current: bool
     files: int
     total_bytes: int
-
-    @property
-    def directory(self) -> str:
-        """该节点在包内的目录前缀."""
-        return f"{TIMELINE_DIR if self.is_safety else BRANCHES_DIR}/{self.key}"
+    # 该节点内容在包内的目录(v2 包: ``timeline/<content>``, 内容相同的节点共用同一
+    # 份; 旧版 v1 包: 节点自己的目录, 按 ``is_safety`` 分放 ``branches/`` 或 ``timeline/``).
+    directory: str
 
 
 @dataclass(frozen=True)
@@ -524,7 +522,12 @@ class ImportService:
     def _extract_node(
         self, contents: PackageContents, staging: Path, node: PackageNode
     ) -> list[BackupFileEntry]:
-        """解出一个节点并返回它自己的快照清单(清单里的条目就是要写库的文件清单)."""
+        """解出一个节点并返回它自己的快照清单(清单里的条目就是要写库的文件清单).
+
+        v2 包里内容相同的节点共用一个包内目录: 这里**每个节点都重新解一遍**(上一个
+        节点解出的目录已被 :meth:`_place_nodes` 整体搬走, 不会撞上"拒绝覆盖")——
+        去重省的是包的体积, 导入后每个节点仍然各有一份完整的磁盘目录.
+        """
         members = contents.member_paths(node.directory)
         if not members:
             raise PackageError(f"导出包里缺少节点内容: {node.key}")
@@ -756,11 +759,24 @@ def _report(progress: ProgressCallback | None, ratio: float, key: str) -> None:
 
 
 def _node(contents: PackageContents, raw: Mapping[str, object]) -> PackageNode:
-    """解析配置里的一条备份节点, 并统计它带来的内容文件数与体积."""
+    """解析配置里的一条备份节点, 并统计它带来的内容文件数与体积.
+
+    内容目录两代格式取法不同: v2 的配置里每个节点带 ``content`` 字段, 内容相同的
+    节点共用同一份; v1 旧包没有这个字段, 节点自己的目录就是内容, 按 ``is_safety``
+    分放在 ``branches/`` 或 ``timeline/`` 下。统计口径是"逻辑内容"(共用内容的节点
+    各算一份), 与导入后每个节点各占一份目录的落盘结果一致.
+    """
     key = _text(raw, "id")
     if not key:
         raise PackageError("导出包里的备份节点缺少 id")
-    prefix = f"{TIMELINE_DIR if _flag(raw, 'is_safety') else BRANCHES_DIR}/{key}/"
+    is_safety = _flag(raw, "is_safety")
+    content = _text(raw, "content")
+    if content:
+        _check_content_key(content)
+        directory = f"{TIMELINE_DIR}/{content}"
+    else:
+        directory = f"{TIMELINE_DIR if is_safety else BRANCHES_DIR}/{key}"
+    prefix = f"{directory}/"
     members = [
         entry
         for entry in contents.entries
@@ -770,7 +786,7 @@ def _node(contents: PackageContents, raw: Mapping[str, object]) -> PackageNode:
     return PackageNode(
         key=key,
         parent_key=_optional_text(raw, "parent_id"),
-        is_safety=_flag(raw, "is_safety"),
+        is_safety=is_safety,
         kind=_kind(raw),
         title=_text(raw, "title"),
         note=_text(raw, "note"),
@@ -781,7 +797,14 @@ def _node(contents: PackageContents, raw: Mapping[str, object]) -> PackageNode:
         current=_flag(raw, "current"),
         files=len(members),
         total_bytes=sum(entry.size for entry in members),
+        directory=directory,
     )
+
+
+def _check_content_key(content: str) -> None:
+    """内容目录名必须是单段普通名字(它要拼进解包路径, 不许夹带路径段)."""
+    if content in {"", ".", ".."} or "/" in content or "\\" in content:
+        raise PackageError(f"导出包里的备份节点内容目录非法: {content!r}")
 
 
 def _location(raw: Mapping[str, object]) -> PackageLocation:

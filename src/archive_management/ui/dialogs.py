@@ -653,14 +653,15 @@ def import_game_dialog(
     initial_paths: Sequence[str] = (),
     add_text: str = "",
     confirm_text: str | None = None,
-    browse: Callable[[], str | None] | None = None,
+    browse: Callable[[str], str | None] | None = None,
 ) -> tuple[str, tuple[str, ...]] | None:
     """询问游戏名与要写进库的存档路径; 取消或名称为空时返回 ``None``.
 
     路径区预填探测到的候选: 每条都能改, 取消勾选就不写库(用户可以只留其中几条),
     也能自己再加一条。``browse`` 非 None 时每条路径后面多一个"浏览…"按钮(与游戏
-    详情里添加/修改存档位置同一个目录选择框), 点它就能可视化挑目录。返回
-    ``(名称, 勾选且非空的路径)``。
+    详情里添加/修改存档位置同一个目录选择框), 点击时把这一行输入框的现有内容
+    传给 ``browse``(选择框据此直接在用户已输入的地址附近打开), 挑到的路径写回
+    这一行。返回 ``(名称, 勾选且非空的路径)``。
     """
     ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
     window = ctk.CTkToplevel(parent)
@@ -715,10 +716,10 @@ def import_game_dialog(
     entries: list[tuple[ctk.CTkCheckBox, ctk.CTkEntry]] = []
 
     def fill_from_browse(field: ctk.CTkEntry) -> None:
-        """把系统目录选择框里挑到的路径填进这一行(用户取消时保持原样)."""
+        """带着这一行的现有内容弹选择框, 挑到的路径写回(用户取消时保持原样)."""
         if browse is None:  # pragma: no cover - 按钮只在 browse 非空时创建
             return
-        picked = browse()
+        picked = browse(field.get().strip())
         if picked:
             field.delete(0, "end")
             field.insert(0, picked)
@@ -985,14 +986,15 @@ def ask_text(
     title: str,
     text: str,
     initial: str = "",
-    browse: Callable[[], str | None] | None = None,
+    browse: Callable[[str], str | None] | None = None,
     confirm_text: str | None = None,
     allow_empty: bool = False,
     context: str = "",
 ) -> str | None:
     """询问一段文本(如游戏名或路径); 取消或内容为空返回 None.
 
-    ``browse`` 非 None 时显示"浏览"按钮, 点击后把返回的路径填入输入框.
+    ``browse`` 非 None 时显示"浏览"按钮, 点击时把输入框现有内容作为参数传给
+    它(路径选择框据此直接在用户已输入的地址附近打开), 返回的路径填入输入框.
     ``allow_empty`` 为 True 时允许提交空内容(返回 ``""``), 供"清空配置"
     这类需要区分"取消"与"留空"的场景使用.
     ``context`` 非空时在提示下方补一行上下文(如重命名时的"当前名称")。
@@ -1070,7 +1072,7 @@ def ask_text(
 
     def fill_from_browse() -> None:
         if browse is not None:  # pragma: no branch - 按钮只在 browse 非空时创建
-            picked = browse()
+            picked = browse(entry.get().strip())
             if picked:
                 entry.delete(0, "end")
                 entry.insert(0, picked)

@@ -925,11 +925,12 @@ class ManageGameWindow:
         title = (
             tr("loc.add_dir_title") if kind == "directory" else tr("loc.add_file_title")
         )
-        pick = (
-            (lambda: pick_directory(title=title))
-            if kind == "directory"
-            else (lambda: pick_file(title=title))
-        )
+
+        def pick(current: str) -> str | None:
+            if kind == "directory":
+                return pick_directory(title=title, start_from=current)
+            return pick_file(title=title, start_from=current)
+
         path = ask_text(
             self._window,
             self._palette,
@@ -988,11 +989,14 @@ class ManageGameWindow:
         item = self._selected_item()
         if item is None:
             return
-        pick = (
-            (lambda: pick_directory(title=tr("loc.edit_dir_title")))
-            if item.path_kind == "directory"
-            else (lambda: pick_file(title=tr("loc.edit_file_title")))
-        )
+
+        def pick(current: str) -> str | None:
+            if item.path_kind == "directory":
+                return pick_directory(
+                    title=tr("loc.edit_dir_title"), start_from=current
+                )
+            return pick_file(title=tr("loc.edit_file_title"), start_from=current)
+
         path = ask_text(
             self._window,
             self._palette,

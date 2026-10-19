@@ -736,7 +736,7 @@ def _measure(app: Any, palette: Palette) -> list[str]:
                 palette,
                 title=tr("dialog.add_game_title"),
                 text=tr("dialog.add_game_prompt"),
-                browse=lambda: None,
+                browse=lambda _current: None,
             ),
         ),
         (

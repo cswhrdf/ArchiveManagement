@@ -693,14 +693,13 @@ def test_import_game_dialog_without_a_name_is_cancelled(
 
 
 def test_import_game_dialog_browse_fills_each_path_row(harness: _FakeParent) -> None:
-    """每条路径都有"浏览…"按钮: 挑到的目录直接填进那一行, 并随确认一起返回."""
+    """每条路径都有"浏览…"按钮: 按钮带着该行现有内容去挑, 挑到的目录写回那一行."""
     picked = ["C:/picked-one", "C:/picked-two"]
     calls: list[str] = []
 
-    def browse() -> str:
-        value = picked[len(calls)]
-        calls.append(value)
-        return value
+    def browse(current: str) -> str:
+        calls.append(current)
+        return picked[len(calls) - 1]
 
     def browse_all_then_confirm() -> None:
         for button in harness.buttons:
@@ -728,7 +727,7 @@ def test_import_game_dialog_browse_fills_each_path_row(harness: _FakeParent) -> 
         browse=browse,
     )
 
-    assert calls == picked
+    assert calls == ["C:/old-one", "C:/old-two"], "每行的现有内容都要传给 browse"
     assert result == ("星露谷", ("C:/picked-one", "C:/picked-two"))
 
 
@@ -1017,7 +1016,7 @@ def test_ask_text_returns_input_with_browse(harness: _FakeParent) -> None:
         DARK,
         title=tr("dialog.add_game_title"),
         text="请输入名称",
-        browse=lambda: None,
+        browse=lambda _current: None,
     )
     assert result == "我的游戏"
     assert tr("dialog.browse") in {button.text for button in harness.buttons}
@@ -2284,7 +2283,7 @@ def test_import_game_dialog_cancelled_browse_keeps_the_row(
         initial_paths=("C:/kept",),
         add_text=tr("dialog.import_add_path"),
         confirm_text=tr("dialog.import_confirm"),
-        browse=lambda: None,
+        browse=lambda _current: None,
     )
 
     assert result == ("星露谷", ("C:/kept",))
@@ -2321,10 +2320,12 @@ def test_edit_tags_dialog_removing_the_last_row_restores_an_empty_one(
 def test_ask_text_browse_fills_the_entry_and_ignores_a_cancelled_pick(
     harness: _FakeParent,
 ) -> None:
-    """浏览按钮的两种结果: 挑到路径就写进输入框, 取消则保持原样."""
+    """浏览带着输入框现有内容去挑; 挑到路径写回输入框, 取消保持原样."""
     picks: list[str | None] = ["C:/picked", None]
+    currents: list[str] = []
 
-    def browse() -> str | None:
+    def browse(current: str) -> str | None:
+        currents.append(current)
         return picks.pop(0)
 
     def click_browse_twice() -> None:
@@ -2337,6 +2338,7 @@ def test_ask_text_browse_fills_the_entry_and_ignores_a_cancelled_pick(
     result = dialogs.ask_text(harness, DARK, title="选目录", text="路径", browse=browse)
 
     assert picks == [], "两次点击都要真的请求过路径"
+    assert currents == ["", "C:/picked"], "第二次点击要看到第一次挑回来的路径"
     assert result == "C:/picked"
 
 

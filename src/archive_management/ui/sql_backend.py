@@ -9,6 +9,7 @@ GUI 的默认数据来源; 备份、分支、恢复、导出与删除原始存�
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -526,15 +527,19 @@ class SqlArchiveService:
         return str(_free_destination(self._exports_dir, stem))
 
     def delete_game(self, game_id: str, destination: str) -> None:
-        """先把这款游戏(配置 + 全部备份)导出成告别包, 再删除它的记录.
+        """先把这款游戏(配置 + 全部备份)导出成告别包, 再删除它的记录与备份文件.
 
         顺序是这次改动的全部要点: **导出成功之前一个字段都不删**。导出用的是与
         「导出游戏」按钮同一条服务路径, 因此包里是完整内容; 失败时异常原样抛出,
-        游戏记录、存档位置、探测候选记账与备份节点全部原样保留。导出成功后按原有
-        行为删除记录(其存档位置与候选记账随之清除), 并清掉封面/图标与译名缓存
-        这类可再生的派生数据 —— 备份目录里的备份文件始终保留。
+        游戏记录、存档位置、探测候选记账与备份节点全部原样保留。导出成功后删除
+        记录(其存档位置与候选记账随之清除), 清掉封面/图标与译名缓存这类可再生的
+        派生数据, 并**连同备份目录里的备份文件一起清理** —— 全部内容已经在告别包
+        里, 留着旧文件只是白占空间。文件删除是尽力而为: 个别目录被占用删不掉时
+        只记审计与警告, 不让整次删除失败(记录已删, 包里数据完好).
         """
         game, gid = self._game_ref(game_id)
+        # 备份节点行会随外键级联删除, 磁盘路径必须在删记录**之前**收集好.
+        snapshot_dirs = self._snapshot_dirs_for(gid)
         # 目录只在真的要写出告别包时才创建(界面里的确认框不该顺手建目录).
         self._exports_dir.mkdir(parents=True, exist_ok=True)
         result = self._export.export_game(gid, Path(destination))
@@ -550,9 +555,48 @@ class SqlArchiveService:
         games_cases.delete_game(self._database, gid)
         self._forget_artwork(game)
         self._forget_names(game)
+        self._remove_snapshot_files(game, snapshot_dirs)
         # 这个游戏已经不存在了: 把它从"本次会话已尝试过"的集合里拿掉, 免得再建同名
         # 游戏时被当成"试过了"而不再取图。
         self._artwork_attempts.discard(str(gid))
+
+    def _snapshot_dirs_for(self, game_id: int) -> list[Path]:
+        """收集这款游戏全部快照目录的磁盘路径(去重、排序, 只用于删除)."""
+        relpaths = {
+            node.storage_relpath
+            for node in self._nodes.list_for_game(game_id)
+            if node.storage_relpath
+        }
+        return sorted(self._backup_root / item for item in relpaths)
+
+    def _remove_snapshot_files(self, game: Game, dirs: Sequence[Path]) -> None:
+        """删除告别包之外不再需要的备份文件(尽力而为, 失败只记审计与警告)."""
+        removed = failed = 0
+        for path in dirs:
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                failed += 1
+                logger.warning("删除备份文件失败: %s (%s)", path, exc)
+                continue
+            removed += 1
+        self._remove_empty_game_folder(game)
+        log_action(
+            "game.delete_backups",
+            game_id=game.id,
+            removed=removed,
+            failed=failed,
+        )
+
+    def _remove_empty_game_folder(self, game: Game) -> None:
+        """备份删干净后把空出来的游戏目录一并移除(还留着东西就原样不动)."""
+        if not game.storage_key:
+            return
+        try:
+            (self._backup_root / game.storage_key).rmdir()
+        except OSError:
+            # 目录非空(有删不掉的残留或杂散文件)或已不存在: 不强求.
+            return
 
     def _forget_artwork(self, game: Game) -> None:
         """把这款游戏探测到的封面与图标缓存一起删掉, 连用户指定的那份一起清.

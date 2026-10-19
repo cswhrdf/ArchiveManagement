@@ -262,6 +262,8 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 - 产物为 Windows x64 的 **onedir** 压缩包、**onefile** 可执行文件、SHA-256 校验文件与构建元数据；发布包不得包含凭据、开发机绝对路径或测试数据。`spec` 文件显式声明入口模块、图标与 CustomTkinter 主题资源，并按需补充隐藏导入。
 - GitHub Actions 在 Windows runner 上构建并上传 `dist` 产物（手动触发也支持）。当前以Windows 为首要发布平台，macOS/Linux 打包未纳入。
 - 包体积与启动时间（2026-09-19，Windows x64 / Python 3.12，含量化封面依赖 Pillow 12.3.0）：**onedir 合计约 57.3 MB**（其中 `_internal/PIL` 约 12.8 MB，是本轮首次引入的开销）、**onefile 约 29.1 MB**；在已初始化的数据目录上启动到窗口出现**约 2.1 s**（同条件源码运行同样约 2.1 s，冻结后没有额外开销）。测量方式：`ArchiveManagement.exe gui --root <已初始化目录> --smoke 0.1` 连跑三次取稳定值。
+- **体积与冷启动复量（2026-10-19，`--clean` 重编）**：**onedir 86.4 MB / onefile 40.1 MB**（依赖涨了，上面那组 09-19 的数字已偏小）；`--version` 从起进程到退出是 **onedir 0.22 s / onefile 1.98 s** —— 差的 1.8 s 就是 onefile 解包到 `%TEMP%\_MEIxxxx` 的开销，但那是「进程能跑起来」的下限，**不是**「到窗口出现」的耗时（那个仍只有 onedir 的 2.1 s 基线，onefile 还没单独量）。
+- **产物不依赖源码树与系统 Python**（2026-10-19 本机实测）：把 `dist/ArchiveManagement` 整份拷到**仓库外**、并且把 `PATH` 只留 `C:\Windows\System32`（此时 `python` / 项目 `.venv` 都不在 PATH 上）之后，`--version` / `doctor --root <临时>` / `gui --root <临时> --smoke 3` 全部退出 0，`--root` 下 `config`/`data`/`logs` 三处齐、日志里一条「界面启动」；onedir 与 onefile 两份产物都是这个结果，同一份产物跑 `scripts/smoke_packaged.py` 是 10/10。**冻结版没有崩溃留证**：`coredumpy` 只声明在 `test` 开发组里、`src` 也不 import 它，打包版出事的现场只有退出码 + 日志 + Windows 事件查看器；而「一行 Python 都没装的干净机器」这类验收只能人工在 Windows Sandbox / 全新 VM 做（`--root` 记得指向临时目录，否则会写进真实用户目录）。
 - **打包版 vs 开发版的逐屏比对（本机工具，不进 CI）**：`uv run python scripts/capture_packaged.py still|restart|compare`。`still`/`restart` 是两级噪声标定（应得距离 0 / SSIM 1.0000），`compare` 用同一份种子的两个克隆成对抓拍 dev 与 exe，借 `create_allure_visual.py` 的比对算尺逐对判红绿（清单是 3 张静默可达的画面：主页列表 / 海报视图 / 空库；详情、发现分区等需点击到达的画面不在其内）。输出落在仓库外 `%TEMP%\am-j4-visual\` 下，验收材料不进仓库。要求系统缩放 100%、本地已有 onedir 产物。
 
 ## 发布

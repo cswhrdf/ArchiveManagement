@@ -483,8 +483,16 @@ def read_manifest_entries(raw: object) -> tuple[SnapshotEntry, ...]:
     return tuple(entries)
 
 
-def content_hash_of(entries: Iterable[SnapshotEntry]) -> str:
-    """对清单计算稳定的整体内容哈希(与顺序无关)."""
+def content_hash_of(
+    entries: Iterable[SnapshotEntry], *, include_hashes: bool = True
+) -> str:
+    """对清单计算稳定的整体内容哈希(与顺序无关).
+
+    ``include_hashes=False`` 时忽略逐文件 sha256, 只按路径/大小/类型/链接目标
+    计"结构指纹": 名称模式备份算出的 content_hash 就是这个口径, 它也因此是
+    跨校验方式比较两份清单是否一致的公共分母(见 ``application.backup`` 的
+    未变化判定)。
+    """
     digest = hashlib.sha256()
     for entry in sorted(entries, key=lambda item: item.relative_path):
         line = "\0".join(
@@ -492,7 +500,7 @@ def content_hash_of(entries: Iterable[SnapshotEntry]) -> str:
                 entry.relative_path,
                 str(entry.size),
                 entry.file_kind,
-                entry.sha256,
+                entry.sha256 if include_hashes else "",
                 entry.link_target or "",
             )
         )

@@ -159,11 +159,14 @@ def test_delete_game_exports_the_game_before_removing_it(tmp_path: Path) -> None
     contents = read_package(destination, verify_hashes=True)
     assert [item["path"] for item in contents.config_list("locations")] == [str(save)]
     assert len(contents.config_list("backups")) == 2
-    assert contents.member_paths("branches"), "包里的备份内容不该是空的"
+    assert contents.member_paths("timeline/"), "包里的备份内容不该是空的"
     # 删除真的发生了: 记录、存档位置与备份节点一条不剩.
     assert GameRepository(database).get(int(game_id)) is None
     assert SaveLocationRepository(database).list_for_game(int(game_id)) == []
     assert BackupRepository(database).list_for_game(int(game_id)) == []
+    # 备份文件也一并清掉了 —— 全部内容都在告别包里, 磁盘上不再留旧副本占空间.
+    assert _tree_files(tmp_path / "backups") == []
+    assert destination.is_file()
 
 
 def test_delete_game_reports_the_export_it_made(
@@ -179,6 +182,9 @@ def test_delete_game_reports_the_export_it_made(
     assert destination.name in exported
     assert str(tmp_path) not in exported, "审计里的路径必须脱敏"
     assert any("game.delete" in line for line in audit_log)
+    assert any("game.delete_backups" in line for line in audit_log), (
+        "备份文件清理要留痕"
+    )
 
 
 def test_delete_export_path_only_computes_and_never_reuses_a_name(
@@ -237,6 +243,7 @@ def test_a_failed_export_deletes_nothing_at_all(
     assert len(SaveLocationRepository(database).list_for_game(int(game_id))) == 1
     assert len(BackupRepository(database).list_for_game(int(game_id))) == 1
     assert _tree_files(tmp_path / "exports") == []
+    assert _tree_files(tmp_path / "backups") != [], "导出失败时备份文件必须原样保留"
 
 
 def test_unknown_game_operations_raise(tmp_path: Path) -> None:

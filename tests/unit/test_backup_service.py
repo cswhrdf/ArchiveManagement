@@ -169,18 +169,103 @@ def test_unchanged_backup_leaves_no_snapshot_directory(tmp_path: Path) -> None:
     assert len(list((tmp_path / "backups").rglob(MANIFEST_FILENAME))) == 1
 
 
-def test_create_branch_requires_changed_content(tmp_path: Path) -> None:
-    """分支同样要校验内容: 与分支起点一致时不产生节点."""
+def test_create_branch_creates_even_when_content_unchanged(tmp_path: Path) -> None:
+    """分支是显式动作: 与起点内容完全一致时也照样创建节点.
+
+    全局快捷键的快速分支靠这条 —— 存档没变时用户仍然想"从这里分出去试试"
+    (比如换 MOD 前先留个名目), 不该被"存档未变化"拦下来。
+    """
     service, game_id = _service(tmp_path)
     base = service.create_backup(game_id)
     assert base.id is not None
 
-    with pytest.raises(ContentUnchangedError):
-        service.create_branch(game_id, base.id, "黑棘")
-
-    _touch_save(tmp_path)
     branch = service.create_branch(game_id, base.id, "黑棘")
+
+    assert branch.node_kind == "branch"
     assert branch.branch_name == "黑棘"
+    assert branch.parent_id == base.id
+    assert [node.id for node in service.list_nodes(game_id)] == [base.id, branch.id]
+
+    # 紧接着再建一条分支同样成立(不因内容没变被拒).
+    again = service.create_branch(game_id, base.id, "黑棘·二")
+    assert again.id is not None
+
+
+def test_unchanged_detection_survives_hash_backfill(
+    tmp_path: Path, audit_log: list[str]
+) -> None:
+    """名称模式的备份被后台补齐哈希后, 未变化判定不能因口径改变而失效.
+
+    补齐会把节点上的 content_hash 从"路径+大小"指纹改写成内容指纹; 再按名称
+    模式备份相同存档时, 新结果的指纹仍是"路径+大小"口径 —— 直接比字符串会把
+    相同存档判成"有变化"而误建新节点(2026-10 用户在干净环境实测到的问题)。
+    """
+    service, game_id = _service(tmp_path, policy=VerificationPolicy(mode="name"))
+    node = service.create_backup(game_id)
+    assert node.id is not None
+    # 模拟界面在备份结束后自动排的后台补齐: 节点哈希口径被改写成内容指纹.
+    assert service.backfill_hashes(node) == 1
+
+    with pytest.raises(ContentUnchangedError):
+        service.create_backup(game_id)
+
+    assert [row.id for row in service.list_nodes(game_id)] == [node.id]
+    assert any("skipped_unchanged" in line for line in audit_log)
+
+
+def test_unchanged_detection_survives_policy_switch(tmp_path: Path) -> None:
+    """切换校验方式(sha256↔name)后, 相同存档仍应被识别为未变化."""
+    modes: list[VerificationMode] = ["sha256"]
+    service, game_id = _service(tmp_path, policy=lambda: VerificationPolicy(modes[0]))
+    service.create_backup(game_id)
+
+    modes[0] = "name"
+    with pytest.raises(ContentUnchangedError):
+        service.create_backup(game_id)
+
+    # 反方向: 名称模式起头, 切到 sha256 后同样跳过(参照节点缺哈希时按结构指纹比).
+    modes[0] = "name"
+    other, other_game = _service(
+        tmp_path / "switched", policy=lambda: VerificationPolicy(modes[0])
+    )
+    other.create_backup(other_game)
+
+    modes[0] = "sha256"
+    with pytest.raises(ContentUnchangedError):
+        other.create_backup(other_game)
+
+
+def test_unchanged_detection_with_blank_parent_hash(tmp_path: Path) -> None:
+    """参照节点没有 content_hash(旧版导出包导入的节点等)时, 用快照清单现算参照."""
+    service, game_id = _service(tmp_path)
+    node = service.create_backup(game_id)
+    assert node.id is not None
+    with Database(tmp_path / "app.db").session() as conn:
+        conn.execute(
+            "UPDATE backup_nodes SET content_hash = '' WHERE id = ?", (node.id,)
+        )
+
+    with pytest.raises(ContentUnchangedError):
+        service.create_backup(game_id)
+
+    assert [row.id for row in service.list_nodes(game_id)] == [node.id]
+
+
+def test_changed_backup_logs_a_content_delta(
+    tmp_path: Path, audit_log: list[str]
+) -> None:
+    """判定"有变化"时留下结构差异日志: 排查"明明没动却建了新备份"直接看数字."""
+    service, game_id = _service(tmp_path)
+    service.create_backup(game_id)
+    _touch_save(tmp_path)
+    (tmp_path / "save0" / "extra.cfg").write_text("new", encoding="utf-8")
+
+    service.create_backup(game_id)
+
+    delta = [line for line in audit_log if "result=changed" in line]
+    assert delta
+    assert "added=1" in delta[-1]
+    assert "extra.cfg" in delta[-1]
 
 
 def test_create_branch_marks_parent_and_name(tmp_path: Path) -> None:
