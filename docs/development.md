@@ -258,10 +258,11 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 - **在仓库根执行**：命令里的 `packaging/archive-management.spec` 是相对路径，`dist/` / `build/` 也落在当前目录下。
 - 版本直接读取 `packaging.py` 中的源码版本。
 - **本地产物**：`dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是这一条命令产的** —— 那是 `.github/workflows/release-build.yml` 的 `Prepare build files` 步骤在构建之后自己打包出来的，别把本地构建与发布产线混为一谈。
-- **双击就能用**：窗口化产物（`console=False`）不带子命令启动时会直接开界面（见「命令行」那条）；验证方式是双击（或直接启动 exe）后日志里应多一行 `界面启动`，而不是只有 `初始化完成`。
+- **双击就能用**：窗口化产物（`console=False`）不带子命令启动时会直接开界面（见「命令行」那条）；验证方式是双击（或直接启动 exe）后日志里应多一行 `界面启动`，而不是只有 `初始化完成`。CI 里这条路由 `release-build.yml` 的产物冒烟步骤自动守着（`uv run python scripts/smoke_packaged.py`：五条判据 × onedir/onefile），本地手动跑同一句即可复现。
 - 产物为 Windows x64 的 **onedir** 压缩包、**onefile** 可执行文件、SHA-256 校验文件与构建元数据；发布包不得包含凭据、开发机绝对路径或测试数据。`spec` 文件显式声明入口模块、图标与 CustomTkinter 主题资源，并按需补充隐藏导入。
 - GitHub Actions 在 Windows runner 上构建并上传 `dist` 产物（手动触发也支持）。当前以Windows 为首要发布平台，macOS/Linux 打包未纳入。
 - 包体积与启动时间（2026-09-19，Windows x64 / Python 3.12，含量化封面依赖 Pillow 12.3.0）：**onedir 合计约 57.3 MB**（其中 `_internal/PIL` 约 12.8 MB，是本轮首次引入的开销）、**onefile 约 29.1 MB**；在已初始化的数据目录上启动到窗口出现**约 2.1 s**（同条件源码运行同样约 2.1 s，冻结后没有额外开销）。测量方式：`ArchiveManagement.exe gui --root <已初始化目录> --smoke 0.1` 连跑三次取稳定值。
+- **打包版 vs 开发版的逐屏比对（本机工具，不进 CI）**：`uv run python scripts/capture_packaged.py still|restart|compare`。`still`/`restart` 是两级噪声标定（应得距离 0 / SSIM 1.0000），`compare` 用同一份种子的两个克隆成对抓拍 dev 与 exe，借 `create_allure_visual.py` 的比对算尺逐对判红绿（清单是 3 张静默可达的画面：主页列表 / 海报视图 / 空库；详情、发现分区等需点击到达的画面不在其内）。输出落在仓库外 `%TEMP%\am-j4-visual\` 下，验收材料不进仓库。要求系统缩放 100%、本地已有 onedir 产物。
 
 ## 发布
 

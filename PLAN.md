@@ -991,6 +991,7 @@ timeline/
 - 判据：**退出码 + 侧效应**（目录与 `logs/archive-management.log` 真的出现）。窗口化 exe 唯一可靠的"它真的干活了"的证据就是日志文件 —— 所以这一条同时替代了"读 stdout"。
 - **追加（2026-10-12，单实例闸门的验收，见 §49.1）**：用同一个临时 `--root` 先起第一个进程（`gui --root <临时> --smoke 30`，它会自己退，不占 runner），再起第二个。**可自动判的**是"第二个进程没有建界面且退 3"：那份 `--root` 的日志里**只有一条** `界面启动`，且第二个进程的退出码是 3（现在它不再弹模态框，所以退出码也能量得着）。
 - 坑：①一次冒烟必须**限时**（窗口起不来时 `gui` 会一直等 → 用外部超时兜住），onefile 首次启动要解包到 `%TEMP%\_MEIxxxx`，比 onedir 慢，超时给它留够（先量一次再定数字）；②`gui` 需要交互式桌面 —— windows runner 有会话，但**第一次上 CI 必须实看一眼**（本机绿说明不了 runner 绿）；③往 `release.yml` 加步骤会撞上 `tests/unit/test_test_config.py` 那四条工作流守卫（依赖分组、`--no-install-project`、`UV_NO_SYNC`、setup-uv 与缓存输入）—— 这批守卫是 `ci.yml` 与 `release.yml` **共用**的，新命令若引入新的组，还要在 `_CI_COMMAND_GROUPS` 里登记。（**落点已留好**：`release.yml` 的 `build` 作业里 `Build onedir and onefile packages` 之后有一段 `← J-3 的"产物冒烟"就落在这里` 的注释，按那个位置插即可 —— 门禁档与发布档会一起拿到它。）
+- **落地（2026-10-19，按上面口径实现）**：判据收进 **`scripts/smoke_packaged.py`**（stdlib-only，`uv run python` 不匹配任何"命令↔依赖组"守卫的模式，四条 uv 守卫零触碰），`release-build.yml` 的 `build` 作业在 `Build onedir and onefile packages` 之后、`Prepare build files` 之前只加一步 `Smoke test the built packages` 调它 —— 门禁档与发布档共用一处定义。五条判据 × 两份产物（①无参数启动：**platformdirs 自带 `WIN_PD_OVERRIDE_APPDATA`/`WIN_PD_OVERRIDE_LOCAL_APPDATA` 覆盖**把系统目录整体沙箱进临时目录，判据 = 沙箱日志出现"界面启动"且进程仍活着；②`--version` 退 0；③`doctor` 退 0 且 root 下 config/data/logs 三处真的出现；④`gui --smoke 3` 退 0 且日志含"界面启动"；⑤单实例：第二个退 3 且日志只有一条"界面启动"）。两份产物都跑全五条，是 ④"重跑①②③"的超集（单实例对 onefile 同样成立，闸门只在 `sys.frozen` 下生效，两份都是）。全部外部限时（等"界面启动" 90s / 自退命令 120s / 第二实例 60s），超时先 `taskkill /T /F` 杀树再判红。**本机验收（2026-10-19，Windows 11 / 100% 缩放，onedir `0.0.1` + onefile）：10/10 通过，退出码 0** —— 无参数启动的沙箱日志确实落在 `%TEMP%\am-smoke-…\<产物>-sandbox\ArchiveManagement\Logs\`（platformdirs 覆盖生效，真实应用目录零触碰）；单实例闸门两份产物都是"第二个退 3、日志只有一条'界面启动'"。守卫：`test_ci_workflow.py` 新增 `test_the_build_smokes_the_packages_it_produced`（钉步骤存在、位置在两步之间、调的是那份脚本）。**仍待办的只剩坑②**：第一次真在 CI runner 上跑时实看一眼（本机绿说明不了 runner 绿）。
 
 **J-4 打包版与开发版的逐屏比对（第 8 条的落地，拆五步）**
 
@@ -1001,6 +1002,13 @@ timeline/
 - **(e) 判据**：同一批画面、同参数抓的开发版与打包版逐张比，阈值沿用 §18.4 实测定下的 `MIN_SSIM=0.995 / MAX_HASH_DISTANCE=2`（这是**同一条渲染管线**上的两种打包方式，冻结本不该改变渲染）。**每处差异逐条给结论**：正当差异（字体回退、DPI、缩放）要写清"为什么正当"，缺图 / 空白 / 文案键裸露（`tr` 找不到键时原样返回键名）/ 整片默认色一律算缺陷，修在 spec 或代码里。
 - **先预判两类"看着像正当"的差异**（写在这里，免得当场拿它当借口）：①**DPI**：打包版有 PyInstaller 的清单、源码运行没有 → 非 100% 缩放下两者尺寸可能不同（所以 (b) 钉住 100%）；②**字体**：冻结后 Tk 仍用系统字体，CustomTkinter 自带字体若没进包会回退 —— 这是**缺陷**（`collect_data_files("customtkinter")` 本来就该把它带上，回退说明那条收集断了）。
 - 坑：打包版**首启动要多等**（onedir 冷启动也有 2 s 量级，见 `docs/development.md` 的实测），等窗口的轮询给足时间，别把"还在启动"判成"没起来"。
+
+- **可行性评估与口径修正（2026-10-19，评估完成；测量结果见本条末尾）**
+  - **借的是"算尺与纪律"，不是基线图本体**：可复用 = `create_allure_visual.compare_one`（phash+SSIM，惰性导入 imagehash/scikit-image，装在 visual 组）、`write_diff` 差异图、`crash_capture` 已在用例里验证过的 `ImageGrab.grab(window=hwnd)`（PrintWindow 按句柄抓，外部进程的窗口同样可用）。**不可复用 = 入库的 7 张基线**：那是 Linux+xvfb+Noto CJK 环境的像素，与 Windows 打包版之间没有可比性（`tests/visual-baselines/README.md` 的采集口径自己写明）。因此 J-4 的正确形态是**成对同机抓拍**：同一台 Windows、同一时段、同一份种子的两个克隆，各拍一份 dev/exe，比"这一对"——(e) 的"同参数抓"落到实处就是"同种子克隆 + 同抓取路径"。
+  - **(d) 清单按代码证据缩水（用户拍板：不加测试专用的产品级 CLI 开关）**：原 (d) 把"启停分区、发现分区"当作"命令行/热键能到达"——证据不支持：`gui` 只有 `--root/--verbose/--smoke`（`app.py:40-89`）；全局热键只注册了"立即备份/建分支"两个动作（`main_window.py:503-504`）；主页分区不持久化，启动固定 LIBRARY（`home_page.py:296`），切页签 = 输入合成（(d) 已排除）。**最终清单 3 张**：01 主页列表（默认启动）、02 海报视图（`HomeRepository.save_state` 预置 `layout=POSTER`，`repository.py:1570`）、07 空库（只 init 不灌数据）。03 详情 / 04 折叠分支 / 05 发现 / 06 启停出局。**主题变体也出局（第一轮实测照出来的，与用户"按证据缩水"的拍板同理）**：GUI 启动固定深色（`sql_backend.py:370` 把 `_theme` 初始化为 `_DEFAULT_THEME`），`set_theme` 只改内存不落盘（`sql_backend.py:828-832`），`config.theme` 与启动外观无关——切浅色只能点设置页（= 输入合成）。顺带照出一个**产品级事实**：设置页"外观"不跨启动生效、`config.theme` 是死配置（`doctor` 还会打印它）——是否要修不在 J-4 范围，记录在案。
+  - **落地物 `scripts/capture_packaged.py`（本机工具，不进 CI；不动 ci.yml/release.yml，工作流守卫零触碰）**：种子走**真实管道**（`GameRepository/SaveLocationRepository/BackupRepository.add` + `HomeRepository.save_state` + `save_config`，时刻取固定值——时间列在"同日背靠背两次抓拍"里必须同串），"灌一次、克隆两份"满足 (a) 的同源且种子不进仓库；抓取两侧**同一条路径**：按 `APP_DISPLAY_NAME` 匹配窗口标题（主窗口标题见 `main_window.py:458`）→ PrintWindow → 裁客户区（标题栏图标/边框不属于画面且两侧不保证逐位相同，裁掉消变量）——dev 一侧不再走 winfo 口径。**认窗不能按 pid 过滤（实测发现）**：Windows venv 的 `python.exe` 是重定向器（PEP 405），真解释器是它的子进程，Tk 窗口归孙进程所有，子进程 pid 永远对不上；改用"起前快照 + 新窗匹配"（起进程前记下桌面已有的同名窗口，之后只认新出现的句柄），躲开用户自己开着的那份。终止用 `taskkill /T /F` 杀整棵树（单杀 launcher 会留下真解释器进程）；窗口用 `--smoke` 兜底自退；等窗轮询给足 25 s（坑"首启动要多等"）。
+  - **可行性判据 = 三级噪声标定**（阈值 0.995/2 是 Linux 上"同渲染噪声=0"标出来的，Windows 双进程噪声没人量过）：L1 `still` 同窗连拍（抓取链路自检，应逐位相同）→ L2 `restart` dev 重启双拍（跨进程噪声）→ L3 `compare` dev vs exe（真信号）。L1/L2 干净 → 阈值原样沿用；不干净 → 按 README 的纪律给 J-4 按实测分布另定一组，**不动 `create_allure_visual.py` 的常量**。图片与逐条结论表落在仓库外（`%TEMP%\am-j4-visual\…`），同 :1029 的"验收材料不进仓库"。
+  - **测量结果（2026-10-19，Windows 11 / 100% 缩放 / onedir 产物 `0.0.1`，材料在 `%TEMP%\am-j4-visual\`）**：L1 同窗连拍 距离 0 / SSIM 1.0000；L2 dev 重启双拍 距离 0 / SSIM 1.0000 —— **Windows 双进程噪声底与 Linux 同为 0，阈值 0.995/2 原样沿用**。L3 三对画面（列表 / 海报 / 空库，1360×860 客户区）全部 距离 0 / SSIM 1.0000，dev 与 exe 截图 **SHA256 逐对相同**（独立于比对算尺的佐证），且 exe 侧每个 root 的 `logs/archive-management.log` 都有 `界面启动`（J-3 的判据，排除"抓错对象"的假绿）。**结论：冻结没有改变任何渲染像素——同一 venv 收进的 tcl/tk 与 CustomTkinter 资源完整，(e) 的"冻结本不该改变渲染"得到实测确认，J-4 就此收口；后续若 spec 的 `datas`/`collect_data_files` 变动，重跑 `compare` 即可复验。**
 
 **J-5 干净环境验证（分清哪档能自动、哪档只能人工）**
 
@@ -2798,7 +2806,7 @@ macOS 分片的 faulthandler dump 里同时挂着 **~30 个** `apscheduler/sched
   - 守卫跟着动: 上一条里的三个断言换成新形状 + 新增 `test_the_packaging_gate_path_never_holds_write_permission`(只读那一份里不许出现 `contents: write`、门禁只传 `ref`/`checks`、调用作业自己也没有 `permissions:`) —— 它守的正是"别再把这个报错带回来";
   - `tests/ci_workflow.py` 新增 `RELEASE_BUILD_WORKFLOW` 与 `UV_STEP_WORKFLOWS`(三份工作流一起过那四条 uv/依赖分组守卫); `test_test_config.py` 新增 `_calls_another_workflow()` 自动豁免"纯转调作业"(命令都在被调用的那份里, 那份自己也在这个循环里), 于是 `windows-package` 从 `_UV_FREE_JOBS` 里退出; `test_icon_assets.py` 的图标门禁改读构建那一份。
 - **仍然待定(留给阶段 K)**: 接不接 `--generate-notes`、要不要发 prerelease、平台范围(仍只 Windows, 见 K-6)、macOS 的签名/公证。
-- **没做的**: `dev` 的自动档(用户暂不做标签触发)、J-3 的冒烟步骤本身、门禁档产物的保留期策略(artifact 默认 90 天, 没额外配)。
+- **没做的**: `dev` 的自动档(用户暂不做标签触发)、门禁档产物的保留期策略(artifact 默认 90 天, 没额外配)。(J-3 的冒烟步骤已于 2026-10-19 落地, 见阶段 J 该条。)
 
 ---
 

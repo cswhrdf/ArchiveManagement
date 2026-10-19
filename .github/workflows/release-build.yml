@@ -124,11 +124,14 @@ jobs:
       - name: Build onedir and onefile packages
         run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
-      # ← 产物冒烟就落在这里(构建之后、打 release/ 之前): 「能编」与「产物能起」是两件事 ——
-      #   产物跑不起来就不该上传一个"看起来能发"的包。内容是四条判据(无参数启动 / `--version` /
-      #   `doctor` / `gui --smoke`) × onedir 与 onefile, 外加单实例闸门, 全部指向临时 `--root`;
-      #   每条都要限时(窗口起不来时 `gui` 会一直等), 判据取"退出码 + 侧效应"(临时 root 下真的出现
-      #   配置/数据/日志三处), 不读 stdout —— 窗口化产物没有控制台。
+      # 产物冒烟: 「能编」与「产物能起」是两件事 —— 跑不起来的包不该被上传成"看起来能发"的样子。
+      # 判据 = 退出码 + 侧效应(临时 root 下真的出现 config/data/logs、日志里出现"界面启动"),
+      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × onedir/onefile(无参数
+      # 启动 / --version / doctor / gui --smoke / 单实例闸门), 全部限时; onefile 首启要解包到
+      # %TEMP%\_MEIxxxx, 超时在脚本里按最坏情况给足。门禁档与发布档共用这一步; 位置由守卫
+      # test_the_build_smokes_the_packages_it_produced 钉住(构建之后、打 release/ 之前)。
+      - name: Smoke test the built packages
+        run: uv run python scripts/smoke_packaged.py
 
       - name: Prepare build files
         shell: pwsh

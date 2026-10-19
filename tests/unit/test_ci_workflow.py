@@ -1419,3 +1419,26 @@ def test_the_packaging_gate_always_reports_a_conclusion() -> None:
     assert '!= "success"' in block, "上游被跳过(result=skipped)也要判红"
     assert "exit 1" in block
     assert "::error::" in block, "判红时要在日志里说清原因"
+
+
+def test_the_build_smokes_the_packages_it_produced() -> None:
+    """构建之后必须先冒烟再上传: 「能编」与「产物能起」是两件事.
+
+    顺序本身就是不变式: 冒烟必须在 ``Build onedir and onefile packages`` 之后(那时才有
+    产物可冒)、在 ``Prepare build files`` 之前(跑不起来的包不该被打包上传成"看起来能发"
+    的样子)。判据是退出码 + 侧效应, 全在 ``scripts/smoke_packaged.py`` 里(工作流只负责
+    调用); 门禁档(ci.yml 的 windows-package)与发布档(release.yml)共用这一步, 两个入口
+    同时被它覆盖。
+    """
+    build = ci_workflow.RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
+    smoke = "- name: Smoke test the built packages"
+    assert smoke in build, "构建作业里必须有产物冒烟这一步"
+    smoke_at = build.index(smoke)
+    assert smoke_at > build.index("Build onedir and onefile packages"), (
+        "冒烟必须在构建之后(不然没有产物可冒)"
+    )
+    assert smoke_at < build.index("Prepare build files"), (
+        "冒烟必须在打 release/ 之前(跑不起来的包不上传)"
+    )
+    step = build.split(smoke, 1)[1].split("- name:", 1)[0]
+    assert "scripts/smoke_packaged.py" in step, "判据只在脚本里一处定义, 工作流只调用"
