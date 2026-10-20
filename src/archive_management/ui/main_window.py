@@ -2742,7 +2742,7 @@ class ArchiveApp(ctk.CTk):
         self._finish_single_inspection(inspection)
 
     def _finish_single_inspection(self, inspection: ImportInspection) -> None:
-        """单游戏包: 原有的冲突对话框(语义一字未改)."""
+        """单游戏包: 冲突对话框(同名导入的目标由后端自动确定, 对话框里没有目标区)."""
         prompt = import_prompt(inspection, self.backend.list_games())
         choice = import_package_dialog(
             self,
@@ -2752,10 +2752,7 @@ class ArchiveApp(ctk.CTk):
             locations_label=tr("dialog.import_locations"),
             locations_hint=tr("dialog.import_locations_hint"),
             strategy_label=tr("dialog.import_strategy"),
-            strategies=import_strategies(has_targets=bool(prompt.targets)),
-            target_label=tr("dialog.import_target"),
-            target_hint=tr("dialog.import_target_hint"),
-            target_locked_hint=tr("dialog.import_target_locked"),
+            strategies=import_strategies(merge_label=prompt.merge_label),
             confirm_text=tr("dialog.import_confirm"),
         )
         if choice is None:
@@ -2774,7 +2771,6 @@ class ArchiveApp(ctk.CTk):
             locations_label=tr("dialog.import_locations"),
             locations_hint=tr("dialog.import_locations_hint"),
             strategy_label=tr("dialog.import_strategy"),
-            target_label=tr("dialog.import_target"),
             confirm_text=tr("dialog.import_confirm"),
         )
         if selection is None:
@@ -2848,23 +2844,24 @@ class ArchiveApp(ctk.CTk):
             return self.backend.run_import(
                 inspection,
                 strategy=choice.strategy,
-                target_game_id=choice.target_game_id,
                 locations=choice.locations,
             )
 
         def ok(message: str) -> None:
             self._set_busy(False)
             self._feedback(FeedbackKind.SUCCESS, message)
-            self._refresh_after_manage(select=self._imported_game(before, choice))
+            self._refresh_after_manage(select=self._imported_game(before, inspection))
 
         self._submit(work, ok)
 
-    def _imported_game(self, before: set[str], choice: ImportChoice) -> str | None:
-        """导入后该选中哪款游戏: 新建的那一款, 否则就是合并的目标.
+    def _imported_game(
+        self, before: set[str], inspection: ImportInspection
+    ) -> str | None:
+        """导入后该选中哪款游戏: 新建的那一款, 否则就是同名导入的目标.
 
         后端只回一条可展示的提示(没有回传游戏 id), 所以"新建的是哪一款"用导入
-        前后游戏库的差集算出来: 差集里有就选它, 没有(合并/跳过)就选合并目标,
-        两者都没有就返回 ``None``, 由调用方保持原选中。
+        前后游戏库的差集算出来: 差集里有就选它, 没有(同名导入/跳过)就选体检里
+        匹配到的那款同名游戏, 两者都没有就返回 ``None``, 由调用方保持原选中。
         """
         created = [
             game.game_id
@@ -2873,7 +2870,11 @@ class ArchiveApp(ctk.CTk):
         ]
         if created:
             return created[0]
-        return choice.target_game_id
+        return (
+            None
+            if inspection.same_name_game_id is None
+            else str(inspection.same_name_game_id)
+        )
 
     def _on_toggle_theme(self) -> str:
         """切换浅/深主题并返回生效主题名(供设置窗口刷新按钮文案)."""

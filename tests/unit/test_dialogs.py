@@ -1265,25 +1265,20 @@ def test_restore_dialog_shows_danger_note_in_same_window(
 def _import_args(
     *,
     locations: tuple[models.ImportLocationRow, ...] = (),
-    targets: tuple[models.ImportTargetOption, ...] = (),
-    match: str = "库里疑似同一款游戏: 星际拓荒(已默认选中)",
+    merge_label: str = tr("dialog.import_strategy_merge_named", name="星际拓荒"),
 ) -> dict[str, Any]:
-    """导入对话框的参数(策略选项按"有没有目标游戏"给, 与界面同一套规则)."""
+    """导入对话框的参数(策略选项按"库里有没有同名游戏"给, 与界面同一套规则)."""
     return {
         "title": tr("dialog.import_title"),
         "prompt": models.ImportPrompt(
             summary="包摘要",
-            match_text=match,
             locations=locations,
-            targets=targets,
+            merge_label=merge_label,
         ),
         "locations_label": tr("dialog.import_locations"),
         "locations_hint": tr("dialog.import_locations_hint"),
         "strategy_label": tr("dialog.import_strategy"),
-        "strategies": models.import_strategies(has_targets=bool(targets)),
-        "target_label": tr("dialog.import_target"),
-        "target_hint": tr("dialog.import_target_hint"),
-        "target_locked_hint": tr("dialog.import_target_locked"),
+        "strategies": models.import_strategies(merge_label=merge_label),
         "confirm_text": tr("dialog.import_confirm"),
     }
 
@@ -1298,36 +1293,23 @@ def _rows() -> tuple[models.ImportLocationRow, ...]:
     )
 
 
-def _targets() -> tuple[models.ImportTargetOption, ...]:
-    return (
-        models.ImportTargetOption(game_id="7", label="星际拓荒", selected=True),
-        models.ImportTargetOption(game_id="9", label="山海旅人"),
-    )
-
-
 def _strategy_radios(harness: _FakeParent) -> list[_FakeRadio]:
-    """导入方式那组单选按钮(目标游戏那组的 value 是游戏 id, 不在此列)."""
+    """导入方式那组单选按钮(对话框里只有这一组)."""
     keys = {STRATEGY_NEW, STRATEGY_MERGE, STRATEGY_SKIP}
     return [radio for radio in harness.radios if radio.value in keys]
 
 
-def _target_radios(harness: _FakeParent) -> list[_FakeRadio]:
-    """目标游戏那组单选按钮."""
-    return [radio for radio in harness.radios if radio.value in {"7", "9"}]
-
-
 def test_import_package_dialog_maps_only_filled_rows(harness: _FakeParent) -> None:
-    """确认后返回策略 + 目标 + "填了路径的那几条"映射(留空的那条不导入)."""
+    """确认后返回策略 + "填了路径的那几条"映射(留空的那条不导入)."""
     harness.click_text = tr("dialog.import_confirm")
     harness.entry_values = ["", "E:/local-saves"]
 
     result = dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+        harness, DARK, **_import_args(locations=_rows())
     )
 
     assert result == models.ImportChoice(
         strategy=STRATEGY_NEW,
-        target_game_id=None,
         locations={1: "E:/local-saves"},
     )
     assert len(harness.windows) == 1
@@ -1349,84 +1331,58 @@ def test_import_package_dialog_defaults_to_the_packaged_path(
     assert result.locations == {0: "D:/saves"}
 
 
-def test_import_package_dialog_merges_into_the_selected_game(
+def test_import_package_dialog_explains_a_package_without_locations(
     harness: _FakeParent,
 ) -> None:
-    """选"合并"时才返回目标游戏, 并顺手解锁目标游戏的单选区."""
+    """包里一条存档位置都没有时, 位置区改为一句说明(2026-10-20 实测: 空白看着像坏了)."""
+    harness.click_text = tr("dialog.import_confirm")
+
+    result = dialogs.import_package_dialog(harness, DARK, **_import_args())
+
+    assert result is not None
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert tr("dialog.import_no_locations") in texts
+    assert tr("dialog.import_locations_hint") not in texts, "没有位置时不再讲映射规则"
+    assert harness.entries == [], "没有位置就没有输入框"
+
+
+def test_import_package_dialog_returns_the_merge_strategy_without_a_target(
+    harness: _FakeParent,
+) -> None:
+    """选"导入到同名游戏"只带回策略: 目标由后端按原始名称自动确定."""
     harness.click_text = tr("dialog.import_confirm")
     harness.on_wait = lambda: next(
         radio for radio in _strategy_radios(harness) if radio.value == STRATEGY_MERGE
     ).invoke()
 
     result = dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+        harness, DARK, **_import_args(locations=_rows())
     )
 
     assert result is not None
     assert result.strategy == STRATEGY_MERGE
-    assert result.target_game_id == "7", "默认应选中匹配到的那一款"
-    assert [radio.kwargs.get("state") for radio in _target_radios(harness)] == [
-        "normal",
-        "normal",
-    ]
-    assert [radio.kwargs.get("state") for radio in _strategy_radios(harness)] == [
-        None,
-        None,
-        None,
-    ], "只置灰目标区, 导入方式那一组保持可用"
-
-
-def test_import_package_dialog_disables_the_target_picker_before_merging(
-    harness: _FakeParent,
-) -> None:
-    """默认的"新建游戏"用不到目标游戏: 目标区一开始就是置灰的."""
-    harness.click_text = tr("dialog.import_confirm")
-
-    dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
-    )
-
-    assert [radio.kwargs.get("state") for radio in _target_radios(harness)] == [
-        "disabled",
-        "disabled",
+    assert result.locations == {0: "D:/saves"}
+    # 窗口里只有策略这一组单选按钮(同名选项的文案里已经写明是哪一款).
+    assert [radio.value for radio in harness.radios] == [
+        STRATEGY_NEW,
+        STRATEGY_MERGE,
+        STRATEGY_SKIP,
     ]
 
 
-def test_import_package_dialog_defaults_to_the_first_target(
+def test_import_package_dialog_without_a_same_name_game_offers_no_merge(
     harness: _FakeParent,
 ) -> None:
-    """调用方没标预选时默认选第一款, 而不是留空(留空会让合并没有目标)."""
-    harness.click_text = tr("dialog.import_confirm")
-    harness.on_wait = lambda: next(
-        radio for radio in _strategy_radios(harness) if radio.value == STRATEGY_MERGE
-    ).invoke()
-    targets = (
-        models.ImportTargetOption(game_id="7", label="星际拓荒"),
-        models.ImportTargetOption(game_id="9", label="山海旅人"),
-    )
-
-    result = dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), targets=targets)
-    )
-
-    assert result is not None
-    assert result.target_game_id == "7"
-
-
-def test_import_package_dialog_without_candidates_offers_no_merge(
-    harness: _FakeParent,
-) -> None:
-    """库里没有可合并的游戏时不给"合并"选项, 也不返回目标游戏."""
+    """库里没有同名游戏时不给"导入到同名游戏", 默认按"新建"返回."""
     harness.click_text = tr("dialog.import_confirm")
 
     result = dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), match="")
+        harness, DARK, **_import_args(locations=_rows(), merge_label="")
     )
 
     assert [radio.value for radio in harness.radios] == [STRATEGY_NEW, STRATEGY_SKIP]
     assert result is not None
     assert result.strategy == STRATEGY_NEW
-    assert result.target_game_id is None
 
 
 def test_import_package_dialog_skip_returns_the_skip_strategy(
@@ -1443,7 +1399,7 @@ def test_import_package_dialog_skip_returns_the_skip_strategy(
     )
 
     assert result == models.ImportChoice(
-        strategy=STRATEGY_SKIP, target_game_id=None, locations={0: "D:/saves"}
+        strategy=STRATEGY_SKIP, locations={0: "D:/saves"}
     )
 
 
@@ -1452,25 +1408,26 @@ def test_import_package_dialog_cancel_returns_none(harness: _FakeParent) -> None
     harness.click_text = tr("dialog.cancel")
 
     result = dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
+        harness, DARK, **_import_args(locations=_rows())
     )
 
     assert result is None
     assert harness.windows[0].destroyed is True
 
 
-def test_import_package_dialog_shows_the_summary_and_the_match(
+def test_import_package_dialog_shows_the_summary_and_the_named_merge_option(
     harness: _FakeParent,
 ) -> None:
-    """包摘要与"疑似同一款"的提示都在同一个窗口里给出."""
+    """包摘要与"导入到同名游戏[名字]"的选项都在同一个窗口里给出."""
     harness.click_text = tr("dialog.cancel")
-    args = _import_args(locations=_rows(), targets=_targets())
+    args = _import_args(locations=_rows())
 
     dialogs.import_package_dialog(harness, DARK, **args)
 
     texts = [label.kwargs.get("text") for label in harness.labels]
     assert args["prompt"].summary in texts
-    assert args["prompt"].match_text in texts
+    radio_texts = [radio.kwargs.get("text") for radio in harness.radios]
+    assert args["prompt"].merge_label in radio_texts
     # 每行存档位置都要把包内路径摆出来(用户得知道这一条对应哪个目录).
     assert "D:/saves(本机已存在)" in texts
     assert "E:/gone" in texts
@@ -1686,9 +1643,7 @@ def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
     """评审时发现: 正文可以滚, 但「取消 / 导入」永远留在滚动区外面."""
     harness.click_text = tr("dialog.cancel")
 
-    dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
-    )
+    dialogs.import_package_dialog(harness, DARK, **_import_args(locations=_rows()))
 
     window = harness.windows[0]
     for text in (tr("dialog.cancel"), tr("dialog.import_confirm")):
@@ -1697,40 +1652,6 @@ def test_import_package_dialog_keeps_the_buttons_outside_the_scrolling_body(
         )
         # 按钮在 window → buttons 框里, 而不是在正文滚动区里。
         assert _parent_of(_parent_of(button)) is window
-
-
-def test_import_package_dialog_explains_why_the_target_list_is_locked(
-    harness: _FakeParent,
-) -> None:
-    """评审时发现: 没选"合并"时目标区要写明原因并看得出是禁用的, 选中后说明换回来."""
-    dialogs.import_package_dialog(
-        harness, DARK, **_import_args(locations=_rows(), targets=_targets())
-    )
-
-    targets = _target_radios(harness)
-    assert targets, "应当有可合并的目标游戏"
-    assert {radio.kwargs.get("state") for radio in targets} == {"disabled"}
-    assert {radio.kwargs.get("text_color_disabled") for radio in targets} == {
-        DARK.text_disabled
-    }
-    assert {radio.kwargs.get("fg_color") for radio in targets} == {
-        DARK.accent_soft_border
-    }, "选中态用淡强调色, 不与「导入」按钮的实心绿撞色"
-
-    hint = next(
-        label
-        for label in harness.labels
-        if label.kwargs.get("text") == tr("dialog.import_target_locked")
-    )
-    assert hint is not None
-
-    merge = next(
-        radio for radio in _strategy_radios(harness) if radio.value == STRATEGY_MERGE
-    )
-    merge.invoke()
-
-    assert hint.kwargs.get("text") == tr("dialog.import_target_hint")
-    assert {radio.kwargs.get("state") for radio in targets} == {"normal"}
 
 
 # ---------------------------------------------------------------- 批量导出
@@ -1901,7 +1822,7 @@ def test_export_batch_dialog_rows_put_the_metadata_on_its_own_line(
 
 
 def _batch_import_prompt() -> models.BatchImportPrompt:
-    """两行: 第一行有两条存档位置与可合并的目标, 第二行什么都没有."""
+    """两行: 第一行有两条存档位置与同名选项, 第二行什么都没有."""
     return models.BatchImportPrompt(
         summary="包内 2 款游戏",
         hint="逐款选择导入方式",
@@ -1910,23 +1831,21 @@ def _batch_import_prompt() -> models.BatchImportPrompt:
                 entry="Demo.archive.zip",
                 name="Demo",
                 meta="Windows · AppID 730",
-                match_text="库里疑似同一款游戏: 星际拓荒(已默认选中)",
                 locations=_rows(),
-                strategies=models.import_strategies(has_targets=True),
-                targets=_targets(),
+                strategies=models.import_strategies(
+                    merge_label=tr(
+                        "dialog.import_strategy_merge_named", name="星际拓荒"
+                    )
+                ),
                 strategy=STRATEGY_NEW,
-                target_game_id="7",
             ),
             models.BatchImportRow(
                 entry="Other.archive.zip",
                 name="Other",
                 meta="Windows",
-                match_text="",
                 locations=(),
-                strategies=models.import_strategies(has_targets=False),
-                targets=(),
+                strategies=models.import_strategies(),
                 strategy=STRATEGY_NEW,
-                target_game_id=None,
             ),
         ),
     )
@@ -1939,7 +1858,6 @@ def _batch_import_args() -> dict[str, Any]:
         "locations_label": tr("dialog.import_locations"),
         "locations_hint": tr("dialog.import_locations_hint"),
         "strategy_label": tr("dialog.import_strategy"),
-        "target_label": tr("dialog.import_target"),
         "confirm_text": tr("dialog.import_confirm"),
     }
 
@@ -1956,7 +1874,7 @@ def _batch_strategy_radios(harness: _FakeParent) -> list[list[_FakeRadio]]:
 
 
 def test_batch_import_dialog_collects_defaults_per_game(harness: _FakeParent) -> None:
-    """确认后逐款返回选择: 默认"新建", 只带预填过的存档位置, 没目标的那款不带目标."""
+    """确认后逐款返回选择: 默认"新建", 只带预填过的存档位置."""
     harness.click_text = tr("dialog.import_confirm")
 
     result = dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
@@ -1964,11 +1882,9 @@ def test_batch_import_dialog_collects_defaults_per_game(harness: _FakeParent) ->
     assert result is not None
     assert result.choices == {
         "Demo.archive.zip": models.ImportChoice(
-            strategy=STRATEGY_NEW, target_game_id=None, locations={0: "D:/saves"}
+            strategy=STRATEGY_NEW, locations={0: "D:/saves"}
         ),
-        "Other.archive.zip": models.ImportChoice(
-            strategy=STRATEGY_NEW, target_game_id=None, locations={}
-        ),
+        "Other.archive.zip": models.ImportChoice(strategy=STRATEGY_NEW, locations={}),
     }
     # 每款游戏一行卡片: 名称/标识/存档位置都摆出来了(用户得知道这一行是哪一款).
     texts = [label.kwargs.get("text") for label in harness.labels]
@@ -1985,17 +1901,12 @@ def test_batch_import_dialog_keeps_cards_compact_and_uniform(
     dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
 
     texts = [label.kwargs.get("text") for label in harness.labels]
-    # 四个小标题同一套样式(次要色), 其中"疑似同一款"原来是最亮的提示色, 看着像链接。
+    # 小标题同一套样式(次要色): 卡片里只有"存档位置"与"导入方式"两种小标题。
     headings = [
         label
         for label in harness.labels
         if label.kwargs.get("text")
-        in {
-            tr("dialog.import_strategy"),
-            tr("dialog.import_target"),
-            tr("dialog.import_locations"),
-            "库里疑似同一款游戏: 星际拓荒(已默认选中)",
-        }
+        in {tr("dialog.import_strategy"), tr("dialog.import_locations")}
     ]
     assert len(headings) >= 3
     assert {label.kwargs.get("text_color") for label in headings} == {
@@ -2003,10 +1914,10 @@ def test_batch_import_dialog_keeps_cards_compact_and_uniform(
     }, "小标题不该有的亮有的暗"
     # 元信息不再单独占一行(它是右侧那一列), 名称与它同一行。
     assert "Windows · AppID 730" in texts
-    # 输入框与下拉框统一高度: 同一张卡片里不再出现 28px 与 30px 两种控件高度。
+    # 输入框高度统一: 同一张卡片里不再出现 28px 与 30px 两种控件高度。
     heights = {
         widget.kwargs.get("height")
-        for widget in [*harness.entries, *harness.combos]
+        for widget in harness.entries
         if "height" in widget.kwargs
     }
     assert heights == {dialogs._CARD_CONTROL_HEIGHT}
@@ -2019,66 +1930,70 @@ def test_batch_import_dialog_keeps_cards_compact_and_uniform(
     assert harness.entries[0].pack_kwargs.get("padx") == dialogs._CARD_PAD
 
 
-def test_batch_import_dialog_merges_into_the_chosen_target(
+def test_batch_import_dialog_explains_a_game_without_locations(
     harness: _FakeParent,
 ) -> None:
-    """选"合并"并把目标改成另一款: 返回的映射里就是那一款的 id."""
+    """没有存档位置的那一款不再整块隐藏位置区: 说明摆出来, 用户才知道不是坏了."""
+    dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+    texts = [label.kwargs.get("text") for label in harness.labels]
+    assert texts.count(tr("dialog.import_no_locations")) == 1, "只有 Other 那一行"
+    assert texts.count(tr("dialog.import_locations_hint")) == 1, (
+        "Demo 那一行仍讲映射规则"
+    )
+
+
+def test_batch_import_strategy_radios_stack_vertically(harness: _FakeParent) -> None:
+    """同名那条选项带着游戏名: 横排时名字一长就把"跳过"挤出卡片(2026-10-20 实测).
+
+    竖排后最长的名字也只是把这一行撑高; 判据钉在 ``pack`` 参数上 —— 策略选项不许再
+    ``side="left"`` 挤同一行(单包对话框历来就是竖排, 两边现在是同一套)。
+    """
+    dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
+
+    groups = _batch_strategy_radios(harness)
+    assert [len(group) for group in groups] == [3, 2], "Demo 有同名选项, Other 只有两项"
+    for group in groups:
+        for radio in group:
+            assert radio.pack_kwargs.get("side") != "left", "策略选项要竖排"
+
+
+def test_batch_import_dialog_collects_a_per_game_merge_choice(
+    harness: _FakeParent,
+) -> None:
+    """把某一款改成"导入到同名游戏": 只有那一款的选择变, 其余照默认."""
     harness.click_text = tr("dialog.import_confirm")
     harness.entry_values = ["", "E:/local-saves"]
 
-    def merge_into_the_second_target() -> None:
+    def merge_the_first_game() -> None:
         merge = next(
             radio
             for radio in _batch_strategy_radios(harness)[0]
             if radio.value == STRATEGY_MERGE
         )
         merge.invoke()
-        harness.combos[0].set("山海旅人")
 
-    harness.on_wait = merge_into_the_second_target
+    harness.on_wait = merge_the_first_game
 
     result = dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
 
     assert result is not None
     assert result.choices["Demo.archive.zip"] == models.ImportChoice(
-        strategy=STRATEGY_MERGE, target_game_id="9", locations={1: "E:/local-saves"}
+        strategy=STRATEGY_MERGE, locations={1: "E:/local-saves"}
     )
-    assert result.choices["Other.archive.zip"].strategy == STRATEGY_NEW
-
-
-def test_batch_import_dialog_merging_without_a_target_keeps_it_empty(
-    harness: _FakeParent,
-) -> None:
-    """选了"合并"却把目标清空: 界面不猜目标(留给后端报"需要先选定要合并到的游戏")."""
-    harness.click_text = tr("dialog.import_confirm")
-
-    def merge_and_clear() -> None:
-        merge = next(
-            radio
-            for radio in _batch_strategy_radios(harness)[0]
-            if radio.value == STRATEGY_MERGE
-        )
-        merge.invoke()
-        harness.combos[0].set("")
-
-    harness.on_wait = merge_and_clear
-
-    result = dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
-
-    assert result is not None
-    choice = result.choices["Demo.archive.zip"]
-    assert choice.strategy == STRATEGY_MERGE
-    assert choice.target_game_id is None
+    assert result.choices["Other.archive.zip"] == models.ImportChoice(
+        strategy=STRATEGY_NEW, locations={}
+    )
 
 
 def test_batch_import_dialog_starts_in_merge_mode_when_the_row_says_so(
     harness: _FakeParent,
 ) -> None:
-    """模型层给出"合并"作默认值时, 对话框要**开局就是合并态**.
+    """模型层给出"导入到同名游戏"作默认值时, 对话框要**开局就是合并态**.
 
-    "库里已有同一款就默认合并"这条要求落在两处: 默认值由 ``models._batch_row`` 给
-    (那里有它自己的用例), 对话框把它读进单选变量并**开局就启用**目标下拉框 —— 否则
-    用户还得先点一下单选框才会亮起来。两处都断言, 只改一处不会绿。
+    "库里已有同名的那款就默认同名导入"这条要求落在两处: 默认值由
+    ``models._batch_row`` 给(那里有它自己的用例), 对话框把它读进单选变量 ——
+    用户不开口也已经选对了。两处都断言, 只改一处不会绿。
     """
     args = _batch_import_args()
     args["prompt"] = models.BatchImportPrompt(
@@ -2089,12 +2004,13 @@ def test_batch_import_dialog_starts_in_merge_mode_when_the_row_says_so(
                 entry="Demo.archive.zip",
                 name="Demo",
                 meta="Windows · AppID 730",
-                match_text="库里疑似同一款游戏: 星际拓荒(已默认选中)",
                 locations=_rows(),
-                strategies=models.import_strategies(has_targets=True),
-                targets=_targets(),
+                strategies=models.import_strategies(
+                    merge_label=tr(
+                        "dialog.import_strategy_merge_named", name="星际拓荒"
+                    )
+                ),
                 strategy=STRATEGY_MERGE,
-                target_game_id="7",
             ),
         ),
     )
@@ -2106,10 +2022,7 @@ def test_batch_import_dialog_starts_in_merge_mode_when_the_row_says_so(
             if radio.value == STRATEGY_MERGE
         )
         assert merge.variable is not None
-        assert merge.variable.get() == STRATEGY_MERGE, "开局就选中合并"
-        # 启用态是 readonly(不是 normal): 目标只能从候选里挑, 内容不该被手删掉 —— 与主页
-        # 筛选框同一条规则(用户 2026-10-13 报的误会)。
-        assert harness.combos[0].kwargs.get("state") == "readonly", "开局就能选目标"
+        assert merge.variable.get() == STRATEGY_MERGE, "开局就选中同名导入"
 
     harness.click_text = tr("dialog.import_confirm")
     harness.on_wait = check_the_initial_state
@@ -2118,35 +2031,8 @@ def test_batch_import_dialog_starts_in_merge_mode_when_the_row_says_so(
 
     assert result is not None
     assert result.choices["Demo.archive.zip"] == models.ImportChoice(
-        strategy=STRATEGY_MERGE, target_game_id="7", locations={0: "D:/saves"}
+        strategy=STRATEGY_MERGE, locations={0: "D:/saves"}
     )
-
-
-def test_batch_import_dialog_disables_targets_until_merging(
-    harness: _FakeParent,
-) -> None:
-    """目标下拉框只在"合并"时可用; 没有候选游戏的那一款整块不出现."""
-    harness.click_text = tr("dialog.cancel")
-
-    def check_the_states() -> None:
-        assert [combo.kwargs.get("state") for combo in harness.combos] == [
-            "disabled",
-            "disabled",
-        ]
-        assert harness.combos[1].packed is False
-        merge = next(
-            radio
-            for radio in _batch_strategy_radios(harness)[0]
-            if radio.value == STRATEGY_MERGE
-        )
-        merge.invoke()
-        # 启用时也是 readonly: 挑目标不等于可以手打(见 test_dialogs 里那条说明)。
-        assert harness.combos[0].kwargs.get("state") == "readonly"
-        assert harness.combos[0].values == ["星际拓荒", "山海旅人"]
-
-    harness.on_wait = check_the_states
-
-    dialogs.batch_import_dialog(harness, DARK, **_batch_import_args())
 
 
 def test_batch_import_dialog_cancel_returns_none(harness: _FakeParent) -> None:

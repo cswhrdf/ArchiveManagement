@@ -123,14 +123,14 @@ class ArchiveService(Protocol):
         inspection: ImportInspection,
         *,
         strategy: str,
-        target_game_id: str | None,
         locations: Mapping[int, str],
     ) -> str:
         """按 ``strategy`` 把体检过的包导入本机, 返回本地化的结果提示.
 
         这一步会**真的写数据库与备份根**(新建游戏、追加备份节点、登记存档位置),
         但**永不覆盖**: 已存在的节点目录按跳过计数, 因此重复导入同一个包不会产生
-        重复数据。``target_game_id`` 只在合并策略下使用; ``locations`` 是“包内序号
+        重复数据。"导入到同名游戏"的目标由后端按原始名称自动匹配(见体检里的
+        ``same_name_game_id``), 界面不传目标; ``locations`` 是“包内序号
         -> 本机路径”的映射, 没有映射的存档位置不导入。失败时抛出异常, 已写的节点
         会被回滚。
         """

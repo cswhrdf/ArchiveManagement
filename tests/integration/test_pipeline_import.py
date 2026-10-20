@@ -182,13 +182,15 @@ def _mapping(source: _Source) -> dict[int, str]:
 # -- 体检 -------------------------------------------------------------------
 
 
-def test_inspect_reads_the_package_and_finds_no_same_platform_game(
+def test_inspect_reads_the_package_and_finds_no_same_name_game(
     tmp_path: Path,
 ) -> None:
-    """体检读出身份/位置/节点统计与定时任务, 平台不同就不算匹配."""
+    """体检读出身份/位置/节点统计与定时任务; 名字对不上就不算同名(平台与 AppID 不再是口径)."""
     source = _build_package(tmp_path)
     database = helpers.migrated_database(tmp_path / "target")
-    GameRepository(database).add(Game(name=NAME, steam_app_id=APP_ID, platform="linux"))
+    GameRepository(database).add(
+        Game(name="别的名字", steam_app_id=APP_ID, platform="windows")
+    )
     service = ImportService(database, backup_root=tmp_path / "target" / "backups")
 
     inspection = service.inspect(source.package)
@@ -199,7 +201,7 @@ def test_inspect_reads_the_package_and_finds_no_same_platform_game(
     assert inspection.platform == "windows"
     assert inspection.origin == "steam"
     assert inspection.tags == ("动作", "存档")
-    assert inspection.matching_game_id is None
+    assert inspection.same_name_game_id is None
     assert [item.path for item in inspection.locations] == [
         str(source.save),
         str(source.other),
@@ -230,21 +232,21 @@ def test_inspect_reads_the_package_and_finds_no_same_platform_game(
     assert inspection.schedule == {"interval": "1d", "enabled": True, "keep_auto": 5}
 
 
-def test_inspect_matches_a_game_on_the_same_platform_and_app_id(
+def test_inspect_matches_a_game_by_its_recorded_original_name(
     tmp_path: Path,
 ) -> None:
-    """库里已有同平台 + 同 AppID 的游戏时, 体检给出这一款的 id."""
+    """库里那款的**显示名**已经改过, 但录入时的原始名称还是包里那个: 体检照样给出这一款的 id."""
     source = _build_package(tmp_path)
     database = helpers.migrated_database(tmp_path / "target")
     existing = GameRepository(database).add(
-        Game(name="别的名字", steam_app_id=APP_ID, platform="windows")
+        Game(name="译名示例", original_name=NAME, steam_app_id=APP_ID, platform="linux")
     )
     assert existing.id is not None
     service = ImportService(database, backup_root=tmp_path / "target" / "backups")
 
     inspection = service.inspect(source.package)
 
-    assert inspection.matching_game_id == existing.id
+    assert inspection.same_name_game_id == existing.id
 
 
 # -- 新建策略 ---------------------------------------------------------------
@@ -419,7 +421,6 @@ def test_the_merge_strategy_appends_to_the_game_and_keeps_its_settings(
     result = service.import_package(
         inspection,
         strategy="merge",
-        target_game_id=existing.id,
         locations={0: str(keep), 1: str(added)},
     )
 
@@ -488,10 +489,10 @@ def test_reimporting_the_same_package_skips_every_existing_node(
     first = service.import_package(
         inspection, strategy="new", locations=_mapping(source)
     )
+    # 重新体检: 第一次导入建好的游戏现在就是"库里同名的那款", 不需要调用方指定目标.
     again = service.import_package(
-        inspection,
+        service.inspect(source.package),
         strategy="merge",
-        target_game_id=first.game_id,
         locations=_mapping(source),
     )
 
@@ -929,14 +930,14 @@ def test_inspect_treats_a_non_list_tag_field_as_no_tags(tmp_path: Path) -> None:
 # -- 导入侧的拒绝 -----------------------------------------------------------
 
 
-def test_merge_import_needs_a_target_game(tmp_path: Path) -> None:
-    """合并策略没给目标游戏: 拒绝(否则不知道该并到哪一款), 一款游戏也不新建."""
+def test_merge_import_needs_a_same_name_game(tmp_path: Path) -> None:
+    """选了"导入到同名游戏"但库里没有同名的那款: 拒绝(否则不知道该并到哪一款), 一款游戏也不新建."""
     source = _build_package(tmp_path)
     database, _backup_root, service = _target(tmp_path / "target")
     inspection = service.inspect(source.package)
 
-    with pytest.raises(ArchiveManagementError, match="合并导入需要先选定"):
-        service.import_package(inspection, strategy="merge", target_game_id=None)
+    with pytest.raises(ArchiveManagementError, match="合并导入需要库里有同名游戏"):
+        service.import_package(inspection, strategy="merge")
 
     assert GameRepository(database).list() == []
 

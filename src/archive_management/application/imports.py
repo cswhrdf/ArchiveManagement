@@ -3,13 +3,14 @@
 两步分开是为了让界面能先把"包里有什么、与库里的东西怎么冲突"摆给用户看:
 
 - :meth:`ImportService.inspect`: 只读清单与配置(不校验内容哈希, 快), 给出游戏标识、
-  存档位置(本机是否已存在同名路径)、备份节点与定时任务, 以及"疑似同一个游戏"的
-  库内匹配(同平台 + 同 AppID);
+  存档位置(本机是否已存在同名路径)、备份节点与定时任务, 以及"同名游戏"的库内匹配
+  (按**录入时的原始名称**比对, 见 :attr:`ImportInspection.same_name_game_id`);
 - :meth:`ImportService.import_package`: 先逐条校验内容哈希, 再解到备份根下的暂存目录、
   逐个节点原子改名到位, **内容都到位之后**才写数据库; 任何一步失败都会把本次已建
   的节点(数据库行 + 目录)一并回收, 不留半截备份.
 
-三种策略: 新建游戏 / 合并到现有游戏(把备份节点追加到该游戏的分支树上) / 跳过。
+三种策略: 新建游戏 / 导入到同名游戏(把备份节点追加到该游戏的分支树上, 目标由
+原名匹配自动确定, 界面不再让用户挑) / 跳过。
 **导入永不覆盖**: 节点目录已存在时跳过该节点并计数, 存档位置走既有的"新增位置"
 用例(规范化 + 判重 + 可访问性), 因此重复导入同一个包不会产生重复数据.
 
@@ -44,6 +45,7 @@ from archive_management.domain import (
     VerificationMode,
     normalize_verification_mode,
 )
+from archive_management.domain.discovery import normalize_game_name
 from archive_management.exceptions import ArchiveManagementError, PackageError
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.repository import (
@@ -71,7 +73,7 @@ from archive_management.services.snapshot import read_manifest
 
 logger = logging.getLogger(__name__)
 
-#: 导入策略: 新建游戏 / 合并到现有游戏 / 跳过这个包.
+#: 导入策略: 新建游戏 / 导入到同名游戏(自动匹配) / 跳过这个包.
 STRATEGY_NEW = "new"
 STRATEGY_MERGE = "merge"
 STRATEGY_SKIP = "skip"
@@ -120,6 +122,10 @@ class ImportInspection:
 
     path: Path
     game_name: str
+    # 包内 game 段的"录入时的原始名称": 导出那台机器不会因改名/译名写回而改写它,
+    # 因此同名匹配用它而不是 ``game_name``(那是可能被用户改过的显示名)。老包没有
+    # 这个字段, 匹配时回退到 ``game_name``。
+    original_name: str
     steam_app_id: int | None
     platform: str
     origin: str
@@ -127,7 +133,8 @@ class ImportInspection:
     locations: tuple[PackageLocation, ...]
     nodes: tuple[PackageNode, ...]
     schedule: Mapping[str, object] | None
-    matching_game_id: int | None
+    # 库里的同名游戏 id(按原始名称匹配, 口径见 :meth:`_same_name_game`; 没有则 None)。
+    same_name_game_id: int | None
 
     @property
     def backup_count(self) -> int:
@@ -255,10 +262,12 @@ class ImportService:
         name = _text(game, "name")
         if not name:
             raise PackageError("导出包里的游戏名称为空")
+        original = _text(game, "original_name")
         nodes = tuple(_node(contents, item) for item in contents.config_list("backups"))
         return ImportInspection(
             path=contents.path,
             game_name=name,
+            original_name=original,
             steam_app_id=_int_or_none(game.get("steam_app_id")),
             platform=_text(game, "platform", "windows"),
             origin=_text(game, "origin", "manual"),
@@ -268,17 +277,20 @@ class ImportService:
             ),
             nodes=nodes,
             schedule=_mapping_or_none(contents.config.get("schedule")),
-            matching_game_id=self._matching_game(game),
+            same_name_game_id=self._same_name_game(original or name),
         )
 
-    def _matching_game(self, game: Mapping[str, object]) -> int | None:
-        """库里"疑似同一个游戏"的 id: 同平台 + 同 AppID 才算."""
-        app_id = _int_or_none(game.get("steam_app_id"))
-        platform = _text(game, "platform", "windows")
-        if app_id is None:
-            return None
+    def _same_name_game(self, name_key: str) -> int | None:
+        """库里"同名游戏"的 id: 按录入时的原始名称比对(与全应用的名称比较同一口径).
+
+        匹配用的是**原始名称**而不是当前显示名: 显示名会被译名写回或用户改名换掉,
+        拿它比对时"同一款游戏换个名字就认不出"; 原名从录入起不变, 跨机器也稳定
+        (导出包的 game 段带着它, 见 :func:`archive_management.application.export`)。
+        库里可能有多款同名游戏, 取列表顺序里的第一款。
+        """
+        wanted = normalize_game_name(name_key)
         for existing in self._games.list():
-            if existing.steam_app_id == app_id and existing.platform == platform:
+            if normalize_game_name(existing.original_name or existing.name) == wanted:
                 return existing.id
         return None
 
@@ -401,12 +413,19 @@ class ImportService:
     def _resolve_game(
         self, strategy: str, inspection: ImportInspection, target_game_id: int | None
     ) -> int:
-        """确定内容落到哪个游戏上(新建一条或复用给定的那条)."""
+        """确定内容落到哪个游戏上(新建一条或复用给定的那条).
+
+        合并的目标**不再由界面挑选**: 调用方没给 ``target_game_id`` 时按体检里
+        "同名游戏"的匹配结果落(这就是"导入到同名游戏"那条选项的全部语义); 连
+        同名游戏都没有时明确报错, 不猜。
+        """
         if strategy == STRATEGY_NEW:
             game = self._games.add(
                 Game(
                     name=inspection.game_name,
-                    original_name=inspection.game_name,
+                    # 原名如实带入(老包没有这一段时退回显示名): 下次再导出/导入,
+                    # 同名匹配仍然对得上。
+                    original_name=inspection.original_name or inspection.game_name,
                     steam_app_id=inspection.steam_app_id,
                     platform=inspection.platform,
                     origin=inspection.origin,
@@ -419,11 +438,16 @@ class ImportService:
                 raise ArchiveManagementError("导入失败: 未返回游戏 id")
             log_action("import.game_created", game_id=game.id, name=game.name)
             return game.id
-        if target_game_id is None:
-            raise ArchiveManagementError("合并导入需要先选定要合并到的游戏")
-        if self._games.get(target_game_id) is None:
-            raise ArchiveManagementError(f"未知游戏: {target_game_id}")
-        return target_game_id
+        target = (
+            target_game_id
+            if target_game_id is not None
+            else inspection.same_name_game_id
+        )
+        if target is None:
+            raise ArchiveManagementError("合并导入需要库里有同名游戏")
+        if self._games.get(target) is None:
+            raise ArchiveManagementError(f"未知游戏: {target}")
+        return target
 
     def _storage_key(
         self,

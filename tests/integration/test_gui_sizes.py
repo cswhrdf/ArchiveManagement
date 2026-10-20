@@ -76,7 +76,6 @@ from archive_management.ui.models import (
     BatchImportRow,
     ImportLocationRow,
     ImportPrompt,
-    ImportTargetOption,
     export_batch_prompt,
     exportable_games,
     import_strategies,
@@ -436,12 +435,7 @@ def _dialog_cases() -> list[tuple[str, _DialogCase]]:
         )
         for index in range(12)
     )
-    targets = tuple(
-        ImportTargetOption(
-            game_id=f"g{index}", label=f"游戏{index}", selected=index == 0
-        )
-        for index in range(8)
-    )
+    merge_label = tr("dialog.import_strategy_merge_named", name=seed.name)
     batch_rows = tuple(
         BatchImportRow(
             entry=f"游戏{index}.archive.zip",
@@ -454,12 +448,9 @@ def _dialog_cases() -> list[tuple[str, _DialogCase]]:
                 files=21,
                 size="4.2 MB",
             ),
-            match_text=tr("dialog.import_match", name=f"游戏{index}"),
             locations=(ImportLocationRow(index=0, text="D:\\Saves", default=""),),
-            strategies=import_strategies(has_targets=bool(targets)),
-            targets=targets,
-            strategy="new",
-            target_game_id=targets[0].game_id if targets else None,
+            strategies=import_strategies(merge_label=merge_label),
+            strategy="merge",
         )
         for index in range(6)
     )
@@ -557,12 +548,14 @@ def _dialog_cases() -> list[tuple[str, _DialogCase]]:
             ),
         ),
         (
-            "28-导入归档包(12 位置 + 8 目标)",
+            "28-导入归档包(12 位置 + 同名选项)",
             lambda app, palette: dialogs.import_package_dialog(
                 app,
                 palette,
                 title=tr("dialog.import_title"),
                 prompt=ImportPrompt(
+                    # 摘要写得特别长: 位置列表装在固定 150px 的内层滚动框里, 撑不高正文区;
+                    # "矮屏上正文区要滚起来"那条行为断言就靠这段长文案把内容顶过视口。
                     summary=tr(
                         "dialog.import_summary",
                         name=seed.name,
@@ -571,18 +564,16 @@ def _dialog_cases() -> list[tuple[str, _DialogCase]]:
                         backups=6,
                         files=48,
                         size="12.4 MB",
-                    ),
-                    match_text=tr("dialog.import_match", name=seed.name),
+                    )
+                    + "长摘要压测: "
+                    + "这一段说明会在四百六十像素的宽度里换行, " * 28,
                     locations=locations,
-                    targets=targets,
+                    merge_label=merge_label,
                 ),
                 locations_label=tr("dialog.import_locations"),
                 locations_hint=tr("dialog.import_locations_hint"),
                 strategy_label=tr("dialog.import_strategy"),
-                strategies=import_strategies(has_targets=bool(targets)),
-                target_label=tr("dialog.import_target"),
-                target_hint=tr("dialog.import_target_hint"),
-                target_locked_hint=tr("dialog.import_target_locked"),
+                strategies=import_strategies(merge_label=merge_label),
                 confirm_text=tr("dialog.import_confirm"),
             ),
         ),
@@ -606,7 +597,6 @@ def _dialog_cases() -> list[tuple[str, _DialogCase]]:
                 locations_label=tr("dialog.import_locations"),
                 locations_hint=tr("dialog.import_locations_hint"),
                 strategy_label=tr("dialog.import_strategy"),
-                target_label=tr("dialog.import_target"),
                 confirm_text=tr("dialog.import_confirm"),
             ),
         ),
@@ -1135,7 +1125,7 @@ def test_a_maximized_window_is_not_remembered(
 
 
 # 导入弹窗那个撑得最高的用例(滚动用例复用它, 免得两处 prompt 长度对不上)。
-_IMPORT_DIALOG_CASE = "28-导入归档包(12 位置 + 8 目标)"
+_IMPORT_DIALOG_CASE = "28-导入归档包(12 位置 + 同名选项)"
 
 
 def _case(label: str) -> _DialogCase:
@@ -1184,7 +1174,8 @@ def test_import_dialog_scrolls_instead_of_getting_squashed(app: ArchiveApp) -> N
     高度断言容易被"把正文区压矮"骗过(高度达标了、内容却永远看不见), 因此这里再加一条
     行为断言: 768 高的屏幕上正文区只能显示内容的一部分(yview 比值 < 1)。
 
-    用例复用 28 号那个 prompt —— 换成一段手写的短摘要就测不到了(内容本来就装得下)。
+    用例复用 28 号那个 prompt(带一段故意写长的摘要) —— 位置列表在固定的内层滚动框里,
+    换成短摘要就测不到了(内容本来就装得下)。
     """
     SCREEN["height"] = 768
     captured: dict[str, float] = {}

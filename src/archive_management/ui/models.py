@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -1192,31 +1191,29 @@ class ImportLocationRow:
 
 
 @dataclass(frozen=True)
-class ImportTargetOption:
-    """可以合并到的目标游戏(对话框里是一个单选项)."""
-
-    game_id: str
-    label: str
-    selected: bool = False
-
-
-@dataclass(frozen=True)
 class ImportChoice:
-    """用户在导入对话框里做出的选择(取消时对话框返回 ``None``)."""
+    """用户在导入对话框里做出的选择(取消时对话框返回 ``None``).
+
+    合并目标不在这里: "导入到同名游戏"的那一款由后端按原始名称匹配自动确定,
+    界面既不让用户挑, 也不替用户传。
+    """
 
     strategy: str
-    target_game_id: str | None
     locations: Mapping[int, str]
 
 
 @dataclass(frozen=True)
 class ImportPrompt:
-    """导入对话框需要的文案与选项(纯数据, 无头环境也能构造与断言)."""
+    """导入对话框需要的文案与选项(纯数据, 无头环境也能构造与断言).
+
+    ``merge_label`` 是"导入到同名游戏 [<名称>]"那条选项的完整文案(名称取库里
+    那款的当前显示名, 让用户认得出要并到哪一款); 空串表示库里没有同名游戏,
+    对话框就不提供这一条。
+    """
 
     summary: str
-    match_text: str
     locations: tuple[ImportLocationRow, ...]
-    targets: tuple[ImportTargetOption, ...]
+    merge_label: str = ""
 
 
 def import_prompt(
@@ -1224,28 +1221,22 @@ def import_prompt(
 ) -> ImportPrompt:
     """把体检结果与游戏库映射成导入对话框的文案与选项.
 
-    游戏库只用来提供"合并到哪一款"的选项与"疑似同一款"的提示: 真正写库的是
-    后端, 界面不替它做匹配判断。存档位置则只在包内路径本机已存在时才预填,
-    其余留空(留空的那一条不会被导入)。
+    游戏库只用来把体检里的同名匹配换算成"库里的那一款叫什么"(选项文案里要展示
+    它)。真正写库与同名判定都在后端, 界面不自己做匹配。存档位置则只在包内路径
+    本机已存在时才预填, 其余留空(留空的那一条不会被导入)。
     """
-    matching_id = (
-        None
-        if inspection.matching_game_id is None
-        else str(inspection.matching_game_id)
-    )
     return ImportPrompt(
         summary=_import_summary(inspection),
-        match_text=_import_match_text(games, matching_id),
         locations=tuple(_import_location(item) for item in inspection.locations),
-        targets=_import_targets(games, matching_id),
+        merge_label=_merge_label(inspection, games),
     )
 
 
-def import_strategies(*, has_targets: bool) -> tuple[tuple[str, str], ...]:
-    """导入方式选项(策略键 + 文案): 没有可合并的游戏就不给"合并"."""
+def import_strategies(*, merge_label: str = "") -> tuple[tuple[str, str], ...]:
+    """导入方式选项(策略键 + 文案): 库里没有同名游戏就不给"导入到同名游戏"."""
     options = [(STRATEGY_NEW, tr("dialog.import_strategy_new"))]
-    if has_targets:
-        options.append((STRATEGY_MERGE, tr("dialog.import_strategy_merge")))
+    if merge_label:
+        options.append((STRATEGY_MERGE, merge_label))
     options.append((STRATEGY_SKIP, tr("dialog.import_strategy_skip")))
     return tuple(options)
 
@@ -1269,26 +1260,23 @@ def _import_summary(inspection: ImportInspection) -> str:
     )
 
 
-def _import_match_text(games: Sequence[GameSummary], matching_id: str | None) -> str:
-    """库里疑似同一款游戏的提示(没有匹配时是空串, 对话框就不显示这一行)."""
-    game = next((item for item in games if item.game_id == matching_id), None)
+def _merge_label(inspection: ImportInspection, games: Sequence[GameSummary]) -> str:
+    """同名导入选项的文案: 「导入到同名游戏 [名称]」, 名称是库里那一款的当前显示名.
+
+    展示库里的名字(而不是包里的)是为了让用户认出"要并进去的是哪一款" —— 同名
+    判定用的是原始名称, 两边的显示名可能已经被译名写回或改名列得不一样了。
+    匹配 id 在界面数据里找不到时(比如那款游戏刚被删掉)返回空串: 这一轮就不提供
+    同名导入, 让用户走"新建"或"跳过"。
+    """
+    same = (
+        None
+        if inspection.same_name_game_id is None
+        else str(inspection.same_name_game_id)
+    )
+    game = next((item for item in games if item.game_id == same), None)
     if game is None:
         return ""
-    return tr("dialog.import_match", name=game.name)
-
-
-def _import_targets(
-    games: Sequence[GameSummary], matching_id: str | None
-) -> tuple[ImportTargetOption, ...]:
-    """目标游戏选项: 疑似同一款排在最前并默认选中, 其余保持库里的顺序."""
-    if not games:
-        return ()
-    matching = tuple(game for game in games if game.game_id == matching_id)
-    others = tuple(game for game in games if game.game_id != matching_id)
-    return tuple(
-        ImportTargetOption(game_id=game.game_id, label=game.name, selected=index == 0)
-        for index, game in enumerate(matching + others)
-    )
+    return tr("dialog.import_strategy_merge_named", name=game.name)
 
 
 def _import_location(item: PackageLocation) -> ImportLocationRow:
@@ -1446,12 +1434,9 @@ class BatchImportRow:
     entry: str
     name: str
     meta: str
-    match_text: str
     locations: tuple[ImportLocationRow, ...]
     strategies: tuple[tuple[str, str], ...]
-    targets: tuple[ImportTargetOption, ...]
     strategy: str
-    target_game_id: str | None
 
 
 @dataclass(frozen=True)
@@ -1479,10 +1464,10 @@ def batch_import_prompt(
 ) -> BatchImportPrompt:
     """把批量体检结果与游戏库映射成批量导入对话框的文案与逐行选项.
 
-    每一行的默认值: **库里已经有一款同一游戏时策略默认"合并到现有游戏"**(包就是同一
-    款游戏的更多备份), 否则默认"新建"; 目标游戏预选"疑似同一款"(没有匹配就是库里的
-    第一款), 存档位置只预填本机已存在的那些。行顺序与包内清单一致 —— 用户看到的顺序
-    就是导出时的顺序。
+    每一行的默认值: **库里已经有同名游戏时策略默认"导入到同名游戏"**(包就是同一
+    款游戏的更多备份, 默认"新建"会让库里多出一款重复的游戏), 否则默认"新建";
+    同名的那一款由后端按原始名称自动确定, 行内不再有目标下拉框。存档位置只预填
+    本机已存在的那些。行顺序与包内清单一致 —— 用户看到的顺序就是导出时的顺序。
     """
     return BatchImportPrompt(
         summary=tr(
@@ -1497,94 +1482,42 @@ def batch_import_prompt(
     )
 
 
-def batch_row_choice(
-    *, strategy: str, target: str | None, locations: Mapping[int, str]
-) -> ImportChoice:
+def batch_row_choice(*, strategy: str, locations: Mapping[int, str]) -> ImportChoice:
     """把一行控件的取值整理成 :class:`ImportChoice`.
 
-    只有"合并"才带目标游戏; 目标为空时返回 ``None`` 而不是空串 —— 界面不替用户猜
-    要合并到哪一款(真导入时后端会明确报"合并导入需要先选定要合并到的游戏")。存档位置
-    去掉两端空白, 空串就是"这一条不导入"(与单包对话框同一条语义)。
+    合并目标不在选择里(同名那一款由后端自动确定), 因此这里只有策略与存档位置;
+    存档位置去掉两端空白, 空串就是"这一条不导入"(与单包对话框同一条语义)。
     """
     return ImportChoice(
         strategy=strategy,
-        target_game_id=target if strategy == STRATEGY_MERGE else None,
         locations={
             index: path.strip() for index, path in locations.items() if path.strip()
         },
     )
 
 
-def target_game_id(targets: Sequence[ImportTargetOption], label: str) -> str | None:
-    """把目标下拉框里的文案还原成游戏 id(找不到就是没选)."""
-    text = label.strip()
-    return next((option.game_id for option in targets if option.label == text), None)
-
-
-def target_label_for(targets: Sequence[ImportTargetOption], game_id: str | None) -> str:
-    """目标下拉框该显示的文案: 该游戏 id 对应的那一条, 找不到就用第一项."""
-    for option in targets:
-        if option.game_id == game_id:
-            return option.label
-    return targets[0].label if targets else ""
-
-
-def unique_targets(
-    games: Sequence[GameSummary], matching_id: str | None
-) -> tuple[ImportTargetOption, ...]:
-    """目标候选: 疑似同一款排最前并预选; **重名的补上 id**, 免得下拉框分不清.
-
-    单包对话框用单选按钮承载游戏 id, 重名不会混淆; 批量对话框里每一行是一个下拉框
-    (一款游戏一行, 铺不下整组单选按钮), 而下拉框的取值是文案 —— 于是只有**重名时**
-    才加一个 "(游戏 id)" 后缀, 常见情况的文案保持干净。
-    """
-    options = _import_targets(games, matching_id)
-    counts = Counter(option.label for option in options)
-    return tuple(
-        replace(option, label=f"{option.label} ({option.game_id})")
-        if counts[option.label] > 1
-        else option
-        for option in options
-    )
-
-
 def _batch_row(
     item: BatchGameInspection, games: Sequence[GameSummary]
 ) -> BatchImportRow:
-    """一行: 游戏标识 + 存档位置 + 策略与目标候选.
+    """一行: 游戏标识 + 存档位置 + 策略选项.
 
-    策略默认值分两种: **包里的游戏在库里已经有一份时默认"合并到现有游戏"** —— 这种包
-    就是同一款游戏的更多备份, 默认"新建"会让库里多出一款重复的游戏; 没检测到同一款时
-    (库里没有 / 对不上)才默认"新建"。目标游戏的预选与单包对话框一致: "疑似同一款"排
-    最前并预选。
+    策略默认值分两种: **包里的游戏在库里已有同名的一款时默认"导入到同名游戏"** ——
+    这种包就是同一款游戏的更多备份, 默认"新建"会让库里多出一款重复的游戏; 没检测到
+    同名游戏时(库里没有 / 原名对不上)才默认"新建"。同名的那一款由后端自动确定,
+    行内没有也不需要目标下拉框。
     """
     inspection = item.inspection
-    matching = (
-        None
-        if inspection.matching_game_id is None
-        else str(inspection.matching_game_id)
-    )
-    targets = unique_targets(games, matching)
+    merge_label = _merge_label(inspection, games)
     return BatchImportRow(
         entry=item.entry,
         name=inspection.game_name,
         meta=_batch_meta(inspection),
-        match_text=_import_match_text(games, matching),
         locations=tuple(_import_location(loc) for loc in inspection.locations),
-        strategies=import_strategies(has_targets=bool(targets)),
-        targets=targets,
-        # 有匹配就一定选得到目标(库里非空), 所以"合并"一定在选项里。
-        strategy=STRATEGY_MERGE if matching else STRATEGY_NEW,
-        target_game_id=_selected_target(targets),
+        strategies=import_strategies(merge_label=merge_label),
+        # 选项文案非空就一定选得到同名的那一款(它在界面数据里), 所以"导入到同名
+        # 游戏"一定在选项里。
+        strategy=STRATEGY_MERGE if merge_label else STRATEGY_NEW,
     )
-
-
-def _selected_target(targets: Sequence[ImportTargetOption]) -> str | None:
-    """默认选中的目标: 预选项优先, 否则第一款(与单包对话框的默认一致)."""
-    for option in targets:
-        if option.selected:  # pragma: no branch - 候选恒把第一项标为选中
-            return option.game_id
-    return targets[0].game_id if targets else None
 
 
 def _batch_meta(inspection: ImportInspection) -> str:

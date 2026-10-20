@@ -200,7 +200,6 @@ def test_gui_import_package_creates_the_game_and_selects_it(
         seen.update(kwargs)
         return ImportChoice(
             strategy=STRATEGY_NEW,
-            target_game_id=None,
             locations={0: str(target_save)},
         )
 
@@ -229,23 +228,23 @@ def test_gui_import_package_creates_the_game_and_selects_it(
         assert "已导入「源游戏」" in app._last_feedback[1]
         assert "备份 1 份" in app._last_feedback[1]
         assert _home_item(app._home_page, games[0].game_id).backup_count == 1
-        # 对话框拿到的是这个包的摘要; 库里没有可合并的游戏时不给"合并"选项.
+        # 对话框拿到的是这个包的摘要; 库里没有同名游戏时不给"导入到同名游戏"选项.
         assert "源游戏" in seen["prompt"].summary
         assert [key for key, _text in seen["strategies"]] == [
             STRATEGY_NEW,
             STRATEGY_SKIP,
         ]
-        assert seen["prompt"].targets == ()
+        assert seen["prompt"].merge_label == ""
         assert app._busy is False
     finally:
         app.destroy()
 
 
-def test_gui_import_package_merges_into_the_matched_game(
+def test_gui_import_package_merges_into_the_same_name_game(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """库里已有同平台同 AppID 的游戏: 预选它合并, 导入后选中的也是它."""
+    """库里已有同名(按录入时的原始名称)的游戏: 同名选项写着它, 导入后选中的也是它."""
     from archive_management.domain import Game
     from archive_management.infrastructure.repository import GameRepository
 
@@ -259,6 +258,7 @@ def test_gui_import_package_merges_into_the_matched_game(
     existing = GameRepository(database).add(
         Game(
             name="库里的源游戏",
+            original_name="源游戏",
             steam_app_id=730,
             platform="windows",
             origin="steam",
@@ -275,7 +275,6 @@ def test_gui_import_package_merges_into_the_matched_game(
         seen.update(kwargs)
         return ImportChoice(
             strategy=STRATEGY_MERGE,
-            target_game_id=game_id,
             locations={0: str(target_save)},
         )
 
@@ -292,13 +291,12 @@ def test_gui_import_package_merges_into_the_matched_game(
         assert _feedback_kind(app) == FeedbackKind.SUCCESS
         assert [game.name for game in service.list_games()] == ["库里的源游戏"]
         assert len(service.list_backups(game_id)) == 2, "合并是追加一份, 不是另建游戏"
-        assert app._game_id == game_id, "导入完要停在合并的目标游戏上"
+        assert app._game_id == game_id, "导入完要停在同名导入的那款游戏上"
         assert "已导入" in app._last_feedback[1]
-        assert seen["prompt"].match_text == tr(
-            "dialog.import_match", name="库里的源游戏"
+        # 同名选项的文案里写的是**库里那一款的当前显示名**(用户认得出要并到哪一款).
+        assert seen["prompt"].merge_label == tr(
+            "dialog.import_strategy_merge_named", name="库里的源游戏"
         )
-        assert [option.game_id for option in seen["prompt"].targets] == [game_id]
-        assert [option.selected for option in seen["prompt"].targets] == [True]
         assert [key for key, _text in seen["strategies"]] == [
             STRATEGY_NEW,
             STRATEGY_MERGE,
@@ -634,12 +632,9 @@ def test_gui_import_batch_imports_the_whole_batch_per_choice(
             choices={
                 entries[0]: ImportChoice(
                     strategy=STRATEGY_NEW,
-                    target_game_id=None,
                     locations={0: str(target_save)},
                 ),
-                entries[1]: ImportChoice(
-                    strategy=STRATEGY_SKIP, target_game_id=None, locations={}
-                ),
+                entries[1]: ImportChoice(strategy=STRATEGY_SKIP, locations={}),
             }
         )
 
@@ -737,7 +732,6 @@ def test_gui_import_batch_cancel_paths_import_nothing_extra(
                 choices={
                     entry: ImportChoice(
                         strategy=STRATEGY_NEW,
-                        target_game_id=None,
                         locations={0: str(target_save)},
                     )
                     for entry in entries

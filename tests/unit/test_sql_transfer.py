@@ -205,22 +205,23 @@ def test_inspect_import_reads_a_package_without_changing_anything(
     assert inspection.backup_count == 1
     # 包内文件数 = 节点目录下的成员减去该节点自己的快照清单.
     assert inspection.file_count == len(contents.member_paths("timeline/")) - 1
-    assert inspection.matching_game_id is None
+    assert inspection.same_name_game_id is None
     assert [item.path for item in inspection.locations] == [normalize_path(str(save))]
     assert [item.exists_here for item in inspection.locations] == [True]
     assert service.list_games() == []
     assert _tree_files(backup_root) == []
 
 
-def test_inspect_import_matches_the_same_game_in_the_library(
+def test_inspect_import_matches_the_same_original_name_in_the_library(
     tmp_path: Path,
 ) -> None:
-    """同平台 + 同 AppID 才算"库里疑似同一款"."""
+    """同名判定按**录入时的原始名称**: 显示名改过(译名写回/改名)也照样认出来."""
     package, _save = _exported_package(tmp_path, app_id=730)
     service, database, _backup_root = _target_service(tmp_path)
     existing = GameRepository(database).add(
         Game(
-            name="库里的 Demo",
+            name="库里的译名",
+            original_name="Demo",
             steam_app_id=730,
             platform="windows",
             origin="steam",
@@ -231,7 +232,7 @@ def test_inspect_import_matches_the_same_game_in_the_library(
 
     inspection = _single_inspection(service, package)
 
-    assert inspection.matching_game_id == existing.id
+    assert inspection.same_name_game_id == existing.id
 
 
 def test_run_import_creates_the_game_nodes_and_locations(tmp_path: Path) -> None:
@@ -245,7 +246,6 @@ def test_run_import_creates_the_game_nodes_and_locations(tmp_path: Path) -> None
     message = service.run_import(
         inspection,
         strategy=STRATEGY_NEW,
-        target_game_id=None,
         locations={0: str(target_save)},
     )
 
@@ -273,10 +273,8 @@ def test_run_import_creates_the_game_nodes_and_locations(tmp_path: Path) -> None
     assert service.list_backups(str(game_id))[0].verified is True
 
 
-def test_run_import_appends_to_the_matching_game_and_marks_the_target(
-    tmp_path: Path,
-) -> None:
-    """合并策略: 节点追加到目标游戏上, 而不是新建一款同名游戏."""
+def test_run_import_appends_to_the_same_name_game(tmp_path: Path) -> None:
+    """合并策略: 不传目标, 节点追加到体检匹配到的同名游戏上, 而不是另建一款."""
     package, _save = _exported_package(tmp_path, app_id=730)
     service, database, _backup_root = _target_service(tmp_path)
     target_save = tmp_path / "target-save"
@@ -285,6 +283,7 @@ def test_run_import_appends_to_the_matching_game_and_marks_the_target(
     existing = GameRepository(database).add(
         Game(
             name="库里的 Demo",
+            original_name="Demo",
             steam_app_id=730,
             platform="windows",
             origin="steam",
@@ -299,7 +298,6 @@ def test_run_import_appends_to_the_matching_game_and_marks_the_target(
     message = service.run_import(
         inspection,
         strategy=STRATEGY_MERGE,
-        target_game_id=str(existing.id),
         locations={0: str(target_save)},
     )
 
@@ -319,7 +317,6 @@ def test_run_import_with_the_skip_strategy_writes_nothing(tmp_path: Path) -> Non
     message = service.run_import(
         inspection,
         strategy=STRATEGY_SKIP,
-        target_game_id=None,
         locations={},
     )
 
@@ -338,14 +335,12 @@ def test_run_import_reports_the_nodes_it_skipped_on_a_repeat(
     service.run_import(
         inspection,
         strategy=STRATEGY_NEW,
-        target_game_id=None,
         locations={},
     )
 
     message = service.run_import(
         inspection,
         strategy=STRATEGY_NEW,
-        target_game_id=None,
         locations={},
     )
 
@@ -360,8 +355,8 @@ def test_run_import_reports_the_nodes_it_skipped_on_a_repeat(
     assert [game.name for game in service.list_games()] == ["Demo", "Demo"]
 
 
-def test_run_import_refuses_an_unknown_target_game(tmp_path: Path) -> None:
-    """合并到一个不存在的游戏: 直接报错, 什么都不写."""
+def test_run_import_refuses_a_merge_without_a_same_name_game(tmp_path: Path) -> None:
+    """库里没有同名游戏却选了"导入到同名游戏": 直接报错, 什么都不写."""
     package, _save = _exported_package(tmp_path)
     service, _database, backup_root = _target_service(tmp_path)
     inspection = _single_inspection(service, package)
@@ -370,7 +365,6 @@ def test_run_import_refuses_an_unknown_target_game(tmp_path: Path) -> None:
         service.run_import(
             inspection,
             strategy=STRATEGY_MERGE,
-            target_game_id="999",
             locations={},
         )
 
@@ -542,12 +536,9 @@ def test_run_import_batch_imports_it_for_real_and_honours_every_choice(
         {
             entries[0]: ImportChoice(
                 strategy=STRATEGY_NEW,
-                target_game_id=None,
                 locations={0: str(target_save)},
             ),
-            entries[1]: ImportChoice(
-                strategy=STRATEGY_SKIP, target_game_id=None, locations={}
-            ),
+            entries[1]: ImportChoice(strategy=STRATEGY_SKIP, locations={}),
         },
     )
 
@@ -583,9 +574,7 @@ def test_run_import_batch_reports_a_wholly_skipped_batch(tmp_path: Path) -> None
     message = service.run_import_batch(
         batch,
         {
-            item.entry: ImportChoice(
-                strategy=STRATEGY_SKIP, target_game_id=None, locations={}
-            )
+            item.entry: ImportChoice(strategy=STRATEGY_SKIP, locations={})
             for item in batch.games
         },
     )
@@ -646,11 +635,7 @@ def test_a_failed_batch_import_is_logged_and_reraised(
     with pytest.raises(ArchiveManagementError):
         service.run_import_batch(
             batch,
-            {
-                entry: ImportChoice(
-                    strategy="不认识的策略", target_game_id=None, locations={}
-                )
-            },
+            {entry: ImportChoice(strategy="不认识的策略", locations={})},
         )
 
     assert any("import.batch_failed" in line for line in audit_log)

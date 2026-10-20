@@ -58,7 +58,6 @@ from archive_management.ui.models import (
     FeedbackKind,
     ImportLocationRow,
     ImportPrompt,
-    ImportTargetOption,
     TaskStatus,
     export_batch_prompt,
     exportable_games,
@@ -253,31 +252,21 @@ def _measure(app: Any, palette: Palette) -> list[str]:
             confirm_text="导出选中",
         ),
     )
-    # 默认策略是"新建游戏": "合并到"那一组应当已经是置灰的.
+    # 库里没有同名游戏: 对话框不提供"导入到同名游戏", 只剩"新建"与"跳过"两条策略.
     modal(
-        "导入归档包(新建策略)",
+        "导入归档包(库里没有同名)",
         lambda: dialogs.import_package_dialog(
             app,
             palette,
             title="导入",
             prompt=ImportPrompt(
                 summary="摘要",
-                match_text="疑似同一款",
                 locations=(ImportLocationRow(index=0, text="D:\\Saves", default=""),),
-                targets=tuple(
-                    ImportTargetOption(
-                        game_id=f"g{index}", label=f"游戏{index}", selected=index == 0
-                    )
-                    for index in range(3)
-                ),
             ),
             locations_label="存档位置",
             locations_hint="勾选",
             strategy_label="导入方式",
-            strategies=import_strategies(has_targets=True),
-            target_label="合并到",
-            target_hint="提示",
-            target_locked_hint="仅合并生效",
+            strategies=import_strategies(),
             confirm_text="导入",
         ),
     )

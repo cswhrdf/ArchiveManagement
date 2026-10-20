@@ -70,7 +70,6 @@ from archive_management.ui.models import (
     BatchImportRow,
     ImportLocationRow,
     ImportPrompt,
-    ImportTargetOption,
     export_batch_prompt,
     exportable_games,
     import_strategies,
@@ -670,23 +669,15 @@ def _measure(app: Any, palette: Palette) -> list[str]:
     games = list(app.backend.list_games())
     seed = games[0]
     locations = (ImportLocationRow(index=0, text="D:\\Saves", default=""),)
-    targets = tuple(
-        ImportTargetOption(
-            game_id=f"g{index}", label=f"游戏{index}", selected=index == 0
-        )
-        for index in range(3)
-    )
+    merge_label = tr("dialog.import_strategy_merge_named", name="游戏0")
     rows = tuple(
         BatchImportRow(
             entry=f"游戏{index}.archive.zip",
             name=f"游戏{index}",
             meta="Windows · 1234 · 3 备份",
-            match_text=tr("dialog.import_match", name=f"游戏{index}"),
             locations=locations,
-            strategies=import_strategies(has_targets=True),
-            targets=targets,
-            strategy="new",
-            target_game_id=targets[0].game_id,
+            strategies=import_strategies(merge_label=merge_label),
+            strategy="merge",
         )
         for index in range(3)
     )
@@ -751,17 +742,13 @@ def _measure(app: Any, palette: Palette) -> list[str]:
                 title="导入",
                 prompt=ImportPrompt(
                     summary="摘要",
-                    match_text="疑似同一款",
                     locations=locations,
-                    targets=targets,
+                    merge_label=merge_label,
                 ),
                 locations_label="存档位置",
                 locations_hint="勾选",
                 strategy_label="导入方式",
-                strategies=import_strategies(has_targets=True),
-                target_label="合并到",
-                target_hint="提示",
-                target_locked_hint="仅合并生效",
+                strategies=import_strategies(merge_label=merge_label),
                 confirm_text="导入",
             ),
         ),
@@ -792,7 +779,6 @@ def _measure(app: Any, palette: Palette) -> list[str]:
                 locations_label="存档位置",
                 locations_hint="勾选",
                 strategy_label="导入方式",
-                target_label="合并到",
                 confirm_text="导入",
             ),
         ),

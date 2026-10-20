@@ -722,7 +722,7 @@ def test_demo_inspect_import_marks_the_fabricated_package(
     assert inspection.backup_count == 0
     assert inspection.file_count == 0
     assert inspection.locations == ()
-    assert inspection.matching_game_id is None
+    assert inspection.same_name_game_id is None
 
 
 def test_demo_run_import_admits_it_wrote_nothing(
@@ -737,13 +737,11 @@ def test_demo_run_import_admits_it_wrote_nothing(
     created = service.run_import(
         inspection,
         strategy=STRATEGY_NEW,
-        target_game_id=None,
         locations={0: "D:/saves"},
     )
     merged = service.run_import(
         inspection,
         strategy=STRATEGY_MERGE,
-        target_game_id="outer-wilds",
         locations={0: "D:/saves"},
     )
 
@@ -763,27 +761,10 @@ def test_demo_run_import_skip_reports_nothing_imported(
     message = service.run_import(
         inspection,
         strategy=STRATEGY_SKIP,
-        target_game_id=None,
         locations={},
     )
 
     assert message == tr("result.import_skipped", name=inspection.game_name, skipped=0)
-
-
-def test_demo_run_import_rejects_a_target_that_does_not_exist(
-    service: DemoArchiveService,
-    tmp_path: Path,
-) -> None:
-    """合并到一个不存在的游戏: 与真实后端一样报错, 不假装成功."""
-    inspection = service.inspect_import(str(tmp_path / "Demo.archive.zip"))
-
-    with pytest.raises(ArchiveManagementError):
-        service.run_import(
-            inspection,
-            strategy=STRATEGY_MERGE,
-            target_game_id="missing-game",
-            locations={},
-        )
 
 
 def test_demo_run_import_rejects_an_unknown_strategy(
@@ -797,7 +778,6 @@ def test_demo_run_import_rejects_an_unknown_strategy(
         service.run_import(
             inspection,
             strategy="nope",
-            target_game_id=None,
             locations={},
         )
 
@@ -815,6 +795,7 @@ def _batch_inspection(*names: str) -> BatchInspection:
                 inspection=ImportInspection(
                     path=Path(f"demo-{index}.archive.zip"),
                     game_name=name,
+                    original_name=name,
                     steam_app_id=None,
                     platform="windows",
                     origin="manual",
@@ -822,7 +803,7 @@ def _batch_inspection(*names: str) -> BatchInspection:
                     locations=(),
                     nodes=(),
                     schedule=None,
-                    matching_game_id=None,
+                    same_name_game_id=None,
                 ),
             )
             for index, name in enumerate(names)
@@ -869,11 +850,9 @@ def test_demo_run_import_batch_admits_it_wrote_nothing(
         batch,
         {
             "demo-0.archive.zip": ImportChoice(
-                strategy=STRATEGY_NEW, target_game_id=None, locations={0: "D:/saves"}
+                strategy=STRATEGY_NEW, locations={0: "D:/saves"}
             ),
-            "demo-1.archive.zip": ImportChoice(
-                strategy=STRATEGY_SKIP, target_game_id=None, locations={}
-            ),
+            "demo-1.archive.zip": ImportChoice(strategy=STRATEGY_SKIP, locations={}),
         },
     )
 
@@ -888,9 +867,7 @@ def test_demo_run_import_batch_skip_reports_nothing_imported(
     """整批都选"跳过": 一句话说清什么都没导入, 而不是"已模拟导入 2 款"."""
     batch = _batch_inspection("演示甲", "演示乙")
     skips = {
-        item.entry: ImportChoice(
-            strategy=STRATEGY_SKIP, target_game_id=None, locations={}
-        )
+        item.entry: ImportChoice(strategy=STRATEGY_SKIP, locations={})
         for item in batch.games
     }
 
@@ -899,31 +876,16 @@ def test_demo_run_import_batch_skip_reports_nothing_imported(
     assert message == tr("result.import_batch_all_skipped", games=2)
 
 
-def test_demo_run_import_batch_rejects_unknown_strategy_target_and_empty_batch(
+def test_demo_run_import_batch_rejects_unknown_strategy_and_empty_batch(
     service: DemoArchiveService,
 ) -> None:
-    """未知策略/不存在的目标游戏/空包都要报错, 不假装成功."""
+    """未知策略/空包都要报错, 不假装成功."""
     batch = _batch_inspection("演示甲")
 
     with pytest.raises(ArchiveManagementError):
         service.run_import_batch(
             batch,
-            {
-                "demo-0.archive.zip": ImportChoice(
-                    strategy="nope", target_game_id=None, locations={}
-                )
-            },
-        )
-    with pytest.raises(ArchiveManagementError):
-        service.run_import_batch(
-            batch,
-            {
-                "demo-0.archive.zip": ImportChoice(
-                    strategy=STRATEGY_MERGE,
-                    target_game_id="missing-game",
-                    locations={},
-                )
-            },
+            {"demo-0.archive.zip": ImportChoice(strategy="nope", locations={})},
         )
     with pytest.raises(ArchiveManagementError):
         service.run_import_batch(_batch_inspection(), {})

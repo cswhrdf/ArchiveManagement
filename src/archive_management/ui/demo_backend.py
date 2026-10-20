@@ -882,9 +882,11 @@ class DemoArchiveService:
         这里真的有一份可导入的备份。
         """
         self._simulate()
+        name = tr("demo.import_name", file=Path(path).stem)
         return ImportInspection(
             path=Path(path),
-            game_name=tr("demo.import_name", file=Path(path).stem),
+            game_name=name,
+            original_name=name,
             steam_app_id=None,
             platform="windows",
             origin="manual",
@@ -892,7 +894,7 @@ class DemoArchiveService:
             locations=(),
             nodes=(),
             schedule=None,
-            matching_game_id=None,
+            same_name_game_id=None,
         )
 
     def run_import(
@@ -900,20 +902,16 @@ class DemoArchiveService:
         inspection: ImportInspection,
         *,
         strategy: str,
-        target_game_id: str | None,
         locations: Mapping[int, str],
     ) -> str:
         """模拟导入(演示后端不会真的建游戏、写备份或登记存档位置).
 
         与 :meth:`run_export` 一样只走一遍"可阻塞的写操作"流程并明确说明什么都没
-        写。目标游戏仍然要校验(合并到一个不存在的游戏与真实后端一样报错), "跳过"
-        也如实回报跳过了多少份 —— 只有真的导入了才会用"已模拟导入"那句话。
+        写。"跳过"也如实回报跳过了多少份 —— 只有真的导入了才会用"已模拟导入"那句。
         """
         self._simulate()
         if strategy not in STRATEGIES:
             raise ArchiveManagementError(f"未知的导入策略: {strategy}")
-        if target_game_id is not None:
-            self._require_game(target_game_id)
         if strategy == STRATEGY_SKIP:
             return tr(
                 "result.import_skipped",
@@ -928,7 +926,7 @@ class DemoArchiveService:
         """模拟批量导入(演示后端不会真的建游戏、写备份或登记存档位置).
 
         与 :meth:`run_import` 同一套口径: 只走一遍"可阻塞的写操作"流程并说清什么都
-        没写; 未知策略与不存在的目标游戏仍然报错; 整批都选了"跳过"时如实回报跳过了
+        没写; 未知策略仍然报错; 整批都选了"跳过"时如实回报跳过了
         多少款, 而不是拿"已模拟导入"糊过去。
         """
         self._simulate()
@@ -945,12 +943,10 @@ class DemoArchiveService:
         return tr("result.import_batch_simulated", count=batch.game_count - skipped)
 
     def _check_batch_choices(self, choices: Mapping[str, ImportChoice]) -> None:
-        """逐条校验用户的选择: 未知策略与不存在的目标游戏都要报错(不是静默跳过)."""
+        """逐条校验用户的选择: 未知策略要报错(不是静默跳过)."""
         for choice in choices.values():
             if choice.strategy not in STRATEGIES:
                 raise ArchiveManagementError(f"未知的导入策略: {choice.strategy}")
-            if choice.target_game_id is not None:
-                self._require_game(choice.target_game_id)
 
     # -- 游戏与存档位置管理 -------------------------------------------------
 

@@ -21,7 +21,6 @@ from archive_management.application.imports import (
     STRATEGY_MERGE,
     STRATEGY_SKIP,
     BatchImportChoice,
-    BatchImportResult,
     ImportService,
 )
 from archive_management.exceptions import ArchiveManagementError
@@ -117,18 +116,15 @@ def _mapped(source: _Source) -> dict[str, BatchImportChoice]:
     }
 
 
-def _merge_into(
-    source: _Source, result: BatchImportResult
-) -> dict[str, BatchImportChoice]:
-    """第二次导入: 合并到第一次建好的游戏上(与单包的"重复导入"用例同一手法)."""
-    choices: dict[str, BatchImportChoice] = {}
-    for index, entry in enumerate(ENTRIES):
-        choices[entry] = BatchImportChoice(
+def _merge_into(source: _Source) -> dict[str, BatchImportChoice]:
+    """第二次导入: 同名合并到第一次建好的游戏上(与单包的"重复导入"用例同一手法)."""
+    return {
+        entry: BatchImportChoice(
             strategy=STRATEGY_MERGE,
-            target_game_id=result.results[index].game_id,
             locations={0: str(source.saves[index])},
         )
-    return choices
+        for index, entry in enumerate(ENTRIES)
+    }
 
 
 # -- 整批导入 ---------------------------------------------------------------
@@ -152,7 +148,7 @@ def test_a_batch_round_trip_rebuilds_both_games_with_their_content(
     assert [item.name for item in inspection.games] == list(NAMES)
     assert [item.entry for item in inspection.games] == list(ENTRIES)
     assert inspection.backup_count == 4
-    assert [item.inspection.matching_game_id for item in inspection.games] == [
+    assert [item.inspection.same_name_game_id for item in inspection.games] == [
         None,
         None,
     ]
@@ -218,7 +214,7 @@ def test_reimporting_the_same_batch_skips_every_existing_node(
     assert first.nodes == 4
 
     again = service.import_batch(
-        service.inspect_batch(source.batch), _merge_into(source, first)
+        service.inspect_batch(source.batch), _merge_into(source)
     )
 
     assert again.nodes == 0

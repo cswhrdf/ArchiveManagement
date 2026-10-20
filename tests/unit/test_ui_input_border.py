@@ -35,7 +35,9 @@ _UI_DIR = Path(__file__).resolve().parents[2] / "src" / "archive_management" / "
 _INPUT_TYPES = frozenset({"CTkEntry", "CTkComboBox", "CTkOptionMenu", "CTkTextbox"})
 # 登记: 扫到的输入控件站点数(加/删一个输入控件时要跟着改 —— 数字变了正说明这件事)。
 # 21 → 22: 设置窗口新增“备份校验方式”下拉框(2026-10-04, 校验方式可选)。
-_EXPECTED_INPUT_SITES = 22
+# 22 → 21: 批量导入卡片移除“合并到”目标下拉框 —— 同名那一款改由后端按原始名称
+# 自动确定, 界面不再让用户挑(2026-10-20)。
+_EXPECTED_INPUT_SITES = 21
 
 
 def _ui_sources() -> list[Path]:

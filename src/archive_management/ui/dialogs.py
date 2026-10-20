@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 import customtkinter as ctk
 
-from archive_management.application.imports import STRATEGY_MERGE
 from archive_management.domain import (
     MAX_TAG_LENGTH,
     MAX_TAGS,
@@ -31,12 +30,9 @@ from archive_management.ui.models import (
     ImportChoice,
     ImportLocationRow,
     ImportPrompt,
-    ImportTargetOption,
     batch_export_choice,
     batch_row_choice,
     filter_export_options,
-    target_game_id,
-    target_label_for,
 )
 from archive_management.ui.palette import Palette
 from archive_management.ui.widgets import (
@@ -1511,16 +1507,14 @@ def import_package_dialog(
     locations_hint: str,
     strategy_label: str,
     strategies: Sequence[tuple[str, str]],
-    target_label: str,
-    target_hint: str,
-    target_locked_hint: str,
     confirm_text: str | None = None,
 ) -> ImportChoice | None:
     """展示包内容与冲突项, 让用户选导入方式并映射存档位置; 取消返回 ``None``.
 
-    ``strategies`` 是 ``(策略键, 文案)`` 列表(调用方按"有没有可合并的游戏"决定
-    是否提供"合并"); ``prompt`` 里的每个存档位置一行输入框, **留空表示这一条不
-    导入**, 只有本就存在于本机的包内路径才会被预填。目标游戏只在"合并"时返回。
+    ``strategies`` 是 ``(策略键, 文案)`` 列表(调用方按"库里有没有同名游戏"决定是否
+    提供"导入到同名游戏", 文案里带着那款的名字); ``prompt`` 里的每个存档位置一行
+    输入框, **留空表示这一条不导入**, 只有本就存在于本机的包内路径才会被预填。
+    同名导入的目标由后端自动确定, 对话框里没有也不需要"合并到"那一栏。
 
     正文放在一个按屏幕高度封顶的滚动区里(矮屏上底部的按钮不会被切掉); 单选按钮的
     选中态用淡强调色而不是主按钮那种实心绿, 免得同一屏里绿色既表示"选中"又表示
@@ -1548,37 +1542,32 @@ def import_package_dialog(
         text_color=palette.text_body,
     ).pack(padx=24, pady=(20, 6), anchor="w")
 
-    if prompt.match_text:
-        ctk.CTkLabel(
-            body,
-            text=prompt.match_text,
-            anchor="w",
-            justify="left",
-            wraplength=460,
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
-        ).pack(padx=24, pady=(0, 6), anchor="w")
-
     _dialog_section(body, palette, locations_label)
-    _dialog_hint(body, palette, locations_hint)
-    # 高度按"两条位置 + 行间分割线"给够: 行距按评审时的取值拉开后, 120 高会把第二条输入框
-    # 裁掉一半, 滚动条也就一直立着。
-    rows = ctk.CTkScrollableFrame(
-        body, width=460, height=150, fg_color=palette.well, corner_radius=8
-    )
-    # 说明到第一条输入框本来就只隔几像素, 更要多给一点间距, 否则它看起来属于第一行。
-    rows.pack(padx=24, pady=(8, 10), fill="x")
-    auto_scrollbar(rows)
-    entries = _import_location_rows(rows, palette, prompt.locations)
+    entries: list[tuple[ImportLocationRow, ctk.CTkEntry]] = []
+    if prompt.locations:
+        _dialog_hint(body, palette, locations_hint)
+        # 高度按"两条位置 + 行间分割线"给够: 行距按评审时的取值拉开后, 120 高会把第二条输入框
+        # 裁掉一半, 滚动条也就一直立着。
+        rows = ctk.CTkScrollableFrame(
+            body, width=460, height=150, fg_color=palette.well, corner_radius=8
+        )
+        # 说明到第一条输入框本来就只隔几像素, 更要多给一点间距, 否则它看起来属于第一行。
+        rows.pack(padx=24, pady=(8, 10), fill="x")
+        auto_scrollbar(rows)
+        entries = _import_location_rows(rows, palette, prompt.locations)
+    else:
+        # 包里一条存档位置都没有(导出那台机器上这款就没登记过)时, 不摆空的滚动框 ——
+        # 那样看着像排版坏了; 明说"没有要映射的", 用户才知道这不是漏了输入框
+        # (2026-10-20 用户实测反馈)。
+        _dialog_hint(body, palette, tr("dialog.import_no_locations"))
     _dialog_section(body, palette, strategy_label)
     strategy_var = ctk.StringVar(value=strategies[0][0])
     for key, text in strategies:
-        ctk.CTkRadioButton(
+        button = ctk.CTkRadioButton(
             body,
             text=text,
             value=key,
             variable=strategy_var,
-            command=lambda: _paint_targets(),
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
             text_color_disabled=palette.text_disabled,
@@ -1586,53 +1575,10 @@ def import_package_dialog(
             fg_color=palette.accent_soft_border,
             hover_color=palette.accent_soft,
             border_color=palette.border,
-        ).pack(padx=24, pady=(2, 0), anchor="w")
-
-    target_var = ctk.StringVar(value=_default_target(prompt.targets))
-    # 只登记"能接受 state 参数"的控件: 滚动容器的 configure 不吃 state(会报未知选项).
-    target_parts: list[ctk.CTkBaseClass] = []
-    target_hint_label: ctk.CTkBaseClass | None = None
-    if prompt.targets:
-        target_parts.append(_dialog_section(body, palette, target_label))
-        target_hint_label = _dialog_hint(body, palette, target_hint)
-        target_parts.append(target_hint_label)
-        target_rows = ctk.CTkScrollableFrame(
-            body, width=460, height=110, fg_color=palette.well, corner_radius=8
         )
-        target_rows.pack(padx=24, pady=(6, 10), fill="x")
-        auto_scrollbar(target_rows)
-        for option in prompt.targets:
-            radio = ctk.CTkRadioButton(
-                target_rows,
-                text=option.label,
-                value=option.game_id,
-                variable=target_var,
-                font=ctk.CTkFont(size=12),
-                text_color=palette.text_body,
-                text_color_disabled=palette.text_disabled,
-                fg_color=palette.accent_soft_border,
-                hover_color=palette.accent_soft,
-                border_color=palette.border,
-            )
-            radio.pack(padx=4, pady=2, anchor="w")
-            target_parts.append(radio)
-
-    def _paint_targets() -> None:
-        """只有"合并"才需要目标游戏: 其余方式把目标区置灰并写明原因.
-
-        只置灰不提原因时, 用户会以为自己的选择被忽略了(评审时定的); 这里把说明文字
-        换成"先选合并才能挑目标", 位置不变、高度也不变。
-        """
-        merging = strategy_var.get() == STRATEGY_MERGE
-        if target_hint_label is not None:
-            target_hint_label.configure(
-                text=target_hint if merging else target_locked_hint
-            )
-        state = "normal" if merging else "disabled"
-        for part in target_parts:
-            part.configure(state=state)
-
-    _paint_targets()
+        button.pack(padx=24, pady=(2, 0), anchor="w")
+        # 同名那条选项带着游戏名: 长名字在对话框宽度内折行, 而不是被窗口右缘截断。
+        _wrap_radio_text(button, _IMPORT_RADIO_WRAP)
 
     result: list[ImportChoice] = []
 
@@ -1642,7 +1588,6 @@ def import_package_dialog(
         result.append(
             ImportChoice(
                 strategy=strategy,
-                target_game_id=_chosen_target(strategy, target_var.get()),
                 locations={index: path for index, path in chosen.items() if path},
             )
         )
@@ -1987,21 +1932,7 @@ class _BatchRowWidgets:
 
     row: BatchImportRow
     strategy: ctk.StringVar
-    target: ctk.CTkComboBox
     entries: tuple[tuple[ImportLocationRow, ctk.CTkEntry], ...]
-    heading: ctk.CTkBaseClass
-
-
-def _paint_batch_row(parts: _BatchRowWidgets) -> None:
-    """只有"合并"才启用目标选择(与单包对话框同一套语义).
-
-    启用态是 ``readonly`` 而不是 ``normal``: 这是"从候选里挑一个", 不是输入框。而它旁边
-    的说明文字是 ``CTkLabel`` —— 两者接受的 state 不是一个集合(Label 不认 readonly),
-    所以分开写。
-    """
-    merged = parts.strategy.get() == STRATEGY_MERGE
-    parts.heading.configure(state="normal" if merged else "disabled")
-    parts.target.configure(state="readonly" if merged else "disabled")
 
 
 def batch_import_dialog(
@@ -2013,16 +1944,13 @@ def batch_import_dialog(
     locations_label: str,
     locations_hint: str,
     strategy_label: str,
-    target_label: str,
     confirm_text: str | None = None,
 ) -> BatchImportSelection | None:
     """逐款确认批量导入的方式; 取消返回 ``None``.
 
-    一款游戏一张小卡片: 名称与标识、"疑似同一款"的提示、存档位置(留空 = 不导入)、
-    策略单选按钮与目标游戏下拉框。语义与单包 :func:`import_package_dialog` 完全一致;
-    这里的目标选择用下拉框而不是单选按钮, 因为一批里有好几款游戏, 每款铺一组单选按钮
-    排不下 —— 下拉框的取值是**去重后的文案**(重名时带游戏 id, 见
-    :func:`~archive_management.ui.models.unique_targets`)。
+    一款游戏一张小卡片: 名称与标识、存档位置(留空 = 不导入)与策略单选按钮。
+    语义与单包 :func:`import_package_dialog` 完全一致 —— "导入到同名游戏"的目标
+    由后端按原始名称自动确定, 卡片里没有目标下拉框(文案里已经写明是哪一款)。
     """
     ok_text = tr("dialog.confirm") if confirm_text is None else confirm_text
     window = ctk.CTkToplevel(parent)
@@ -2074,64 +2002,34 @@ def batch_import_dialog(
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         ).pack(side="right")
-        if row.match_text:
-            _card_heading(card, palette, row.match_text)
         entries = _batch_location_entries(
             card, palette, row, locations_label, locations_hint
         )
         strategy = ctk.StringVar(value=row.strategy)
-        target = ctk.CTkComboBox(
-            card,
-            values=[option.label for option in row.targets],
-            height=_CARD_CONTROL_HEIGHT,
-            # 只能从列表里选(候选来自扫描结果): 手删内容不会换目标游戏, 提交时读的仍是列表里的值.
-            state="readonly",
-            fg_color=palette.input_bg,
-            button_color=palette.raised,
-            button_hover_color=palette.raised,
-            border_color=palette.input_border,
-            text_color=palette.text_body,
-            dropdown_fg_color=palette.panel,
-            dropdown_text_color=palette.text_body,
-            font=ctk.CTkFont(size=12),
-            dropdown_font=ctk.CTkFont(size=12),
-        )
-        heading = _card_heading(card, palette, target_label, pack=False)
-        parts = _BatchRowWidgets(
-            row=row,
-            strategy=strategy,
-            target=target,
-            entries=entries,
-            heading=heading,
-        )
+        parts = _BatchRowWidgets(row=row, strategy=strategy, entries=entries)
 
-        def paint() -> None:
-            _paint_batch_row(parts)
-
-        # 小标题一律在自己控件上方(与“包内存档位置”“合并到”同一套排法): 原来“导入方式”
-        # 的标签在单选按钮左边, 而“合并到”的标签在上方, 同一张卡片里两种排法(评审时定的)。
+        # 小标题一律在自己控件上方(与“包内存档位置”同一套排法): 原来“导入方式”
+        # 的标签在单选按钮左边, 同一张卡片里两种排法(评审时定的)。
         _card_heading(card, palette, strategy_label)
         radios = ctk.CTkFrame(card, fg_color="transparent")
-        radios.pack(fill="x", padx=_CARD_PAD, pady=(2, 0), anchor="w")
+        radios.pack(fill="x", padx=_CARD_PAD, pady=(2, 8), anchor="w")
         for key, text in row.strategies:
-            ctk.CTkRadioButton(
+            button = ctk.CTkRadioButton(
                 radios,
                 text=text,
                 value=key,
                 variable=strategy,
-                command=paint,
                 font=ctk.CTkFont(size=12),
                 text_color=palette.text_body,
                 text_color_disabled=palette.text_disabled,
                 fg_color=palette.accent_soft_border,
                 hover_color=palette.accent_soft,
                 border_color=palette.border,
-            ).pack(side="left", padx=(0, 8))
-        if row.targets:
-            heading.pack(padx=_CARD_PAD, pady=(6, 0), anchor="w")
-            target.pack(padx=_CARD_PAD, pady=(2, 8), fill="x")
-            target.set(target_label_for(row.targets, row.target_game_id))
-        paint()
+            )
+            # 竖排(与单包对话框同一套): 同名那条选项带着游戏名, 横排时名字一长就会把
+            # 后面的"跳过"挤出卡片(2026-10-20 用户实测); 竖排后长名字只是把行撑高。
+            button.pack(pady=(2, 0), anchor="w")
+            _wrap_radio_text(button, _CARD_RADIO_WRAP)
         return parts
 
     built = [build_row(row) for row in prompt.rows]
@@ -2144,9 +2042,6 @@ def batch_import_dialog(
                 choices={
                     parts.row.entry: batch_row_choice(
                         strategy=str(parts.strategy.get()),
-                        target=target_game_id(
-                            parts.row.targets, str(parts.target.get())
-                        ),
                         locations={
                             item.index: str(entry.get())
                             for item, entry in parts.entries
@@ -2186,14 +2081,36 @@ def batch_import_dialog(
     return result[0] if result else None
 
 
-# 批量导入卡片的几何: 左右内边距对称, 输入框与下拉框同高。
+# 批量导入卡片的几何: 左右内边距对称。
 #
-# 原来左内边距 16 而右边只剩 8(卡片右边界被滚动条压住一条缝), 同一张卡片里输入框
-# 28px、下拉框 30px, 四个小标题还只靠颜色区分(绿的那个看起来像超链接)(评审时定的)。
+# 原来左内边距 16 而右边只剩 8(卡片右边界被滚动条压住一条缝), 同一张卡片里控件高度
+# 参差, 四个小标题还只靠颜色区分(绿的那个看起来像超链接)(评审时定的)。
 _CARD_PAD = 12
 _CARD_INSET = 6
 _CARD_CONTROL_HEIGHT = 30
 _CARD_TEXT_WIDTH = 400
+# 单选按钮文字的换行宽度: CustomTkinter 6 的 ``CTkRadioButton`` 不支持 ``wraplength``
+# (文字由内部那个 tkinter.Label 绘制), 同名导入那条选项带着游戏名, 名字一长单行摆不下
+# 就会把同一行后面的选项挤出可视区、或被窗口右缘截断(2026-10-20 用户实测) —— 借内部
+# 标签开换行(见 :func:`_wrap_radio_text`)。432 = 单包对话框可用宽 460 - 圆点与间距 28;
+# 卡片里同理为 400 - 28。
+_IMPORT_RADIO_WRAP = 432
+_CARD_RADIO_WRAP = _CARD_TEXT_WIDTH - 28
+
+
+def _wrap_radio_text(button: ctk.CTkRadioButton, width: int) -> None:
+    """让单选按钮的文字在 ``width`` 像素内换行.
+
+    ``CTkRadioButton`` 自己不换行(见上面的常量说明), 这里给内部那个文本标签开
+    ``wraplength``; CustomTkinter 将来改掉这个内部属性时安静退化为单行(回到旧行为,
+    而不是崩), 换行宽度按该控件的缩放比例换算, 高分屏上也不会换早了。
+    """
+    label = getattr(button, "_text_label", None)
+    if label is None:  # pragma: no cover - 只在 CustomTkinter 改内部实现时发生
+        return
+    scale = getattr(button, "_apply_widget_scaling", None)
+    pixels = width if scale is None else int(scale(width))
+    label.configure(wraplength=pixels, justify="left")
 
 
 def _card_heading(
@@ -2228,19 +2145,23 @@ def _batch_location_entries(
     label: str,
     hint: str,
 ) -> tuple[tuple[ImportLocationRow, ctk.CTkEntry], ...]:
-    """一行游戏卡片里的存档位置区(没有位置时整块不显示)."""
-    if not row.locations:
-        return ()
+    """一行游戏卡片里的存档位置区(没有位置时改为一句说明, 不再整块隐藏)."""
     _card_heading(card, palette, label)
+    # 包里一条存档位置都没有(导出那台机器上这款就没登记过)的那一款, 位置区不再整块
+    # 藏起来 —— 同屏其它卡片都有输入框, 这一张空着会像坏了; 明说"没有要映射的"
+    # (2026-10-20 用户实测反馈)。
+    text = hint if row.locations else tr("dialog.import_no_locations")
     ctk.CTkLabel(
         card,
-        text=hint,
+        text=text,
         anchor="w",
         justify="left",
         wraplength=_CARD_TEXT_WIDTH,
         font=ctk.CTkFont(size=11),
         text_color=palette.text_hint,
     ).pack(padx=_CARD_PAD, pady=(0, 2), anchor="w")
+    if not row.locations:
+        return ()
     entries: list[tuple[ImportLocationRow, ctk.CTkEntry]] = []
     for item in row.locations:
         ctk.CTkLabel(
@@ -2381,20 +2302,3 @@ def _fit_dialog_body(body: ctk.CTkScrollableFrame, cap: int) -> None:
     content = int(box[3]) - int(box[1])
     if content > 0:
         body.configure(height=max(_DIALOG_BODY_MIN, min(cap, content + 4)))
-
-
-def _default_target(targets: Sequence[ImportTargetOption]) -> str:
-    """目标游戏的默认选中项: "疑似同一款"(没有就是列表里的第一款)."""
-    for option in targets:
-        if option.selected:
-            return option.game_id
-    return targets[0].game_id if targets else ""
-
-
-def _chosen_target(strategy: str, selected: str) -> str | None:
-    """只有"合并"方式才返回目标游戏; 其余方式一律不带.
-
-    目标区在"合并"时一定有预选项(没有可选游戏时界面根本不提供合并), 所以这里
-    不做"没选中"的兜底判断: 界面不替用户猜要合并到哪一款。
-    """
-    return selected if strategy == STRATEGY_MERGE else None

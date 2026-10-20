@@ -1666,14 +1666,13 @@ class SqlArchiveService:
         inspection: ImportInspection,
         *,
         strategy: str,
-        target_game_id: str | None,
         locations: Mapping[int, str],
     ) -> str:
         """按策略真的导入这个包, 返回带真实计数的本地化提示.
 
         内容与数据库都由 :class:`ImportService` 处理(失败时它会回滚本次已建的节点);
-        这里只负责把界面的字符串 id 换成整型、记审计与拼提示。“跳过”策略什么都不
-        写, 因此提示里只说明跳过了多少份。
+        这里只负责记审计与拼提示。"跳过"策略什么都不写, 因此提示里只说明跳过了多少份;
+        "导入到同名游戏"的目标由服务层按原始名称匹配自动确定, 界面不传目标。
         """
         source = redacted_path(str(inspection.path))
         log_action("import.start", basic=True, strategy=strategy, source=source)
@@ -1681,7 +1680,6 @@ class SqlArchiveService:
             result = self._import.import_package(
                 inspection,
                 strategy=strategy,
-                target_game_id=self._import_target(target_game_id),
                 locations=locations,
             )
         except ArchiveManagementError as exc:
@@ -1698,8 +1696,8 @@ class SqlArchiveService:
         """按每款游戏各自的选择导入整批, 返回带真实计数的本地化提示.
 
         ``choices`` 以**内层条目名**为键; 没给选择的那一款由服务层按默认值处理(新建,
-        且不导入任何存档位置)。目标游戏的字符串 id 在这里换成整型并顺带校验存在
-        (与 :meth:`run_import` 同一个 :meth:`_import_target`)。失败与取消的回滚边界都
+        且不导入任何存档位置)。"导入到同名游戏"的目标由服务层按原始名称匹配自动
+        确定。失败与取消的回滚边界都
         由服务层决定: 当前这一款只回收自己, **已经导完的保留**。
 
         用例层用同一个异常表达"失败"与"取消", 因此这里按真实请求过取消来区分: 只有
@@ -1735,11 +1733,10 @@ class SqlArchiveService:
     def _batch_choices(
         self, choices: Mapping[str, ImportChoice]
     ) -> dict[str, BatchImportChoice]:
-        """把界面选择翻译成用例层的选择: 目标游戏顺带校验存在(未知目标报错)."""
+        """把界面选择翻译成用例层的选择(同名导入的目标由服务层自动确定)."""
         return {
             entry: BatchImportChoice(
                 strategy=choice.strategy,
-                target_game_id=self._import_target(choice.target_game_id),
                 locations=choice.locations,
             )
             for entry, choice in choices.items()
@@ -2125,17 +2122,6 @@ class SqlArchiveService:
         """返回数据库中的游戏实体(不存在时抛错)."""
         game, _id = self._game_ref(game_id)
         return game
-
-    def _import_target(self, game_id: str | None) -> int | None:
-        """合并导入的目标游戏 id(str -> int); 没有目标时是 ``None``.
-
-        顺带校验目标真的存在: 否则用户选中的游戏已经被删掉时, 错误会变成难懂的
-        数据库异常而不是"未知游戏"。
-        """
-        if game_id is None:
-            return None
-        _game, gid = self._game_ref(game_id)
-        return gid
 
     def _game_ref(self, game_id: str) -> tuple[Game, int]:
         """返回游戏实体与稳定的整型 id."""
