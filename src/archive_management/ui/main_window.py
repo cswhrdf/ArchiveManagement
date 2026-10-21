@@ -868,7 +868,9 @@ class ArchiveApp(ctk.CTk):
             self._backup_btn,
             self._export_btn,
             self._settings_game_btn,
+            self._enable_btn,
             self._cancel_btn,
+            self._schedule_toggle_btn,
             self._restore_btn,
             self._branch_btn,
             self._rename_btn,
@@ -1019,6 +1021,31 @@ class ArchiveApp(ctk.CTk):
         self._subtitle_font = ctk.CTkFont(size=13)
         self._subtitle_label.configure(wraplength=_HEADER_TEXT_WIDTH, justify="left")
         self._subtitle_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        # 启用/停用原来藏在「游戏设置」弹窗的按钮行里, 与"定时备份/重命名/删除"混在一起,
+        # 用户实测反馈"容易误会成点了会打开什么"(2026-10-20), 于是抽到页头。2026-10-21
+        # 把开关换成**状态词 + 按钮**一对, 两条理由:
+        #   ① 页头是"动作区"(导出/游戏设置), 开关是设置面板的语汇 —— 设置窗口里那几个
+        #      开关管的是配置项, 这里管的是"当前这款游戏在不在启用状态";
+        #   ② 按钮文字一律写**点击后会发生什么**(与全局任务窗口的暂停/继续、设置窗口的
+        #      主题切换同一个口径), 当前状态交给左边那枚小字 —— 两件事各占一处, 谁也不靠猜。
+        # 位置放在动作组**最左**: 它决定的是"这款游戏的分量"(只有启用中的那一款响应
+        # 全局快捷键与定时备份), 属于对象自身的状态, 不是又一个动作; 夹在中间会被读成
+        # 同类动作, 放到最右又占掉主操作的终点。真正"整体置灰"的是归档(见 game.allow)。
+        # **创建顺序必须与摆放顺序一致**: Tk 的 Tab 序跟的是创建顺序, 否则键盘用户会先跳到
+        # 右边两颗按钮再回到最左那颗(test_gui_keyboard 的"Tab 顺序与摆放顺序不一致"会红)。
+        self._enable_state_label = self.kit.label(header, "", style="muted", size=12)
+        self._enable_state_label.grid(
+            row=0, column=1, rowspan=2, padx=(8, 6), sticky="e"
+        )
+        self._enable_btn = self.kit.button(
+            header,
+            "",
+            style="ghost",
+            command=self._on_toggle_game_enabled,
+            width=96,
+            height=38,
+        )
+        self._enable_btn.grid(row=0, column=2, rowspan=2, padx=(0, 6))
         self._export_btn = self.kit.button(
             header,
             tr("action.export"),
@@ -1027,7 +1054,7 @@ class ArchiveApp(ctk.CTk):
             width=104,
             height=38,
         )
-        self._export_btn.grid(row=0, column=1, rowspan=2, padx=(8, 6))
+        self._export_btn.grid(row=0, column=3, rowspan=2, padx=(8, 6))
         self._settings_game_btn = self.kit.button(
             header,
             tr("action.game_settings"),
@@ -1036,7 +1063,7 @@ class ArchiveApp(ctk.CTk):
             width=112,
             height=38,
         )
-        self._settings_game_btn.grid(row=0, column=2, rowspan=2)
+        self._settings_game_btn.grid(row=0, column=4, rowspan=2)
 
         self._hero = self.kit.frame(
             self._content, bg_key="hero_bg", border_key="border"
@@ -1410,8 +1437,26 @@ class ArchiveApp(ctk.CTk):
         )
         self._task_name_label.configure(wraplength=_TASK_NAME_WIDTH, justify="left")
         self._task_name_label.grid(row=1, column=0, padx=16, sticky="ew")
+        # 启停按钮与「游戏设置 → 定时备份」的编辑弹窗、全局任务窗口共用同一条
+        # set_schedule 路径, 只翻转启用态并保留周期配置。文字写**点击后会发生什么**
+        # (暂停 / 继续, 与全局任务窗口同一个词), 当前状态由上面那枚状态词说 ——
+        # 两颗控件分工不重叠。未配置周期、或正在跑备份时都不出现(见 _render_task)。
+        self._schedule_toggle_btn = self.kit.button(
+            panel,
+            "",
+            style="ghost",
+            command=self._on_toggle_schedule,
+            width=64,
+            height=26,
+        )
+        self._schedule_toggle_btn.grid(row=1, column=1, padx=(8, 16), sticky="e")
+        self._schedule_toggle_btn.grid_remove()
         self._task_state_label = self.kit.label(panel, "", style="muted", size=12)
-        self._task_state_label.grid(row=1, column=1, padx=(8, 16), sticky="e")
+        # 状态词搬到卡片标题那一行(标题说"这是什么卡", 右边说"它现在是什么状态"),
+        # 下面那行留给任务名与启停按钮 —— 开关换成按钮后不再单占一行, 卡片比原来矮一行。
+        self._task_state_label.grid(
+            row=0, column=1, padx=(8, 16), pady=(16, 8), sticky="e"
+        )
 
         self._task_progress = ctk.CTkProgressBar(
             panel, height=8, corner_radius=RADIUS_PILL
@@ -1441,30 +1486,23 @@ class ArchiveApp(ctk.CTk):
         self._cancel_btn.configure(state="disabled")
 
         # 说明与它的值各占一行(值拿满宽度): 长路径不再需要和别的列抢位置。
-        self.kit.label(panel, tr("task.next"), style="muted", size=12).grid(
-            row=4, column=0, columnspan=2, padx=16, sticky="w"
-        )
-        self._task_next = self.kit.label(panel, "", style="body", size=12)
-        self._task_next.configure(wraplength=_TASK_VALUE_WIDTH, justify="left")
-        self._task_next.grid(
-            row=5, column=0, columnspan=2, padx=16, pady=(2, 0), sticky="ew"
-        )
-
+        # 「下次运行」不在这里: 它与右上概要区是同一份数据, 一处说一遍就够
+        # (用户反馈: 详情页里同一句话出现在两处, 卡片还因此白占两行)。
         self.kit.label(panel, tr("task.target"), style="muted", size=12).grid(
-            row=6, column=0, columnspan=2, padx=16, pady=(8, 0), sticky="w"
+            row=4, column=0, columnspan=2, padx=16, pady=(8, 0), sticky="w"
         )
         # 备份目标是完整路径, 必须换行显示, 否则会被卡片裁掉.
         self._task_target = self.kit.label(panel, "", style="hint", size=12)
         self._task_target.configure(wraplength=_TASK_VALUE_WIDTH, justify="left")
         self._task_target.grid(
-            row=7, column=0, columnspan=2, padx=16, pady=(2, 0), sticky="ew"
+            row=5, column=0, columnspan=2, padx=16, pady=(2, 0), sticky="ew"
         )
 
         # 快捷键不在任务状态卡里展示: 它属于全局设置, 统一在"设置"窗口里查看与修改。
         self._task_hint = self.kit.label(panel, "", style="hint", size=12)
         self._task_hint.configure(wraplength=250, justify="left")
         self._task_hint.grid(
-            row=8, column=0, columnspan=2, padx=16, pady=(12, 12), sticky="w"
+            row=6, column=0, columnspan=2, padx=16, pady=(12, 12), sticky="w"
         )
 
     # ---------------------------------------------------------------- 数据装载
@@ -1540,6 +1578,7 @@ class ArchiveApp(ctk.CTk):
         self._paint_next_chip(self.p)
         self._render_selected(None)
         self._render_task(self.backend.task_status(None))
+        self._sync_enable_control()
         self._update_actions()
         self._show_area(graph=False)
         for child in self._list_scroll.winfo_children():
@@ -1571,6 +1610,7 @@ class ArchiveApp(ctk.CTk):
         self._render_list()
         self._render_selected(None)
         self._render_task(self.backend.task_status(game_id))
+        self._sync_enable_control()
         self._update_actions()
         self.kit.apply(self.p)
         if self._game is not None and not self._game.has_locations:
@@ -1606,15 +1646,17 @@ class ArchiveApp(ctk.CTk):
         self._stat_recent_sub.configure(text=detail.last_backup_sub)
         self._stat_total_value.configure(text=detail.total_backups_label)
         self._stat_total_sub.configure(text=detail.total_backups_sub)
-        self._next_scheduled = bool(detail.next_backup_label)
+        # 胶囊配色只在"这一个时间点真的会换来一次备份"时才亮起: 任务暂停或游戏
+        # 停用(概要区写"已暂停"/"未启用")属于需要用户动手的状态, 不能用正向强调色.
+        self._next_scheduled = bool(detail.next_backup_label) and detail.game_enabled
         self._stat_next_value.configure(text=detail.next_backup_text)
         self._paint_next_chip(self.p)
 
     def _paint_next_chip(self, palette: Palette) -> None:
         """下次自动备份那个胶囊的配色跟着有没有排期走.
 
-        有排期 = 强调色的正向提示; 没有排期 = 中性底色 + 中性字(未配置), 不再是
-        一个穿着正向色、里面只有一条短横线的面板。
+        有排期 = 强调色的正向提示; 没有排期(未配置/已暂停/未启用) = 中性底色 +
+        中性字, 不再是一个穿着正向色、里面只有一条短横线的面板。
         """
         if self._next_scheduled:
             self._next_chip.configure(
@@ -1778,11 +1820,27 @@ class ArchiveApp(ctk.CTk):
         self._fit_task_name(task.task_name)
         self._show_task_progress(task.running)
         self._task_state_label.configure(text=state)
+        # 启停按钮只在配置了周期、且当前没有正在跑的备份时出现: 运行中那一格的"运行中"
+        # 由状态词说, 而这时摆一颗"暂停"会与下面的「取消」混淆(它停不了正在进行的那一次).
+        # 它的可用性与"游戏是否启用"无关(两者互不影响): 停用期间照样能暂停/继续, 只是
+        # 到点会被跳过; 只有归档才是整体不可用(后端也会拒绝, 这里置灰防误触)。
+        game = self._game
+        can_toggle = game is not None and not game.archived
+        if task.schedule_text and not task.running:
+            self._schedule_toggle_btn.configure(
+                text=tr(
+                    "schedule.pause" if task.schedule_enabled else "schedule.resume"
+                ),
+                state="normal" if can_toggle else "disabled",
+            )
+            self.kit.repaint_button(self._schedule_toggle_btn, self.p)
+            self._schedule_toggle_btn.grid()
+        else:
+            self._schedule_toggle_btn.grid_remove()
         self._task_progress.set(task.progress)
         self._task_progress_label.configure(
             text=task.progress_label if task.running else ""
         )
-        self._task_next.configure(text=task.next_run_text)
         self._task_target.configure(text=task.target_label)
         self._task_hint.configure(text=tr("task.hint"))
         self._cancel_btn.configure(state="normal" if task.cancellable else "disabled")
@@ -2264,6 +2322,10 @@ class ArchiveApp(ctk.CTk):
         self._backup_btn.configure(state="normal" if can_do_backup else "disabled")
         can_export = game is not None and not busy and game.allow("export")
         self._export_btn.configure(state="normal" if can_export else "disabled")
+        # 页头那对"状态词 + 启停按钮"与导出按钮同一套可用性: 忙碌期间与归档游戏都不许翻转。
+        can_enable = game is not None and not busy and not game.archived
+        self._enable_btn.configure(state="normal" if can_enable else "disabled")
+        self._sync_enable_control()
         selected = self._backup_id is not None
         nodes_ready = selected and not busy and game is not None
         # 恢复/分支/重命名/删除备份都属于"备份管理": 归档的游戏不允许其中任何一项.
@@ -2966,6 +3028,86 @@ class ArchiveApp(ctk.CTk):
         self._render_task(self.backend.task_status(self._game_id))
         if self._game_id is not None:
             self._render_hero(self.backend.get_detail(self._game_id))
+
+    def _sync_enable_control(self) -> None:
+        """把页头那对"状态词 + 启停按钮"对齐当前游戏.
+
+        按钮文字写**点击后会发生什么**, 状态词写现在是什么 —— 两处各说一件事, 所以
+        失败回滚/刷新时只要重放这一句, 不必去猜控件当时被拨到了哪边(也不会递归回调)。
+        """
+        enabled = self._game is not None and self._game.enabled
+        self._enable_state_label.configure(
+            text=tr("detail.state_enabled" if enabled else "detail.state_disabled")
+        )
+        self._enable_btn.configure(
+            text=tr("detail.disable_game" if enabled else "detail.enable_game")
+        )
+
+    def _on_toggle_game_enabled(self) -> None:
+        """页头启停按钮: 启用会自动停用其它启用中的游戏(与主页同一套语义与文案)."""
+        game = self._game
+        if game is None:
+            return
+        if game.archived:
+            # 按钮已被 _update_actions 置灰, 这里兜底"旧代码路径直接调进来"的场景.
+            self._feedback(
+                FeedbackKind.ERROR, tr("home.archived_blocked", name=game.name)
+            )
+            self._sync_enable_control()
+            return
+        want = not game.enabled
+        replaced = next(
+            (
+                other
+                for other in self.backend.list_games()
+                if other.enabled and other.game_id != game.game_id
+            ),
+            None,
+        )
+        try:
+            self.backend.set_game_enabled(game.game_id, want)
+        except ArchiveManagementError as exc:
+            self._feedback(FeedbackKind.ERROR, str(exc))
+            self._sync_enable_control()
+            return
+        log_action("ui.detail_enable", game_id=game.game_id, enabled=want)
+        if want and replaced is not None:
+            message = tr("home.enabled_replaced", name=game.name, other=replaced.name)
+        else:
+            message = tr("home.enabled" if want else "home.disabled", name=game.name)
+        self._feedback(FeedbackKind.SUCCESS, message)
+        # 启用态会决定定时备份到点是否真的执行: 走完整刷新, 把任务卡与概要区一起对齐。
+        self._refresh_after_manage()
+
+    def _on_toggle_schedule(self) -> None:
+        """任务卡里的启停按钮: 保留周期配置, 只翻转启用状态(同全局任务窗口)."""
+        game = self._game
+        if game is None:
+            return
+        task = self.backend.task_status(game.game_id)
+        if not task.schedule_text:
+            return
+        want = not task.schedule_enabled
+        try:
+            status = self.backend.set_schedule(
+                game.game_id,
+                task.schedule_text,
+                enabled=want,
+                keep_auto=task.keep_auto,
+            )
+        except ArchiveManagementError as exc:
+            self._feedback(FeedbackKind.ERROR, str(exc))
+            # 回滚显示: 后端没接受这次翻转, 状态词与按钮文字要重新对齐真实状态.
+            self._render_task(self.backend.task_status(game.game_id))
+            return
+        log_action("schedule.toggle", game_id=game.game_id, enabled=want)
+        self._feedback(
+            FeedbackKind.SUCCESS,
+            tr("task.schedule_on" if want else "task.schedule_off", name=game.name),
+        )
+        # 启用态会决定这一条任务"到点是否真的跑", 概要区的下次备份文案随之变化.
+        self._render_task(status)
+        self._render_hero(self.backend.get_detail(game.game_id))
 
     def _on_game_settings(self) -> None:
         self._open_manage_game()

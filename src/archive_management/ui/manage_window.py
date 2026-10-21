@@ -1,6 +1,7 @@
 """管理游戏与存档位置窗口.
 
-一个模态浮层: 上半部管理游戏信息(重命名/停用/删除), 下半部管理该
+一个模态浮层: 上半部管理游戏信息(重命名/删除; 启停已抽到详情页页头的
+开关, 2026-10-20), 下半部管理该
 游戏的"原始存档位置"(添加目录/文件、设为主位置、重新验证、编辑路径、
 删除记录), 并提供"删除原始存档位置": 把磁盘上的原目录移入
 系统回收站(需输入游戏名称确认, 不会永久删除)。界面明确区分原始位置与
@@ -205,13 +206,9 @@ class ManageGameWindow:
             header_actions, tr("manage.rename"), self._on_rename, width=88
         )
         self._rename_btn.pack(side="left", padx=(0, 6))
-        self._toggle_btn = self._make_button(
-            header_actions,
-            tr("manage.disable") if self._enabled else tr("manage.enable"),
-            self._on_toggle_enabled,
-            width=88,
-        )
-        self._toggle_btn.pack(side="left", padx=(0, 6))
+        # 启用/停用不在这里了: 抽成了详情页页头的"状态词 + 按钮"一对(与「导出游戏」
+        # 「游戏设置」并排), 按钮行里混一颗"停用"容易被误会成"点了会打开什么"(2026-10-20),
+        # 而开关的样式放在页头也不对味(2026-10-21 改成按钮)。
         # 危险动作穿危险色: 与下方的"删除原始存档位置"一致(评审时定的)。
         self._delete_btn = self._make_button(
             header_actions,
@@ -597,7 +594,7 @@ class ManageGameWindow:
             return
         for button in (*self._location_buttons, self._delete_origin_btn):
             button.configure(state="disabled")
-        for button in (self._rename_btn, self._schedule_btn, self._toggle_btn):
+        for button in (self._rename_btn, self._schedule_btn):
             button.configure(state="disabled")
         # 「外观」那一节也归在“改游戏信息”里: 归档后与重命名/启停同一档置灰。
         for choose, _reset in self._artwork_buttons.values():
@@ -829,7 +826,6 @@ class ManageGameWindow:
             self._backend,
             game_id=self._game_id,
             game_name=self._name,
-            game_enabled=self._enabled,
         ):
             self._render_schedule_state()
             self._on_change()
@@ -862,21 +858,6 @@ class ManageGameWindow:
             _TITLE_TEXT_WIDTH,
             max_lines=_TITLE_TEXT_LINES,
         )
-        self._on_change()
-
-    def _on_toggle_enabled(self) -> None:
-        if self._blocked("enable"):
-            return
-        try:
-            summary = self._backend.set_game_enabled(self._game_id, not self._enabled)
-        except ArchiveManagementError as exc:
-            self._show_error(exc)
-            return
-        self._enabled = summary.enabled
-        self._toggle_btn.configure(
-            text=tr("manage.disable") if self._enabled else tr("manage.enable")
-        )
-        self._render_state()
         self._on_change()
 
     def _on_delete_game(self) -> None:

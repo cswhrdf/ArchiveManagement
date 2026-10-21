@@ -574,7 +574,7 @@ def test_edit_schedule_rejects_invalid_keep_auto(
     assert updated.schedule_text == "2h"
     assert updated.keep_auto == before.keep_auto
 
-    # 停用中的游戏允许先配周期, 只是任务保持暂停态(返回 True 并提示原因)。
+    # 游戏是否启用与这里的保存无关: 停用与否都只写周期与保留份数。
     _patch_dialogs(monkeypatch, schedule_result=("3h", "2"))
     assert (
         edit_schedule(
@@ -583,7 +583,6 @@ def test_edit_schedule_rejects_invalid_keep_auto(
             app.backend,
             game_id="outer-wilds",
             game_name="星际拓荒",
-            game_enabled=False,
         )
         is True
     )
@@ -654,11 +653,13 @@ def test_task_card_wraps_long_paths() -> None:
     app._select_game("outer-wilds")
     _pump(app)
 
-    for label in (app._task_name_label, app._task_next, app._task_target):
+    for label in (app._task_name_label, app._task_target):
         assert int(label.cget("wraplength")) > 0
         assert label.cget("justify") == "left"
     assert app._task_target.cget("text")
     assert len(app._task_name_label.cget("text")) < 40
+    # "下次运行"只留在概要区说一遍(任务卡里再摆一份是重复投放).
+    assert not hasattr(app, "_task_next")
 
 
 def test_task_card_state_follows_schedule_state() -> None:
@@ -688,9 +689,62 @@ def test_task_card_state_follows_schedule_state() -> None:
     app._select_game("shanhai")
     _pump(app)
     assert app._task_state_label.cget("text") == tr("schedule.state_off")
-    # 没有排期时给出口径, 而不是一个像加载失败的短横线(评审时定的).
-    assert app._task_next.cget("text") == tr("task.next_none")
-    assert app._task_next.cget("text") != "—"
+    # 任务卡不再重复概要区的"下次运行", 但概要区必须给出口径而不是破折号.
+    assert app._stat_next_value.cget("text") == tr("hero.next_none")
+    assert app._stat_next_value.cget("text") != "—"
+
+
+def test_task_card_schedule_button_toggles_backend_state() -> None:
+    """任务卡里的暂停/继续按钮: 只在配了周期且没在跑备份时出现, 翻转保留周期并同步状态词."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+
+    # 已配置且启用: 按钮出现、文字是"暂停"(点击后会发生的事)、状态词是"已启用".
+    app._select_game("outer-wilds")
+    _pump(app)
+    button = app._schedule_toggle_btn
+    assert button.winfo_manager() == "grid"
+    assert button.cget("text") == tr("schedule.pause")
+    assert str(button.cget("state")) == "normal"
+    assert app._task_state_label.cget("text") == tr("schedule.state_on")
+
+    # 点"暂停": 周期保留、状态词变"已暂停"、按钮跟着改成"继续".
+    app._on_toggle_schedule()
+    _pump(app)
+    status = app.backend.task_status("outer-wilds")
+    assert status.schedule_text == "1d"
+    assert status.schedule_enabled is False
+    assert app._task_state_label.cget("text") == tr("schedule.state_paused")
+    assert button.cget("text") == tr("schedule.resume")
+
+    # 点"继续": 恢复已启用, 按钮改回"暂停".
+    app._on_toggle_schedule()
+    _pump(app)
+    assert app.backend.task_status("outer-wilds").schedule_enabled is True
+    assert app._task_state_label.cget("text") == tr("schedule.state_on")
+    assert button.cget("text") == tr("schedule.pause")
+
+    # 停用游戏不再动任务: 任务仍是"已启用", 按钮仍可点(继续/暂停随时生效),
+    # 但概要区的下次备份要说"未启用"(到点会被跳过, 不能拿时间点当承诺).
+    app.backend.set_game_enabled("outer-wilds", False)
+    app._select_game("outer-wilds")
+    _pump(app)
+    assert app._task_state_label.cget("text") == tr("schedule.state_on")
+    assert str(button.cget("state")) == "normal"
+    assert button.cget("text") == tr("schedule.pause")
+    assert app._stat_next_value.cget("text") == tr("hero.next_disabled")
+    app.backend.set_game_enabled("outer-wilds", True)
+    app._select_game("outer-wilds")
+    _pump(app)
+    assert app._stat_next_value.cget("text") != tr("hero.next_disabled")
+
+    # 未配置周期的游戏: 按钮收起, 状态词仍写"未配置".
+    app._select_game("shanhai")
+    _pump(app)
+    assert app._schedule_toggle_btn.winfo_manager() == ""
+    assert app._task_state_label.cget("text") == tr("schedule.state_off")
 
 
 def test_task_panel_is_renamed_and_has_no_schedule_editor() -> None:
@@ -751,10 +805,79 @@ def test_schedule_window_notifies_and_refuses_archived_items(
         app.destroy()
 
 
-def test_schedule_window_blocks_toggle_and_keeps_add_cancelled(
+def test_schedule_window_ignores_a_toggle_without_a_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """停用中的游戏不能启用任务; 新增时配置对话框被取消就不加任务、也不改选中项."""
+    """没选中游戏、或选中的那条没有周期时, 暂停/继续什么都不做(也不弹窗)."""
+    from dataclasses import replace
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.schedule_window import ScheduleWindow
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    window = ScheduleWindow(
+        app, backend=app.backend, palette=Palette.for_theme(app._theme)
+    )
+    try:
+        _pump(app)
+        before = app.backend.task_status("outer-wilds")
+
+        # ① 什么都没选中。
+        window._selected = None
+        window._on_toggle()
+
+        # ② 选中了, 但这一条没有周期(等价于"未配置定时备份")。
+        item = next(row for row in window._items if row.game_id == "outer-wilds")
+        window._items = [replace(item, interval_text="")]
+        window._select("outer-wilds")
+        window._on_toggle()
+
+        after = app.backend.task_status("outer-wilds")
+        assert after.schedule_text == before.schedule_text
+        assert after.schedule_enabled == before.schedule_enabled
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_schedule_window_blocks_toggle_for_an_archived_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """归档游戏的任务: 暂停/继续被拦下(只提示原因), 配置一点没变."""
+    from dataclasses import replace
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.palette import Palette
+    from archive_management.ui.schedule_window import ScheduleWindow
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    window = ScheduleWindow(
+        app, backend=app.backend, palette=Palette.for_theme(app._theme)
+    )
+    try:
+        _pump(app)
+        before = app.backend.task_status("outer-wilds")
+        item = next(row for row in window._items if row.game_id == "outer-wilds")
+        window._items = [replace(item, archived=True)]
+        window._select("outer-wilds")
+
+        window._on_toggle()
+
+        after = app.backend.task_status("outer-wilds")
+        assert after.schedule_enabled == before.schedule_enabled
+        assert after.schedule_text == before.schedule_text
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_schedule_window_toggles_for_a_disabled_game_and_keeps_add_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """停用中的游戏照样能暂停/继续(启停与游戏启用脱钩); 新增时配置对话框被取消就不加任务、也不改选中项."""
     import archive_management.ui.schedule_window as sched_window_mod
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.palette import Palette
@@ -764,7 +887,7 @@ def test_schedule_window_blocks_toggle_and_keeps_add_cancelled(
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     try:
         _pump(app)
-        # 停用"outer-wilds": 任务保留周期但被强制暂停, 于是 can_toggle 为假。
+        # 停用"outer-wilds": 任务的周期与启用态都保留, 所以 can_toggle 仍为真.
         app.backend.set_game_enabled("outer-wilds", False)
         window = ScheduleWindow(
             app, backend=app.backend, palette=Palette.for_theme(app._theme)
@@ -772,12 +895,12 @@ def test_schedule_window_blocks_toggle_and_keeps_add_cancelled(
         window._select("outer-wilds")
         selected = window._selected_item()
         assert selected is not None
-        assert selected.can_toggle is False
+        assert selected.can_toggle is True
         before = app.backend.task_status("outer-wilds").schedule_enabled
 
-        # ① 启停: 只弹提示(已替身), 配置一点没变。
+        # ① 启停: 停用中的游戏也翻转成功(到点是否真跑是执行期的另一道关口)。
         window._on_toggle()
-        assert app.backend.task_status("outer-wilds").schedule_enabled == before
+        assert app.backend.task_status("outer-wilds").schedule_enabled is not before
 
         # ② 新增: 选好了游戏但配置对话框被取消 → 不写库, 也不选中它。
         monkeypatch.setattr(

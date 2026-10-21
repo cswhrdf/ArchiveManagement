@@ -103,14 +103,19 @@ def test_home_item_uses_the_same_rule_for_its_actions() -> None:
     assert _home_item(archived=False, enabled=True).state_label == ""
 
 
-def test_schedule_item_blocks_enabling_while_the_game_is_not_active() -> None:
-    """停用或归档的游戏不能启用定时任务; 归档后连编辑也不允许."""
+def test_schedule_item_toggles_independently_of_the_game_state() -> None:
+    """定时任务的启停与游戏是否启用脱钩: 只有归档才拦住暂停/继续.
+
+    "游戏停用 → 到点跳过"是执行期的关口, 不是配置期的限制: 停用中的游戏照样能
+    把任务继续起来, 所以 ``can_toggle`` 不再看 ``game_enabled``。
+    """
     paused = _schedule_item(enabled=False, game_enabled=False)
-    assert paused.can_enable is False
-    assert paused.can_toggle is False
+    assert paused.can_toggle is True
     assert paused.state_label == "已暂停"
     assert _schedule_item(enabled=True, game_enabled=False).can_toggle is True
+    assert _schedule_item(enabled=True, game_enabled=True).can_toggle is True
     archived = _schedule_item(enabled=False, game_enabled=False, archived=True)
+    assert archived.can_toggle is False
     assert archived.editable is False
     assert archived.can_schedule is False
     assert archived.state_label == "已归档"

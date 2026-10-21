@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -102,6 +105,60 @@ def test_set_game_enabled_flag(tmp_path: Path) -> None:
     assert disabled.enabled is False
     enabled = service.set_game_enabled(game_id, True)
     assert enabled.enabled is True
+
+
+def test_deleting_a_game_survives_a_backup_folder_that_cannot_be_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """个别快照目录被占用删不掉: 只记警告并继续, 游戏记录照样消失.
+
+    磁盘清理是"尽力而为"(内容已经在告别包里了): 删不掉的目录跳过并计数, 不许把整次删除
+    弄成失败 —— 否则用户会看到一款永远删不掉、又打不开的游戏。这里把 ``rmtree`` 换成
+    只对备份目录抛 ``OSError`` 的版本, 判据是记录删干净 + 日志里有一条警告。
+    """
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    backup_root = tmp_path / "backups"
+    real_rmtree: Any = shutil.rmtree
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        if str(path).startswith(str(backup_root)):
+            raise OSError("被占用")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("shutil.rmtree", refuse)
+    with caplog.at_level(logging.WARNING, logger="archive_management.ui.sql_backend"):
+        service.delete_game(game_id, str(tmp_path / "exports" / "demo.archive.zip"))
+
+    assert service.list_games() == []
+    assert any("删除备份文件失败" in record.getMessage() for record in caplog.records)
+
+
+def test_a_leftover_file_keeps_the_game_folder_in_place(tmp_path: Path) -> None:
+    """备份删干净后游戏目录里还有残留时 ``rmdir`` 失败: 原样留着, 不报错.
+
+    空目录能删就删(不给磁盘留壳子), 但目录里只要还剩东西就不强求 —— 那可能是被占用的
+    文件, 也可能是用户自己放进去的。判据是删除本身成功、目录与残留都还在。
+    """
+    service, game_id, _save = _service_with_save(tmp_path)
+    service.run_backup_now(game_id)
+    backup_root = tmp_path / "backups"
+    folders = [
+        path
+        for path in backup_root.iterdir()
+        if path.is_dir() and path.name != "exports"
+    ]
+    assert len(folders) == 1, "一次备份应该只建一个游戏目录"
+    leftover = folders[0] / "leftover.txt"
+    leftover.write_text("删不掉的残留", encoding="utf-8")
+
+    service.delete_game(game_id, str(tmp_path / "exports" / "demo.archive.zip"))
+
+    assert service.list_games() == []
+    assert folders[0].is_dir(), "目录非空: 不强求删掉, 也不许因此报错"
+    assert leftover.is_file()
 
 
 def test_delete_game_removes_locations(tmp_path: Path) -> None:

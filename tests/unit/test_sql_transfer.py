@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 
+from archive_management.application import imports as imports_module
 from archive_management.application.imports import (
     STRATEGY_MERGE,
     STRATEGY_NEW,
@@ -24,6 +25,7 @@ from archive_management.domain import (
 from archive_management.exceptions import (
     ArchiveManagementError,
     OperationCancelledError,
+    PackageError,
 )
 from archive_management.i18n import tr
 from archive_management.infrastructure.database import Database
@@ -61,6 +63,21 @@ pytestmark = [
     # 真实 SQLite + 文件系统 + 调度后端, 按层定义归入 integration.
     pytest.mark.layer("integration"),
 ]
+
+
+def test_a_package_content_folder_must_be_a_single_name() -> None:
+    """导出包里的"内容目录"要拼进解包路径: 空、路径段与分隔符一律拒绝.
+
+    这是读包阶段的第一道闸(在写出任何文件之前): 一个夹带 ``..`` 或分隔符的 ``content``
+    就能把解包目录挪到包外。这里直接钉住那个判定函数本身 —— 构造一份带非法 content 的包
+    要绕过写包侧的校验, 而那一层校验是另一条守卫的事。
+    """
+    bad = ("", ".", "..", "a/b", "a\\b", "C:/abs")
+    for content in bad:
+        with pytest.raises(PackageError):
+            imports_module._check_content_key(content)
+    # 合法值不许误杀(中文与空格都是普通目录名的一部分).
+    imports_module._check_content_key("节点一")
 
 
 def test_run_export_writes_a_package_with_every_backup(tmp_path: Path) -> None:

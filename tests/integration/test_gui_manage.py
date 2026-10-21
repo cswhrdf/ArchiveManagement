@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -96,7 +97,8 @@ def test_archived_game_keeps_only_the_documented_actions(
     )
     assert state(window._delete_btn) == "normal"
     assert state(window._rename_btn) == "disabled"
-    assert state(window._toggle_btn) == "disabled"
+    # 启用/停用已抽到详情页页头的那对"状态词 + 按钮"(2026-10-21): 管理窗口里不再有那颗按钮.
+    assert not hasattr(window, "_toggle_btn")
     assert state(window._schedule_btn) == "disabled"
     assert {state(button) for button in window._location_buttons} == {"disabled"}
     assert state(window._delete_origin_btn) == "disabled"
@@ -149,7 +151,6 @@ def test_archived_manage_window_blocks_every_action(
 
     window._on_schedule()
     window._on_rename()
-    window._on_toggle_enabled()
     window._add_location("directory")
     window._on_set_primary()
     window._on_verify()
@@ -449,7 +450,7 @@ def test_manage_window_game_actions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """管理窗口: 重命名/停用/重新启用 不报错且状态正确."""
+    """管理窗口: 重命名生效; 启用/停用不在窗口里(抽成了详情页页头的状态词 + 按钮)."""
     from archive_management.ui.demo_backend import DemoArchiveService
     from archive_management.ui.manage_window import ManageGameWindow
 
@@ -468,13 +469,159 @@ def test_manage_window_game_actions(
     assert manager._name == "改名成功"
     assert manager._backend.get_detail("shanhai").name == "改名成功"
 
-    manager._on_toggle_enabled()
-    assert manager._enabled is False
-    assert manager._backend.get_detail("shanhai").name == "改名成功"
-    manager._on_toggle_enabled()
-    assert manager._enabled is True
+    # 启停入口不在管理窗口: 状态行仍在, 但翻转动作只属于详情页页头的那颗按钮.
+    assert not hasattr(manager, "_toggle_btn")
+    assert not hasattr(manager, "_on_toggle_enabled")
+    assert manager._state_label.cget("text") == tr("manage.enabled_label")
 
     manager.close()
+
+
+def test_detail_page_enable_button_toggles_game(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """页头那对"状态词 + 按钮": 状态词说现在, 按钮文字说点击后会发生什么.
+
+    翻转会写入后端并自动停用"启用中的另一款"; 两处文案永远对齐真实状态, 按钮文字不
+    兼作状态标签(与全局任务窗口的暂停/继续、设置窗口的主题切换同一个口径)。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import FeedbackKind
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._select_game("shanhai")
+    _pump(app)
+
+    # shanhai 默认启用: 状态词写"已启用", 按钮写"停用游戏"(点了会发生的事), 且可点.
+    assert app._enable_state_label.cget("text") == tr("detail.state_enabled")
+    assert app._enable_btn.cget("text") == tr("detail.disable_game")
+    assert str(app._enable_btn.cget("state")) == "normal"
+
+    def enabled_of(game_id: str) -> bool:
+        summary = next(g for g in app.backend.list_games() if g.game_id == game_id)
+        return bool(summary.enabled)
+
+    # 点"停用游戏": 写入后端, 两处文案一起翻面(状态词→已停用, 按钮→启用游戏).
+    app._on_toggle_game_enabled()
+    _pump(app)
+    assert enabled_of("shanhai") is False
+    assert app._enable_state_label.cget("text") == tr("detail.state_disabled")
+    assert app._enable_btn.cget("text") == tr("detail.enable_game")
+    assert app._last_feedback == (
+        FeedbackKind.SUCCESS,
+        tr("home.disabled", name="山海旅人"),
+    )
+
+    # 点"启用游戏": 启用中的另一款(星际拓荒)会被自动停用, 反馈把这件事说清.
+    app._on_toggle_game_enabled()
+    _pump(app)
+    assert enabled_of("shanhai") is True
+    assert enabled_of("outer-wilds") is False
+    assert app._enable_state_label.cget("text") == tr("detail.state_enabled")
+    assert app._enable_btn.cget("text") == tr("detail.disable_game")
+    assert app._last_feedback == (
+        FeedbackKind.SUCCESS,
+        tr("home.enabled_replaced", name="山海旅人", other="星际拓荒"),
+    )
+
+
+def test_the_enable_button_on_an_archived_game_explains_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """归档游戏的启停按钮置灰; 绕过按钮直接调也要被拦下并给出口径(状态词不许错)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import FeedbackKind
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._home_page._select("shanhai")
+    app._home_page._on_archive()
+    _pump(app)
+    app._select_game("shanhai")
+    _pump(app)
+
+    assert str(app._enable_btn.cget("state")) == "disabled"
+    assert app._enable_state_label.cget("text") == tr("detail.state_disabled")
+
+    app._on_toggle_game_enabled()
+
+    assert app._last_feedback == (
+        FeedbackKind.ERROR,
+        tr("home.archived_blocked", name="山海旅人"),
+    )
+    # 被拦下时两处文案仍必须指着真实状态(这里没翻转成功).
+    assert app._enable_state_label.cget("text") == tr("detail.state_disabled")
+    assert app._enable_btn.cget("text") == tr("detail.enable_game")
+
+
+def test_browsing_a_location_uses_the_picker_that_fits_its_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "浏览"回调按位置类型分派 pick_directory / pick_file, 并把框里的内容当起点.
+
+    新增位置与编辑已有位置各有一个闭包, 分派写反了就会拿"选文件"去选目录(用户看到的
+    是错的对话框)。两个闭包的两个分支都盯住: 回访值统一取空串(模拟取消), 不碰后端。
+    """
+    from archive_management.ui import manage_window as manage_mod
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_ask(_parent: Any, _palette: Any, *, browse: Any, **_kwargs: Any) -> str:
+        calls.append(("browse", {"picked": browse("D:/输入框里的路径")}))
+        return ""  # 模拟用户取消: 不进后端
+
+    def pick_directory(**kwargs: Any) -> str:
+        calls.append(("directory", kwargs))
+        return "D:/选到的目录"
+
+    def pick_file(**kwargs: Any) -> str:
+        calls.append(("file", kwargs))
+        return "D:/选到的文件.dat"
+
+    monkeypatch.setattr(manage_mod, "ask_text", fake_ask)
+    monkeypatch.setattr(manage_mod, "pick_directory", pick_directory)
+    monkeypatch.setattr(manage_mod, "pick_file", pick_file)
+    window = _manage_game_window(
+        app, game_id="outer-wilds", name="星际拓荒", enabled=True
+    )
+    try:
+        first = window._items[0]
+        edit_kind = "directory" if first.path_kind == "directory" else "file"
+        window._on_add_directory()
+        window._on_add_file()
+        # 编辑已有位置: 选中第一行再走"编辑路径"(闭包按这一行的 path_kind 分派).
+        window._selected = first.location_id
+        window._on_edit_path()
+        # 编辑"文件"类型的位置: 闭包的另一半分派(演示库里这款只有目录, 直接换一条文件
+        # 类型的行 —— 这里验的是"按这一行的 path_kind 选哪个选择器").
+        window._items = [
+            SimpleNamespace(
+                location_id="loc-file", path_kind="file", path="D:/旧档.dat"
+            )
+        ]
+        window._selected = "loc-file"
+        window._on_edit_path()
+    finally:
+        window.close()
+
+    picked = [
+        (kind, kwargs.get("start_from"))
+        for kind, kwargs in calls
+        if kind in {"directory", "file"}
+    ]
+    assert picked == [
+        ("directory", "D:/输入框里的路径"),
+        ("file", "D:/输入框里的路径"),
+        (edit_kind, "D:/输入框里的路径"),
+        ("file", "D:/输入框里的路径"),
+    ]
 
 
 def test_manage_window_location_actions(

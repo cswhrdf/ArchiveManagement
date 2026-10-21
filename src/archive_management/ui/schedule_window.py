@@ -115,14 +115,13 @@ def edit_schedule(
     *,
     game_id: str,
     game_name: str,
-    game_enabled: bool = True,
 ) -> bool:
     """为某个游戏编辑定时备份配置; 修改成功返回 True(取消/前置不满足返回 False).
 
     周期留空表示取消该游戏的定时备份。周期与保留份数的校验同样在这里完成,
     便于两个入口(全局任务窗口与游戏设置)复用同一套规则; 没有配置存档位置的
-    游戏会先被拦下并告知原因。停用中的游戏允许先把周期配好, 但任务只能处于
-    暂停态, 保存后明确告知原因。
+    游戏会先被拦下并告知原因。游戏是否启用**不影响**这里的保存: 定时任务的
+    启停与它脱钩, 停用期间配好的任务照旧排队, 只是到点会被跳过。
     """
     if not _has_locations(backend, game_id):
         _error_dialog(
@@ -164,14 +163,6 @@ def edit_schedule(
         interval=text or None,
         keep_auto=keep_auto,
     )
-    if text.strip() and not game_enabled:
-        # 后端把停用游戏的任务强制成暂停态, 这里说明原因, 避免用户以为保存失败.
-        info_dialog(
-            parent,
-            palette,
-            title=tr("dialog.schedule_title", name=game_name),
-            message=tr("dialog.schedule_paused_disabled", name=game_name),
-        )
     return True
 
 
@@ -698,7 +689,6 @@ class ScheduleWindow:
             self._backend,
             game_id=item.game_id,
             game_name=item.game_name,
-            game_enabled=item.game_enabled,
         )
         if not changed:
             return False
@@ -717,12 +707,7 @@ class ScheduleWindow:
                 self._window,
                 self._palette,
                 title=tr("dialog.error_title"),
-                message=tr(
-                    "error.archived_game_schedule"
-                    if item.archived
-                    else "error.disabled_game_schedule",
-                    name=item.game_name,
-                ),
+                message=tr("error.archived_game_schedule", name=item.game_name),
             )
             return
         status = self._backend.set_schedule(

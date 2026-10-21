@@ -176,6 +176,33 @@ def test_paused_schedule_survives_restart(tmp_path: Path) -> None:
     assert status.schedule_enabled is False
 
 
+def test_a_disabled_games_schedule_stays_enabled_across_restart(
+    tmp_path: Path,
+) -> None:
+    """重启恢复不能把"游戏停用"折成"任务暂停": 启用态照抄库里的配置.
+
+    这是脱钩容易漏掉的一处: 启动时若按 ``is_active`` 折算, 用户会看到任务莫名变成
+    "已暂停", 之后每次重启都要手动"继续"。
+    """
+    service, game_id, _backend = _service_with_scheduler(tmp_path)
+    service.set_schedule(game_id, "30m")
+    service.set_game_enabled(game_id, False)
+    backend = ManualBackend()
+
+    restarted = SqlArchiveService(
+        Database(tmp_path / "app.db"),
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=backend),
+    )
+
+    status = restarted.task_status(game_id)
+    assert status.schedule_text == "30m"
+    assert status.schedule_enabled is True
+    # 到点那一次仍然会被"游戏没启用"挡下 —— 执行期的关口没有跟着脱钩一起消失.
+    backend.trigger(f"backup-{game_id}")
+    assert restarted.list_backups(game_id) == []
+
+
 def test_unparsable_stored_schedule_is_ignored(tmp_path: Path) -> None:
     """数据库里的脏数据不应该阻止服务启动."""
     database = Database(tmp_path / "app.db")
@@ -320,36 +347,36 @@ def test_pause_keeps_interval_configuration(tmp_path: Path) -> None:
     assert item.next_run_text == tr("schedule.next_run_none")
 
 
-def test_schedule_for_a_disabled_game_is_created_paused(tmp_path: Path) -> None:
-    """停用中的游戏允许先配好周期, 但任务只能是暂停态."""
+def test_schedule_of_a_disabled_game_keeps_its_own_enabled_state(
+    tmp_path: Path,
+) -> None:
+    """定时任务的启停与游戏是否启用脱钩: 停用中的游戏也能把任务配成启用态."""
     service, game_id, _save = _service_with_save(tmp_path)
 
     status = service.set_schedule(game_id, "30m")
 
     assert status.schedule_text == "30m"
-    assert status.schedule_enabled is False
+    assert status.schedule_enabled is True
     item = next(i for i in service.list_schedules() if i.game_id == game_id)
-    assert item.state_label == "已暂停"
-    assert item.can_enable is False
-    assert item.can_toggle is False
+    assert item.state_label == "已启用"
+    # 游戏停用不再拦住"继续": 到点是否真的备份由另一道关口决定
+    # (见 test_scheduled_backup_skips_a_disabled_game).
+    assert item.can_toggle is True
 
 
-def test_resuming_a_schedule_of_a_disabled_game_is_rejected(
-    tmp_path: Path,
-) -> None:
-    """停用中的游戏不允许把已有任务切到启用态."""
+def test_continuing_a_schedule_of_a_disabled_game_is_allowed(tmp_path: Path) -> None:
+    """停用中的游戏可以把已暂停的任务继续起来(只是到点会被跳过)."""
     service, game_id, _save = _service_with_save(tmp_path)
-    service.set_schedule(game_id, "30m")
+    service.set_schedule(game_id, "30m", enabled=False)
 
-    with pytest.raises(ArchiveManagementError) as excinfo:
-        service.set_schedule(game_id, "30m", enabled=True)
+    resumed = service.set_schedule(game_id, "30m", enabled=True)
 
-    assert "停用" in str(excinfo.value)
-    assert service.task_status(game_id).schedule_enabled is False
+    assert resumed.schedule_enabled is True
+    assert service.task_status(game_id).schedule_enabled is True
 
 
-def test_disabling_a_game_pauses_its_schedule(tmp_path: Path) -> None:
-    """停用游戏时把它已启用的定时任务置为暂停."""
+def test_disabling_a_game_keeps_its_schedule_enabled(tmp_path: Path) -> None:
+    """停用游戏不动任务的启用态: 周期与"已启用"都保留, 只是到点跳过."""
     service, game_id, _backend = _service_with_scheduler(tmp_path)
     service.set_schedule(game_id, "30m")
     assert service.task_status(game_id).schedule_enabled is True
@@ -358,7 +385,12 @@ def test_disabling_a_game_pauses_its_schedule(tmp_path: Path) -> None:
 
     status = service.task_status(game_id)
     assert status.schedule_text == "30m"
-    assert status.schedule_enabled is False
+    assert status.schedule_enabled is True
+    # 任务仍然开着(暂停标志为 False), 与"游戏没启用"是两件事 —— 概要区的下一次
+    # 备份文案如何区分这两者见 test_ui_models 的四态用例。
+    detail = service.get_detail(game_id)
+    assert detail.game_enabled is False
+    assert detail.next_backup_paused is False
 
 
 def test_scheduled_backup_skips_a_disabled_game(tmp_path: Path) -> None:

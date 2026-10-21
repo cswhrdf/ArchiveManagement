@@ -270,21 +270,33 @@ class GameDetail:
     storage_folder: str = ""
     # 配了定时备份但当前未启用(暂停): 不能当成"未配置"(见 next_backup_text).
     next_backup_paused: bool = False
+    # 游戏本身是否启用: 定时任务的启停与它无关(两者互不影响), 但到点能不能真的跑
+    # 出去看它 —— 停用期间任务照旧排队, 触发时被跳过(见 next_backup_text).
+    game_enabled: bool = True
 
     @property
     def next_backup_text(self) -> str:
-        """下次自动备份的展示文本.
+        """下次自动备份的展示文本(四态).
 
         没有排期时不能只给一个短横线 —— 那看起来像加载失败; 这里换成一句能读的
         口径(与任务卡里的"未配置"、定时窗口里的"未安排"保持同一套说法)。
 
-        "配了周期但没启用"与"压根没配"必须分开: 前者说"已暂停", 否则用户会以为
-        自己没配过(用户反馈)。
+        四种情况必须分开说, 否则用户分不清"我没配"/"我配了但关了任务"/"我配了但
+        游戏没启用"(后两者都会让下一次备份不落地, 原因却完全不同):
+
+        - 没配定时任务 → ``hero.next_none``("未配置")
+        - 配了但任务被暂停 → ``hero.next_paused``("已暂停")
+        - 任务开着、游戏本身停用 → ``hero.next_disabled``("未启用")
+        - 其余 → 下一次运行的时间
         """
-        if self.next_backup_label:
-            return self.next_backup_label
         if self.next_backup_paused:
             return tr("hero.next_paused")
+        if self.next_backup_label:
+            return (
+                self.next_backup_label
+                if self.game_enabled
+                else tr("hero.next_disabled")
+            )
         return tr("hero.next_none")
 
     @property
@@ -374,12 +386,15 @@ class SelectedBackup:
 
 @dataclass(frozen=True)
 class TaskStatus:
-    """定时任务与运行环境状态."""
+    """定时任务与运行环境状态.
+
+    不含"下次运行": 它只在概要区(``GameDetail.next_backup_text``)说一遍, 任务卡
+    再摆一份属于重复投放(用户反馈: 两处显示同一个时间点, 卡片还因此高两行)。
+    """
 
     running: bool
     task_name: str
     progress: float  # 0..1
-    next_run_label: str
     target_label: str
     theme_name: str
     backend_ok: bool = True
@@ -389,11 +404,6 @@ class TaskStatus:
     progress_label: str = ""  # 正在进行的具体步骤
     keep_auto: int = 3  # 自动备份保留份数
     revision: int = 0  # 备份数据版本号: 变化即表示列表需要重载
-
-    @property
-    def next_run_text(self) -> str:
-        """下次运行的展示文本(没有排期时给出口径, 而不是一个孤零零的破折号)."""
-        return self.next_run_label or tr("task.next_none")
 
 
 @dataclass(frozen=True)
@@ -410,7 +420,8 @@ class ScheduleItem:
     last_error: str = ""
     tone: str = "blue"
     has_locations: bool = True  # 未配置存档位置的游戏无法创建定时备份
-    # 游戏本身的状态: 停用或归档时保留任务配置, 但不允许启用与执行.
+    # 游戏本身的状态: 停用只影响"到点是否真的备份", 不影响任务自身的启停; 归档才
+    # 会让任务整体不可编辑(归档时后端会顺手把任务暂停).
     game_enabled: bool = True
     archived: bool = False
 
@@ -440,16 +451,13 @@ class ScheduleItem:
         return self.has_locations and not self.archived
 
     @property
-    def can_enable(self) -> bool:
-        """是否允许把任务切到启用态(停用或归档的游戏不允许)."""
-        return self.game_enabled and not self.archived
-
-    @property
     def can_toggle(self) -> bool:
-        """是否允许暂停/继续: 归档后整体不可用; 停用中的游戏只能暂停, 不能继续."""
-        if not self.interval_text or self.archived:
-            return False
-        return self.enabled or self.game_enabled
+        """是否允许暂停/继续: 配了周期、且游戏没被归档.
+
+        定时任务的启停与"游戏是否启用"**无关**(两者互不影响): 游戏停用期间照样可以
+        继续任务, 只是到点会被跳过 —— 所以这里不再看 :attr:`game_enabled`.
+        """
+        return bool(self.interval_text) and not self.archived
 
     @property
     def editable(self) -> bool:
@@ -463,9 +471,15 @@ class ScheduleItem:
 
     @property
     def next_run_text(self) -> str:
-        """下次运行的展示文本(没有排期时给出口径, 而不是一个孤零零的破折号)."""
+        """下次运行的展示文本(没有排期时给出口径, 而不是一个孤零零的破折号).
+
+        任务开着但游戏本身停用时要说明"到点不会跑", 否则这一行给出的时间点像是在
+        承诺一次备份(与详情页概要区的 ``hero.next_disabled`` 同一套口径).
+        """
         if not self.next_run_label:
             return tr("schedule.next_run_none")
+        if not self.game_enabled:
+            return tr("schedule.next_run_disabled")
         return tr("schedule.next_run", stamp=self.next_run_label)
 
     @property

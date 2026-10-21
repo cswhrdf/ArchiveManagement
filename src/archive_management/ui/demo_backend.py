@@ -480,9 +480,21 @@ class DemoArchiveService:
         return [self._live_summary(game_id) for game_id in self._meta]
 
     def get_detail(self, game_id: str) -> GameDetail:
-        """返回单个游戏的概要数据."""
+        """返回单个游戏的概要数据.
+
+        启用态与"下次备份"都实时跟随调度配置: 演示数据里那个写死的时间戳只在真的
+        配了启用的任务时才算数, 否则概要区会与任务卡自相矛盾("今天 12:00"对一个
+        压根没配定时的游戏是在承诺一次不会发生的备份)。
+        """
         self._require_game(game_id)
-        return self._details[game_id]
+        detail = self._details[game_id]
+        interval, enabled, _keep = self._schedule_of(game_id)
+        return replace(
+            detail,
+            game_enabled=self._meta[game_id].enabled,
+            next_backup_label=detail.next_backup_label if interval and enabled else "",
+            next_backup_paused=bool(interval) and not enabled,
+        )
 
     def list_backups(self, game_id: str) -> list[BackupItem]:
         """返回某游戏的备份节点, 并标记当前节点."""
@@ -504,7 +516,6 @@ class DemoArchiveService:
                 else tr("task.unscheduled")
             ),
             progress=0.0,
-            next_run_label="今天 12:00" if interval else "",
             target_label="本地备份目录",
             theme_name=self._theme,
             backend_ok=True,
@@ -538,15 +549,8 @@ class DemoArchiveService:
             # 空周期 = 删除任务(暂停状态也不再保留).
             self._schedules.pop(game_id, None)
         else:
-            existing = bool(self._schedule_of(game_id)[0])
-            if enabled and not summary.enabled:
-                # 停用中的游戏允许先配好周期, 但任务只能暂停; 已有任务时说明用户在
-                # "继续", 与真实后端一样明确拒绝.
-                if existing:
-                    raise ArchiveManagementError(
-                        tr("error.disabled_game_schedule", name=summary.name)
-                    )
-                enabled = False
+            # 定时任务的启停与"游戏是否启用"脱钩: 游戏停用也允许直接配成启用态,
+            # 只是到点会被跳过(与真实后端一致).
             self._schedules[game_id] = (clean, enabled, max(1, keep_auto))
         return self.task_status(game_id)
 
@@ -1045,7 +1049,10 @@ class DemoArchiveService:
                 )
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> GameSummary:
-        """启用或停用一个游戏(启用时会自动停用其它启用中的游戏)."""
+        """启用或停用一个游戏(启用时会自动停用其它启用中的游戏).
+
+        定时任务的启停与游戏是否启用互不影响: 停用不动任务的启用态, 只是到点跳过.
+        """
         self._require_game(game_id)
         if enabled and self._archived.get(game_id, False):
             raise ArchiveManagementError(tr("error.archived_game_enable"))
@@ -1053,10 +1060,7 @@ class DemoArchiveService:
             for other_id, other in list(self._meta.items()):
                 if other_id != game_id and other.enabled:
                     self._meta[other_id] = replace(other, enabled=False)
-                    self._pause_schedule(other_id)
         self._meta[game_id] = replace(self._meta[game_id], enabled=enabled)
-        if not enabled:
-            self._pause_schedule(game_id)
         # 启用态会显示在详情页与管理窗口, 因此要刷新数据版本让界面重读.
         self._revision += 1
         return self._live_summary(game_id)

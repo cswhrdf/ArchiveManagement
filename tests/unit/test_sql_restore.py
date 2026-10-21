@@ -137,6 +137,30 @@ def test_run_restore_creates_safety_point_by_default(tmp_path: Path) -> None:
     assert safety[0].backup_id not in visible_in_branch_view(items)
 
 
+def test_the_process_check_uses_the_injected_provider(tmp_path: Path) -> None:
+    """恢复前的"游戏在跑"判定要走注入的进程表, 而不是本机真实的 psutil.
+
+    这是``SqlArchiveService``漏传 ``process_provider`` 时才会暴露的那半边: 恢复服务
+    拿不到替身就只能看本机当下开着什么(任何带 "demo" 的进程都会让演示游戏被判定在
+    运行), 于是同一份代码本机红、CI 绿。``force=True`` 是界面里"我看过了, 继续"的
+    同一条路径, 必须能写回。
+    """
+    service, game_id, _save = _service_with_save(
+        tmp_path,
+        name="ZzzGuardGame",
+        process_provider=lambda: ["ZzzGuardGame.exe"],
+    )
+    service.run_backup_now(game_id)
+    node = service.list_backups(game_id)[0]
+
+    with pytest.raises(ArchiveManagementError) as excinfo:
+        service.run_restore(game_id, node.backup_id)
+    assert "正在运行" in str(excinfo.value)
+
+    service.run_restore(game_id, node.backup_id, force=True)
+    assert service.list_backups(game_id)[-1].backup_id == node.backup_id
+
+
 def test_a_cancelled_restore_reports_cancelled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

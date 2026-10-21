@@ -2117,14 +2117,12 @@ def _card_heading(
     card: ctk.CTkBaseClass,
     palette: Palette,
     text: str,
-    *,
-    first: bool = False,
-    pack: bool = True,
 ) -> ctk.CTkBaseClass:
-    """批量导入卡片里的小标题: 四个小标题共用同一套样式(次要色 11px, 左对齐).
+    """批量导入卡片里的小标题: 各小标题共用同一套样式(次要色 11px, 左对齐).
 
-    需要"先建、晚一点再摆"的调用方(目标游戏那块要排在"导入方式"之后)传
-    ``pack=False``, 自己决定摆放位置。
+    原先还有一个 ``pack=False`` 让调用方自己摆(目标游戏那块要排在"导入方式"之后),
+    那块选择区在 2026-10-19 的导入重做里被拿掉了(目标由后端按原始名称确定), 于是这两个
+    参数再也没人传 —— 留着就是一段永远进不去的分支, 直接删掉。
     """
     label = ctk.CTkLabel(
         card,
@@ -2133,8 +2131,7 @@ def _card_heading(
         font=ctk.CTkFont(size=11),
         text_color=palette.text_muted,
     )
-    if pack:
-        label.pack(padx=_CARD_PAD, pady=(0 if first else 6, 0), anchor="w")
+    label.pack(padx=_CARD_PAD, pady=(6, 0), anchor="w")
     return label
 
 

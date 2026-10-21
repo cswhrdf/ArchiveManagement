@@ -617,10 +617,14 @@ def test_dashboard_stats_never_show_a_bare_mark(app: Any) -> None:
     }
     bad = {name: text for name, text in values.items() if text.strip() in _BARE_MARKS}
     assert not bad, f"统计列退化成一个符号了: {bad}"
-    # 未排期时不能只给一个符号或空串, 必须能看出"是没配置, 不是坏了"。
+    # 未排期(未配置/已暂停/未启用)时不能只给一个符号或空串, 必须能看出"不是坏了"。
     if not app._next_scheduled:
         text = str(app._stat_next_value.cget("text"))
-        assert text == tr("hero.next_none"), text
+        assert text in (
+            tr("hero.next_none"),
+            tr("hero.next_paused"),
+            tr("hero.next_disabled"),
+        ), text
 
 
 def _live_empty_action(panel: Any) -> Any:

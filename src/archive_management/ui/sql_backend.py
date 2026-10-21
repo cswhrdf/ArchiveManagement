@@ -153,7 +153,7 @@ def _tone(name: str) -> str:
 def _stamp_or_empty(moment: datetime | None) -> str:
     """时间戳文案: 没有排期时返回空串.
 
-    界面据此给出"未配置/未安排"这种能读的说法(见 ``ui.models`` 的
+    界面据此给出"未配置/未启用/未安排"这种能读的说法(见 ``ui.models`` 的
     ``next_backup_text`` / ``next_run_text``), 而不是一个像加载失败的短横线。
     """
     return format_moment(moment) if moment is not None else ""
@@ -328,8 +328,9 @@ class SqlArchiveService:
         """绑定数据库、备份根目录、调度器与缓存目录(后两者默认惰性创建).
 
         ``cache_dir`` 为空时封面接口一律返回空: 测试与未配置应用路径的场景直接走
-        占位图, 不去碰真实用户缓存目录。``process_provider`` 是自动启停用的进程名
-        提供者, 省略时用 psutil(测试注入假进程表)。``exports_dir`` 是自动导出的
+        占位图, 不去碰真实用户缓存目录。``process_provider`` 是进程名提供者(自动启停
+        与恢复前的"游戏是不是在跑"共用同一个), 省略时用 psutil(测试注入假进程表)。
+        ``exports_dir`` 是自动导出的
         落点, 省略时取备份目录旁边(生产里就是 :attr:`ApplicationPaths.exports_dir`);
         它**不在这里创建**, 只在真的要写出告别包时创建。``artwork_dir`` 是**用户自己
         指定**的封面/图标落点, 同样省略时取备份目录旁边(生产里是
@@ -364,6 +365,9 @@ class SqlArchiveService:
             database,
             backup_root=backup_root,
             backups=self._backups,
+            # 恢复前的"游戏在跑就不让写回"必须跟自动启停用同一张进程表: 少了这个
+            # 注入, 测试没法制身(而真 psutil 会把用例变成"看本机当下开着什么").
+            process_provider=process_provider,
         )
         self._export = ExportService(database, backup_root=backup_root)
         self._import = ImportService(database, backup_root=backup_root)
@@ -405,14 +409,13 @@ class SqlArchiveService:
                     exc,
                 )
                 continue
-            game = self._games.get(job.game_id)
-            # 停用或归档的游戏保留任务配置, 但一律以暂停状态登记(不执行).
-            active = game is not None and is_active(game)
+            # 启用态照抄库里的配置: 任务自己的启停与"游戏是否启用"无关, 停用/归档
+            # 只会让到点那一次被跳过(见 _scheduled_backup), 不该在重启后被改写成暂停.
             self._scheduler.schedule(
                 job.game_id,
                 minutes,
                 self._scheduled_backup(job.game_id),
-                enabled=job.enabled and active,
+                enabled=job.enabled,
             )
             restored += 1
         if restored:
@@ -457,6 +460,7 @@ class SqlArchiveService:
             total_backups_sub="",
             next_backup_label=_stamp_or_empty(next_run),
             next_backup_paused=next_paused,
+            game_enabled=game.enabled,
             original_name=game.original_name or game.name,
             storage_folder=game.storage_key,
         )
@@ -623,12 +627,12 @@ class SqlArchiveService:
 
         这是用户自己的选择, 因此带 ``manual=True``: 自动启停据此让手动决定优先
         (见 :func:`~archive_management.application.games.set_enabled`)。
+
+        定时任务的启停**不跟着**游戏走(两者互不影响): 停用只是让它到点被跳过
+        (见 :meth:`_scheduled_backup`), 任务与周期原样保留; 归档才顺手暂停.
         """
         _game, gid = self._game_ref(game_id)
         result = games_cases.set_enabled(self._database, gid, enabled, manual=True)
-        if not enabled:
-            # 停用后定时备份不允许启用: 先把它置为暂停, 界面才能如实展示状态.
-            self._pause_schedule(gid)
         self._touch()
         return self._summary(result.game)
 
@@ -782,14 +786,12 @@ class SqlArchiveService:
         with self._operation_lock:
             active = self._active
         entry = self._scheduler.get(gid) if gid is not None else None
-        next_run = self._next_run(gid) if gid is not None else None
         error = self._scheduler.last_error(gid) if gid is not None else None
         task_name, schedule_text, schedule_enabled = self._schedule_summary(gid, entry)
         return TaskStatus(
             running=active is not None,
             task_name=task_name,
             progress=active.fraction if active is not None else 0.0,
-            next_run_label=_stamp_or_empty(next_run),
             target_label=str(self._backup_root),
             theme_name=self._theme,
             backend_ok=True,
@@ -1767,7 +1769,7 @@ class SqlArchiveService:
                     self._jobs.delete(job.id)
             log_action("schedule.clear", game_id=gid)
             return self.task_status(game_id)
-        active = self._requested_state(game, gid, enabled)
+        active = enabled
         minutes = parse_interval(clean)
         entry = self._scheduler.schedule(
             gid, minutes, self._scheduled_backup(gid), enabled=active
@@ -1807,22 +1809,6 @@ class SqlArchiveService:
             raise ArchiveManagementError(
                 tr("error.no_locations_schedule", name=game.name)
             )
-
-    def _requested_state(self, game: Game, gid: int, requested: bool) -> bool:
-        """把"想启用"折算成实际可用的启用态: 停用中的游戏只能暂停.
-
-        已经有任务时说明用户在"继续", 这种情况明确拒绝而不是静默改成暂停;
-        新建任务时则降级为暂停并记一条日志(界面会随之提示原因)。
-        """
-        if not requested or game.enabled:
-            return requested
-        if self._scheduler.get(gid) is not None:
-            log_action("schedule.rejected", game_id=gid, reason="game_disabled")
-            raise ArchiveManagementError(
-                tr("error.disabled_game_schedule", name=game.name)
-            )
-        log_action("schedule.paused_disabled", game_id=gid)
-        return False
 
     def cancel_active(self) -> bool:
         """请求取消当前备份; 没有进行中的备份时返回 False."""
@@ -1913,7 +1899,7 @@ class SqlArchiveService:
             logger.debug("补齐备份哈希 %d 个文件: %s", filled, node.storage_relpath)
 
     def _pause_schedule(self, gid: int) -> None:
-        """把某游戏的定时备份置为暂停(停用或归档时调用; 没有任务就不做)."""
+        """把某游戏的定时备份置为暂停(归档时调用; 没有任务就不做)."""
         jobs = self._jobs.for_game(gid)
         job = jobs[0] if jobs else None
         if job is None or not job.schedule.strip() or not job.enabled:
@@ -1932,7 +1918,9 @@ class SqlArchiveService:
         def run() -> None:
             game = self._games.get(game_id)
             if game is None or not is_active(game):
-                # 停用或归档期间不执行自动备份: 任务配置保留, 恢复启用后照常触发.
+                # 定时任务的启停由用户独立控制, 与"游戏是否启用"脱钩; 到点这一刻
+                # 才是唯一的关口: 停用或归档期间跳过本次备份(任务与周期都保留,
+                # 重新启用后照常触发).
                 log_action(
                     "schedule.skipped", basic=True, game_id=game_id, reason="inactive"
                 )

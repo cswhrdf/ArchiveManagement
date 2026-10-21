@@ -278,21 +278,21 @@ def test_demo_schedule_on_archived_game_is_refused(service: DemoArchiveService) 
         service.set_schedule("outer-wilds", "1h")
 
 
-def test_demo_schedule_on_a_disabled_game_stays_paused(
+def test_demo_schedule_on_a_disabled_game_keeps_its_own_state(
     service: DemoArchiveService,
 ) -> None:
-    """停用中的游戏可以先把周期配好, 但任务只能是暂停状态."""
-    # 演示数据里这款游戏本来就配了定时任务(已存在的任务不允许被"继续"), 先清掉。
+    """演示后端与真实后端一致: 游戏停用不影响任务自身的启用态(到点才跳过)."""
     service.set_schedule("outer-wilds", "")
     service.set_game_enabled("outer-wilds", False)
 
     status = service.set_schedule("outer-wilds", "1h")
 
     assert status.schedule_text == "1h"
-    assert status.schedule_enabled is False
-    # 已经有任务时再"配置"一次就等于要它跑起来 —— 停用中的游戏不允许, 必须明确拒绝.
-    with pytest.raises(ArchiveManagementError):
-        service.set_schedule("outer-wilds", "1h")
+    assert status.schedule_enabled is True
+    # 再次保存(= "继续")也照样接受: 启停归任务自己管.
+    resumed = service.set_schedule("outer-wilds", "1h", enabled=False)
+    assert resumed.schedule_enabled is False
+    assert service.set_schedule("outer-wilds", "1h").schedule_enabled is True
 
 
 def test_demo_empty_schedule_removes_the_task(service: DemoArchiveService) -> None:

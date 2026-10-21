@@ -199,6 +199,22 @@ def test_detail_next_backup_text_tells_paused_apart_from_missing() -> None:
     )
 
 
+def test_detail_next_backup_text_says_disabled_when_the_game_is_off() -> None:
+    """任务开着但游戏停用: 说"未启用"(到点会被跳过), 不能拿时间点当承诺."""
+    scheduled = replace(
+        _detail(name="Demo"),
+        next_backup_label="2026/09/26 20:11",
+        game_enabled=False,
+    )
+
+    assert scheduled.next_backup_text == tr("hero.next_disabled")
+    assert scheduled.next_backup_text != scheduled.next_backup_label
+    # 任务自己的暂停优先于"游戏未启用": 两者要用户做的事不同(一个去继续任务, 一个去启用游戏).
+    assert replace(scheduled, next_backup_paused=True).next_backup_text == tr(
+        "hero.next_paused"
+    )
+
+
 def test_selected_backup_hint_names_the_real_restore_button() -> None:
     """选中面板的指引必须写出真实按钮名: 早先这里是没被替换的占位符(评审时定的)."""
     text = tr("sel.not_current", size="14 B", button=tr("action.restore"))
@@ -1407,6 +1423,10 @@ def test_schedule_item_next_run_text_says_unscheduled_instead_of_a_dash() -> Non
     assert replace(item, next_run_label="2026/09/26 20:11").next_run_text == tr(
         "schedule.next_run", stamp="2026/09/26 20:11"
     )
+    # 任务开着但游戏停用: 这一行要说明"到点不会跑", 不能只给个时间点.
+    assert replace(
+        item, next_run_label="2026/09/26 20:11", game_enabled=False
+    ).next_run_text == tr("schedule.next_run_disabled")
 
 
 def test_schedule_item_without_an_interval_reports_unscheduled() -> None:
@@ -1423,5 +1443,5 @@ def test_schedule_item_without_an_interval_reports_unscheduled() -> None:
 
     assert item.interval_label == tr("task.unscheduled")
     assert item.can_toggle is False
-    # 有周期且游戏可用时才能暂停/继续(与 state_label 的三种状态同一套判据).
+    # 有周期就能暂停/继续(与 state_label 的三种状态同一套判据, 与游戏启用无关).
     assert replace(item, interval_text="30m", enabled=True).can_toggle is True

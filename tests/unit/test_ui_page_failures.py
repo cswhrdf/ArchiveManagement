@@ -23,6 +23,7 @@ import customtkinter as ctk
 import pytest
 
 from archive_management.exceptions import ArchiveManagementError
+from archive_management.i18n import tr
 from archive_management.services.hotkeys import ACTION_SAVE_NOW
 from archive_management.ui import discovery_page, home_page, main_window, manage_window
 from archive_management.ui.models import FeedbackKind, ViewKind
@@ -909,18 +910,85 @@ def test_a_rejected_rename_reports_the_reason(
     assert refreshes == []
 
 
-def test_a_rejected_enable_in_the_manage_window_reports_the_reason(
+def test_a_rejected_enable_on_the_detail_page_reports_the_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """启用/停用被拒绝时摆出原因, 也不改本窗口记着的状态."""
-    window, _backend, errors, _refreshes = _manage(
-        monkeypatch, failing="set_game_enabled"
+    """页头启停按钮被后端拒绝: 摆出原因, 状态词与按钮文字重新对齐真实状态."""
+
+    class _WidgetStub:
+        """状态词/按钮的替身: 只记下最后写进去的那句文案."""
+
+        text = ""
+
+        def configure(self, **kwargs: object) -> None:
+            self.text = str(kwargs["text"])
+
+    app = _app(monkeypatch, failing="set_game_enabled")
+    app._game = SimpleNamespace(game_id="1", name="演示", archived=False, enabled=True)
+    # list_games 的替身答案是个普通对象, 不能迭代: 直接给一份空列表.
+    app.backend.list_games = lambda: []
+    state_label, enable_btn = _WidgetStub(), _WidgetStub()
+    app._enable_state_label = state_label
+    app._enable_btn = enable_btn
+
+    app._on_toggle_game_enabled()
+
+    assert [message for _kind, message in app._feedbacks] == ["后端拒绝了这一步"]
+    assert state_label.text == tr("detail.state_enabled"), (
+        "被拒绝后状态词要弹回真实状态"
+    )
+    assert enable_btn.text == tr("detail.disable_game"), (
+        "按钮文字同理: 它说的是点击后会发生什么, 拒绝后要回到游戏真实的状态"
     )
 
-    window._on_toggle_enabled()
 
-    assert errors == ["后端拒绝了这一步"]
-    assert window._enabled is True
+def test_toggling_a_game_that_is_no_longer_selected_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有选中游戏时两颗启停按钮直接返回(旧界面的回调可能晚到一步)."""
+    app = _app(monkeypatch)
+    app._game = None
+
+    app._on_toggle_game_enabled()
+    app._on_toggle_schedule()
+
+    assert app._feedbacks == []
+    assert app.backend.calls == []
+
+
+def test_the_schedule_button_does_nothing_without_a_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没配周期时那颗按钮本来就不显示; 直接调进来也必须什么都不做."""
+    app = _app(monkeypatch)
+    app._game = SimpleNamespace(game_id="1", name="演示", archived=False, enabled=True)
+    app.backend.task_status = lambda _game_id=None: SimpleNamespace(
+        schedule_text="", schedule_enabled=False, keep_auto=3
+    )
+
+    app._on_toggle_schedule()
+
+    assert app._feedbacks == []
+    assert "set_schedule" not in app.backend.calls
+
+
+def test_a_rejected_schedule_toggle_reports_the_reason_and_redraws(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """暂停/继续被后端拒绝: 摆出原因, 并把任务卡按**真实状态**重画."""
+    app = _app(monkeypatch, failing="set_schedule")
+    app._game = SimpleNamespace(game_id="1", name="演示", archived=False, enabled=True)
+    app.backend.task_status = lambda _game_id=None: SimpleNamespace(
+        schedule_text="1d", schedule_enabled=True, keep_auto=3
+    )
+    redrawn: list[Any] = []
+    app._render_task = redrawn.append
+
+    app._on_toggle_schedule()
+
+    assert [message for _kind, message in app._feedbacks] == ["后端拒绝了这一步"]
+    assert len(redrawn) == 1, "被拒绝后要重画一次, 否则卡片停在没生效的那一边"
+    assert redrawn[0].schedule_enabled is True
 
 
 def test_a_rejected_delete_reports_the_reason(

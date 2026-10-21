@@ -23,6 +23,7 @@ from archive_management.services.artwork import (
 )
 from archive_management.services.game_names import NameFetcher
 from archive_management.services.platform_adapters import SaveCandidateSource
+from archive_management.services.processes import ProcessNameProvider
 from archive_management.services.scheduler import BackupScheduler, ManualBackend
 from archive_management.ui.sql_backend import SqlArchiveService
 
@@ -40,7 +41,23 @@ pytestmark = [
 ]
 
 
-def _service(tmp_path: Path, *, config_path: Path | None = None) -> SqlArchiveService:
+def _idle_processes() -> list[str]:
+    """固定的进程名清单(只有系统进程): 用例不能依赖本机当下开着什么.
+
+    进程匹配的规则是"归一化后互相包含", 而 SQL 用例里的演示游戏常叫 ``Demo`` ——
+    本机只要跑着任何带 demo 的进程(实测 ``KungFuWaifusDemo.exe``), 恢复就会被
+    "检测到游戏进程正在运行"拦下, 于是同一份代码本机红、CI 绿。要验证"进程在跑就
+    不让恢复/就自动启用"的用例, 自己传一个 provider(见 ``test_sql_home_misc``)。
+    """
+    return ["explorer.exe", "svn.exe"]
+
+
+def _service(
+    tmp_path: Path,
+    *,
+    config_path: Path | None = None,
+    process_provider: ProcessNameProvider | None = None,
+) -> SqlArchiveService:
     database = Database(tmp_path / "app.db")
     database.migrate()
     # 用不启动线程的手动调度后端, 让测试不依赖真实时间轴.
@@ -49,6 +66,7 @@ def _service(tmp_path: Path, *, config_path: Path | None = None) -> SqlArchiveSe
         backup_root=tmp_path / "backups",
         scheduler=BackupScheduler(backend=ManualBackend()),
         config_path=config_path,
+        process_provider=process_provider or _idle_processes,
     )
 
 
@@ -67,10 +85,16 @@ def _advance(save: Path, text: str = "") -> None:
 
 
 def _service_with_save(
-    tmp_path: Path, name: str = "Demo", *, config_path: Path | None = None
+    tmp_path: Path,
+    name: str = "Demo",
+    *,
+    config_path: Path | None = None,
+    process_provider: ProcessNameProvider | None = None,
 ) -> tuple[SqlArchiveService, str, Path]:
     """构造带一个可用存档位置的游戏, 返回服务、游戏 id 与存档目录."""
-    service = _service(tmp_path, config_path=config_path)
+    service = _service(
+        tmp_path, config_path=config_path, process_provider=process_provider
+    )
     game_id = service.add_game(name).game_id
     save = tmp_path / "save"
     save.mkdir()
