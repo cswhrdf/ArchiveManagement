@@ -942,6 +942,40 @@ def test_a_rejected_enable_on_the_detail_page_reports_the_reason(
     )
 
 
+def test_a_quick_branch_without_any_backup_node_tells_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快捷键创建分支但游戏还没有任何备份: 说明原因, 不去碰后端."""
+    app = _app(monkeypatch)
+    app._game = SimpleNamespace(game_id="1", name="演示", archived=False)
+    app._backup_id = None
+    app._current_id = None
+
+    app._on_branch(quick=True)
+
+    assert app._feedbacks == [(FeedbackKind.INFO, tr("hotkey.branch_no_node"))]
+    assert app.backend.calls == [], "没有可用节点时不应走到后端"
+
+
+def test_a_button_branch_without_selection_is_a_silent_no_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """按钮路径(非快捷键)没有选中节点: 安静返回, 即使当前节点还在.
+
+    快捷键从**当前节点**分出, 按钮的语义是"从此处创建分支"(以选中节点为父) ——
+    选中被清空后它既不会拿当前节点凑数, 也不会弹分支名对话框。
+    """
+    app = _app(monkeypatch)
+    app._game = SimpleNamespace(game_id="1", name="演示", archived=False)
+    app._backup_id = None
+    app._current_id = "b1"
+
+    app._on_branch()
+
+    assert app._feedbacks == [], "按钮路径没有选中时不该有提示"
+    assert app.backend.calls == []
+
+
 def test_toggling_a_game_that_is_no_longer_selected_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

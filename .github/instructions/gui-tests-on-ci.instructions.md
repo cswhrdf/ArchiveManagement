@@ -3,7 +3,7 @@ applyTo: "tests/integration/test_*.py,tests/gui_support.py,tests/unit/test_*.py,
 description: '写或改 GUI 端到端用例(以及它们量到的那几处界面代码)时的实测坑: CI 上的窗口尺寸不由用例决定、字体度量会变、合成键盘事件走焦点窗口(焦点可能压根不在对话框里)、尺寸夹取要看请求高度并收敛、延后的布局任务要与控件一起撤、行/卡片会被重渲染销毁(等待之后必须重新取引用)、平台默认值(-topmost/尾随空行计高)必须显式写掉、父窗口还没落地时算出来的居中/相对位置是错的(冷启动首次打开)、一个进程里只能有一个 Tk 根(没拆干净的根会让后面所有用例贴图报 image "pyimageN" does not exist, 而收尾断裂本身要按失败处理、不只记一笔). 遇到"本机绿、CI 红(尤其只有 Windows 或只有 Linux 红)"的布局/尺寸/文字截断/按键失败时先读这篇。'
 ---
 
-# GUI 端到端用例在 CI 上: 十四条实测出来的坑与写法
+# GUI 端到端用例在 CI 上: 十五条实测出来的坑与写法
 
 本仓库的 GUI 用例跑在真 Tk 上(本地 Windows、CI 的 ubuntu(xvfb) + windows runner), 下面每条都是 **实测踩过**的: 失败形态都是"本机全绿、CI 上某几台红", 而且红的那几条看起来像产品 bug, 其实是用例的假设不成立(2026-09-30 那一轮: 7 条 GUI 端到端失败里 6 条属于这一类)。
 
@@ -244,3 +244,10 @@ def _widget_spot(view: TreeView, canvas_x: float, canvas_y: float) -> tuple[int,
 - 逐用例收尾(`gui_support.close_apps`)的判据是**相对**的, 而且**只对"自己建了窗口"的用例生效**(没有窗口可归因就不判)⇒ 不建窗口的用例是盲区。两层兜底在 `tests/conftest.py`: ① **逐条用例判红**(它的 teardown 报告上写好失败信息: 线程清单 + 该往哪儿收), ② **会话末**再等一次(最多 2s), 还活着就点名"进出时存量变多的用例"、把会话判红, 并**写一条 broken 结论项**(`gui_support.write_leak_result`)。第 ②条必须写进报告 —— 它是**会话级**不变量, 只喊日志的话就是"红的作业配绿的报告"(2026-10-16 run 38777794002 实测: 质量作业里 `pytest tests/performance` 退出码 1, 而报告里 14 条性能用例全绿)。
 - **实测咬出来的五处**(都已修, 可作为样板): 替身窗口跑三次 `run_gui` 的 `test_gui_lifecycle.py::test_run_gui_reports_every_config_state`(`_StubApp.mainloop` 就地返回 ⇒ `finally` 里逐个 `backend.shutdown()`); `test_gui_transfer.py` 里两个**造包** helper(`_exported_package` / `_exported_batch` —— 只服务造包, 用完即 `service.shutdown()`); `test_pipeline_backup_restore.py::test_backup_history_survives_node_delete_and_reopen` 里模拟"重启后再开"的那只后端(不传 `scheduler=` 就是真调度器 ⇒ 量完要 `reopened.shutdown()`); `tests/performance/test_home_scale.py::test_backend_home_response_time` 与 `tests/performance/test_backup_scale.py::test_backend_backup_listing_response`(同样只为量一次 —— 这两处 CI 才会跑到, 本机默认 `testpaths` 不含 `tests/performance`)。
 - 自查口径: 单跑那个模块, 只要日志里出现 `[scheduler] 会话末还有 ...` 或那条 `ERROR ... of <用例>` 就是还有漏; 一个字都不打才算干净(正常会话零开销: 逐条只在"看出变多"时才等, 会话末数到 0 立即返回)。
+
+## 14. 后台线程的结果要 `_drain`, 只 `_pump` 会让"忙碌守卫"把下一步静默吞掉(2026-10-22 实测)
+
+- `ArchiveApp` 的写操作(建分支/备份/导出/删除/恢复)都在 worker 线程里跑: 开始时 `_set_busy(True)`, 而**复位发生在消息被搬回主线程的那一刻**(`_poll_messages` → `ok()` → `_set_busy(False)`), 那个轮询是 `after(100ms)` 自排的任务。`_pump(app)` 只 `update()` 一轮, 100ms 之内那一拍**不保证**跑到。
+- 症状(2026-10-22 macOS 分片): `test_gui_lifecycle.py::test_detail_flows_survive_cancelled_or_blocked_dialogs` 报"文案不对"—— 期望 `hotkey.branch_no_node`, 实际是上一步 `_select_game` 留下的 `game.no_locations_hint`。现场 dump 里 `app._busy = True` 才说明真相: 第 ⑧ 步的快捷键建分支还在后台, 守卫那一步在 `if game is None or self._busy: return` 处**直接返回**, 于是"看起来像文案写错了"。
+- 写法: 任何 `_submit` 出去的调用以后一律用 `_drain(app)`(它每轮显式调 `_poll_messages`, 直到 `_busy` 复位, 带上限)等它落盘; 只有"同步早退"的路径才能用 `_pump`。下一步之前再加一条 `assert app._busy is False`, 让同类回归报在"忙碌没复位"而不是隔壁那条无辜断言上。
+- 咬法: 把演示后端换成 `DemoArchiveService(delay=0.5)`(`run_create_branch` 会 `_simulate()` 睡一下)、等待改回 `_pump`, 本机(Linux/Windows 都行)就能稳定复现; 改回 `_drain` 即绿。

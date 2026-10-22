@@ -1,7 +1,8 @@
 """全局快捷键服务.
 
 快捷键用于在游戏内快速操作: **全局保存**立即为当前游戏创建一次备份, **创建
-分支**在选中节点上分出一条新分支(不弹窗, 使用默认分支名). 系统级快捷键注册很
+分支**在当前节点(画 ``●`` 的那个)上分出一条新分支(不弹窗, 使用默认分支名,
+不依赖界面选中)。系统级快捷键注册很
 容易失败——被其它程序占用、缺少辅助功能权限、无图形环境(如 CI/无头运行)——因此
 本模块的约定是**永不抛到调用方**: :meth:`GlobalHotkeyService.register` 把结果
 收敛成 :class:`HotkeyState`, 失败时给出可展示的原因, 应用继续以"无快捷键"的
@@ -52,7 +53,11 @@ ALLOWED_TOKENS: frozenset[str] = frozenset(MODIFIER_TOKENS + LETTER_TOKENS)
 
 # 默认快捷键: 三平台统一为"Win 键开头 + 两个按键", 且都落在左手单手可达的区域。
 DEFAULT_SAVE_ACCELERATOR = "<win>+<alt>+s"
-DEFAULT_BRANCH_ACCELERATOR = "<win>+<alt>+z"
+# 分支默认键是踩坑换出来的(都别再选回去): Z 与 NVIDIA App / GeForce
+# Experience 的覆盖层(Alt+Z)冲突; B/G/R/M 被 Windows 自带的 Xbox Game Bar
+# 占用(蓝牙配对/打开 Game Bar/录制/麦克风)。F(Fork, 分支)同在左手区,
+# 无已知的系统或驱动占用。旧配置文件里保存的键不受这次换默认影响。
+DEFAULT_BRANCH_ACCELERATOR = "<win>+<alt>+f"
 # 动作名(与 HotkeyBinding.name 对应).
 ACTION_SAVE_NOW = "save_now"
 ACTION_CREATE_BRANCH = "create_branch"

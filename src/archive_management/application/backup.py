@@ -784,20 +784,8 @@ class BackupService:
         current = {entry.relative_path: entry for entry in result.entries}
         added = sorted(current.keys() - reference.keys())
         removed = sorted(reference.keys() - current.keys())
-        resized = sum(
-            1
-            for path, entry in current.items()
-            if path in reference and reference[path].size != entry.size
-        )
-        rehashed = sum(
-            1
-            for path, entry in current.items()
-            if path in reference
-            and reference[path].size == entry.size
-            and reference[path].sha256
-            and entry.sha256
-            and reference[path].sha256 != entry.sha256
-        )
+        resized = _resized_entry_count(reference, current)
+        rehashed = _rehashed_entry_count(reference, current)
         log_action(
             action,
             basic=True,
@@ -820,6 +808,36 @@ class BackupService:
         if parent is None or parent.game_id != game_id:
             raise ArchiveManagementError(f"未知的父备份节点: {parent_id}")
         return parent
+
+
+def _resized_entry_count(
+    reference: dict[str, SnapshotEntry], current: dict[str, SnapshotEntry]
+) -> int:
+    """两边都有且大小不同的文件数(位置没变、文件长胖/变瘦了)."""
+    return sum(
+        1
+        for path, entry in current.items()
+        if path in reference and reference[path].size != entry.size
+    )
+
+
+def _rehashed_entry_count(
+    reference: dict[str, SnapshotEntry], current: dict[str, SnapshotEntry]
+) -> int:
+    """两边都有、大小相同、哈希都有且不同的文件数(内容变了但大小没变).
+
+    "大小相同"与"哈希都有"是前置门槛: 大小不同时归并进"大小变化"口径; 任一边
+    没算过哈希(名称模式)时无从比较内容, 也不能当成"内容没变"放过.
+    """
+    return sum(
+        1
+        for path, entry in current.items()
+        if path in reference
+        and reference[path].size == entry.size
+        and reference[path].sha256
+        and entry.sha256
+        and reference[path].sha256 != entry.sha256
+    )
 
 
 def _children_by_parent(nodes: list[BackupNode]) -> dict[int, list[int]]:

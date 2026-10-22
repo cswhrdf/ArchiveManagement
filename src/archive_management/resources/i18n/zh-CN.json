@@ -253,6 +253,7 @@
   "hotkey.err_no_letter": "组合键必须至少包含一个字母键(a-z)，例如 Win+Alt+S",
   "hotkey.err_unknown_key": "不支持的按键：只允许 Win/Ctrl/Alt/Shift 与字母 a-z",
   "hotkey.game_inactive": "快捷键未触发：当前游戏未启用或已归档",
+  "hotkey.branch_no_node": "快捷键未触发：这款游戏还没有备份，先创建一次备份再分支",
   "error.unknown_game": "未知游戏：{game_id}; 请刷新列表后重试",
   "error.no_locations_backup": "该游戏未配置存档位置，无法备份：请先在「游戏设置」里添加存档路径",
   "error.no_locations_schedule": "「{name}」还没有配置存档位置，无法创建定时备份任务：请先在「游戏设置」中添加存档路径后再配置定时备份。",

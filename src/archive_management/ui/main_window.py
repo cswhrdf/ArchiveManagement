@@ -1437,6 +1437,8 @@ class ArchiveApp(ctk.CTk):
         )
         self._task_name_label.configure(wraplength=_TASK_NAME_WIDTH, justify="left")
         self._task_name_label.grid(row=1, column=0, padx=16, sticky="ew")
+        # 最近一次写进任务名的文本: 窗口宽度变化后要按新宽度重裁(见 _refit_detail_names)。
+        self._task_name_text = ""
         # 启停按钮与「游戏设置 → 定时备份」的编辑弹窗、全局任务窗口共用同一条
         # set_schedule 路径, 只翻转启用态并保留周期配置。文字写**点击后会发生什么**
         # (暂停 / 继续, 与全局任务窗口同一个词), 当前状态由上面那枚状态词说 ——
@@ -1801,6 +1803,10 @@ class ArchiveApp(ctk.CTk):
         if self._page is AppPage.DETAIL:
             self._set_detail_names()
             self._fit_selected_text()
+            # 任务名也是详情页里"按宽度裁"的一员: 从前只有 _render_task 那一次,
+            # 窗口从默认宽度缩小后它仍按旧 wraplength 摆着 —— Linux CI 实测
+            # '每 1d 备份 · 保留 3 份' 比 rail 里的标签宽 21px, 被 Tk 硬裁且不补省略号。
+            self._fit_task_name(self._task_name_text)
 
     def _on_content_resize(self, _event: tk.Event) -> None:
         """内容区尺寸变化: 名称的可用宽度变了, 延后重新裁一次.
@@ -1817,6 +1823,7 @@ class ArchiveApp(ctk.CTk):
     def _render_task(self, task: TaskStatus) -> None:
         """刷新任务状态卡: 运行中的操作优先, 否则显示定时任务的启用状态."""
         state = tr("task.running") if task.running else _schedule_state(task)
+        self._task_name_text = task.task_name
         self._fit_task_name(task.task_name)
         self._show_task_progress(task.running)
         self._task_state_label.configure(text=state)
@@ -2313,22 +2320,30 @@ class ArchiveApp(ctk.CTk):
         busy = self._busy
         game = self._game
         self._apply_entry_states(busy)
+        self._apply_header_action_states(busy, game)
+        self._apply_node_action_states(busy, game)
+        self._paint_button_states()
+
+    def _apply_header_action_states(self, busy: bool, game: GameSummary | None) -> None:
+        """页头三个动作(备份/导出/启停)的可用性: 规则各不相同, 忙碌期间一律置灰."""
         can_do_backup = (
             game is not None
             and game.has_locations
             and not busy
             and game.allow("backup")
         )
-        self._backup_btn.configure(state="normal" if can_do_backup else "disabled")
+        self._backup_btn.configure(state=_switch_state(can_do_backup))
         can_export = game is not None and not busy and game.allow("export")
-        self._export_btn.configure(state="normal" if can_export else "disabled")
+        self._export_btn.configure(state=_switch_state(can_export))
         # 页头那对"状态词 + 启停按钮"与导出按钮同一套可用性: 忙碌期间与归档游戏都不许翻转。
         can_enable = game is not None and not busy and not game.archived
-        self._enable_btn.configure(state="normal" if can_enable else "disabled")
+        self._enable_btn.configure(state=_switch_state(can_enable))
         self._sync_enable_control()
+
+    def _apply_node_action_states(self, busy: bool, game: GameSummary | None) -> None:
+        """恢复/分支/重命名/删除备份都属于"备份管理": 归档的游戏不允许其中任何一项."""
         selected = self._backup_id is not None
         nodes_ready = selected and not busy and game is not None
-        # 恢复/分支/重命名/删除备份都属于"备份管理": 归档的游戏不允许其中任何一项.
         self._restore_btn.configure(
             state=_node_state(game, "restore", ready=nodes_ready)
         )
@@ -2339,7 +2354,6 @@ class ArchiveApp(ctk.CTk):
         self._delete_btn.configure(
             state=_node_state(game, "backup_delete", ready=nodes_ready)
         )
-        self._paint_button_states()
 
     def _apply_entry_states(self, busy: bool) -> None:
         """忙碌期间收起这两个"点了没反应"的入口.
@@ -2511,16 +2525,28 @@ class ArchiveApp(ctk.CTk):
     def _on_branch(self, *, quick: bool = False) -> None:
         """创建分支; ``quick`` 为 True 时使用默认分支名且不弹窗(全局快捷键).
 
-        分支不受"存档未变化"限制: 无论内容与起点是否一致都会创建节点
+        快捷键走**当前节点**(画 ``●`` 的那个), 不依赖界面选中 —— 在游戏里按快捷键
+        时不应该要求先回软件点一个节点; 按钮路径仍是"从此处创建分支", 以选中节点为
+        父节点。分支不受"存档未变化"限制: 无论内容与起点是否一致都会创建节点
         (见 :meth:`archive_management.application.backup.BackupService.create_backup`)。
         """
         game = self._game
-        if game is None or self._backup_id is None or self._busy:
+        # 快捷键从当前节点分出; 按钮从选中节点分出("从此处创建分支").
+        backup_id = self._current_id if quick else self._backup_id
+        if game is None or self._busy:
             return
         if not action_allowed("branch", archived=game.archived):
             self._feedback(
                 FeedbackKind.INFO, tr("home.archived_blocked", name=game.name)
             )
+            return
+        if backup_id is None:
+            if quick:
+                # 快捷键是"在游戏里按一下"的动作, 悄无声息会让人摸不着头脑, 说明原因.
+                log_action(
+                    "hotkey.skipped", game_id=game.game_id, reason="no_backup_node"
+                )
+                self._feedback(FeedbackKind.INFO, tr("hotkey.branch_no_node"))
             return
         branch_name: str | None = tr("dialog.branch_default")
         if not quick:
@@ -2536,12 +2562,11 @@ class ArchiveApp(ctk.CTk):
                 "branch.cancel",
                 basic=True,
                 game_id=game.game_id,
-                parent_id=self._backup_id,
+                parent_id=backup_id,
             )
             self._feedback(FeedbackKind.INFO, tr("action.branch_canceled"))
             return
         self._set_busy(True)
-        backup_id = self._backup_id
         self._feedback(
             FeedbackKind.PENDING, tr("action.branch_pending", branch=branch_name)
         )
@@ -3601,6 +3626,11 @@ class ArchiveApp(ctk.CTk):
 
     def _tone_color(self, tone: str | None) -> str:
         return _TONE_COLORS.get(tone or "", _TONE_COLORS["default"])
+
+
+def _switch_state(enabled: bool) -> str:
+    """布尔可用性 → Tk 按钮状态(行内三元写多了会把所在方法顶出 B 级复杂度)."""
+    return "normal" if enabled else "disabled"
 
 
 def _node_state(game: GameSummary | None, action: GameAction, *, ready: bool) -> str:

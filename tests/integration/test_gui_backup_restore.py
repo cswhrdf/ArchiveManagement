@@ -180,7 +180,7 @@ def test_rename_dialog_cancel_keeps_backup(
 def test_branch_hotkey_creates_a_branch_without_dialog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """全局快捷键创建分支不弹窗: 直接使用默认分支名."""
+    """全局快捷键创建分支不弹窗: 默认分支名, 且从当前节点分出(不依赖界面选中)."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
     _patch_dialogs(monkeypatch)
@@ -196,7 +196,11 @@ def test_branch_hotkey_creates_a_branch_without_dialog(
     )
     _pump(app)
     app._select_game("shanhai")
-    app._select_backup(app._items[0])
+
+    # 特意不选中任何节点: 快捷键在游戏里按, 不应要求先回界面点一个框.
+    assert app._backup_id is None
+    parent = app._current_id
+    assert parent is not None
 
     # 快捷键回调只投递消息, 由主线程轮询后执行.
     app._request_hotkey_branch()
@@ -204,6 +208,7 @@ def test_branch_hotkey_creates_a_branch_without_dialog(
 
     created = app._items[-1]
     assert created.branch_name == tr("dialog.branch_default")
+    assert created.parent_id == parent, "分支应挂在当前节点上"
     assert app._hotkeys.accelerators()[ACTION_CREATE_BRANCH] == (
         DEFAULT_BRANCH_ACCELERATOR
     )

@@ -411,6 +411,9 @@ def test_detail_flows_survive_cancelled_or_blocked_dialogs(
     _pump(app)
     app._on_delete_backup()
     _pump(app)
+    # 选"否"是同步早退: 这里只 _pump 就够(后台那条另有 `_drain`), 但顺手钉住"没起后台",
+    # 免得哪天这条路径改成异步后, 下面的断言变成"读到了上一条提示"那种谜题。
+    assert app._busy is False
     assert len(app.backend.list_backups("outer-wilds")) == len(backups)
     assert tr("action.delete_canceled") in app._last_feedback[1]
     # ⑤ 删除同一线路上的节点: 不需要确认, 直接删掉(后继节点上移)。
@@ -434,17 +437,25 @@ def test_detail_flows_survive_cancelled_or_blocked_dialogs(
     app._on_export()
     _drain(app)
     assert app._busy is False
-    # ⑧ 快捷键路径(quick=True): 按文档"不弹窗, 直接用默认分支名"建一条。
-    #    删除成功后选中项会被清空, 因此先重新选一个节点(这也是"没有选中就不动作"的那条守卫)。
+    # ⑧ 快捷键路径(quick=True): 从**当前节点**(画 ``●`` 的那个)分出、不依赖界面选中 ——
+    #    ⑤ 删除成功后选中项已被清空, 此刻没有选中也能用默认分支名建出一条(不弹窗)。
     app._on_branch(quick=True)
-    assert len(app.backend.list_backups("outer-wilds")) == len(remaining), (
-        "没有选中节点时不该建分支"
+    # 建分支走后台线程: 必须**等它把忙碌标志复位**再往下走。只 _pump 一轮不够 ——
+    # 轮询是 100ms 一次的 after 任务, 忙碌标志要等消息被搬回主线程才复位(macOS CI
+    # 实测过: 那一步 ⑨ 的快捷键于是在 `_busy` 早退处被吞掉, 提示停在上一条
+    # "该游戏未配置存档位置…", 看起来像文案写错了)。
+    _drain(app)
+    assert len(app.backend.list_backups("outer-wilds")) == len(remaining) + 1, (
+        "快捷键建分支应从当前节点分出, 不依赖界面选中"
     )
-    app._select_backup(app.backend.list_backups("outer-wilds")[-1])
+    # 守卫那一条: 换到还没有任何备份的游戏(无尽太空) —— 没有当前节点可分时说明
+    # 原因而不是悄悄失败, 这也是 ``hotkey.branch_no_node`` 文案的由来。
+    app._select_game("endless-space")
     _pump(app)
+    assert app._busy is False, "上一步的后台分支还没跑完, 快捷键会被忙碌守卫静默吞掉"
     app._on_branch(quick=True)
-    _pump(app)
-    assert len(app.backend.list_backups("outer-wilds")) == len(remaining) + 1
+    assert app.backend.list_backups("endless-space") == []
+    assert app._last_feedback[1] == tr("hotkey.branch_no_node")
 
 
 def test_settings_and_schedule_windows_are_reused(

@@ -163,6 +163,41 @@ def test_resolve_start_dir_returns_none_when_unreachable() -> None:
     assert pickers.resolve_start_dir("Q:/no/such/drive") is None
 
 
+def test_resolve_start_dir_returns_none_when_no_ancestor_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """祖先链一个都不存在时返回 None: 这条兜底在 POSIX 真实文件系统上不可达.
+
+    真实路径只有 Windows 能自然走到这行(``Q:/`` 这类盘符不存在时整条祖先链都
+    不存在); POSIX 绝对路径的祖先里永远有 ``/``, Linux/macOS 上最后的 ``return
+    None`` 天然测不到 —— 用"祖先为空"的替身路径把该情形构造出来, 三个平台的
+    覆盖率才能一致.
+    """
+
+    class RootlessPath:
+        """替身路径: 是绝对路径, 但它自己与所有祖先都不存在(拼错的盘符)."""
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def expanduser(self) -> RootlessPath:
+            return self
+
+        def is_absolute(self) -> bool:
+            return True
+
+        def is_dir(self) -> bool:
+            return False
+
+        @property
+        def parents(self) -> tuple[()]:
+            return ()
+
+    monkeypatch.setattr(pickers, "Path", RootlessPath)
+
+    assert pickers.resolve_start_dir("/missing/drive/entirely") is None
+
+
 def test_resolve_start_dir_expands_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

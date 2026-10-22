@@ -203,7 +203,7 @@ def test_hotkey_state_defaults() -> None:
 def test_default_accelerators_are_platform_uniform() -> None:
     """两个默认快捷键都以 Win 键开头 + 两个按键, 三平台键位一致, 且单手可及."""
     assert DEFAULT_ACCELERATOR == "<win>+<alt>+s"
-    assert DEFAULT_BRANCH_ACCELERATOR == "<win>+<alt>+z"
+    assert DEFAULT_BRANCH_ACCELERATOR == "<win>+<alt>+f"
     for accelerator in (DEFAULT_ACCELERATOR, DEFAULT_BRANCH_ACCELERATOR):
         combo = parse_accelerator(accelerator)
         assert combo is not None

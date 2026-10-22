@@ -253,6 +253,7 @@
   "hotkey.err_no_letter": "The combination needs at least one letter key (a-z), for example Win+Alt+S",
   "hotkey.err_unknown_key": "Unsupported key: only Win/Ctrl/Alt/Shift and letters a-z are allowed",
   "hotkey.game_inactive": "Hotkey ignored: the current game is not enabled or is archived",
+  "hotkey.branch_no_node": "Hotkey ignored: this game has no backups yet — back up once before branching",
   "error.unknown_game": "Unknown game: {game_id}; refresh the list and try again",
   "error.no_locations_backup": "Cannot back up: no save location is configured; add one in Game settings first",
   "error.no_locations_schedule": "{name} has no save location yet, so a scheduled backup cannot be created: add a save path in Game settings first.",

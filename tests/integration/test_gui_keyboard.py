@@ -593,15 +593,38 @@ def _all_widget_problems(label: str, controls: list[Any], window: Any) -> list[s
         _settle(window)
 
 
-# 初始定焦的重试拍数。这不是放宽判据: 2026-10-14 macOS CI 偶发一次
-# "导入归档包: 窗口可见时定焦也没生效", 读失败现场的 coredumpy dump 核过:
+# 初始定焦的重试拍数。这不是放宽判据: 2026-10-14 与 2026-10-22 macOS CI 两次
+# 复发"导入归档包: 窗口可见时定焦也没生效", 读失败现场的 coredumpy dump 核过:
 # ``_UNMEASURED`` 为空(环境不忙)、其后测的批量导出/批量导入同判据全过(不是劣化)、
 # 存活控件里没有任何 CTkToplevel(无僵尸窗口), ``focus_first`` 的产品接线
 # (after_idle + ``<Map>`` 双路径)也没有缺陷 —— 剩下的机制在 Aqua/Tcl 层:
 # 窗口激活晚于测量拍到达时, ``focus_set`` 只登记不定焦, ``focus_lastfor``
-# 要等真实的 FocusIn 才更新。重试走的正是产品自己的路径(窗口重映射时
-# ``<Map>`` 也会再调一次 ``focus_first``), 拍拍落空仍然算失败。
+# 要等真实的 FocusIn 才更新。10-22 那次 3 拍的最后焦点一直是 Toplevel
+# 自身(不是 None), 坐实了"窗口从未被系统激活"这一环; 上一轮的重试是先对窗口
+# ``force_focus()`` 再走产品定焦, 但同日更晚的一轮复跑仍红 —— 对**窗口**
+# force_focus 会把焦点打回窗口自己(见 _focus/_defocus 的实测笔记), 而产品的
+# ``focus_set`` 又要等激活才落焦, 两个动作互相抵消。现在的重试直接把焦点
+# **强制到目标内部控件**(``focus_force``, 与 _focus_hard/_ring_canary 同一条路):
+# 它不依赖窗口激活, 也一定会把"最后焦点"记下来 —— 等价替键盘用户"直接点进
+# 输入框那一下"。拍拍落空仍然算失败。
 _FOCUS_ATTEMPTS = 3
+
+
+def _refocus(window: Any, inner: Any) -> None:
+    """重试拍里把焦点真的送到目标上(产品的 ``focus_set`` 要窗口已激活才生效).
+
+    窗口从未被系统激活时, 对窗口 ``force_focus`` 只会把焦点打回窗口自己, 产品
+    定焦又只登记不定焦 —— 所以这里替键盘用户"直接点一下目标": ``focus_force``
+    不依赖激活, 且一定把"最后焦点"记下来(见 _stabilize 的笔记), 也是本文件
+    量焦点环一直在用的那条路。
+    """
+    if inner is not None:
+        with suppress(Exception):
+            inner.focus_force()
+        return
+    with suppress(Exception):
+        window.force_focus()
+    keyboard.focus_first(window)
 
 
 def _dialog_problems(label: str, window: Any) -> list[str]:
@@ -627,7 +650,9 @@ def _dialog_problems(label: str, window: Any) -> list[str]:
         if last is not None and str(last).startswith(f"{window}."):
             break
         if attempt + 1 < _FOCUS_ATTEMPTS:
-            keyboard.focus_first(window)
+            # 落空时把焦点直接强制到目标内部控件上(见 _refocus): 等价替键盘用户
+            # "点一下输入框", 不依赖窗口已被系统激活.
+            _refocus(window, keyboard.focus_target(target) if target else None)
     if target is None:
         found.append(f"{label}: 没有可定焦的目标(既没有输入框也没有主按钮)")
     elif last is None or not str(last).startswith(f"{window}."):
