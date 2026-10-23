@@ -207,7 +207,7 @@ uv run python scripts/run_tests_local.py    # 两个进程分片跑, 约省 1/3 
 
 **写法约定：markdown 不按宽度折行** —— 一段、一条、一行就写一行（列表项的续行并回同一行），改文档时不要手动折行，也别把长行拆开；表格、代码块与 `*.instructions.md` 的 YAML frontmatter 不受影响，`> [!WARNING]` 这类标记行要单独一行。这样 diff 里“改一个词”就是一行，而不是半个段落。
 
-另外仓库里有一批**给 AI 助手的路径级规则**（`.github/instructions/*.instructions.md`，按路径自动生效）：用 AI 助手改界面滚动区、CI 工作流或 GUI 用例时，让其读对应那份，可以少踩已经记录过的坑。
+另外仓库里有一批**给 AI 助手的路径级规则**（`.github/instructions/*.instructions.md`，按路径自动生效）：用 AI 助手改界面滚动区、CI 工作流或 GUI 用例时，让其读对应那份，可以少踩已经记录过的坑。仓库根还有一份 [AGENTS.md](AGENTS.md)：给 AI 助手的入口文件（项目概述、快速命令、前后端架构、关键约定、验证流程、质量检查与文档导航），开头就让它读那一份最省事。
 
 ## 十、提交与拉取请求
 

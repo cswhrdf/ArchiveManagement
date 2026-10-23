@@ -1,5 +1,5 @@
 ---
-description: 改完代码要拿"全量结果"(含覆盖率门禁)时的固定做法: 一律用 scripts/run_tests_local.py 并行分片跑, 不要单进程干等; 覆盖率门禁要加 --coverage; 以及拿到红时怎么区分"负载引起的偶发"与真回归。
+description: '改完代码要拿"全量结果"(含覆盖率门禁)时的固定做法: 一律用 scripts/run_tests_local.py 并行分片跑, 不要单进程干等; 覆盖率门禁要加 --coverage; 以及拿到红时怎么区分"负载引起的偶发"与真回归。'
 applyTo: "**"
 ---
 
