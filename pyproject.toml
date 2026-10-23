@@ -102,7 +102,7 @@ path = "src/archive_management/packaging.py"
 # CI **不需要**装它: 用例靠 pytest 的 `pythonpath = ["src", "tests"]` 导入源码, 静态检查靠
 # `mypy_path`, 所以每处 `uv sync` 都带 `--no-install-project` —— 不构建、也不必下载构建后端
 # (hatchling), 每个作业的额外开销为零; 只有质量作业装一次并跑一次 CLI 冒烟, 用来钉住
-# "可编辑安装真的可用"(见 .github/workflows/ci.yml 与 docs/testing.md 第 6 节)。
+# "可编辑安装真的可用"(见 .github/workflows/ci.yml 与 docs/testing-ci.md)。
 #
 # 另: 版本是动态的(`dynamic = ["version"]` + `[tool.hatch.version]` 读
 # `src/archive_management/packaging.py`), 所以**首次** `uv lock` / `uv sync` 需联网取 hatchling。
@@ -326,7 +326,7 @@ markers = [
 branch = true
 source = ["src/archive_management"]
 # 记录**相对工作目录**的文件名: 报告作业在 Ubuntu 上合并各平台的分片数据(见
-# docs/testing.md 第 6 节), 绝对路径在另一台机器上无法还原。相对文件名让 Windows 与
+# docs/testing-ci.md 第 6 节说明), 绝对路径在另一台机器上无法还原。相对文件名让 Windows 与
 # Linux 记下的名字都形如 `src/archive_management/app.py`, `coverage combine` 再把它
 # 归一到当前仓库根下的真实文件 —— 覆盖率数字与平台无关, 只有"哪台机器产的"不同。
 relative_files = true

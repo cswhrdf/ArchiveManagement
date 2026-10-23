@@ -12,7 +12,7 @@ uv run pre-commit install
 
 开发依赖按**作业**拆成五组（`test` / `coverage` / `quality` / `analysis` / `package`，见 `pyproject.toml` 的 `[dependency-groups]`）：CI 里每个作业只装自己需要的那一组（`uv sync --locked --no-default-groups --group ...`，另外靠顶层 `UV_NO_SYNC=1` 拦住 `uv run` 的隐式 sync），本地则通过 `[tool.uv] default-groups` 一次装齐，所以上面的命令与以前完全一样。要只跑某一类检查时也可以手动 `uv sync --no-default-groups --group test`（注意它会把其它组从 `.venv` 里卸掉）。
 
-上面的命令可以在**任意目录**执行。项目以**可编辑包**装进 `.venv`（`pyproject.toml` 的 `[tool.uv] package = true`）：`uv sync` 往 site-packages 里放的只是一个指向 `src` 的 `.pth`（几十字节）与一份 dist-info，**源码不进 site-packages**、改代码不需要重装，因此 `python -m archive_management` 与绕过 `uv run` 直接调用 `.venv` 里的解释器（Windows 是 `.venv\Scripts\python.exe`，Linux 是 `.venv/bin/python`）都能导入自身源码，不再需要 `PYTHONPATH`。CI 里则相反：用例靠 pytest 的 `pythonpath` 导入源码、静态检查靠 `mypy_path`，所以每处 `uv sync` 都带 `--no-install-project`（不构建、也不必下载构建后端），只有质量作业装一次并跑一次 CLI 冒烟 —— 见 [testing.md](testing.md) 第 6 节与 `.github/workflows/ci.yml`。
+上面的命令可以在**任意目录**执行。项目以**可编辑包**装进 `.venv`（`pyproject.toml` 的 `[tool.uv] package = true`）：`uv sync` 往 site-packages 里放的只是一个指向 `src` 的 `.pth`（几十字节）与一份 dist-info，**源码不进 site-packages**、改代码不需要重装，因此 `python -m archive_management` 与绕过 `uv run` 直接调用 `.venv` 里的解释器（Windows 是 `.venv\Scripts\python.exe`，Linux 是 `.venv/bin/python`）都能导入自身源码，不再需要 `PYTHONPATH`。CI 里则相反：用例靠 pytest 的 `pythonpath` 导入源码、静态检查靠 `mypy_path`，所以每处 `uv sync` 都带 `--no-install-project`（不构建、也不必下载构建后端），只有质量作业装一次并跑一次 CLI 冒烟 —— 见 [testing-ci.md](testing-ci.md) 与 `.github/workflows/ci.yml`。
 
 **首次 `uv sync` 需要联网取一次构建后端**：可编辑安装必须真的构建一次，uv 会去解析 `pyproject.toml` 的 `build-system.requires`（`hatchling`）。构建依赖不参与 `uv.lock`，所以锁文件齐备也可能卡在这一步，报 `Failed to resolve requirements from build-system.requires` / `Failed to fetch: https://pypi.org/simple/hatchling/`。访问 PyPI 不畅时先给 uv 配镜像：
 
@@ -157,19 +157,19 @@ uvx black --diff --line-length 88 --target-version py312 src tests scripts
 
 本地提交钩子只对本次变动的 Python 文件执行 Ruff（检查 + 格式化）、mypy，并运行 `blocker`+`critical` 子集（= 数据安全与核心逻辑，等级定义见 [testing.md](testing.md) 的严重等级表），另外还会跑一次 `deptry`（依赖变更与导入变更都得重查，所以它的触发范围含 `pyproject.toml` / `uv.lock`），并把 `src/archive_management/resources/` 顶层的**固定数据清单**（如平台工具排除清单）自动压回单行紧凑 JSON（`scripts/compact_json.py`）。这个钩子跑完会把文件 **`git add` 进暂存区**（这次没改写也会加一次，顺手把索引里可能残留的多行版本同步成单行）：工作区与索引一起变成单行后 pre-commit 就不算它“弄脏了文件”，本次提交直接带上转换好的内容，不需要重新 `git add`；万一把结果加不进索引（没有 git 等），才会退回“就地改写并拦下提交”。`resources/i18n/*.json` 是给人审校的文案资源，不受影响。
 
-**排版钩子也是这套做法（2026-10-05 起）**：`ruff format` 那条钩子不再用 `--check`，而是 `scripts/ruff_format_and_stage.py` —— 就地排版、把结果 `git add` 回暂存区，于是**本次提交一次就带上排版好的内容**（以前的流程是“提交 → 被拦下 → 手工 `uv run ruff format <文件>` → `git add` → 再提交”）。改动不会被吞掉：排版结果与工作区一致地进索引，pre-commit 因此不算它“弄脏了文件”；只有加不进索引（没有 git、权限问题）时才退回“拦下提交”。CI 那侧的 `uv run ruff format --check .` 保持只读判据不变（见 [testing.md](testing.md) 的工程门禁一节）。
+**排版钩子也是这套做法（2026-10-05 起）**：`ruff format` 那条钩子不再用 `--check`，而是 `scripts/ruff_format_and_stage.py` —— 就地排版、把结果 `git add` 回暂存区，于是**本次提交一次就带上排版好的内容**（以前的流程是“提交 → 被拦下 → 手工 `uv run ruff format <文件>` → `git add` → 再提交”）。改动不会被吞掉：排版结果与工作区一致地进索引，pre-commit 因此不算它“弄脏了文件”；只有加不进索引（没有 git、权限问题）时才退回“拦下提交”。CI 那侧的 `uv run ruff format --check .` 保持只读判据不变（见 [testing-ci.md](testing-ci.md) 的质量门禁一节）。
 
-CI 会在 Windows、Ubuntu、macOS 上运行全量测试（三个平台的矩阵与分片数见 [testing.md](testing.md) 第 4 节），并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类、基准阈值与报告汇总见 [testing.md](testing.md)。
+CI 会在 Windows、Ubuntu、macOS 上运行全量测试（三个平台的矩阵与分片数见 [testing-ci.md](testing-ci.md)），并单独执行性能基准、安全测试与上面那批静态分析工具，最后合并成一份 Allure 报告。测试分类与基准阈值见 [testing.md](testing.md)，报告汇总见 [testing-ci.md](testing-ci.md)。
 
 ### 想在本地看 Allure 报告：
 
 1. `uv run pytest --alluredir=allure-results`
 1. `allure generate allure-results --output allure-report`
-1. `allure open allure-report`（标题、界面语言、端口、失败归类、运行变量与环境白名单都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）（完整命令、常见坑与报告自检见 [testing.md](testing.md) 第 7 节）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
+1. `allure open allure-report`（标题、界面语言、端口、失败归类、运行变量与环境白名单都在 `allurerc.mjs` 里定好了；地址冲突时加 `--port 8081`）（完整命令、常见坑与报告自检见 [testing-ci.md](testing-ci.md)）。**生成报告时请停在仓库根目录**：`allurerc.mjs` 就在这里，它负责把结果上的平台标签映射成报告的"环境"（Windows/macOS/Linux），换目录执行会让环境静默退回 `default`（自检脚本会把这种情况判为失败）。
 
-用例失败时会**自动留现场**（coredumpy dump + 界面截图 + 摘要，机制与纪律见 [testing.md](testing.md) 第 6 节）：dump 落在仓库根的 `crash-dumps/`（已被忽略），用 `coredumpy load crash-dumps/<用例>.dump` 进 pdb，或在 VSCode 里用 coredumpy 扩展右键打开；不想留就加 `--crash-dump-depth=0`。
+用例失败时会**自动留现场**（coredumpy dump + 界面截图 + 摘要，机制与纪律见 [testing-ci.md](testing-ci.md)）：dump 落在仓库根的 `crash-dumps/`（已被忽略），用 `coredumpy load crash-dumps/<用例>.dump` 进 pdb，或在 VSCode 里用 coredumpy 扩展右键打开；不想留就加 `--crash-dump-depth=0`。
 
-CI 的 pytest 作业是**分片执行**的（三平台各 3 片并行，报告作业再合并结果与覆盖率）。本地想复现同一套流程：`--shard-count` / `--shard-index` + `scripts/merge_allure_results.py` + `uv run coverage combine`，命令与实测数据见 [testing.md](testing.md) 第 6、7 节。
+CI 的 pytest 作业是**分片执行**的（三平台各 3 片并行，报告作业再合并结果与覆盖率）。本地想复现同一套流程：`--shard-count` / `--shard-index` + `scripts/merge_allure_results.py` + `uv run coverage combine`，命令与实测数据见 [testing-ci.md](testing-ci.md)。
 
 ## 文档与 Wiki
 
@@ -251,16 +251,19 @@ CustomTkinter 在**每个**窗口建好 **200ms** 后自己去贴 `CustomTkinter
 ## 打包
 
 ```shell
+uv run python scripts/build_icon.py --check
 uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
+uv run python scripts/smoke_packaged.py
 ```
 
+- **三条命令就是本地编包的完整链路**：核对位图（`--check` 只比指纹，不一致就不过）→ PyInstaller（spec 里同时声明 onedir 与 onefile，所以**一条命令产出两份**）→ 产物冒烟（`scripts/smoke_packaged.py`，5 条判据 × 两份产物，只在 Windows 上跑；产物不在默认位置时用 `--onedir` / `--onefile` 指过去）。CI 的 `release-build.yml` 跑的就是同样这三句。
 - 构建前应先通过全部门禁：`uv sync --locked`、Ruff（`check` + `format`）、mypy、pytest；位图也要是最新的（`uv run python scripts/build_icon.py --check`，CI 在构建前就跑这一句）。
 - **在仓库根执行**：命令里的 `packaging/archive-management.spec` 是相对路径，`dist/` / `build/` 也落在当前目录下。
 - 版本直接读取 `packaging.py` 中的源码版本。
-- **本地产物**：`dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是这一条命令产的** —— 那是 `.github/workflows/release-build.yml` 的 `Prepare build files` 步骤在构建之后自己打包出来的，别把本地构建与发布产线混为一谈。
+- **本地产物**（同一条命令同时产出两份）：`dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）。**zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是这一条命令产的** —— 那是 `.github/workflows/release-build.yml` 的 `Prepare build files` 步骤在构建之后自己打包出来的，别把本地构建与发布产线混为一谈。
 - **双击就能用**：窗口化产物（`console=False`）不带子命令启动时会直接开界面（见「命令行」那条）；验证方式是双击（或直接启动 exe）后日志里应多一行 `界面启动`，而不是只有 `初始化完成`。CI 里这条路由 `release-build.yml` 的产物冒烟步骤自动守着（`uv run python scripts/smoke_packaged.py`：五条判据 × onedir/onefile），本地手动跑同一句即可复现。
 - 产物为 Windows x64 的 **onedir** 压缩包、**onefile** 可执行文件、SHA-256 校验文件与构建元数据；发布包不得包含凭据、开发机绝对路径或测试数据。`spec` 文件显式声明入口模块、图标与 CustomTkinter 主题资源，并按需补充隐藏导入。
-- GitHub Actions 在 Windows runner 上构建并上传 `dist` 产物（手动触发也支持）。当前以Windows 为首要发布平台，macOS/Linux 打包未纳入。
+- GitHub Actions 在 Windows runner 上构建，冒烟通过后把 `dist/` 打成 `release/` 里的 zip、onefile、`SHA256SUMS.txt` 与 `build-metadata.json` 并上传（手动触发也支持）。当前以 Windows 为首要发布平台，macOS/Linux 打包未纳入。
 - 包体积与启动时间（2026-09-19，Windows x64 / Python 3.12，含量化封面依赖 Pillow 12.3.0）：**onedir 合计约 57.3 MB**（其中 `_internal/PIL` 约 12.8 MB，是本轮首次引入的开销）、**onefile 约 29.1 MB**；在已初始化的数据目录上启动到窗口出现**约 2.1 s**（同条件源码运行同样约 2.1 s，冻结后没有额外开销）。测量方式：`ArchiveManagement.exe gui --root <已初始化目录> --smoke 0.1` 连跑三次取稳定值。
 - **体积与冷启动复量（2026-10-19，`--clean` 重编）**：**onedir 86.4 MB / onefile 40.1 MB**（依赖涨了，上面那组 09-19 的数字已偏小）；`--version` 从起进程到退出是 **onedir 0.22 s / onefile 1.98 s** —— 差的 1.8 s 就是 onefile 解包到 `%TEMP%\_MEIxxxx` 的开销，但那是「进程能跑起来」的下限，**不是**「到窗口出现」的耗时（那个仍只有 onedir 的 2.1 s 基线，onefile 还没单独量）。
 - **产物不依赖源码树与系统 Python**（2026-10-19 本机实测）：把 `dist/ArchiveManagement` 整份拷到**仓库外**、并且把 `PATH` 只留 `C:\Windows\System32`（此时 `python` / 项目 `.venv` 都不在 PATH 上）之后，`--version` / `doctor --root <临时>` / `gui --root <临时> --smoke 3` 全部退出 0，`--root` 下 `config`/`data`/`logs` 三处齐、日志里一条「界面启动」；onedir 与 onefile 两份产物都是这个结果，同一份产物跑 `scripts/smoke_packaged.py` 是 10/10。**冻结版没有崩溃留证**：`coredumpy` 只声明在 `test` 开发组里、`src` 也不 import 它，打包版出事的现场只有退出码 + 日志 + Windows 事件查看器；而「一行 Python 都没装的干净机器」这类验收只能人工在 Windows Sandbox / 全新 VM 做（`--root` 记得指向临时目录，否则会写进真实用户目录）。
@@ -268,7 +271,7 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
 ## 发布
 
-构建与发布分成**两份**工作流（判据与取舍落在 `docs/testing.md` 第 6 节）：
+构建与发布分成**两份**工作流（判据与取舍落在 `docs/testing-ci.md`）：
 
 - [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml)（Build Windows Package，**只读**）：真正的构建作业 —— 装依赖、跑构建前检查、`--check` 图标指纹、PyInstaller、产物冒烟、上传 artifact。有两个调用方（见下表）。
 - [`.github/workflows/release.yml`](.github/workflows/release.yml)（Release Windows Package）：只负责“什么时候发”—— `push` 到 `main` 或手动触发；它先 `uses:` 上面那一份拿到产物，再由 `publish` 作业建 Release（写权限只在这一份里）。

@@ -69,24 +69,25 @@ uv run pytest tests/security                                # 安全测试(默�
 ```
 
 - **要拿全量结果就一律走 `scripts/run_tests_local.py`**，不要裸跑单进程的 `coverage run --rcfile=.coverage-platform.rc -m pytest`（墙钟差得不多，但脚本把分片、耗时合并与覆盖率收尾都做掉了）。透传参数用 `--` 隔开，**不要再写 `--shard-count` / `--shard-index`**——片号由脚本注入，重复给会被直接拒绝；刷新分片权重用 `-- --record-durations=tests/durations.json`。
-- 覆盖率的两步口径、只想定位某个模块缺在哪时的 `--data-file` + `--include` 写法，见第四节；分片与耗时档案的机制、CI 怎么组合分片，见 [docs/testing.md](docs/testing.md) 第 6 节；拿到红先分清"负载引起的偶发"与真回归，判据在 [`.github/instructions/local-full-run.instructions.md`](.github/instructions/local-full-run.instructions.md)。
+- 覆盖率的两步口径、只想定位某个模块缺在哪时的 `--data-file` + `--include` 写法，见第四节；分片与耗时档案的机制、CI 怎么组合分片，见 [docs/testing-ci.md](docs/testing-ci.md)；拿到红先分清"负载引起的偶发"与真回归，判据在 [`.github/instructions/local-full-run.instructions.md`](.github/instructions/local-full-run.instructions.md)。
 - 提交钩子里的 pytest 只看最高两档严重等级（`--min-severity=critical`，快速反馈），各等级怎么判见第五节；等级不符预期时给单个用例加 `@pytest.mark.*`。
 
 ### 报告、打包与图标（细节都在 `docs/`）
 
 ```shell
-uv run pytest --alluredir=allure-results                                  # 先把结果落盘
+uv run pytest --alluredir=allure-results                                   # 先把结果落盘
 allure generate allure-results --output allure-report                      # 生成报告(先删旧目录: 它不刷新数据)
 allure open allure-report --port 8080                                      # 本地看(file:// 打不开, 必须经 HTTP)
-uv run python scripts/verify_allure_report.py --results allure-results      # 报告自检(发布前必过)
+uv run python scripts/verify_allure_report.py --results allure-results     # 报告自检(发布前必过)
 
 uv run pyinstaller --noconfirm --clean packaging/archive-management.spec   # 打包(在仓库根执行)
+uv run python scripts/smoke_packaged.py                                    # 编完先冒烟(两份产物各 5 条判据, 仅 Windows)
 uv run python scripts/build_icon.py                                        # 改了 app.svg 后重画位图
 uv run python scripts/build_icon.py --check                                # 只核对位图与 SVG 是否一致
 ```
 
 - 打包产出 `dist/ArchiveManagement/`（onedir）与 `dist/ArchiveManagement-onefile.exe`（onefile）； **zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是它产的** —— 那是构建流水线（[.github/workflows/release-build.yml](.github/workflows/release-build.yml)）构建之后自己打包的（这份只读，被门禁与发布档共用）。合入 `main` 的 PR 会先用它的合并预览提交跑一次同样的打包（门禁，**不发** Release，必需检查名 `CI required packaging status`）；合入之后由 [release.yml](.github/workflows/release.yml) 的 `push` 档跑同一份构建，版本号变了才建 Release。口径见 [docs/development.md](docs/development.md) 的「发布」。
-- 报告自检与失败现场留证、视觉回归基线见 [docs/testing.md](docs/testing.md) 第 6、7 节；图标流水线、打包与发布见 [docs/development.md](docs/development.md) 的「应用图标」「打包」「发布」三节。
+- 报告自检与失败现场留证、视觉回归基线见 [docs/testing-ci.md](docs/testing-ci.md)；图标流水线、打包与发布见 [docs/development.md](docs/development.md) 的「应用图标」「打包」「发布」三节。
 - `ui-review/`（逐页复核与截图）是**本地材料**，已被忽略、不进版本库。
 
 ### 文档改动（[第九节](#九文档与手册)）
@@ -119,11 +120,11 @@ uv run python scripts/build_icon.py --check                                # 只
 - 公共检查（ruff / mypy / deptry / bandit / pip-audit / radon + xenon）只在 Ubuntu 跑一次，带 `env=common`。
 - 所以覆盖率结论在**每一轮**的报告里看（`Coverage report` 条目，push 与 PR 都有）。想在本机核，就按第四节跑那两步口径。
 
-细节（矩阵、分片权重、报告自检、失败现场留证）见 [docs/testing.md](docs/testing.md) 第 4、6 节。
+细节（矩阵、分片权重、报告自检、失败现场留证）见 [docs/testing-ci.md](docs/testing-ci.md)。
 
 ## 四、覆盖率是硬门禁：100%
 
-`pyproject.toml` 的 `[tool.coverage.report] fail_under` 是 **100**，平台标记机制与豁免规则在 [scripts/coverage_platform.py](scripts/coverage_platform.py) 与 [docs/testing.md](docs/testing.md) 的"有意不统计的覆盖"一节。三条要点：
+`pyproject.toml` 的 `[tool.coverage.report] fail_under` 是 **100**，平台标记机制与豁免规则在 [scripts/coverage_platform.py](scripts/coverage_platform.py) 与 [docs/testing-ci.md](docs/testing-ci.md) 的"有意不统计的覆盖"一节。三条要点：
 
 1. **判门禁必须全量。** 覆盖率是"整套用例合起来覆盖了什么"，任何子集运行（包括 VS Code 测试面板显示的行内覆盖率、只跑某个文件的用例）给出的都是"这次跑了哪些用例"的数字，与结论无关 ——同一个文件在不同子集里可以是 25%、56% 或 100%。
 2. **两种口径别混。** `pytest --cov` 走的是合并口径（不做平台排除，因为 pytest-cov 在导入根 conftest 之前就构造好了 Coverage 对象）；按平台判定要走命令行两步：
@@ -157,7 +158,7 @@ uv run python scripts/build_icon.py --check                                # 只
 - **咬合验证**：写完守卫/用例，**故意改坏一次**，确认它真的变红，再还原（"看起来在守、其实空转"的断言比没有断言更糟）。新增一个守卫时，最好同时给出"改坏哪个字它就红"。
 - **探针用完即删**：为了量一个数字写的一次性脚本不要留在仓库里；长输出先落盘再读（避免 traceback 被截断）。
 - **三平台都要想一遍**：CI 上的桌面尺寸、字体度量（CJK 字体可能缺失）、窗口管理器行为都与本机不同。 GUI 用例的实测坑见 [.github/instructions/gui-tests-on-ci.instructions.md](.github/instructions/gui-tests-on-ci.instructions.md)。
-- 新增用例的收尾清单见 [docs/testing.md](docs/testing.md) 第 8 节。
+- 新增用例的收尾清单见 [docs/testing.md](docs/testing.md) 第 6 节。
 
 ## 六、代码约定
 
@@ -173,7 +174,7 @@ uv run python scripts/build_icon.py --check                                # 只
 界面是这个项目里"判据最多"的部分 —— 颜色、间距、圆角、字号、对比度、键盘可用性、文案截断都有守卫：
 
 - **颜色只能从调色板取**（`ui/palette.py` 的具名 token），包括输入控件的边界用 `input_border`、面板外框用 `border` 这种区分；写死颜色不会跟主题重绘，对比度守卫与主题重绘守卫都会红。
-- **对比度**有下限（正文 4.5:1、非文字与输入边界 3:1、禁用态 2.5:1），改动颜色前先看 [docs/testing.md](docs/testing.md) 的"对比度判据"一节。
+- **对比度**有下限（正文 4.5:1、非文字与输入边界 3:1、禁用态 2.5:1），改动颜色前先看 [docs/testing-ui.md](docs/testing-ui.md) 的"对比度判据"一节。
 - **键盘可用性**：能聚焦、有可见焦点环、Esc/回车接得上（补丁在 `ui/keyboard.py`）。
 - **文案**：全角标点、末行不许只剩标点、空状态要给下一步 —— 都有用例量。
 - 动手前建议先读 [docs/ui-notes.md](docs/ui-notes.md) 与 [docs/features.md](docs/features.md)。
@@ -193,7 +194,7 @@ uv run python scripts/build_icon.py --check                                # 只
 uv run python scripts/run_tests_local.py    # 两个进程分片跑, 约省 1/3 墙钟
 ```
 
-**不要**用 `pytest-xdist` 代替分片：GUI 用例各自起真实窗口，多个 worker 会互相拖垮（实测还会多出 Tk 初始化失败）。分片/耗时档案的机制见 [docs/testing.md](docs/testing.md) 第 6 节。
+**不要**用 `pytest-xdist` 代替分片：GUI 用例各自起真实窗口，多个 worker 会互相拖垮（实测还会多出 Tk 初始化失败）。分片/耗时档案的机制见 [docs/testing-ci.md](docs/testing-ci.md)。
 
 ## 九、文档与手册
 

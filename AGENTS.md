@@ -24,7 +24,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - **静态门禁**：`uv run ruff check .` / `uv run ruff format .`（CI 用 `--check` 只查不改）/ `uv run mypy` / `uv run deptry .`；复杂度另用 `uv run radon cc -s --min C src`（输出应为空）与 `uv run xenon --max-absolute B --max-modules F --max-average F src`。
 - **单点验证**（迭代时用这个，秒级）：`uv run pytest tests/unit/test_xxx.py -q`、`-k <关键词>`、`uv run pytest tests/integration -q`；性能与安全**默认不跑**：`uv run pytest tests/performance`、`uv run pytest tests/security`。
 - **要拿全量结果**一律走 `uv run python scripts/run_tests_local.py --coverage`（双进程分片 + 收尾 combine/report），**不要**裸跑单进程 `coverage run -m pytest`；透传参数用 `--` 隔开，且**别再写 `--shard-count` / `--shard-index`**（片号由脚本注入，重复给会被拒绝）。规则见 [.github/instructions/local-full-run.instructions.md](.github/instructions/local-full-run.instructions.md)。
-- **报告与打包**：`uv run pytest --alluredir=allure-results` → `allure generate allure-results --output allure-report`（先删旧目录，它不刷新数据）→ `allure open allure-report --port 8080`（必须经 HTTP，`file://` 打不开）；打包 `uv run pyinstaller --noconfirm --clean packaging/archive-management.spec`；改了 `app.svg` 后 `uv run python scripts/build_icon.py`。细节见 [docs/development.md](docs/development.md)。
+- **报告与打包**：`uv run pytest --alluredir=allure-results` → `allure generate allure-results --output allure-report`（先删旧目录，它不刷新数据）→ `allure open allure-report --port 8080`（必须经 HTTP，`file://` 打不开）；打包 `uv run pyinstaller --noconfirm --clean packaging/archive-management.spec`（一条命令同时产出 onedir 与 onefile），编完用 `uv run python scripts/smoke_packaged.py` 冒烟（仅 Windows）；改了 `app.svg` 后 `uv run python scripts/build_icon.py`。细节见 [docs/development.md](docs/development.md)。
 
 ## 3. 后端架构
 
@@ -73,7 +73,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 ## 7. 质量检查
 
-- **两层门禁**：本地提交钩子（快，只看最高两档严重等级）与 CI（三平台全量 + 性能 + 安全 + 视觉回归 + 覆盖率门禁 + Allure 原生质量门）。作业清单与矩阵见 [docs/testing.md](docs/testing.md) 第 6 节。
+- **两层门禁**：本地提交钩子（快，只看最高两档严重等级）与 CI（三平台全量 + 性能 + 安全 + 视觉回归 + 覆盖率门禁 + Allure 原生质量门）。作业清单与矩阵见 [docs/testing-ci.md](docs/testing-ci.md)。
 - **测试分层与等级**：`tests/unit`（纯逻辑）/ `tests/integration`（文件系统、真实窗口）/ `tests/performance` / `tests/security`；每个模块在 `pytestmark` 里**恰好声明一个**严重等级（blocker/critical/normal/minor/trivial，判定标准见 [docs/testing.md](docs/testing.md) 第 1 节），并带齐 epic/feature/story/layer 四个 Allure 标签（缺了收集期就报错）。
 - **风格**：裸 `assert` + 能定位问题的失败消息（太长就把消息存进变量，保持单行）；环境用 `tmp_path`、替身用 `monkeypatch`（仓库里不用 `unittest.mock`）；用例自带数据，不依赖执行顺序。
 - **别绕过门禁**：不许用无原因的 `pytest.skip` 静默掉用例（Tk 环境问题只认白名单症状）、不许放宽 `fail_under` 或复杂度阈值、不许用"既有问题"当借口跳过检查。CI 红了你认为既有问题，在 PR 里写明。
@@ -88,7 +88,9 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 | [CONTRIBUTING.md](CONTRIBUTING.md)                                      | **动手前必读**：环境、常用命令速查、提交前门禁、覆盖率口径、测试怎么写、代码与界面约定、提交与 PR 流程                                  |
 | [docs/features.md](docs/features.md)                                    | 界面结构与各功能（备份/分支/定时任务/恢复/原始目录/导入导出/日志）的现行行为                                                            |
 | [docs/development.md](docs/development.md)                              | 命令行、配置文件、应用目录、质量门禁、应用图标流水线、打包与发布                                                                        |
-| [docs/testing.md](docs/testing.md)                                      | 测试分层与等级、性能与安全测试、报告与分片机制、各类 UI 判据、新增测试清单                                                              |
+| [docs/testing.md](docs/testing.md)                                      | 测试分层与等级、共享测试设施、性能与安全测试、写用例的通用纪律、新增测试清单                            |
+| [docs/testing-ui.md](docs/testing-ui.md)                                | 界面用例的环境与收尾纪律、时序与量法、尺寸/配色/交互/文案判据                                          |
+| [docs/testing-ci.md](docs/testing-ci.md)                                | CI 作业矩阵、报告自检、失败现场留证、分片与覆盖率口径、本地生成报告                                    |
 | [docs/library.md](docs/library.md)                                      | 统一游戏主页、列表与海报、分类筛选、游戏发现、封面与图标                                                                                |
 | [docs/export-format.md](docs/export-format.md)                          | 导入导出包的文件结构、字段、上限与读取纪律（改格式先看它）                                                                              |
 | [docs/hotkeys.md](docs/hotkeys.md)                                      | 全局快捷键的默认键位、录制流程与实现约定                                                                                                |

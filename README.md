@@ -66,7 +66,7 @@ uv run python -m archive_management gui --root ./dev-data     # 启动图形界�
 开发相关的内容不再写在这份 README 里，免得两处口径漂移：
 
 - **要动手改代码**：[CONTRIBUTING.md](./CONTRIBUTING.md) —— 第二节是**常用命令速查**（环境与运行、静态门禁、用例与分片、覆盖率、报告与打包、文档），后面几节是提交前要过的门禁、覆盖率那个硬门禁的口径、测试怎么写、代码与界面约定、两个常见的坑，以及提交与 PR 的流程。
-- **想了解机制**：[development.md](./docs/development.md)（命令行、配置文件、质量门禁、打包与发布、应用图标流水线）与 [testing.md](./docs/testing.md)（测试分类、基准阈值、分片与报告自检）。
+- **想了解机制**：[development.md](./docs/development.md)（命令行、配置文件、质量门禁、打包与发布、应用图标流水线）与 [testing.md](./docs/testing.md)、[testing-ui.md](./docs/testing-ui.md)、[testing-ci.md](./docs/testing-ci.md)（测试分层与界面判据、CI 分片与报告自检）。
 
 ---
 
@@ -84,5 +84,7 @@ uv run python -m archive_management gui --root ./dev-data     # 启动图形界�
 | [hotkeys.md](./docs/hotkeys.md)             | 全局快捷键的默认键位、自定义流程与实现约定                             |
 | [platforms.md](./docs/platforms.md)         | Windows / macOS / Linux 支持矩阵、可信存档来源与平台注意事项           |
 | [development.md](./docs/development.md)     | 开发环境、命令行、配置文件、质量门禁、打包与发布                       |
-| [testing.md](./docs/testing.md)             | 测试分类、性能基准与安全测试、Allure 报告汇总                          |
+| [testing.md](./docs/testing.md)             | 测试分类与等级、共享测试设施、性能基准与安全测试、新增测试清单          |
+| [testing-ui.md](./docs/testing-ui.md)       | 界面用例的环境与收尾纪律、时序与量法、尺寸/配色/交互/文案判据          |
+| [testing-ci.md](./docs/testing-ci.md)       | CI 作业矩阵、失败现场留证、分片与覆盖率口径、本地生成报告              |
 | [ui-notes.md](./docs/ui-notes.md)           | 从界面移出的说明文案（备查）                                           |

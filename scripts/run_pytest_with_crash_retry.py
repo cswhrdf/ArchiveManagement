@@ -2,7 +2,7 @@ r"""把"死于原生崩溃或**用例超时**"的测试进程原地重跑 ——
 
 背景一(2026-10-05, run 37270928260): macOS 26.6.2 arm64 + Tcl/Tk 9.0 上, UI 分片死在 Tk
 Aqua 位图绘制的 use-after-free(``EXC_BAD_ACCESS @0x70``, 崩在 ``-[NSCGSContext
-dealloc]`` 一族, 排查记录见 ``docs/testing.md``)。这是原生层的缺陷, 同一用例在
+dealloc]`` 一族, 排查记录见 ``docs/testing-ci.md``)。这是原生层的缺陷, 同一用例在
 Linux/Windows 都过; 但 pytest 进程一死, 崩溃点之后的用例全部没有结果, 分片报缺。
 
 背景二(2026-10-16, run 38758273842): Windows 的 UI 段在
@@ -37,7 +37,7 @@ Linux/Windows 都过; 但 pytest 进程一死, 崩溃点之后的用例全部没
 
 * 这个脚本直接透传、不再重试, 并在日志里打提醒;
 * ``tests/unit/test_ci_diagnostics.py`` 里那条"窗口没被忘记"的守卫**当场变红** ——
-  要么移除这层包装(ci.yml 的两个 UI 步骤与 docs/testing.md 的说明), 要么在确认上游
+  要么移除这层包装(ci.yml 的两个 UI 步骤与 docs/testing-ci.md 的说明), 要么在确认上游
   仍没修好后**明确续期**(改 :data:`RETRY_UNTIL` 并在续期理由里写清依据)。
 
 用法(CI, 见 ``.github/workflows/ci.yml`` 的 UI 段)::
@@ -346,7 +346,7 @@ def _announce(
         "### 原生崩溃重试(临时缓解)",
         [
             f"- 第一次尝试死于 {describe_exit(code)}: macOS 26 + Tcl/Tk 9.0 的原生缺陷"
-            "(排查记录见 docs/testing.md), 不是用例失败;",
+            "(排查记录见 docs/testing-ci.md), 不是用例失败;",
             f"- 已清理该次落盘的残缺产物: {cleaned};",
             f"- 重跑退出码 {rerun.returncode}。",
         ],
@@ -384,7 +384,7 @@ def _notice_expired(what: str) -> None:
     print(
         f"::notice::{what}, 但重试窗口已于 {RETRY_UNTIL} 过期 —— 请移除 "
         "scripts/run_pytest_with_crash_retry.py 这层包装(ci.yml 的 UI 步骤与 "
-        "docs/testing.md), 或确认原因依在后明确续期",
+        "docs/testing-ci.md), 或确认原因依在后明确续期",
         file=sys.stderr,
     )
 

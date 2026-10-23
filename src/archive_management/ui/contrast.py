@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 
-# 三类判据的下限(见 docs/testing.md「对比度判据」一节):
+# 三类判据的下限(见 docs/testing-ui.md「对比度判据」一节):
 #   * 正文/次要文字按 WCAG 2.1 AA 的 4.5:1;
 #   * 选中描边、状态点这类"非文字"的信息载体按 3:1;
 #   * 禁用态文字规范里豁免(禁用控件没有对比度要求),但我们仍然设一条底线,

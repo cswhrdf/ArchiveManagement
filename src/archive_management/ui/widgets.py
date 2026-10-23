@@ -210,7 +210,7 @@ def measured_font(font: MetricsFont, window: tk.Misc) -> MetricsFont:
 # **聚焦时的换色规则**(用户实测: "聚焦框在实底按钮上看起来只是按钮缩小了一圈"):
 # 主色/危险色实底上任何亮色环都看不出(实测 1.27:1), 所以聚焦时把这类按钮换成对应的
 # 软底样式 —— 换完之后那一档亮色(深色主题)/深色(浅色主题)环立刻有 **10:1 以上**,
-# 而且**两套主题各自只剩一个抢眼的环色**(见 ``docs/testing.md``)。
+# 而且**两套主题各自只剩一个抢眼的环色**(见 ``docs/testing-ui.md``)。
 # 只换配色、不换功能: 软底样式仍在 ``DESTRUCTIVE_STYLES`` 允许范围内。
 FOCUS_STYLE: dict[str, ButtonStyle] = {
     "accent": "soft",

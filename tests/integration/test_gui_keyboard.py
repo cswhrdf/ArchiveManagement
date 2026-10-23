@@ -11,7 +11,7 @@ A. **每个可交互控件都在 Tab 链里** —— CustomTkinter 的按钮/单
    ``tests/gui_support.py`` 的 :data:`TK_RETRY_REASON`), 那时它直接报
    ``invalid command name "tk_focusNext"`` —— 守卫不能建在这种量具上。
    "真的按 Tab 走得过去"这件事在探针里验过一次(修前只有 2 个输入框, 修后 40+ 个
-   控件全在链上), 结论记在 ``docs/testing.md``。
+   控件全在链上), 结论记在 ``docs/testing-ui.md``。
 B. **禁用态不在 Tab 链里** —— 把 Tab 花在一个按不动的控件上是白费。
 C. **焦点看得见** —— 聚焦时描边要换成**与聚焦后底色**分得开的颜色(不是恒定的
    强调色: 主色实底按钮的底色就是强调色); 主色/危险色实底按钮还要**换成抢眼的
@@ -87,7 +87,7 @@ pytestmark = [
 ]
 
 # 生成事件前要跑的完整事件循环次数: 实测只 ``update_idletasks`` 时窗口还没映射,
-# 发给子控件的按键会被丢掉(docs/testing.md 里同一条坑)。
+# 发给子控件的按键会被丢掉(docs/testing-ui.md 里同一条坑)。
 _SETTLE_ROUNDS = 3
 
 # 量不出来的控件(界面在忙 / 本环境推不上焦点): 不计问题, 但要留下痕迹 ——

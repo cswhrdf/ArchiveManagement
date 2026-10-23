@@ -5,7 +5,7 @@ applyTo: src/archive_management/ui/**.py
 
 # 界面改动: 每条判据都有用例盯着
 
-这些不是审美偏好，每一条都有守卫；越界时**改代码而不是改判据**。详细判据在 [docs/testing.md](../../docs/testing.md)，交互取舍在 [docs/ui-notes.md](../../docs/ui-notes.md)，功能行为在 [docs/features.md](../../docs/features.md)。
+这些不是审美偏好，每一条都有守卫；越界时**改代码而不是改判据**。详细判据在 [docs/testing-ui.md](../../docs/testing-ui.md)，交互取舍在 [docs/ui-notes.md](../../docs/ui-notes.md)，功能行为在 [docs/features.md](../../docs/features.md)。
 
 ## 1. 文案
 

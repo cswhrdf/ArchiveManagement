@@ -40,7 +40,7 @@ def test_report_summary_items_declare_a_severity() -> None:
 
     严重等级: 缺了会在报告里多出一个 ``no_severity`` 桶;
     环境标签: 缺了会被归到 ``default``, 按环境筛选时就看不到性能/安全/覆盖率结论;
-    名称不拼平台: 平台现在由"环境"表达(见 docs/testing.md 第 5 节), 写进名称会让报告里
+    名称不拼平台: 平台现在由"环境"表达(见 docs/testing-ci.md 第 1 节), 写进名称会让报告里
     多出三个同名的独立条目。
     """
     scripts = (

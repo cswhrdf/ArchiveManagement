@@ -7,7 +7,7 @@
 **浅色主题的强调色、危险色、次要文字与禁用文字按对比度判据重新取过值**
 (深色主题的原值本来就达标): 原来 accent 2.44:1、danger 2.75:1、
 text_muted 4.17:1、text_disabled 1.84:1,都低于本仓库自己定的下限; 取色依据与
-逐对量测见 :mod:`archive_management.ui.contrast` 与 ``docs/testing.md``。
+逐对量测见 :mod:`archive_management.ui.contrast` 与 ``docs/testing-ui.md``。
 """
 
 from __future__ import annotations

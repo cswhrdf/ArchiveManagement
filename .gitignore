@@ -59,7 +59,7 @@ cover/
 # Allure 报告与性能/安全结果(由 CI 生成并作为 artifact 上传)
 allure-results*/
 allure-report*/
-# 分片跑测试时的产物(每片一份结果目录与覆盖率数据, 见 docs/testing.md)
+# 分片跑测试时的产物(每片一份结果目录与覆盖率数据, 见 docs/testing-ci.md)
 coverage-data-*/
 .allure/
 # 运行总账、覆盖率豁免清单与失败现场(CI 生成, 由 allurerc.mjs 的 globalAttachments 收进报告「全局附件」)

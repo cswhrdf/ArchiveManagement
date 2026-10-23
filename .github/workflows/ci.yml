@@ -448,7 +448,7 @@ jobs:
           print(sys.version)
           print(f"Tcl/Tk {tkinter.TkVersion}")
           assert tkinter.TkVersion < 9, (
-              "解释器又带回 Tcl/Tk 9.x 了: 见 docs/testing.md 的 macOS 原生崩溃"
+              "解释器又带回 Tcl/Tk 9.x 了: 见 docs/testing-ci.md 的 macOS 原生崩溃"
               "一节 —— 要么确认 setup-python 仍装的是 python.org 构建, 要么先确认"
               "上游修好了 9.0 的 Aqua 缺陷, 再考虑撤掉这道闸"
           )

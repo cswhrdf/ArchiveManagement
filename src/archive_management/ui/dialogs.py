@@ -289,7 +289,7 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     # 接线放在最前面: 下面几步只是摆位置, 而窗口一旦可见用户就可能已经在按 Esc。
     if modal:
         bind_window_keys(window)
-        # 舒适线只对**模态弹窗**约定(见 docs/testing.md): 常驻工作窗口有自己的最小
+        # 舒适线只对**模态弹窗**约定(见 docs/testing-ui.md): 常驻工作窗口有自己的最小
         # 尺寸, 屏幕再矮也不该把它们压矮(见 test_gui_sizes 的"工作窗口只守硬线")。
         _clamp_to_comfort_line(window)
     window.withdraw()

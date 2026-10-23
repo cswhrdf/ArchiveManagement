@@ -763,7 +763,7 @@ def test_the_crash_retry_window_has_not_been_forgotten() -> None:
     assert today <= module.RETRY_UNTIL, (
         f"崩溃/超时重试的窗口已在 {module.RETRY_UNTIL} 到期: 请移除这层临时包装"
         "(ci.yml 两个 UI 步骤外面包的 scripts/run_pytest_with_crash_retry.py, 以及"
-        " docs/testing.md 的说明), 或确认上游(macOS 26 + Tcl/Tk 9.0)与 Windows 的"
+        " docs/testing-ci.md 的说明), 或确认上游(macOS 26 + Tcl/Tk 9.0)与 Windows 的"
         "卡顿仍未修复后明确续期"
     )
 

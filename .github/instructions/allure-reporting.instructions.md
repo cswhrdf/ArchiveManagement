@@ -9,7 +9,7 @@ description: '本仓库 Allure 报告体系的用法与不变式: 配置的唯�
 
 **核心前提：报告类故障几乎不会让任何用例变红。** 环境退化成 default、历史断链、少一片数据、附件丢失，表现出来都是"报告看起来正常"——所以每一条约定要么写死在配置里，要么由 `tests/unit/test_report_*.py` / `test_ci_*.py` 的守卫钉住。
 
-细节说明在 `docs/testing.md` 第 5~7 节（结果元数据 / CI 流程 / 本地生成），本文只写"改代码时怎么不错"。
+细节说明在 `docs/testing-ci.md` 第 1~3 节（结果元数据 / CI 流程 / 本地生成），本文只写"改代码时怎么不错"。
 
 ## 1. 全景：一次运行里，报告是怎么拼出来的
 
@@ -179,4 +179,4 @@ CI 红、报告缺块、或者“本地根本不复现的那种失败”来了�
 | 改分类规则 / 环境 id                               | `allurerc.mjs`、守卫里的期望集合、`tests/tk_guard.py` 的症状清单（`test_report_config_categorises_the_known_environment_problems`）                                                                                                                                                  |
 | 改视觉回归的画面或 `FROZEN_NOW`                    | `tests/visual-baselines/` 的基线图（必须重采）与那里的 README 表；重采只能用**包含这次改动的那一轮** CI 的 `visual-baselines-candidates`—— 两张主页图上带着 `FROZEN_NOW` 那一天的日期，拿旧一轮的产物一上来就红（守卫 `test_the_capture_pins_the_clock_so_baselines_stop_drifting`） |
 
-本地验证（`docs/testing.md` 第 7 节有完整命令）：跑一遍带 `--alluredir` 的用例 → 生成 `environment.properties` → `npx allure@3 generate allure-results --config allurerc.mjs --clean --output allure-report` → `verify_allure_report.py` → `npx allure@3 open`（**`file://` 会被跨域拦掉**）。改了配置或脚本，至少跑一次 `tests/unit/test_report_*.py` 与 `test_ci_*.py`：这批守卫不跑用例，几十秒就能给出"哪一处没同步"。
+本地验证（`docs/testing-ci.md` 第 3 节有完整命令）：跑一遍带 `--alluredir` 的用例 → 生成 `environment.properties` → `npx allure@3 generate allure-results --config allurerc.mjs --clean --output allure-report` → `verify_allure_report.py` → `npx allure@3 open`（**`file://` 会被跨域拦掉**）。改了配置或脚本，至少跑一次 `tests/unit/test_report_*.py` 与 `test_ci_*.py`：这批守卫不跑用例，几十秒就能给出"哪一处没同步"。

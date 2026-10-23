@@ -227,7 +227,7 @@ export default {
       // 已知局限: 这条规则只看"该平台有没有用例结果", 发现不了**部分**漏收(三个分片只
       // 合并进一两片时, 环境、通过率、这条规则全都正常)。那一层交给产物清单:
       // scripts/merge_allure_results.py 写、各平台作业上传、由
-      // scripts/verify_allure_report.py --manifest 与最终条数对齐(见 docs/testing.md 第 6 节)。
+      // scripts/verify_allure_report.py --manifest 与最终条数对齐(见 docs/testing-ci.md)。
       //
       // macOS 已于 2026-09-30 恢复: 这里要求三个平台, 与 CI 的三个
       // 矩阵(pytest / pytest-report / security)及汇总作业的 --expect-platforms 必须一致

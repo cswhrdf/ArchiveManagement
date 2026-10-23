@@ -169,7 +169,7 @@ def test_coverage_data_from_another_platform_can_be_combined(
 ) -> None:
     """各平台的覆盖率数据要能在报告作业(Ubuntu)上合并: 记相对路径, 分隔符自动归一.
 
-    报告生成是纯文件操作, 所以两个平台的数据都在 Ubuntu 上合并(见 docs/testing.md 第 6 节),
+    报告生成是纯文件操作, 所以两个平台的数据都在 Ubuntu 上合并(见 docs/testing-ci.md),
     而 Windows 记下的名字是反斜杠形式。``relative_files = true`` 让两边的名字都相对仓库根,
     ``coverage combine`` 再把分隔符换成本机的那一种 —— 少了这个设置会变成"合并成功但一个
     文件都对不上"(覆盖率报告空掉, 而 Windows 上跑这条用例看不出来, 只有 Linux 才暴露)。
@@ -858,7 +858,7 @@ def test_report_config_categorises_the_known_environment_problems() -> None:
         "env-tk-library",
         "env-transient-database",
         "gate-quality-check",
-    }, f"分类规则变了要同步 docs/testing.md 与本用例: {ids}"
+    }, f"分类规则变了要同步 docs/testing-ci.md 与本用例: {ids}"
     assert len(ids) == len(set(ids)), "每条规则要有唯一 id(同名会被合并)"
     # Tk 那条用数组匹配器(message / trace 任一命中), 两条正则都要盖住全部已知症状。
     # 顺手把 JS 的 flags 也读出来: 规则必须大小写不敏感, 否则 `tcl_findLibrary`

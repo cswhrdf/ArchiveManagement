@@ -1260,7 +1260,7 @@ def test_typing_in_the_home_search_box_filters_without_pressing_enter() -> None:
     page._search_entry.insert(0, "山海")
     # 事件喂给控件**自己**, 不直接调 _on_search_key: 后者测不到"<KeyRelease> 到底绑没绑上"
     # (拆掉那条绑定它照样绿 —— 这一版就是这么被咬出来的)。
-    # 合成键盘事件走**焦点**窗口, 所以先把焦点交给这个输入框(见 docs/testing.md 那几条坑)。
+    # 合成键盘事件走**焦点**窗口, 所以先把焦点交给这个输入框(见 docs/testing-ui.md 那几条坑)。
     page._search_entry._entry.focus_force()
     page._search_entry._entry.event_generate("<KeyRelease>")
     deadline = time.monotonic() + 5.0
