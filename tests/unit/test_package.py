@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -139,3 +142,49 @@ def test_the_smoke_script_and_the_workflow_follow_the_spec_names() -> None:
     assert f"dist/{folder}/{onedir_exe}.exe" in smoke, hint
     assert f'"dist/{onefile}.exe"' in smoke, hint
     assert f'"dist/{onefile}.exe"' in workflow, hint
+
+
+def _load_smoke_module() -> ModuleType:
+    """按路径加载 ``scripts/smoke_packaged.py``(scripts 不是包, 与别的报道脚本同一手法)."""
+    path = _ROOT / "scripts" / "smoke_packaged.py"
+    spec = importlib.util.spec_from_file_location("smoke_packaged", path)
+    assert spec is not None, f"加载不到 {path}"
+    assert spec.loader is not None, f"{path} 没有 loader"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["smoke_packaged"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_both_artifacts_have_a_cold_start_bound() -> None:
+    """J-7①: onefile 的慢是解包开销买的, 给了上限才能拦住"又往包里塞大件"."""
+    limits = _load_smoke_module()._COLD_START_LIMITS_SECONDS
+    hint = "两份产物都要有冷启动上限(Popen → '界面启动' 落地)"
+    assert set(limits) == {"onedir", "onefile"}, hint
+    assert all(limit > 0 for limit in limits.values()), "上限必须是正数"
+
+
+def test_exactly_at_the_bound_is_not_a_failure() -> None:
+    smoke = _load_smoke_module()
+    limits = smoke._COLD_START_LIMITS_SECONDS
+    for label, limit in limits.items():
+        assert smoke.cold_start_problem(label, limit) is None, (
+            f"{label} 恰好等于上限不判超"
+        )
+        reason = smoke.cold_start_problem(label, limit + 0.1)
+        assert reason is not None, f"{label} 超限要给原因"
+        assert "超过上限" in reason, f"{label}: {reason}"
+    assert limits["onefile"] > limits["onedir"], "onefile 要解包, 上限不该比 onedir 紧"
+
+
+def test_the_no_args_check_really_applies_the_bound() -> None:
+    """只在常量里写个数不等于有闸门: 上限必须真接进无参数启动那条判据, 超了判红."""
+    source = (_ROOT / "scripts" / "smoke_packaged.py").read_text(encoding="utf-8")
+    body = source.split("def check_no_args", 1)[-1].split("\ndef ", 1)[0]
+    assert "cold_start_problem(" in body, (
+        "无参数启动那条判据必须调用 cold_start_problem"
+    )
+    after = body.split("if slow is not None:", 1)
+    assert len(after) == 2, "上限没接进判据(只算了耗时, 没有比较)"
+    tail = after[1][:160]
+    assert "return False" in tail, f"超限要判红(return False), 不能只打印: {tail!r}"

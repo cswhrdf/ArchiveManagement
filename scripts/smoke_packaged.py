@@ -6,6 +6,7 @@ r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.ym
 ① 无参数启动: 打包版的默认命令是 ``gui``(``app.default_command``), 双击就该开窗口。
    系统目录整体重定向进临时沙箱(platformdirs 自带的 ``WIN_PD_OVERRIDE_*`` 覆盖,
    两个变量都指到同一处), 判据 = 沙箱日志里出现"界面启动"且进程仍活着(窗口开着),
+   **顺手量冷启动耗时**(Popen → 日志落地)并卡上限(``_COLD_START_LIMITS_SECONDS``),
    看完杀整棵树 —— 全程不碰真实的应用目录;
 ② ``--version``: 退出码 0;
 ③ ``doctor --root <临时>``: 退出码 0, 且该 root 下 config/data/logs 三处真的出现;
@@ -51,6 +52,22 @@ _CMD_TIMEOUT_SECONDS = 120.0
 _SECOND_INSTANCE_TIMEOUT_SECONDS = 60.0
 #: 确认"窗口开着"前的静置(秒): 日志落地后再等一眼, 排除"刚写完启动日志就退了"。
 _ALIVE_SETTLE_SECONDS = 1.0
+#: 冷启动上限(秒): Popen 到"界面启动"落地。本机实测(2026-10-24, Windows x64 / 不压 UPX,
+#: 同一条判据连跑 3 轮) onedir **0.5 s** / onefile **2.0 s** —— 0.5 s 是探测的粒度(Popen
+#: 之后一轮就看到了), 所以 onedir 那个数是"不超过 0.5 s"。上限按 CI runner 的最坏情况
+#: 留 10~20 倍余量: 真超了就是解包或依赖出问题了(又往包里塞大件), 不是抖动; 它不是性能
+#: 基准 —— "启动→窗口→关窗"的总时长是另一件事(1.70 s / 3.6 s, 见 docs/development.md)。
+#: 注意探测是 0.5 s 一轮, 量到的数最多比真实值大一轮。
+_COLD_START_LIMITS_SECONDS = {"onedir": 10.0, "onefile": 20.0}
+
+
+def cold_start_problem(label: str, elapsed: float) -> str | None:
+    """冷启动超限就返回一句原因(给判据拼消息), 没超返回 ``None``."""
+    limit = _COLD_START_LIMITS_SECONDS[label]
+    if elapsed <= limit:
+        return None
+    return f"冷启动 {elapsed:.1f}s 超过上限 {limit:.0f}s"
+
 
 #: 一条判据的结论: (过没过, 给人看的一句话)。
 Verdict = tuple[bool, str]
@@ -143,12 +160,14 @@ def _wait_startup_in_log(proc: subprocess.Popen[bytes], log: Path) -> bool:
     return False
 
 
-def check_no_args(exe: Path, sandbox: Path) -> Verdict:
-    """①无参数启动: 默认命令 = gui, 双击就该开窗口(判据 = 沙箱日志 + 进程仍活着)."""
+def check_no_args(exe: Path, sandbox: Path, *, label: str) -> Verdict:
+    """①无参数启动: 默认命令 = gui, 双击就该开窗口(判据 = 沙箱日志 + 进程还活着 + 冷启动上限)."""
     sandbox.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
     proc = _launch(exe, [], env=_sandbox_env(sandbox))
     try:
         log = _wait_startup_in_sandbox(proc, sandbox)
+        elapsed = time.monotonic() - started
         if log is None:
             if proc.poll() is not None:
                 return False, f"进程提前退出(退出码 {proc.returncode}), 没等到启动日志"
@@ -159,7 +178,15 @@ def check_no_args(exe: Path, sandbox: Path) -> Verdict:
         time.sleep(_ALIVE_SETTLE_SECONDS)
         if proc.poll() is not None:
             return False, f"写完启动日志后进程没撑住(退出码 {proc.returncode})"
-        return True, f"沙箱日志出现'{_GUI_STARTED_MARK}'且进程仍活着: {log}"
+        slow = cold_start_problem(label, elapsed)
+        if slow is not None:
+            return False, f"{slow}(窗口确实起来了, 但慢到该查了)"
+        limit = _COLD_START_LIMITS_SECONDS[label]
+        return (
+            True,
+            f"沙箱日志出现'{_GUI_STARTED_MARK}'且进程仍活着, 冷启动 {elapsed:.1f}s"
+            f"(上限 {limit:.0f}s): {log}",
+        )
     finally:
         _kill_tree(proc.pid)
 
@@ -239,7 +266,7 @@ def check_single_instance(exe: Path, root: Path) -> Verdict:
 def run_battery(label: str, exe: Path, workspace: Path) -> list[tuple[str, Verdict]]:
     """对一份产物跑完五条判据, 返回逐条结论(判据名 → (过没过, 说明))."""
     checks: list[tuple[str, Verdict]] = [
-        ("无参数启动", check_no_args(exe, workspace / f"{label}-sandbox")),
+        ("无参数启动", check_no_args(exe, workspace / f"{label}-sandbox", label=label)),
         ("--version", check_version(exe)),
         ("doctor", check_doctor(exe, workspace / f"{label}-doctor")),
         ("gui --smoke", check_gui_smoke(exe, workspace / f"{label}-smoke")),
