@@ -52,6 +52,8 @@ _CMD_TIMEOUT_SECONDS = 120.0
 _SECOND_INSTANCE_TIMEOUT_SECONDS = 60.0
 #: 确认"窗口开着"前的静置(秒): 日志落地后再等一眼, 排除"刚写完启动日志就退了"。
 _ALIVE_SETTLE_SECONDS = 1.0
+#: PyInstaller onefile 的解包目录前缀(``%TEMP%\_MEIxxxx``): 正常退出会自清, **被杀不会**。
+_MEI_PREFIX = "_MEI"
 #: 冷启动上限(秒): Popen 到"界面启动"落地。本机实测(2026-10-24, Windows x64 / 不压 UPX,
 #: 同一条判据连跑 3 轮) onedir **0.5 s** / onefile **2.0 s** —— 0.5 s 是探测的粒度(Popen
 #: 之后一轮就看到了), 所以 onedir 那个数是"不超过 0.5 s"。上限按 CI runner 的最坏情况
@@ -109,6 +111,32 @@ def _sandbox_env(sandbox: Path) -> dict[str, str]:
     return env
 
 
+def _temp_env(base: dict[str, str] | None, temp_dir: Path) -> dict[str, str]:
+    r"""把子进程的 TEMP/TMP 指进本次工作目录.
+
+    onefile 会把整份包解到 ``%TEMP%\_MEIxxxx``, 正常退出由引导程序自清、**被杀则留残渣**
+    (实测每份约 75 MB)。冒烟里的 ① 与 ⑤ 都会杀进程树, 所以这两处的 TEMP 必须指进工作
+    目录 —— 残渣随 ``shutil.rmtree(workspace)`` 一起消失, 不会去撑用户的 %TEMP%。
+    """
+    env = dict(os.environ) if base is None else dict(base)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("TEMP", "TMP"):
+        env[name] = str(temp_dir)
+    return env
+
+
+def _mei_dirs(root: Path) -> set[Path]:
+    """``root`` 下的 onefile 解包目录(``_MEI`` 前缀); 读不到就当空集."""
+    try:
+        return {
+            path
+            for path in root.iterdir()
+            if path.is_dir() and path.name.startswith(_MEI_PREFIX)
+        }
+    except OSError:
+        return set()
+
+
 def _launch(
     exe: Path, args: Sequence[str], env: dict[str, str] | None = None
 ) -> subprocess.Popen[bytes]:
@@ -122,10 +150,14 @@ def _launch(
 
 
 def _run_timed(
-    exe: Path, args: Sequence[str], *, timeout: float = _CMD_TIMEOUT_SECONDS
+    exe: Path,
+    args: Sequence[str],
+    *,
+    timeout: float = _CMD_TIMEOUT_SECONDS,
+    env: dict[str, str] | None = None,
 ) -> int:
     """限时跑一条自退命令, 返回退出码; 超时先杀树再抛 TimeoutError(判据层转失败)."""
-    proc = _launch(exe, args)
+    proc = _launch(exe, args, env=env)
     try:
         return proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -164,7 +196,7 @@ def check_no_args(exe: Path, sandbox: Path, *, label: str) -> Verdict:
     """①无参数启动: 默认命令 = gui, 双击就该开窗口(判据 = 沙箱日志 + 进程还活着 + 冷启动上限)."""
     sandbox.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    proc = _launch(exe, [], env=_sandbox_env(sandbox))
+    proc = _launch(exe, [], env=_temp_env(_sandbox_env(sandbox), sandbox / "temp"))
     try:
         log = _wait_startup_in_sandbox(proc, sandbox)
         elapsed = time.monotonic() - started
@@ -236,7 +268,8 @@ def check_single_instance(exe: Path, root: Path) -> Verdict:
     """⑤单实例闸门: 第二个实例不开新窗、退 3, 日志里"界面启动"只有一条."""
     root.mkdir(parents=True, exist_ok=True)
     log = root / "logs" / _LOG_NAME
-    first = _launch(exe, ["gui", "--root", str(root), "--smoke", "30"])
+    env = _temp_env(None, root / "temp")
+    first = _launch(exe, ["gui", "--root", str(root), "--smoke", "30"], env=env)
     try:
         if not _wait_startup_in_log(first, log):
             return False, (
@@ -247,6 +280,7 @@ def check_single_instance(exe: Path, root: Path) -> Verdict:
                 exe,
                 ["gui", "--root", str(root), "--smoke", "30"],
                 timeout=_SECOND_INSTANCE_TIMEOUT_SECONDS,
+                env=env,
             )
         except TimeoutError as exc:
             return False, f"第二个实例没有按时退出: {exc}"
@@ -312,6 +346,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     workspace = Path(tempfile.mkdtemp(prefix="am-smoke-"))
+    mei_root = Path(tempfile.gettempdir())
+    mei_before = _mei_dirs(mei_root)
     failed = 0
     try:
         for label, exe in artifacts:
@@ -322,6 +358,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 failed += 0 if ok else 1
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+    leaked = sorted(_mei_dirs(mei_root) - mei_before)
+    print(f"\n临时目录残渣: 本次在 {mei_root} 新增 {len(leaked)} 个 _MEI*")
+    if leaked:
+        names = ", ".join(path.name for path in leaked)
+        print(f"::warning::冒烟自己在 %TEMP% 留下了 onefile 解包残渣: {names}")
     if failed:
         print(f"::error::产物冒烟 {failed} 条判据未过 —— 跑不起来的包不上传。")
         return 1

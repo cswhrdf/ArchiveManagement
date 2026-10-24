@@ -144,6 +144,15 @@ def test_the_smoke_script_and_the_workflow_follow_the_spec_names() -> None:
     assert f'"dist/{onefile}.exe"' in workflow, hint
 
 
+def _smoke_source() -> str:
+    return (_ROOT / "scripts" / "smoke_packaged.py").read_text(encoding="utf-8")
+
+
+def _function_body(name: str) -> str:
+    """取 `scripts/smoke_packaged.py` 里某个函数的源码(到下一个顶层 def 为止)."""
+    return _smoke_source().split(f"def {name}", 1)[-1].split("\ndef ", 1)[0]
+
+
 def _load_smoke_module() -> ModuleType:
     """按路径加载 ``scripts/smoke_packaged.py``(scripts 不是包, 与别的报道脚本同一手法)."""
     path = _ROOT / "scripts" / "smoke_packaged.py"
@@ -179,8 +188,7 @@ def test_exactly_at_the_bound_is_not_a_failure() -> None:
 
 def test_the_no_args_check_really_applies_the_bound() -> None:
     """只在常量里写个数不等于有闸门: 上限必须真接进无参数启动那条判据, 超了判红."""
-    source = (_ROOT / "scripts" / "smoke_packaged.py").read_text(encoding="utf-8")
-    body = source.split("def check_no_args", 1)[-1].split("\ndef ", 1)[0]
+    body = _function_body("check_no_args")
     assert "cold_start_problem(" in body, (
         "无参数启动那条判据必须调用 cold_start_problem"
     )
@@ -188,3 +196,33 @@ def test_the_no_args_check_really_applies_the_bound() -> None:
     assert len(after) == 2, "上限没接进判据(只算了耗时, 没有比较)"
     tail = after[1][:160]
     assert "return False" in tail, f"超限要判红(return False), 不能只打印: {tail!r}"
+
+
+def test_the_checks_that_kill_a_process_contain_its_unpack_dir(
+    tmp_path: Path,
+) -> None:
+    """J-7②: 杀进程树会把 onefile 的 `_MEI` 解包目录留在 %TEMP%(实测每份 ~75 MB).
+
+    ① 无参数启动与 ⑤ 单实例闸门都会杀, 所以这两处的 TEMP/TMP 必须指进工作目录 ——
+    否则一次冒烟就往用户的 %TEMP% 里丢 150 MB(实测 16 → 18 个、+150.7 MB)。
+    """
+    smoke = _load_smoke_module()
+    temp_dir = tmp_path / "temp"
+    env = smoke._temp_env({"KEEP": "1"}, temp_dir)
+    assert env["KEEP"] == "1", "别把父进程环境整份丢掉"
+    assert env["TEMP"] == str(temp_dir), "TEMP 必须指进工作目录"
+    assert env["TMP"] == str(temp_dir), "TMP 也要指过去(两套变量都得盖住)"
+    assert temp_dir.is_dir(), "指过去的目录要先建出来"
+    for name in ("check_no_args", "check_single_instance"):
+        assert "_temp_env(" in _function_body(name), (
+            f"{name} 会杀进程, 必须走 _temp_env"
+        )
+
+
+def test_mei_dirs_only_picks_the_unpack_directories(tmp_path: Path) -> None:
+    (tmp_path / "_MEI12345").mkdir()
+    (tmp_path / "_MEIabc").mkdir()
+    (tmp_path / "am-smoke-x").mkdir()
+    (tmp_path / "_MEIfile").write_text("x", encoding="utf-8")
+    found = {path.name for path in _load_smoke_module()._mei_dirs(tmp_path)}
+    assert found == {"_MEI12345", "_MEIabc"}, f"只认 _MEI 目录, 多认了: {found}"
