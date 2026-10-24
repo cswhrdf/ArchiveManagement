@@ -221,13 +221,24 @@ jobs:
         if: always()
         shell: bash
         run: |
-          while IFS= read -r -d '' source; do
-            if grep -q 'dl.google.com/linux/chrome' "$source"; then
-              sudo mv "$source" "${source}.disabled"
-            fi
-          done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
-          sudo apt-get update
-          sudo apt-get install -y xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6
+          # 已装即跳过 apt(与 pytest 作业里那一步同一个理由): 自建持久机上这套包一轮装过
+          # 就一直在, 而 apt-get update 是"包已装齐也每轮必付"的网络敞口。注意**只跳过 apt**:
+          # 末尾拷 ``_tkinter`` 那段依赖 $RUNNER_TEMP, 它每轮都是新目录, 必须每次都跑。
+          installed=0
+          for pkg in xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6; do
+            dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' && installed=$((installed + 1))
+          done
+          if [ "$installed" -eq 5 ]; then
+            echo "xvfb / CJK 字体 / 发行版 Tk 8.6 已在机上, 跳过 apt"
+          else
+            while IFS= read -r -d '' source; do
+              if grep -q 'dl.google.com/linux/chrome' "$source"; then
+                sudo mv "$source" "${source}.disabled"
+              fi
+            done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
+            sudo apt-get update
+            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6
+          fi
           # 把发行版 python3-tk 的 ``_tkinter`` 留一份: 它链的是发行版 libtk8.6(Xft/fontconfig),
           # 而那几个库由 tcl8.6/tk8.6 两个包提供。
           mkdir -p "$RUNNER_TEMP/tk-xft"
@@ -504,6 +515,18 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          # 已装即跳过: 自建持久机上这两个包一轮装过就一直在, 而 apt-get update 是
+          # "包已装齐也每轮必付"的网络敞口 —— 自建机访问发行版源时快时慢, 慢的那几轮
+          # setup 段能拖十几分钟(2026-10-24 一轮同机三片的排队缺口 764s/353s)。托管
+          # runner 每次全新, 走不到快路径, 下面的冷路径原样保留。
+          installed=0
+          for pkg in xvfb fonts-noto-cjk; do
+            dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' && installed=$((installed + 1))
+          done
+          if [ "$installed" -eq 2 ]; then
+            echo "xvfb / fonts-noto-cjk 已在机上, 跳过 apt"
+            exit 0
+          fi
           # The hosted runner may have a stale Google Chrome index. It is unrelated to Xvfb
           # and can make apt-get update fail with a Hash Sum mismatch.
           while IFS= read -r -d '' source; do

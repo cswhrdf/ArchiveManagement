@@ -145,6 +145,8 @@ uv run python scripts/verify_allure_report.py allure-report --manifest allure-ma
 - **三平台片数一致（各 3 片）**：总时长 ≈ 片数×固定开销 + 串行时间；片数只按这个算——2026-10-10 起不再看计价倍率（仓库公开后 Actions 免费）。片号 0 连续编到片数-1；片数出现在四处（矩阵、--shard-count、--shard-index、--expect-shards），不一致会**静默少跑**（守卫逐平台校验）。
 - **共享一份 UI 会话的用例整组同片**（`tests/conftest.py` 的 `_SHARED_UI_SESSIONS` + `sharding.shard_plan(groups=...)`）：它们靠 `tests/ui_sharing.py` 的池复用同一扇窗口与同一个后端，拆到两片后每片各自重建一份，复用直接作废。守卫 `tests/unit/test_sharding.py::test_shard_plan_keeps_a_shared_ui_session_in_one_piece`（还有一条反过来要求"真在用共享会话的模块都登记了"）。这份登记有三个消费者：分片装箱（`groups`）、"用完即关"（`SharedUiRegistry.declare_users`，池在最后一个用例结束时就地关闭）、片内聚段（`sharding.cluster_groups` 在收集期把同池模块连成一段执行，池窗不再隔着无关模块闲置挂着，见 [testing.md](testing.md) 第 2 节）。
 - **依赖缓存只让片 0 写**（save-cache: `matrix.shard == 0`）：同平台各片 cache key 相同，并行保存只有第一个抢得到，其余打 Failed to save 噪音。
+- **Linux 的 Xvfb/字体安装步带"已装即跳过"快路径**：自建持久机上包一轮装过就一直在，而步内的 `apt-get update` 是"包已装齐也每轮必付"的网络敞口（自建机访问发行版源时快时慢，慢的那几轮 setup 段能拖十几分钟，2026-10-24 一轮同机三片排队缺口 764s/353s）；已装即跳过，托管 runner 每次全新、走原冷路径不受影响。视觉回归作业里的同款快路径**只跳过 apt**：末尾拷 `_tkinter` 那段依赖 `$RUNNER_TEMP`（每轮新目录），必须每次都跑。
+- **自建 runner 的另两处敞口在机器侧收**（仓库不动）：① Linux/Windows runner 在 `<runner根>/.env` 配 `UV_DEFAULT_INDEX` 指可用镜像，可把偶发的依赖下载慢压掉（uv 按锁文件哈希校验，换镜像不影响完整性；自建机上 uv 本地缓存跨轮留存，冷的只剩"新增依赖"那几次下载）；② Windows runner 把 `_work` 加进 Defender 排除（GitHub 会把 TEMP/TMP 指到 `_work\_temp`，pytest 的 tmp 与 setup-uv 的缓存目录 `setup-uv-cache` 都在那），`python.exe`/`uv.exe` 再加进程排除 —— 三片同机并发时实时扫描会把 busy 抬高 3~4×。
 
 ## 3. 本地生成与查看报告
 
