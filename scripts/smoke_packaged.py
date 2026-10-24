@@ -266,7 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--onefile",
         type=Path,
-        default=Path("dist/ArchiveManagement-onefile.exe"),
+        default=Path("dist/ArchiveManagement.exe"),
         help="onefile 产物(默认按 pyinstaller 的输出位置找)",
     )
     args = parser.parse_args(argv)

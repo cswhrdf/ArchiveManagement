@@ -142,7 +142,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
           Compress-Archive -Path dist/ArchiveManagement/* -DestinationPath "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.zip"
-          Copy-Item "dist/ArchiveManagement-onefile.exe" "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.exe"
+          Copy-Item "dist/ArchiveManagement.exe" "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.exe"
           $files = Get-ChildItem release -File
           $hashes = foreach ($file in $files) {
             $hash = Get-FileHash $file.FullName -Algorithm SHA256
