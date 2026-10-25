@@ -54,6 +54,7 @@ from archive_management.ui.models import (
     batch_import_prompt,
     batch_row_choice,
     branch_order,
+    branch_tree,
     can_backup,
     export_batch_prompt,
     exportable_games,
@@ -305,6 +306,45 @@ def _auto(backup_id: str, day: int, parent_id: str | None = None) -> BackupItem:
         auto=True,
         parent_id=parent_id,
     )
+
+
+def test_branch_order_rewrites_the_parent_of_a_pruned_chain() -> None:
+    """被剪掉的自动备份不能把后继节点变成孤根(2026-10-25 实测: 两次自动备份后画成两棵树)."""
+    items = [
+        _item("root", _dt(day=1, hour=9, minute=0)),
+        replace(_item("manual-1", _dt(day=2, hour=9, minute=0)), parent_id="root"),
+        _auto("auto-1", 3, parent_id="manual-1"),
+        replace(_item("manual-2", _dt(day=4, hour=9, minute=0)), parent_id="auto-1"),
+        _auto("auto-2", 5, parent_id="manual-2"),
+    ]
+    by_id = {item.backup_id: item for item in branch_order(items)}
+    assert set(by_id) == {"root", "manual-1", "manual-2", "auto-2"}
+    hint = "父节点被剪掉后, 子节点的 parent_id 要改指存活祖先"
+    assert by_id["manual-2"].parent_id == "manual-1", hint
+    assert by_id["auto-2"].parent_id == "manual-2"
+    assert by_id["manual-2"].depth == 2
+
+
+def test_branch_tree_survives_a_second_prune() -> None:
+    """画布会对 ``branch_order`` 的结果再剪一次: 幂等才不会有孤根被摆到旁边."""
+    items = [
+        _item("root", _dt(day=1, hour=9, minute=0)),
+        replace(_item("manual-1", _dt(day=2, hour=9, minute=0)), parent_id="root"),
+        _auto("auto-1", 3, parent_id="manual-1"),
+        replace(_item("manual-2", _dt(day=4, hour=9, minute=0)), parent_id="auto-1"),
+        _auto("auto-2", 5, parent_id="manual-2"),
+        replace(
+            _item("branch", _dt(day=6, hour=9, minute=0)),
+            parent_id="manual-1",
+            is_branch=True,
+        ),
+    ]
+    original = branch_tree(items)
+    again = branch_tree(branch_order(items))
+    fingerprint = [(node.node_id, node.depth, node.children) for node in original]
+    assert [(node.node_id, node.depth, node.children) for node in again] == fingerprint
+    roots = [node.node_id for node in again if node.depth == 0]
+    assert roots == ["root"], f"整幅图只该有一个根, 实际 {roots}"
 
 
 def test_branch_view_shows_only_newest_auto_backup() -> None:

@@ -2005,6 +2005,9 @@ class ArchiveApp(ctk.CTk):
             return
         if self._view == ViewKind.BRANCH:
             # 分支视图: 喂**剪枝后**的树, 由画布铺图(见 ui/tree_view.py).
+            # 这里的 items 已经是 branch_order 的输出(已剪枝、父节点已重挂到存活祖先),
+            # 画布内部还会再跑一次 branch_tree —— 因此那一次必须是**幂等**的, 否则被剪掉的
+            # 自动备份会让它后面的节点变成孤根、在图上单独长成一棵(2026-10-25 用户实测).
             self._tree_view.set_items(items, include_safety=include_safety)
             self._tree_view.redraw(self.p)
             self._tree_view.select(self._backup_id, self.p)

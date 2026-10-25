@@ -624,6 +624,12 @@ def branch_order(
     自动备份只保留最新的一份、安全点默认不展示(见
     :func:`visible_in_branch_view`); 父节点被过滤掉时, 子节点会上移到最近仍
     可见的祖先, 因此层级始终连续。
+
+    **``parent_id`` 也要一起改成重挂后的那个祖先**(2026-10-25 修): 主窗口把这个列表
+    交给画布, 画布会再跑一次 :func:`branch_tree` —— 若 ``parent_id`` 还指着已被剪掉的
+    节点, 第二遍就找不到它的父节点, 那些节点会被当成**根**摆到旁边(实测: 两次自动备份后
+    一幅图里出现两棵树, 右边的子树和主线没有任何连线). 改完之后
+    ``branch_tree(branch_order(items))`` 与原树逐节点相同, 重复剪枝变成幂等的。
     """
     inputs = keep_surviving(
         _tree_inputs(items),
@@ -632,8 +638,9 @@ def branch_order(
     depths = tree_depths(inputs)
     lineage = branch_lineage(inputs)
     by_id = {item.backup_id: item for item in items}
+    parents = {node.node_id: node.parent_id for node in inputs}
     ordered = [
-        replace(by_id[node_id], depth=depth)
+        replace(by_id[node_id], depth=depth, parent_id=parents.get(node_id))
         for node_id, depth in depths.items()
         if node_id in by_id
     ]
