@@ -37,6 +37,7 @@ G. **窗口级 Esc/回车只属于对话框** —— 常驻窗口(设置、定�
 from __future__ import annotations
 
 import sys
+import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
@@ -605,9 +606,20 @@ def _all_widget_problems(label: str, controls: list[Any], window: Any) -> list[s
 # force_focus 会把焦点打回窗口自己(见 _focus/_defocus 的实测笔记), 而产品的
 # ``focus_set`` 又要等激活才落焦, 两个动作互相抵消。现在的重试直接把焦点
 # **强制到目标内部控件**(``focus_force``, 与 _focus_hard/_ring_canary 同一条路):
-# 它不依赖窗口激活, 也一定会把"最后焦点"记下来 —— 等价替键盘用户"直接点进
-# 输入框那一下"。拍拍落空仍然算失败。
+# 等价替键盘用户"直接点进输入框那一下"。拍拍落空仍然算失败。
+# 2026-10-26 第三次复发把最后一块机制补齐: Aqua 上窗口未被系统激活时, 连
+# ``focus_force`` 都记不下"最后焦点"(3 拍强制落焦后 lastfor 仍是 Toplevel 自身),
+# 所以"强制落焦"这条路在未激活窗口上也是死的。拍与拍之间只做 ``update()`` 轮、
+# 没有真实时间, 满载的 WindowServer 一慢, 激活必然迟到 —— 现在的每一拍在真实
+# 时间里泵事件等 <FocusIn>(见 _wait_focus_lands), 并用 _watch_focus_in 把
+# "激活一直没来"与"激活来了但焦点没落对"分开写进失败消息。判据本身没有放宽:
+# 落焦证据仍然必须是"最后焦点是窗口的子控件", 拍拍落空仍然算失败。
 _FOCUS_ATTEMPTS = 3
+
+# 每一拍给 WindowServer 的真实时间预算(秒)。健康路径第一轮 ``update()`` 就拿到
+# 落焦证据、立刻返回, 只有真出问题时才付这笔时间(3 拍全落空 ≈ 6s, 换来的是失败
+# 消息里能区分"没激活"与"激活了没落对")。
+_FOCUS_WAIT_SECONDS = 2.0
 
 
 def _refocus(window: Any, inner: Any) -> None:
@@ -627,6 +639,50 @@ def _refocus(window: Any, inner: Any) -> None:
     keyboard.focus_first(window)
 
 
+def _wait_focus_lands(window: Any, seconds: float) -> Any:
+    """在真实时间里等"初始定焦落上"(每 20ms 泵一轮事件), 到点返回最后一次读数.
+
+    只做 ``update()`` 轮没有真实时间, 等不来迟到的激活(见 _FOCUS_ATTEMPTS 的
+    机制笔记); 每轮把 ``update_idletasks`` 与 ``update`` 都跑了, 与 ``_settle``
+    同一组动作。返回值与 ``focus_lastfor`` 一致, 调用方拿它判"是不是窗口的子控件"。
+    """
+    deadline = time.monotonic() + seconds
+    last: Any = None
+    while True:
+        with suppress(Exception):
+            window.update_idletasks()
+            window.update()
+        last = window.focus_lastfor()
+        if last is not None and str(last).startswith(f"{window}."):
+            return last
+        if time.monotonic() >= deadline:
+            return last
+        time.sleep(0.02)
+
+
+def _watch_focus_in(window: Any) -> Callable[[], bool]:
+    """临时登记 <FocusIn> 观察哨: 返回"到此刻为止窗口是否真的收到过焦点事件".
+
+    Tk 把窗口路径放进每个子控件的 bindtags, 所以**子控件**收到 <FocusIn> 时
+    这里的窗口级绑定也会触发 —— 用它把"激活一直没来"(环境问题)与"激活来了但
+    焦点没落到子控件上"(产品问题)分开写进失败消息。返回的回调收尾时会解除绑定,
+    不动产品自己接的任何绑定。
+    """
+    seen = False
+
+    def mark(_event: Any) -> None:
+        nonlocal seen
+        seen = True
+
+    funcid = window.bind("<FocusIn>", mark, add="+")
+
+    def done() -> bool:
+        window.unbind("<FocusIn>", funcid)
+        return seen
+
+    return done
+
+
 def _dialog_problems(label: str, window: Any) -> list[str]:
     """对话框级别的三条: Esc、回车(要有主操作)、初始焦点.
 
@@ -643,20 +699,28 @@ def _dialog_problems(label: str, window: Any) -> list[str]:
     target = keyboard.focus_first(window)
     # 定焦是排进 after_idle 的(那一刻窗口可能还没映射): 跑完事件循环再读 Tk 记下的
     # 焦点; 没落上时按 _FOCUS_ATTEMPTS 说明的理由重试, 拍拍落空才算真问题.
+    seen_focus_in = _watch_focus_in(window)
     last: Any = None
     for attempt in range(_FOCUS_ATTEMPTS):
-        _settle(window)
-        last = window.focus_lastfor()
+        # 每一拍都在真实时间里等(见 _wait_focus_lands): 激活迟到是这族偶发的根因,
+        # 纯 update() 轮等不到它.
+        last = _wait_focus_lands(window, _FOCUS_WAIT_SECONDS)
         if last is not None and str(last).startswith(f"{window}."):
             break
         if attempt + 1 < _FOCUS_ATTEMPTS:
             # 落空时把焦点直接强制到目标内部控件上(见 _refocus): 等价替键盘用户
             # "点一下输入框", 不依赖窗口已被系统激活.
             _refocus(window, keyboard.focus_target(target) if target else None)
+    activated = seen_focus_in()
     if target is None:
         found.append(f"{label}: 没有可定焦的目标(既没有输入框也没有主按钮)")
     elif last is None or not str(last).startswith(f"{window}."):
-        found.append(f"{label}: 窗口可见时定焦也没生效(最后焦点={last})")
+        reason = (
+            "整轮没等到 <FocusIn>(窗口从未被系统激活)"
+            if not activated
+            else "焦点始终没落到子控件上"
+        )
+        found.append(f"{label}: 窗口可见时定焦也没生效(最后焦点={last}; {reason})")
     return found
 
 
