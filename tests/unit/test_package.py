@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import io
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -203,8 +205,10 @@ def test_the_checks_that_kill_a_process_contain_its_unpack_dir(
 ) -> None:
     """J-7②: 杀进程树会把 onefile 的 `_MEI` 解包目录留在 %TEMP%(实测每份 ~75 MB).
 
-    ① 无参数启动与 ⑤ 单实例闸门都会杀, 所以这两处的 TEMP/TMP 必须指进工作目录 ——
-    否则一次冒烟就往用户的 %TEMP% 里丢 150 MB(实测 16 → 18 个、+150.7 MB)。
+    ① 无参数启动与 ⑤ 单实例闸门自己杀, ②③④ 限时到了由 ``_run_timed`` 杀 —— **每一条
+    起产物的判据**都必须把子进程的 TEMP/TMP 指进工作目录, 否则一次冒烟就往用户的
+    %TEMP% 里丢残渣(实测 16 → 18 个、+150.7 MB; 2026-10-26 又因为 ③ 超时被杀留下
+    一个 ``_MEI000004cc2``)。
     """
     smoke = _load_smoke_module()
     temp_dir = tmp_path / "temp"
@@ -213,10 +217,67 @@ def test_the_checks_that_kill_a_process_contain_its_unpack_dir(
     assert env["TEMP"] == str(temp_dir), "TEMP 必须指进工作目录"
     assert env["TMP"] == str(temp_dir), "TMP 也要指过去(两套变量都得盖住)"
     assert temp_dir.is_dir(), "指过去的目录要先建出来"
-    for name in ("check_no_args", "check_single_instance"):
+    for name in (
+        "check_no_args",
+        "check_version",
+        "check_doctor",
+        "check_gui_smoke",
+        "check_single_instance",
+    ):
         assert "_temp_env(" in _function_body(name), (
-            f"{name} 会杀进程, 必须走 _temp_env"
+            f"{name} 会起产物进程(限时到了就杀), 必须走 _temp_env"
         )
+
+
+def test_a_timed_out_command_reports_where_it_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """超时要自带现场: 子进程已经打出来的东西与应用日志末尾都要进失败消息.
+
+    窗口化产物没有控制台, 杀掉之后什么都留不下 —— 没有这两行, 下一次 CI 红还得靠猜
+    (2026-10-26 runner 上 doctor 卡 120s 那次就是这样)。
+    """
+    smoke = _load_smoke_module()
+    killed: list[int] = []
+
+    class FakeProcess:
+        pid = 4321
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired(cmd="doctor", timeout=timeout or 0)
+
+    def fake_popen(args: list[str], **kwargs: object) -> FakeProcess:
+        out = kwargs["stdout"]
+        err = kwargs["stderr"]
+        assert isinstance(out, io.BufferedWriter), "限时命令的 stdout 要落成文件"
+        assert isinstance(err, io.BufferedWriter), "限时命令的 stderr 要落成文件"
+        out.write("备份根  : X\n".encode())  # 模拟子进程已经打到这里
+        out.flush()  # 真进程走 fd, 不用 flush; 替身写的是 Python 缓冲, 得自己冲
+        err.write(b"Traceback: boom\n")
+        err.flush()
+        return FakeProcess()
+
+    monkeypatch.setattr(smoke.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(smoke, "_kill_tree", killed.append)
+    log = tmp_path / "root" / "logs" / "archive-management.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("应用   : 存档管理工具\n", encoding="utf-8")
+
+    with pytest.raises(TimeoutError) as caught:
+        smoke._run_timed(
+            tmp_path / "fake.exe",
+            ["doctor"],
+            timeout=5,
+            evidence=tmp_path / "evidence",
+            log=log,
+        )
+
+    message = str(caught.value)
+    assert killed == [4321], f"超时了要杀整棵树, 实际: {killed}"
+    assert "超过 5s 未退出" in message, message
+    assert "备份根" in message, f"子进程输出要进消息: {message}"
+    assert "Traceback: boom" in message, f"stderr 也要进消息: {message}"
+    assert "应用   : 存档管理工具" in message, f"应用日志末尾也要进消息: {message}"
 
 
 def test_mei_dirs_only_picks_the_unpack_directories(tmp_path: Path) -> None:

@@ -16,7 +16,9 @@ r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.ym
    整份日志**只有一条**"界面启动"。
 
 每条都限时(窗口起不来时 ``gui`` 会一直等, 用外部超时兜住); onefile 首次启动要解包到
-``%TEMP%\_MEIxxxx``, 比较慢, 超时按最坏情况给足。用法::
+``%TEMP%\_MEIxxxx``, 比较慢, 超时按最坏情况给足。**限时命令一律落现场**: 子进程的
+stdout/stderr 写成文件, 超时或非零退出把这两份与 ``--root`` 下应用日志的末尾一并塞进
+失败消息 —— 窗口化产物没有控制台, 不给现场就只能重跑一轮去猜(2026-10-26 那次就是这样)。用法::
 
     uv run python scripts/smoke_packaged.py     # dist/ 下自动找两份产物
 """
@@ -24,6 +26,7 @@ r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.ym
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -32,6 +35,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import IO
 
 #: "窗口真的起来了"在日志里的那句(``ui.main_window`` 启动时写)。
 _GUI_STARTED_MARK = "界面启动"
@@ -115,8 +119,10 @@ def _temp_env(base: dict[str, str] | None, temp_dir: Path) -> dict[str, str]:
     r"""把子进程的 TEMP/TMP 指进本次工作目录.
 
     onefile 会把整份包解到 ``%TEMP%\_MEIxxxx``, 正常退出由引导程序自清、**被杀则留残渣**
-    (实测每份约 75 MB)。冒烟里的 ① 与 ⑤ 都会杀进程树, 所以这两处的 TEMP 必须指进工作
-    目录 —— 残渣随 ``shutil.rmtree(workspace)`` 一起消失, 不会去撑用户的 %TEMP%。
+    (实测每份约 75 MB)。冒烟里 ① 与 ⑤ 明着杀进程树, ②③④ 限时到了也杀(``_run_timed``)
+    —— 所以**每一条起产物的判据**都要走这里: 残渣随 ``shutil.rmtree(workspace)`` 一起
+    消失, 不会去撑用户的 %TEMP%(2026-10-26: ③ doctor 超时被杀, 在 %TEMP% 留下一个
+    ``_MEI000004cc2``, 就是因为它当时没盖 TEMP)。
     """
     env = dict(os.environ) if base is None else dict(base)
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -149,20 +155,71 @@ def _launch(
     )
 
 
+def _tail(path: Path, *, lines: int = 6) -> str:
+    """取一份文本的末尾几行(读不到当空串), 只用于往失败消息里带现场."""
+    kept = [line.strip() for line in _read_log(path).splitlines() if line.strip()]
+    return " | ".join(kept[-lines:])
+
+
+def _evidence_tail(evidence: Path, log: Path | None = None) -> str:
+    """失败现场: 子进程 stdout/stderr 的末尾, 加上应用日志的末尾(取不到的项不占位)."""
+    parts: list[str] = []
+    for name, path in (
+        ("stdout", evidence / "out.txt"),
+        ("stderr", evidence / "err.txt"),
+    ):
+        text = _tail(path)
+        if text:
+            parts.append(f"{name}={text}")
+    if log is not None:
+        text = _tail(log)
+        parts.append(f"日志={text}" if text else f"日志={log} 还是空的")
+    return "; ".join(parts)
+
+
+def _with_tail(message: str, evidence: Path, log: Path | None = None) -> str:
+    """给一句失败消息补上现场(一点现场都没拿到就原样返回)."""
+    tail = _evidence_tail(evidence, log)
+    return f"{message}; {tail}" if tail else message
+
+
 def _run_timed(
     exe: Path,
     args: Sequence[str],
     *,
     timeout: float = _CMD_TIMEOUT_SECONDS,
     env: dict[str, str] | None = None,
+    evidence: Path | None = None,
+    log: Path | None = None,
 ) -> int:
-    """限时跑一条自退命令, 返回退出码; 超时先杀树再抛 TimeoutError(判据层转失败)."""
-    proc = _launch(exe, args, env=env)
-    try:
-        return proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc.pid)
-        raise TimeoutError(f"超过 {timeout:.0f}s 未退出(args={list(args)})") from None
+    """限时跑一条自退命令, 返回退出码; 超时先杀树再抛 TimeoutError(判据层转失败).
+
+    ``evidence`` 给一个目录时, 子进程的 stdout/stderr 落成 ``out.txt`` / ``err.txt``;
+    ``log`` 给应用日志路径时, 超时的消息里带上它的末尾。窗口化产物没有控制台, **卡住时
+    这两处就是唯一的现场** —— 少了它们只能重跑一轮去猜它卡在哪。
+    """
+    with contextlib.ExitStack() as stack:
+        captured: list[IO[bytes]] = []
+        if evidence is not None:
+            evidence.mkdir(parents=True, exist_ok=True)
+            captured = [
+                stack.enter_context((evidence / "out.txt").open("wb")),
+                stack.enter_context((evidence / "err.txt").open("wb")),
+            ]
+        proc = subprocess.Popen(  # noqa: S603 - 见 _launch
+            [str(exe), *args],
+            env=env,
+            stdout=captured[0] if captured else subprocess.DEVNULL,
+            stderr=captured[1] if captured else subprocess.DEVNULL,
+        )
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc.pid)
+            detail = f"超过 {timeout:.0f}s 未退出(args={list(args)})"
+            if evidence is None:
+                raise TimeoutError(detail) from None
+            raise TimeoutError(_with_tail(detail, evidence, log)) from None
 
 
 def _wait_startup_in_sandbox(
@@ -223,25 +280,41 @@ def check_no_args(exe: Path, sandbox: Path, *, label: str) -> Verdict:
         _kill_tree(proc.pid)
 
 
-def check_version(exe: Path) -> Verdict:
+def check_version(exe: Path, work: Path) -> Verdict:
     """②--version: 退出码 0(不看 stdout —— 窗口化产物没有控制台)."""
     try:
-        returncode = _run_timed(exe, ["--version"])
+        returncode = _run_timed(
+            exe,
+            ["--version"],
+            env=_temp_env(None, work / "temp"),
+            evidence=work / "evidence",
+        )
     except TimeoutError as exc:
         return False, str(exc)
     if returncode != 0:
-        return False, f"--version 退出码 {returncode}, 应为 0"
+        return False, _with_tail(
+            f"--version 退出码 {returncode}, 应为 0", work / "evidence"
+        )
     return True, "退出码 0"
 
 
-def check_doctor(exe: Path, root: Path) -> Verdict:
+def check_doctor(exe: Path, work: Path) -> Verdict:
     """③doctor --root <临时>: 退出码 0 且三处目录真的出现("能建目录"的侧效应)."""
+    root = work / "root"
+    log = root / "logs" / _LOG_NAME
+    evidence = work / "evidence"
     try:
-        returncode = _run_timed(exe, ["doctor", "--root", str(root)])
+        returncode = _run_timed(
+            exe,
+            ["doctor", "--root", str(root)],
+            env=_temp_env(None, work / "temp"),
+            evidence=evidence,
+            log=log,
+        )
     except TimeoutError as exc:
         return False, str(exc)
     if returncode != 0:
-        return False, f"doctor 退出码 {returncode}, 应为 0"
+        return False, _with_tail(f"doctor 退出码 {returncode}, 应为 0", evidence, log)
     missing = [
         name for name in ("config", "data", "logs") if not (root / name).is_dir()
     ]
@@ -250,15 +323,25 @@ def check_doctor(exe: Path, root: Path) -> Verdict:
     return True, "退出码 0, config/data/logs 三处都在"
 
 
-def check_gui_smoke(exe: Path, root: Path) -> Verdict:
+def check_gui_smoke(exe: Path, work: Path) -> Verdict:
     """④gui --root <临时> --smoke 3: 退出码 0 且日志里出现"界面启动"."""
+    root = work / "root"
+    log = root / "logs" / _LOG_NAME
+    evidence = work / "evidence"
     try:
-        returncode = _run_timed(exe, ["gui", "--root", str(root), "--smoke", "3"])
+        returncode = _run_timed(
+            exe,
+            ["gui", "--root", str(root), "--smoke", "3"],
+            env=_temp_env(None, work / "temp"),
+            evidence=evidence,
+            log=log,
+        )
     except TimeoutError as exc:
         return False, str(exc)
     if returncode != 0:
-        return False, f"gui --smoke 退出码 {returncode}, 应为 0"
-    log = root / "logs" / _LOG_NAME
+        return False, _with_tail(
+            f"gui --smoke 退出码 {returncode}, 应为 0", evidence, log
+        )
     if _GUI_STARTED_MARK not in _read_log(log):
         return False, f"{log} 里没有'{_GUI_STARTED_MARK}'(窗口没真起来)"
     return True, "退出码 0, 日志含'界面启动'"
@@ -269,6 +352,7 @@ def check_single_instance(exe: Path, root: Path) -> Verdict:
     root.mkdir(parents=True, exist_ok=True)
     log = root / "logs" / _LOG_NAME
     env = _temp_env(None, root / "temp")
+    evidence = root / "evidence"
     first = _launch(exe, ["gui", "--root", str(root), "--smoke", "30"], env=env)
     try:
         if not _wait_startup_in_log(first, log):
@@ -281,13 +365,17 @@ def check_single_instance(exe: Path, root: Path) -> Verdict:
                 ["gui", "--root", str(root), "--smoke", "30"],
                 timeout=_SECOND_INSTANCE_TIMEOUT_SECONDS,
                 env=env,
+                evidence=evidence,
+                log=log,
             )
         except TimeoutError as exc:
             return False, f"第二个实例没有按时退出: {exc}"
         if second_code != _ALREADY_RUNNING_EXIT:
-            return False, (
+            return False, _with_tail(
                 f"第二个实例退出码 {second_code}, 应为 {_ALREADY_RUNNING_EXIT}"
-                "(闸门失效: 它开了自己的窗口)"
+                "(闸门失效: 它开了自己的窗口)",
+                evidence,
+                log,
             )
         count = _read_log(log).count(_GUI_STARTED_MARK)
         if count != 1:
@@ -301,7 +389,7 @@ def run_battery(label: str, exe: Path, workspace: Path) -> list[tuple[str, Verdi
     """对一份产物跑完五条判据, 返回逐条结论(判据名 → (过没过, 说明))."""
     checks: list[tuple[str, Verdict]] = [
         ("无参数启动", check_no_args(exe, workspace / f"{label}-sandbox", label=label)),
-        ("--version", check_version(exe)),
+        ("--version", check_version(exe, workspace / f"{label}-version")),
         ("doctor", check_doctor(exe, workspace / f"{label}-doctor")),
         ("gui --smoke", check_gui_smoke(exe, workspace / f"{label}-smoke")),
         (

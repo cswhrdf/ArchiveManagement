@@ -133,6 +133,17 @@ def run(argv: Sequence[str] | None = None) -> int:
     return 1  # pragma: no cover - 上面不返回
 
 
+def _report(line: str) -> None:
+    """报告一行: 同时写日志与控制台.
+
+    打包版是 ``console=False``(没有控制台), 用户从快捷方式或命令行跑 ``doctor``/``init``
+    时 ``print`` 的内容哪儿也不去 —— 日志是这种环境下唯一留得下的现场。所以两处都写,
+    而且是**一行一发**: 真卡在中间时, 日志末尾就能看出卡在哪一行(冒烟也靠这个抓现场)。
+    """
+    logger.info("%s", line)
+    print(line, flush=True)
+
+
 def _start_logging(paths: ApplicationPaths, *, verbose: bool) -> ConfigLoad:
     """读取配置并按其中的 ``logging`` 段启用日志, 返回这次读取的结果.
 
@@ -177,7 +188,8 @@ def _run_init(paths: ApplicationPaths, *, verbose: bool) -> int:
             f"备份根   : {paths.backup_root}",
         ]
     )
-    print("\n".join(lines))
+    for line in lines:
+        _report(line)
     logger.info("初始化完成, schema 版本 %d", version)
     return 0
 
@@ -186,26 +198,26 @@ def _run_doctor(paths: ApplicationPaths, *, verbose: bool) -> int:
     loaded = _start_logging(paths, verbose=verbose)
     family = current_platform()
     registry_note = "可用" if has_windows_registry(family) else "不适用"
-    print(f"应用   : {APP_DISPLAY_NAME} {package_version()}")
-    print(f"平台   : {platform_label(family)} (注册表探测: {registry_note})")
-    print(f"配置目录: {paths.config_dir}")
-    print(f"数据目录: {paths.data_dir}")
-    print(f"日志目录: {paths.log_dir}")
-    print(f"备份根  : {paths.backup_root}")
+    _report(f"应用   : {APP_DISPLAY_NAME} {package_version()}")
+    _report(f"平台   : {platform_label(family)} (注册表探测: {registry_note})")
+    _report(f"配置目录: {paths.config_dir}")
+    _report(f"数据目录: {paths.data_dir}")
+    _report(f"日志目录: {paths.log_dir}")
+    _report(f"备份根  : {paths.backup_root}")
 
     if loaded.reset:
-        print(f"配置   : 内容非法, 已还原为默认值(原文件: {loaded.backup})")
+        _report(f"配置   : 内容非法, 已还原为默认值(原文件: {loaded.backup})")
     else:
-        print(f"配置   : 格式 v{loaded.config.version}, 主题 {loaded.config.theme}")
+        _report(f"配置   : 格式 v{loaded.config.version}, 主题 {loaded.config.theme}")
 
     try:
         database = Database(paths.database_path)
-        print(
+        _report(
             f"数据库 : {paths.database_path} "
             f"(schema {database.schema_version()}/{database.latest_schema_version()})"
         )
     except Exception as exc:
-        print(f"数据库 : 不可用 -> {exc}")
+        _report(f"数据库 : 不可用 -> {exc}")
     return 0
 
 

@@ -121,6 +121,24 @@ def test_doctor_reports_restored_config(tmp_path: Path) -> None:
     assert load_config(config_path) == AppConfig()
 
 
+def test_doctor_writes_its_report_into_the_log_too(tmp_path: Path) -> None:
+    """打包版没有控制台(``console=False``): 报告必须也落进日志.
+
+    否则用户双击/从命令行跑 ``doctor`` 时, 屏幕上与文件里都留不下东西 —— 冒烟在 CI
+    runner 上抓到"医生卡住"时也是靠这份日志看它停在哪一行。
+    """
+    _run_with_output(["init", "--root", str(tmp_path)])
+    _run_with_output(["doctor", "--root", str(tmp_path)])
+
+    try:
+        log = (tmp_path / "logs" / "archive-management.log").read_text(encoding="utf-8")
+    finally:
+        _detach_log_handlers()
+    hint = "doctor 的报告要同时写日志(打包版没有控制台)"
+    assert "配置目录" in log, hint
+    assert "数据库 :" in log, hint
+
+
 def _detach_log_handlers() -> None:
     """移除并关闭当前装配的日志处理器, 避免影响其他用例."""
     root = logging.getLogger("archive_management")
