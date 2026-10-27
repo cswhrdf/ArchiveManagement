@@ -846,7 +846,7 @@ def test_report_config_declares_every_environment_id_as_allowed() -> None:
 
 
 def test_report_config_categorises_the_known_environment_problems() -> None:
-    """失败归类要盖住仓库记录过的环境问题, 且只登记这三条。
+    """失败归类要盖住仓库记录过的环境问题与工程门禁, 且只登记这四条。
 
     为什么需要这条守卫: 分类规则靠**错误文本**匹配, 而 Tk 症状的权威清单在
     ``tests/tk_guard.KNOWN_TK_SKIP_MARKERS``。新增一种症状(或改了拼写)却忘了同步分类规则时,\n    那条失败会掉进默认分类 —— 读报告的人会以为是用例本身坏了。这里把两处钉在一起。
@@ -858,6 +858,7 @@ def test_report_config_categorises_the_known_environment_problems() -> None:
         "env-tk-library",
         "env-transient-database",
         "gate-quality-check",
+        "gate-packaging-smoke",
     }, f"分类规则变了要同步 docs/testing-ci.md 与本用例: {ids}"
     assert len(ids) == len(set(ids)), "每条规则要有唯一 id(同名会被合并)"
     # Tk 那条用数组匹配器(message / trace 任一命中), 两条正则都要盖住全部已知症状。

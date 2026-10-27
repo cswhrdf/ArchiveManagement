@@ -16,6 +16,9 @@
   —— 那个脚本要跑 ruff/mypy, 而汇总作业一行依赖都没装);
 - 每个家族只声明自己的: 身份(结果里的 ``fullName`` 或标签判据)、范围(公共 / 每平台)、
   **预期产物名**、产出脚本、上传它的 CI 作业、以及由谁判定它"在不在";
+- 有一族是**条件适用**的(产物冒烟): 只在"打包真的跑了"的运行里才应该有, 平台清单由调用方
+  按运行期事实传给 :func:`expected_items`(``smoke_platforms``), 不适用时整族不进"应有" ——
+  不是每轮都无条件要求(否则非门禁运行每轮报一条假缺失);
 - :func:`identity_gaps` 反向扫 ``scripts/create_allure_*.py``, 把代码里出现、清单里却查不到的
   身份报出来 —— 于是"新加一类结论"必然会被守卫拦下, 不会静默漏掉。
 
@@ -166,6 +169,20 @@ CATALOG: tuple[Producer, ...] = (
         job="pytest",
         match=MATCH_PREFIX,
         detail="mypy --platform win32 / darwin, 在各自的平台上执行",
+    ),
+    Producer(
+        key="smoke",
+        title="产物冒烟",
+        identity=f"{IDENTITY_PREFIX}smoke.",
+        scope=PER_PLATFORM,
+        artifact="allure-results-smoke-<os>",
+        script="scripts/create_allure_smoke.py",
+        job="windows-package",
+        match=MATCH_PREFIX,
+        detail=(
+            "打包后的产物冒烟(两份产物各五条判据, 每条一个结果项)"
+            "—— 目前仅 Windows; 且只在打包真的跑了的运行里适用(条件期望, 见 expected_items)"
+        ),
     ),
     Producer(
         key="crash",
@@ -343,13 +360,25 @@ def platform_environments(scripts_directory: Path) -> dict[str, str]:
     return {}
 
 
-def expected_items(platforms: list[str], scripts_directory: Path) -> list[Expected]:
+def expected_items(
+    platforms: list[str],
+    scripts_directory: Path,
+    smoke_platforms: tuple[str, ...] = (),
+) -> list[Expected]:
     """按清单 + 解析出来的质量检查, 展开本次运行**应该有**的全部结论项.
 
     ``platforms`` 是本次运行声明要覆盖的平台(来自 CI 的 ``--expect-platforms``): 每平台一项
     的结论按它展开 —— 某个平台整体没把产物交上来时, 它的每一项都会在"应有"里占一行, 于是
     **缺的是哪个平台**一眼看清。公共项(与平台无关)只出现一次, 环境留空: 它最终落在哪个环境
     里由产出方自己决定, 核对时也不看环境。
+
+    ``smoke_platforms`` 是**条件适用**的一族(产物冒烟): 它只在"打包真的跑了"的运行里才应该
+    有 —— 打包门禁只在合入 main 的 PR 上执行, 把它当无条件期望会让其余每一轮(push 到 dev、
+    测试红了被跳过的 PR)都报一条假缺失, 而假警报看多了就没人当回事(见
+    ``tests/unit/test_report_manifest.py`` 里 security 那次的记录)。CI 由汇总作业按
+    ``needs.windows-package.result`` 传入(打包成功/失败都要求数, 被跳过则传空), 不适用时
+    这一族整族不出现。平台清单在这里单点收着: 将来冒烟扩到别的平台, 只改 CI 那一处取值与
+    ``Producer.artifact`` 的写法, 不动这张表的骨架。
 
     行序就是清单序(`CATALOG`), 一族结论连着出现; 质量检查逐项展开 —— 在
     ``create_allure_quality.py`` 里加一项检查, 这里立刻跟着多一行, 不需要谁回来维护。
@@ -360,6 +389,13 @@ def expected_items(platforms: list[str], scripts_directory: Path) -> list[Expect
     for producer in CATALOG:
         if producer.gate == GATE_ON_DEMAND:
             continue  # 按需产出: 不是"应该有", 缺了也不算缺失(见 GATE_ON_DEMAND)
+        if producer.key == "smoke":
+            # 条件适用(见 docstring): 没传平台 = 本次运行不适用, 整族不进"应有"。
+            items.extend(
+                Expected(producer, producer.identity, producer.title, environment)
+                for environment in smoke_platforms
+            )
+            continue
         if producer.key == "quality":
             items.extend(
                 Expected(

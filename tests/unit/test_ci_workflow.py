@@ -412,6 +412,24 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         ),
         encoding="utf-8",
     )
+    # 冒烟结论项(由打包作业里的 create_allure_smoke.py 写成): 两条判据, 一条红 ——
+    # 总账的"构建后冒烟"一节要按平台数得出来, 而不是装作通过。
+    for slug, check, passed in (
+        ("smoke-onedir-version", "onedir.version", True),
+        ("smoke-onefile-doctor", "onefile.doctor", False),
+    ):
+        (results / f"{slug}-result.json").write_text(
+            json.dumps(
+                {
+                    "uuid": slug,
+                    "name": slug,
+                    "fullName": f"archive-management.smoke.{check}",
+                    "status": "passed" if passed else "failed",
+                    "labels": [{"name": "env", "value": "Windows"}],
+                }
+            ),
+            encoding="utf-8",
+        )
     performance = {
         "environment": {"os_family": "Linux"},
         "measurements": [{"name": "backup", "passed": True}],
@@ -429,6 +447,7 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         "## 覆盖率",
         "## 性能基准",
         "## 安全测试",
+        "## 构建后冒烟(打包门禁档)",
         "## 证据核对(应有 vs 实有)",
         "### ① 结论清单",
         "### ② 结论项声明的附件文件",
@@ -436,6 +455,9 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         assert section in ledger
     # 读序: 结论在前, 审计性的核对在末尾 —— 但"缺不漏"的那一行数留在开头。
     assert ledger.index("## 安全测试") < ledger.index("## 证据核对(应有 vs 实有)")
+    assert ledger.index("## 构建后冒烟(打包门禁档)") < ledger.index(
+        "## 证据核对(应有 vs 实有)"
+    ), "冒烟的结论也是结论, 要排在审计附录之前"
     assert ledger.rstrip().endswith("说明这段证据在打包/下载环节丢了。")
     assert "- 证据核对: 应有 " in ledger, "开头要留一行数, 不然移到末尾就看不出来了"
     assert "91.82%" in ledger, "覆盖率数字要取自原始 XML"
@@ -449,6 +471,9 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
     assert "全部达标(1 项)" in ledger, "性能基准给一行结论"
     assert "| Linux | 1 | 0 | 0 | 通过 |" in ledger, (
         "安全那一行要给出结论数、未拦截数、失败用例与结论"
+    )
+    assert "| Windows | 2 | 1 | **未通过** |" in ledger, (
+        "冒烟那一行要按平台数出判据数与未过数(两条判据一条红 = 未通过)"
     )
     assert "**缺失**" in ledger, "声明了却找不到的原始文件必须被标出来"
 
@@ -938,7 +963,11 @@ def test_the_pages_deploy_is_gone_and_the_report_is_an_artifact() -> None:
         "quality",
         "pytest-report",
         "security",
-    }, "汇总要等齐三批产物(报告还没传完就开始合并会静默少一部分)"
+        "windows-package",
+    }, (
+        "汇总要等齐三批产物(报告还没传完就开始合并会静默少一部分), 也要等打包 —— "
+        "构建后冒烟的结论产物由它上传, 不等就会拿到半份"
+    )
     assert "Generate final Allure report" in code, "汇总本身还在这里"
     assert "name: allure-report-final" in code, "报告仍要作为产物上传"
     assert "allure-report.tar.gz" in code, "上传的是自检通过后打好的那个归档"
@@ -1331,8 +1360,12 @@ def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
     永远进不了分支保护的必需检查 —— 想让"CI 通过才允许合入"成立, 编译就得是 PR 运行的一部分。
     所以它是 ci.yml 里一个 `uses:` release-build.yml 的作业(只读的那一份, 下一条守卫讲为什么),
     而不是 release.yml 自己的触发。
-    `needs` 要盖住**产出结论**的那几个作业(报告的覆盖率门槛与原生质量门也算结论 —— 漏掉它们
-    等于放行一个覆盖率还没判过的 PR), 同时**不重复跑用例**(同一轮 CI 已经跑过三平台全量)。
+    `needs` 要盖住**产出结论**的核心作业(质量 / 用例 / 安全)。报告链(pytest-report /
+    allure-summary)在 2026-10-27 的重排里**翻转**了方向: 它们反过来等打包, 把构建后冒烟的
+    结论产物收进汇总报告 —— 所以这里不再等它们, 报告链的红(覆盖率门槛、原生质量门)由它们
+    自己的检查兜住(那几个作业红了照样红整轮运行); 而这里的前置红了 => 本作业被跳过(default
+    needs 语义) => packaging-gate 判红, 合入照样被拦。同时**不重复跑用例**(同一轮 CI 已经
+    跑过三平台全量)。
     """
     text = ci_workflow.workflow_text()
     block = ci_workflow.job_block(text, "windows-package")
@@ -1344,10 +1377,8 @@ def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
         "changes",
         "quality",
         "pytest",
-        "pytest-report",
         "security",
-        "allure-summary",
-    }, "门禁要等齐产出结论的作业"
+    }, "门禁要等齐产出结论的核心作业(报告链翻转成等打包, 不再挡打包)"
     condition = ci_workflow.job_condition(text, "windows-package")
     assert "github.event_name == 'pull_request'" in condition
     hint = "只给合入 main 的 PR 付这份编译成本"
@@ -1442,3 +1473,68 @@ def test_the_build_smokes_the_packages_it_produced() -> None:
     )
     step = build.split(smoke, 1)[1].split("- name:", 1)[0]
     assert "scripts/smoke_packaged.py" in step, "判据只在脚本里一处定义, 工作流只调用"
+    assert "--report smoke-report.json" in step, (
+        "冒烟步要把逐条判据落成 JSON, 下一步才有东西可转(只给退出码, 报告里看不出哪条红)"
+    )
+
+
+def test_the_packaging_smoke_results_reach_the_final_report() -> None:
+    """构建后冒烟的结论要一路进汇总报告: 落 JSON → 转结果项 → 上传 → 汇总收走 → 条件期望.
+
+    四个环节各钉一点, 断一个报告里就只剩一个看不见的退出码:
+    ① release-build 在冒烟步之后把 JSON 转成 Allure 结果并上传(两步都 ``always()``: 冒烟红的
+       时候结论更要进报告; 上传 ``ignore``: 冒烟没跑时"该有而没有"由汇总的条件期望点名,
+       不在这里叠一个误导性的红);
+    ② 产物名 ``allure-results-smoke-windows`` 匹配汇总作业的 ``pattern: allure-results-*``
+       (自动收走), 但**不**匹配每平台报告作业的 ``allure-results-<os>-*`` —— 否则冒烟结论会
+       被错并进单平台报告;
+    ③ 汇总作业 ``needs`` 里有 windows-package(不等它就会在它传完之前去下载, 静默少一节);
+    ④ 条件期望从 ``needs.windows-package.result`` 推出来: 只有打包真的跑了(success/failure)
+       才要求数, 被跳过传空 —— 写死 "Windows" 的话, push 到 dev 的每一轮都会报假缺失。
+    """
+    build = ci_workflow.RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
+    smoke_at = build.index("- name: Smoke test the built packages")
+    writer_at = build.index("- name: Write smoke results into Allure")
+    upload_at = build.index("- name: Upload smoke Allure results")
+    assert smoke_at < writer_at < upload_at, (
+        "转结论与上传必须紧跟冒烟步(先有 JSON 才能转, 转完才有东西可传)"
+    )
+    assert upload_at < build.index("- name: Prepare build files"), (
+        "冒烟结论的上传排在打 release/ 之前 —— 与冒烟本身同一个理由, 跑不起来的包不该"
+        '被上传成"看起来能发"的样子'
+    )
+    writer = build.split("- name: Write smoke results into Allure", 1)[1]
+    writer_step = writer.split("\n      - name:", 1)[0]
+    assert "if: always()" in writer_step, (
+        "冒烟红了也要把结论转出来, 不能默认 success() 跳过"
+    )
+    assert "create_allure_smoke.py" in writer_step, "转换只留一处定义, 工作流只调用"
+
+    artifact = "allure-results-smoke-windows"
+    upload_step = build.split("- name: Upload smoke Allure results", 1)[1]
+    upload_step = upload_step.split("\n      - name:", 1)[0]
+    assert "if: always()" in upload_step, "冒烟红/构建红时也要试着传(没有就 ignore)"
+    assert f"name: {artifact}" in upload_step
+    assert "if-no-files-found: ignore" in upload_step, (
+        '构建更早红掉时没有结论可传是预期内的, 不该在这里叠一个"没文件"的红'
+    )
+    assert not any(
+        artifact.startswith(f"allure-results-{os_name}-")
+        for os_name in ci_workflow.OS_PLATFORMS
+    ), (
+        f"{artifact} 会撞上每平台报告作业的下载 pattern(allure-results-<os>-*), "
+        "冒烟结论会被错并进单平台报告 —— 换一个不带的平台段"
+    )
+
+    workflow = ci_workflow.workflow_text()
+    summary = ci_workflow.job_block(workflow, "allure-summary")
+    assert "windows-package" in ci_workflow.needs_of(workflow, "allure-summary"), (
+        "汇总不等打包就可能在它传完之前去下载, 冒烟那一节静默缺失"
+    )
+    assert "pattern: allure-results-*" in summary, "产物名要被这份 pattern 收走"
+    assert "needs.windows-package.result" in summary, (
+        "条件期望必须从打包作业的结果推出, 不能写死"
+    )
+    assert '--expect-smoke-platforms "$SMOKE_EXPECTED"' in summary, (
+        "期望平台要经变量传入(空 = 不适用), 写死会让非门禁运行每轮报假缺失"
+    )

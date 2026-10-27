@@ -256,7 +256,7 @@ uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 uv run python scripts/smoke_packaged.py
 ```
 
-- **三条命令就是本地编包的完整链路**：核对位图（`--check` 只比指纹，不一致就不过）→ PyInstaller（spec 里同时声明 onedir 与 onefile，所以**一条命令产出两份**）→ 产物冒烟（`scripts/smoke_packaged.py`，5 条判据 × 两份产物，只在 Windows 上跑；产物不在默认位置时用 `--onedir` / `--onefile` 指过去）。CI 的 `release-build.yml` 跑的就是同样这三句。
+- **三条命令就是本地编包的完整链路**：核对位图（`--check` 只比指纹，不一致就不过）→ PyInstaller（spec 里同时声明 onedir 与 onefile，所以**一条命令产出两份**）→ 产物冒烟（`scripts/smoke_packaged.py`，5 条判据 × 两份产物，只在 Windows 上跑；产物不在默认位置时用 `--onedir` / `--onefile` 指过去）。CI 的 `release-build.yml` 跑的就是同样这三句，只是冒烟多带 `--report smoke-report.json`：逐条判据落成 JSON（失败也写），由紧跟的 `scripts/create_allure_smoke.py` 转成 Allure 结果项上传 `allure-results-smoke-windows`，CI 汇总报告的「构建后冒烟」一节看的就是它（本地不传 `--report` 则什么都不落盘）。
 - 构建前应先通过全部门禁：`uv sync --locked`、Ruff（`check` + `format`）、mypy、pytest；位图也要是最新的（`uv run python scripts/build_icon.py --check`，CI 在构建前就跑这一句）。
 - **在仓库根执行**：命令里的 `packaging/archive-management.spec` 是相对路径，`dist/` / `build/` 也落在当前目录下。
 - 版本直接读取 `packaging.py` 中的源码版本。
@@ -278,7 +278,7 @@ uv run python scripts/smoke_packaged.py
 
 构建与发布分成**两份**工作流（判据与取舍落在 `docs/testing-ci.md`）：
 
-- [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml)（Build Windows Package，**只读**）：真正的构建作业 —— 装依赖、跑构建前检查、`--check` 图标指纹、PyInstaller、产物冒烟、上传 artifact。有两个调用方（见下表）。
+- [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml)（Build Windows Package，**只读**）：真正的构建作业 —— 装依赖、跑构建前检查、`--check` 图标指纹、PyInstaller、产物冒烟（结论转 Allure 结果，上传 `allure-results-smoke-windows`）、上传 artifact。有两个调用方（见下表）。
 - [`.github/workflows/release.yml`](.github/workflows/release.yml)（Release Windows Package）：只负责“什么时候发”—— `push` 到 `main` 或手动触发；它先 `uses:` 上面那一份拿到产物，再由 `publish` 作业建 Release（写权限只在这一份里）。
 
 | 入口                                 | 什么时候                                                              | 编什么                                       | 发布?                          |
@@ -288,7 +288,7 @@ uv run python scripts/smoke_packaged.py
 | `release.yml` 的 `workflow_dispatch` | 手动                                                                  | `ref` 指的分支或提交（`dev` 只有这一个入口） | 看 `publish` 开关              |
 
 - **为什么构建与发布不能合成一份**（2026-10-17 实测，不是设计洁癖）：GitHub 对**嵌套工作流**的权限是**逐作业静态校验**的 —— 一份工作流里只要有作业声明 `contents: write`，而调用它那次运行（PR）只给得起 `contents: read`，整份工作流就判 `not valid`（原文：`The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`），报错在**解析阶段**，一个 job 都起不来，运行期的 `publish: false` 拦不住。所以门禁调的是只读的 `release-build.yml` —— 否则想让门禁跑起来，就得给 PR 那次运行发一个带写权限的 token，而 PR 里的代码是会被拉下来执行的。
-- **打包门禁**：`ci.yml` 的 `windows-package` 作业在 `release-build.yml` 上跑 `checks: build-only`（同一轮 CI 已经跑过三平台全量，不在 Windows 上重跑一遍），构建完跑产物冒烟（无参数启动 / `--version` / `doctor` / `gui --smoke` 四条判据 × onedir 与 onefile，外加单实例闸门，全部指向临时 `--root`）。分支保护里要勾的必需检查是 **`CI required packaging status`**（`packaging-gate` 那个恒跑的“结论”作业）—— 干活的那个作业在纯文档改动的 PR 上会被跳过，被跳过的必需检查会永久停在 pending，所以结论交给另一个作业。
+- **打包门禁**：`ci.yml` 的 `windows-package` 作业在 `release-build.yml` 上跑 `checks: build-only`（同一轮 CI 已经跑过三平台全量，不在 Windows 上重跑一遍），构建完跑产物冒烟（无参数启动 / `--version` / `doctor` / `gui --smoke` 四条判据 × onedir 与 onefile，外加单实例闸门，全部指向临时 `--root`）。分支保护里要勾的必需检查是 **`CI required packaging status`**（`packaging-gate` 那个恒跑的“结论”作业）—— 干活的那个作业在纯文档改动的 PR 上会被跳过，被跳过的必需检查会永久停在 pending，所以结论交给另一个作业。2026-10-27 重排后 `windows-package` 只等 `changes`/`quality`/`pytest`/`security`（**不再等报告链**），报告作业反过来等它、把冒烟结论收进汇总报告 —— 因此分支保护里**报告链的检查（`pytest-report` / `allure-summary`）也要勾为必需**，否则存在“打包绿了但报告红”的合入盲区（见 [testing-ci.md](testing-ci.md) 第 2 节）。
 - **为什么门禁不能写成 `workflow_run`**：跨工作流触发产生的检查挂不到那个 PR 上，永远进不了必需检查 —— 想让“CI 通过才允许合入”成立，编译就得发生在 PR 那次运行里。
 - **发布口径**：版本号由提交者手改 `packaging.py`，CI 只读不改（不注入 tag 版本）。**同一个版本合入两次是正常的事**（小修、文档、只改守卫），所以 `v<版本号>` 已经存在时这一轮只构建、不重复发 Release（记一条 `::notice::`，不算失败）。真的发了就建 `v<版本号>` 的 Release，附上 zip、单文件 exe、`SHA256SUMS.txt` 与 `build-metadata.json`。
 - **手动重编/补发**：Actions → _Release Windows Package_ → Run workflow（给 `ref`，需要发布时把 `publish` 打开）。

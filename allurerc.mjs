@@ -109,7 +109,7 @@ export default {
   // 环境问题"还是"真回归"。分类只影响**呈现**, 不影响质量门(有失败照样红) —— 它的价值是
   // 让下一个人少花时间在已经被解释过的环境问题上。
   //
-  // 三条规则(每条都能追溯到仓库里的记录, 别凭印象加):
+  // 四条规则(每条都能追溯到仓库里的记录, 别凭印象加):
   // 1. Tk/Tcl 库不可用 —— 症状清单的权威来源是 tests/tk_guard.py 的 KNOWN_TK_SKIP_MARKERS
   //    (uv 托管构建偶发读不到 Tcl/Tk 库数据, 上游 astral-sh/uv#7036)。这里用**数组**匹配器:
   //    数组内每项是与(AND)、数组之间是或(OR), 于是"message 里有"或"trace 里有"都算命中
@@ -122,8 +122,11 @@ export default {
   //    我们自己的守卫用例(tests/unit/test_gui_retry.py)在失败信息里**会打印整份症状清单**,
   //    不限定层就会把"单测失败"说成"Tk 环境问题"。
   // 2. 数据库瞬时读失败 —— 全量跑里出现过一次的已知偶发。
-  // 3. 工程门禁未通过 —— 脚本写入的质量检查结果带 testCategory=quality, 它们失败时
+  // 3. 工程门禁未通过(质量检查) —— 脚本写入的质量检查结果带 testCategory=quality, 它们失败时
   //    不该混进"用例失败"(那是"代码没过门禁", 不是"哪条用例坏了")。
+  // 4. 工程门禁未通过(产物冒烟) —— 同上一条的理由: 冒烟判据带 testCategory=smoke
+  //    (scripts/create_allure_smoke.py 写), "包起不来"是工程门禁的事, 掉进默认的"用例失败"
+  //    会误导人去查测试代码。
   //
   // groupBy 里的 layer/status/environment 是内建选择器(取自结果标签), 用来在分类内部再
   // 分层; 每个分类还会默认再按错误消息聚一次(groupByMessage 默认 true)。
@@ -166,6 +169,15 @@ export default {
         matchers: {
           statuses: ["failed", "broken"],
           labels: { testCategory: "quality" },
+        },
+        groupBy: ["environment", "status"],
+      },
+      {
+        id: "gate-packaging-smoke",
+        name: "工程门禁:产物冒烟未通过",
+        matchers: {
+          statuses: ["failed", "broken"],
+          labels: { testCategory: "smoke" },
         },
         groupBy: ["environment", "status"],
       },

@@ -348,6 +348,27 @@ def test_every_expected_conclusion_names_a_live_script_and_an_upstream_job() -> 
     workflow_jobs = ci_workflow.jobs(workflow)
     upstream = _upstream_jobs(workflow, "allure-summary")
 
+    def uploads_artifacts(job_name: str, jobs: dict[str, str]) -> bool:
+        """这个作业(或它转调的本地工作流)真的在传产物吗.
+
+        纯转调作业(``uses: ./.github/workflows/*.yml``, 如打包门禁的 ``windows-package``)
+        自己没有步骤, 上传发生在被调的那份里 —— 顺着 ``uses:`` 找过去再看, 否则清单里登记
+        它就会永远误报"不上传任何产物"。
+        """
+        block = jobs[job_name]
+        if "actions/upload-artifact" in block:
+            return True
+        called = re.search(r"uses: \./\.github/workflows/([\w.-]+)", block)
+        if called is None:
+            return False
+        nested = (_REPO_ROOT / ".github" / "workflows" / called.group(1)).read_text(
+            encoding="utf-8"
+        )
+        return any(
+            "actions/upload-artifact" in nested_block
+            for nested_block in ci_workflow.jobs(nested).values()
+        )
+
     for item in catalog.CATALOG:
         assert (_REPO_ROOT / item.script).is_file(), (
             f"{item.key} 声明的产出脚本不存在: {item.script}"
@@ -355,8 +376,8 @@ def test_every_expected_conclusion_names_a_live_script_and_an_upstream_job() -> 
         assert item.job in workflow_jobs, (
             f"{item.key} 声明的上传作业不在工作流里: {item.job}"
         )
-        assert "actions/upload-artifact" in workflow_jobs[item.job], (
-            f"{item.job} 已经不上传任何产物, {item.key} 的缺失会被误报"
+        assert uploads_artifacts(item.job, workflow_jobs), (
+            f"{item.job}(或它转调的工作流)已经不上传任何产物, {item.key} 的缺失会被误报"
         )
         if item.gate == catalog.GATE_ON_DEMAND:
             # 按需那一族(作业崩溃现场)的证据**不来自某个上游作业**: 任何作业(包括汇总作业
@@ -381,14 +402,17 @@ def test_expected_items_expand_every_family_and_every_quality_check() -> None:
     items = catalog.expected_items(platforms, scripts)
 
     families = {item.producer.key for item in items}
+    # 两个例外: 按需一族(作业崩溃现场)只在真的崩了时才有; 冒烟一族是**条件适用**的
+    # (只在打包真的跑了的运行里才应该有, 默认调用不传平台 => 整族不出现)。
     always_expected = {
         producer.key
         for producer in catalog.CATALOG
-        if producer.gate != catalog.GATE_ON_DEMAND
+        if producer.gate != catalog.GATE_ON_DEMAND and producer.key != "smoke"
     }
     assert families == always_expected, (
-        "每族结论都要在「应有」里 —— 按需的那一族(作业崩溃现场)例外: 它只在真的崩了时才"
-        "有, 缺了不算缺失(见 GATE_ON_DEMAND)"
+        "每族结论都要在「应有」里 —— 例外只有两个: 按需的那一族(作业崩溃现场)缺了不算缺失"
+        "(见 GATE_ON_DEMAND); 冒烟那一族按条件展开(见 test_smoke_expectation_follows_the_"
+        "declared_platforms)"
     )
 
     checks = catalog.quality_checks(scripts)
@@ -424,6 +448,32 @@ def test_expected_items_expand_every_family_and_every_quality_check() -> None:
     assert per_platform["security"] == len(platforms), (
         "security 每轮三个平台都跑(不做降频), 所以三个平台各要一行"
     )
+
+
+def test_smoke_expectation_follows_the_declared_platforms() -> None:
+    """产物冒烟是**条件适用**的一族: 传了平台才要求, 没传整族消失(不报假缺失).
+
+    打包门禁只在"合入 main 的 PR"上跑 —— 把冒烟当无条件期望, push 到 dev 与测试红被跳过
+    的 PR 每一轮都会报一条"缺少结论: 产物冒烟(Windows)", 而假警报看多了就没人当回事
+    (security 的 macOS 在矩阵 exclude 里的那次就是这么过来的, 见
+    test_every_platform_conclusion_is_produced_on_every_run)。
+    """
+    catalog = _load_script("allure_catalog")
+    scripts = _REPO_ROOT / "scripts"
+    platforms = ["Windows", "macOS", "Linux"]
+
+    absent = catalog.expected_items(platforms, scripts)
+    assert not [item for item in absent if item.producer.key == "smoke"], (
+        "没传 smoke 平台时这一族不该出现 —— 门禁没跑的运行报缺失就是假警报"
+    )
+
+    items = catalog.expected_items(platforms, scripts, ("Windows",))
+    smoke = [item for item in items if item.producer.key == "smoke"]
+    assert [(item.identity, item.environment) for item in smoke] == [
+        ("archive-management.smoke.", "Windows")
+    ], "传了才要求, 且按传入的平台展开(冒烟将来扩平台时改的就是这份清单)"
+    # 传了冒烟平台, 别的族不受影响(条件只作用于这一族)。
+    assert len(items) == len(absent) + 1
 
 
 def test_missing_conclusions_are_loud_in_the_ledger_and_as_broken_items(

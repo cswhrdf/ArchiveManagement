@@ -17,10 +17,11 @@
 - **平台以 Allure 的"环境"维度呈现**（2026-10-05 起）：每条结果带 `env` 标签（平台展示名），`allurerc.mjs` 的 matcher 把标签映射成 Allure environment；报告里出现 Windows / macOS / Linux 三个环境，"按环境过滤/对比"直接可用。`env` 与 `os` 两个标签在**收集期**挂成标记（`conftest._attach_environment_labels`），**不能**写在 autouse 夹具里：`pytest.mark.skip` / `skipif` 由 pytest 在夹具之前求值，写在夹具里的标签会整个丢掉，结果会落进隐式的 `default` 环境——报告里按平台看不到它，逐平台用例数还会比分片自报的少（2026-10-14 run 38594250358 就是这样：Linux/macOS 各少 1 条，报告自检不过、最终报告没上传）。平台参数 `平台` 没有标记形态，仍留在夹具里。两个配套兜底：平台作为 `--platform` 参数进入结果身份——三平台 `retryHash` 各不相同（一个用例不会在跨平台合并后变成"重试"）、`historyId` 又共享（历史趋势能连上）；旧的 os 标签 + parentSuite 后缀保留（旧报告兼容 + 兜底）。**生成报告必须在仓库根执行**——Allure CLI 要读到 `allurerc.mjs` 才会识别环境，读不到会**静默**退回 default 环境，`scripts/verify_allure_report.py` 会判"报告不完整"。摘要类结论项同规则：带 env、标题不拼平台名（环境维度已经表达）。
 - 用例标题里的参数化 id 会被 pytest 转成 ASCII 转义（`\u7528\u6237`），生成报告时还原（界面与 URL 里都是可读中文）。
 - **`allurerc.mjs` 的三项读者辅助**：
-  1. **categories 失败归类**——三条规则（id 与 `allurerc.mjs` / `tests/unit/test_test_config.py` 三处同步，改名要一起改）：
+  1. **categories 失败归类**——四条规则（id 与 `allurerc.mjs` / `tests/unit/test_test_config.py` 三处同步，改名要一起改）：
      - `env-tk-library`：环境:Tk/Tcl 库不可用（症状清单与 `tk_guard.KNOWN_TK_SKIP_MARKERS` 同源、大小写不敏感、限定 layer 为 integration/e2e）；
      - `env-transient-database`：环境:数据库瞬时读失败（`sqlite3.OperationalError` 且数据库被锁/暂时不可读）；
-     - `gate-quality-check`：工程门禁:质量检查未通过（按 `testCategory=quality` 标签挑选）；未命中的落进默认的 Product/Test errors 桶。
+     - `gate-quality-check`：工程门禁:质量检查未通过（按 `testCategory=quality` 标签挑选）；
+     - `gate-packaging-smoke`：工程门禁:产物冒烟未通过（按 `testCategory=smoke` 标签挑选，2026-10-27 起）；未命中的落进默认的 Product/Test errors 桶。
   2. **variables 报告顶部稳定事实**（覆盖率门槛、分层执行位置等；平台各自的事实按环境变量写）。每次运行会变的（提交号、分支、耗时）由 `environment.properties` 与总账负责，两边不重复不冲突。
   3. **allowedEnvironments 环境 id 白名单**——少列一个 id 时 `allure generate` 直接 Internal Error 硬失败（这也是一种守卫）。三项各有守卫（`tests/unit/test_test_config.py`、`tests/unit/test_report_quality_items.py`）。
 
@@ -39,10 +40,15 @@ push/PR ────┼── pytest (win/mac/linux) × 3 片: 单元+集成(两
                  ▼
             allure-summary: 汇总三平台 + 覆盖率合并 + 原生质量门 + 总账 + 报告 artifact
 
-合入 main 的 PR 额外: … ── windows-package (调 release-build.yml: 构建 + 产物冒烟, 只出 artifact)
+合入 main 的 PR 额外: quality/pytest/security 全绿后 ── windows-package (调 release-build.yml:
+    构建 + 产物冒烟, 只出 artifact) ── 其冒烟结论(allure-results-smoke-windows)由
+    allure-summary 的 `pattern: allure-results-*` 一并收进汇总报告
 ```
 
-- **打包门禁（2026-10-17 新增，只针对合入 `main` 的 PR）**：“用例绿”与“能编 + 产物能起”是两件事 —— 后者只有真跑一次 PyInstaller 才知道。所以 `ci.yml` 里的 `windows-package` 作业（`uses: ./.github/workflows/release-build.yml`）在 `quality` / `pytest` / `pytest-report` / `security` / `allure-summary` 都过了之后，拿这个 PR 的**合并预览提交**构建 onedir + onefile 并跑产物冒烟；它**只上传 artifact、不发 Release**（`checks: build-only`：同一轮 CI 已经跑过三平台全量，不在 Windows 上重跑一遍）。冒烟 = `scripts/smoke_packaged.py`（五条判据 × 两份产物：无参数启动 / `--version` / `doctor` / `gui --smoke` / 单实例闸门；判据取退出码 + 侧效应，**不读 stdout**——窗口化产物没有控制台；无参数启动用 platformdirs 的 `WIN_PD_OVERRIDE_*` 把系统目录整体沙箱进临时目录，不碰真实应用目录；全部外部限时）。守卫：`test_the_build_smokes_the_packages_it_produced`（钉住"构建之后、打 release/ 之前"的位置）。
+2026-10-27 重排：**方向翻转**——`windows-package` 只等 `changes` / `quality` / `pytest` / `security`（产出结论的核心作业），**不再等报告链**；`allure-summary` 反过来 `needs` 它，好把构建后冒烟的结论产物收进汇总报告。测试红 ⇒ `windows-package` 被跳过（default needs 语义）⇒ `packaging-gate` 判红，合入照样被拦；而报告链的红（覆盖率门槛、原生质量门）由它们自己的必需检查兜住（**分支保护里除了 `CI required packaging status`，`pytest-report` / `allure-summary` 相关检查也要勾为必需**，否则存在"打包绿了但报告红"的合入盲区——重排后这两件事不再互相挡）。
+
+- **打包门禁（2026-10-17 新增，只针对合入 `main` 的 PR）**：“用例绿”与“能编 + 产物能起”是两件事 —— 后者只有真跑一次 PyInstaller 才知道。所以 `ci.yml` 里的 `windows-package` 作业（`uses: ./.github/workflows/release-build.yml`）在 `changes` / `quality` / `pytest` / `security` 都过了之后，拿这个 PR 的**合并预览提交**构建 onedir + onefile 并跑产物冒烟；它**只上传 artifact、不发 Release**（`checks: build-only`：同一轮 CI 已经跑过三平台全量，不在 Windows 上重跑一遍）。冒烟 = `scripts/smoke_packaged.py`（五条判据 × 两份产物：无参数启动 / `--version` / `doctor` / `gui --smoke` / 单实例闸门；判据取退出码 + 侧效应，**不读 stdout**——窗口化产物没有控制台；无参数启动用 platformdirs 的 `WIN_PD_OVERRIDE_*` 把系统目录整体沙箱进临时目录，不碰真实应用目录；全部外部限时）。守卫：`test_the_build_smokes_the_packages_it_produced`（钉住"构建之后、打 release/ 之前"的位置）。
+- **冒烟结论进汇总报告（2026-10-27 起）**：`smoke_packaged.py --report smoke-report.json` 把逐条判据落成 JSON（失败也写），打包作业里紧跟的 `scripts/create_allure_smoke.py` 转成 Allure 结果项（每条判据一条、`env=Windows` 归进那个平台的环境、`testCategory=smoke`）并上传 `allure-results-smoke-windows`——产物名匹配汇总作业的 `pattern: allure-results-*` 但不匹配每平台报告的 `allure-results-<os>-*`（不会被错并进单平台报告）。"该不该有"是**条件期望**：汇总作业按 `needs.windows-package.result` 推导并传 `--expect-smoke-platforms`（success/failure 都要求数，skipped/cancelled 传空=不适用），不适用时整族不进「应有」清单、不报假缺失。守卫：`test_the_packaging_smoke_results_reach_the_final_report` / `test_smoke_expectation_follows_the_declared_platforms`。
 - **为什么门禁调的是 `release-build.yml` 而不是 `release.yml`**：嵌套工作流的权限是**逐作业静态校验**的 —— `release.yml` 里那个 `publish` 作业要 `contents: write`，而 PR 那次运行的顶层只有 `contents: read`，整份工作流会被判 `not valid`（原文：`The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`），连一个 job 都起不来，运行期的 `publish: false` 拦不住。所以构建单独成一份**只读**的 `release-build.yml`（门禁与发布档共用它），写权限只留在 `release.yml` 的发布作业上。守卫：`test_the_packaging_gate_path_never_holds_write_permission`。
 - **必需检查是 `CI required packaging status`（要在仓库设置的 Rules / branch protection 里勾上）**：分支保护里的必需检查不能由一个会被条件跳过的作业兼任 —— 纯文档改动的 PR 会跳过 `windows-package`，那样检查会永久停在 pending（与 `required-check` 同一条理由，见 `ci.yml` 开头的注释）。所以门禁=两个作业：干活的“`windows-package`”+ 恒跑的“结论”`packaging-gate`（三种情况给绿：纯文档改动 / 不是合入 main 的 PR / 编译成功；上游红了导致它被跳过 = `skipped` 也判红）。守卫：`tests/unit/test_ci_workflow.py` 里那三条（`test_the_release_workflow_only_publishes_from_main` / `test_the_packaging_gate_gates_pull_requests_into_main` / `test_the_packaging_gate_always_reports_a_conclusion`）。
 - **发布只在合入之后（`release.yml` 的 `push: branches: [main]`）**：版本号（`packaging.py`）没变就只构建、不重复发 Release（`v<版本号>` 已存在是正常出口）；变了则建 Release 并附上 zip / exe / `SHA256SUMS.txt` / `build-metadata.json`。`dev` **没有**自动档（只有手动 `workflow_dispatch`）。触发与口径见 `docs/development.md` 的「发布」一节。

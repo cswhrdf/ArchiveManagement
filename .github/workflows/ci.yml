@@ -742,8 +742,13 @@ jobs:
     # 为什么门禁是"这个作业 + 下面的聚合结论"两个, 而不是把它自己写进必需检查: 纯文档改动的 PR 会
     # 跳过它(见 changes 作业), 被跳过的必需检查会停在 pending —— 必需检查得交给"总会报一次结论"
     # 的作业(与 required-check 同一套理由, 见文件开头的注释)。
+    # needs 排布(2026-10-27 重排): 只等"产出结论"的核心作业(质量/用例/安全), **不等报告链** ——
+    # 报告(pytest-report / allure-summary)翻转成反过来等这个作业, 好把构建后冒烟的结论产物收进
+    # 汇总报告。报告链的红(覆盖率门槛、原生质量门)由它们自己的必需检查兜住, 不再挡打包的墙钟;
+    # 而这里的前置(quality/pytest/security)红了 => 本作业被跳过(default needs 语义) =>
+    # packaging-gate 判红, 合入照样被拦。
     name: 打包 Windows 产物 (仅合入 main 的 PR)
-    needs: [changes, quality, pytest, pytest-report, security, allure-summary]
+    needs: [changes, quality, pytest, security]
     if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && needs.changes.outputs.should_run == 'true' }}
     uses: ./.github/workflows/release-build.yml
     with:
@@ -1285,7 +1290,7 @@ jobs:
     # 站点发布用的 pages / id-token 权限、github-pages 环境与三个发布步骤一并删除,
     # 报告的可达性交给 `allure-report-final` 产物。
     name: Allure 汇总报告
-    needs: [changes, quality, pytest-report, security]
+    needs: [changes, quality, pytest-report, security, windows-package]
     # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
     if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
     runs-on: ubuntu-latest
@@ -1295,6 +1300,11 @@ jobs:
     # 平台专属检查、静态分析与性能基准现在都跑在 pytest 的片 0 与 quality 作业里, 所以清单里
     # 不再有 quality-platform / analysis / performance: 它们要出的产物都由这两个作业上传,
     # 等它们跑完即可。
+    # windows-package(2026-10-27 重排): 打包作业里的构建后冒烟会上传
+    # `allure-results-smoke-windows`, 靠下面的 `pattern: allure-results-*` 一并收进汇总报告
+    # —— 不等它就会在它传完之前去下载, 报告静默少一节。被跳过的 need 不拦 `always()` 作业:
+    # 测试红 / 非门禁路径 / 纯文档的轮次里它就是 skipped, 汇总照常出报告, 冒烟那一族按
+    # 条件期望处理(见后面调 create_allure_summary.py 的那一步)。
     # 这个作业只跑仓库自己的脚本(不跑 PR 里的代码), 权限与顶层一致即可:
     # `contents: read`(checkout 要它) + `actions: read`(取本轮的产物)。
     permissions:
@@ -1533,11 +1543,18 @@ jobs:
         # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账末节
         # 「证据核对」的"应有" —— 某个平台的产物整体没交上来时, 那些行会直接点名缺失
         # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
+        # `--expect-smoke-platforms` 是**条件期望**(2026-10-27): 产物冒烟只在"打包真的跑了"的
+        # 运行里才应该有 —— 打包门禁只在合入 main 的 PR 上执行, 无条件要求会让 push 到 dev、
+        # 测试红了被跳过的 PR 每轮都报一条假缺失。取值由 needs.windows-package.result 推出:
+        # success / failure 都要求数(失败=冒烟红或构建红, 两种都该在报告里看得见缺了什么),
+        # skipped / cancelled(前置红了、不是这条路径、纯文档)传空 = 不适用。
         if: always()
+        env:
+          SMOKE_EXPECTED: ${{ (needs.windows-package.result == 'success' || needs.windows-package.result == 'failure') && 'Windows' || '' }}
         shell: bash
         run: |
           mkdir -p allure-results
-          uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux
+          uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux --expect-smoke-platforms "$SMOKE_EXPECTED"
 
       - name: Download failure diagnostics from every job
         # 各作业只在**失败时**上传诊断(见各自的 Collect/Upload failure diagnostics)。

@@ -18,15 +18,19 @@ r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.ym
 每条都限时(窗口起不来时 ``gui`` 会一直等, 用外部超时兜住); onefile 首次启动要解包到
 ``%TEMP%\_MEIxxxx``, 比较慢, 超时按最坏情况给足。**限时命令一律落现场**: 子进程的
 stdout/stderr 写成文件, 超时或非零退出把这两份与 ``--root`` 下应用日志的末尾一并塞进
-失败消息 —— 窗口化产物没有控制台, 不给现场就只能重跑一轮去猜(2026-10-26 那次就是这样)。用法::
+失败消息 —— 窗口化产物没有控制台, 不给现场就只能重跑一轮去猜(2026-10-26 那次就是这样)。
+``--report`` 把逐条判据落成 JSON(失败也写), 由 ``scripts/create_allure_smoke.py`` 转成
+Allure 结果项并入 CI 的汇总报告 —— 退出码管门禁, 报告管"哪一条没过"。用法::
 
     uv run python scripts/smoke_packaged.py     # dist/ 下自动找两份产物
+    uv run python scripts/smoke_packaged.py --report smoke-report.json
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -34,6 +38,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
@@ -77,6 +82,31 @@ def cold_start_problem(label: str, elapsed: float) -> str | None:
 
 #: 一条判据的结论: (过没过, 给人看的一句话)。
 Verdict = tuple[bool, str]
+
+#: 冒烟结论落盘时的平台显示名(与报告环境的取名一致, 见 ``create_allure_smoke.py``)。
+#: 脚本只在 Windows 上做冒烟(产物是 Windows 的), 所以是一个字面量而不是现场探测。
+REPORT_PLATFORM = "Windows"
+
+#: 每条判据的固定标识 + 显示名。标识进 Allure 结论项的 ``fullName``(由
+#: ``scripts/create_allure_smoke.py`` 拼接), **改标识会断掉报告里的历史趋势** —— 显示名
+#: 可以随便改, 标识不要动。顺序即判据执行顺序, 与 :func:`run_battery` 里的调用顺序一致。
+CHECK_IDENTITIES: tuple[tuple[str, str], ...] = (
+    ("no-args", "无参数启动"),
+    ("version", "--version"),
+    ("doctor", "doctor"),
+    ("gui-smoke", "gui --smoke"),
+    ("single-instance", "单实例闸门"),
+)
+
+
+@dataclass(frozen=True)
+class SmokeCheck:
+    """一条判据的结论: 标识(进报告身份)、显示名、过没过、给人看的说明."""
+
+    key: str
+    name: str
+    passed: bool
+    detail: str
 
 
 def _utf8_console() -> None:
@@ -385,19 +415,37 @@ def check_single_instance(exe: Path, root: Path) -> Verdict:
         _kill_tree(first.pid)
 
 
-def run_battery(label: str, exe: Path, workspace: Path) -> list[tuple[str, Verdict]]:
-    """对一份产物跑完五条判据, 返回逐条结论(判据名 → (过没过, 说明))."""
-    checks: list[tuple[str, Verdict]] = [
-        ("无参数启动", check_no_args(exe, workspace / f"{label}-sandbox", label=label)),
-        ("--version", check_version(exe, workspace / f"{label}-version")),
-        ("doctor", check_doctor(exe, workspace / f"{label}-doctor")),
-        ("gui --smoke", check_gui_smoke(exe, workspace / f"{label}-smoke")),
-        (
-            "单实例闸门",
-            check_single_instance(exe, workspace / f"{label}-single"),
-        ),
+def run_battery(label: str, exe: Path, workspace: Path) -> list[SmokeCheck]:
+    """对一份产物跑完五条判据, 逐条给出结论(标识与显示名见 :data:`CHECK_IDENTITIES`)."""
+    verdicts: tuple[Verdict, ...] = (
+        check_no_args(exe, workspace / f"{label}-sandbox", label=label),
+        check_version(exe, workspace / f"{label}-version"),
+        check_doctor(exe, workspace / f"{label}-doctor"),
+        check_gui_smoke(exe, workspace / f"{label}-smoke"),
+        check_single_instance(exe, workspace / f"{label}-single"),
+    )
+    # strict=True: 判据条数与标识条数对不上(加了一条判据忘了配标识)当场炸, 免得身份错位。
+    return [
+        SmokeCheck(key, name, ok, detail)
+        for (key, name), (ok, detail) in zip(CHECK_IDENTITIES, verdicts, strict=True)
     ]
-    return checks
+
+
+def write_report(path: Path, artifacts: list[dict[str, object]]) -> None:
+    """把逐条判据的结论落成 JSON(给 ``scripts/create_allure_smoke.py`` 转成 Allure 结果).
+
+    **失败也要写**: "哪一条没过"要进汇总报告, 而不是一个只有退出码的红作业 —— 所以这一步
+    在数完失败之后、返回退出码之前执行, 与成败无关。判据的标识(``key``)是报告身份的一部分,
+    详见 :data:`CHECK_IDENTITIES` 的说明。
+    """
+    path.write_text(
+        json.dumps(
+            {"platform": REPORT_PLATFORM, "artifacts": artifacts},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -418,6 +466,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path("dist/ArchiveManagement.exe"),
         help="onefile 产物(默认按 pyinstaller 的输出位置找)",
     )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="把逐条判据的结论写成这份 JSON(给 create_allure_smoke.py 转成 Allure 结果)",
+    )
     args = parser.parse_args(argv)
     if sys.platform != "win32":
         print("产物冒烟只在 Windows 上做(打包产物是 Windows 的)。")
@@ -437,15 +491,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     mei_root = Path(tempfile.gettempdir())
     mei_before = _mei_dirs(mei_root)
     failed = 0
+    report_artifacts: list[dict[str, object]] = []
     try:
         for label, exe in artifacts:
             print(f"\n=== {label}: {exe}")
-            for name, (ok, detail) in run_battery(label, exe, workspace):
-                verdict = "通过" if ok else "失败"
-                print(f"{name}: {verdict}({detail})")
-                failed += 0 if ok else 1
+            checks = run_battery(label, exe, workspace)
+            for check in checks:
+                verdict = "通过" if check.passed else "失败"
+                print(f"{check.name}: {verdict}({check.detail})")
+                failed += 0 if check.passed else 1
+            report_artifacts.append(
+                {
+                    "label": label,
+                    "exe": str(exe),
+                    "checks": [
+                        {
+                            "key": check.key,
+                            "name": check.name,
+                            "passed": check.passed,
+                            "detail": check.detail,
+                        }
+                        for check in checks
+                    ],
+                }
+            )
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+    if args.report is not None:
+        write_report(args.report, report_artifacts)
+        print(f"冒烟结论已写入 {args.report}")
     leaked = sorted(_mei_dirs(mei_root) - mei_before)
     print(f"\n临时目录残渣: 本次在 {mei_root} 新增 {len(leaked)} 个 _MEI*")
     if leaked:

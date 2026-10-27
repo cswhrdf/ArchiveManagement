@@ -130,8 +130,31 @@ jobs:
       # 启动 / --version / doctor / gui --smoke / 单实例闸门), 全部限时; onefile 首启要解包到
       # %TEMP%\_MEIxxxx, 超时在脚本里按最坏情况给足。门禁档与发布档共用这一步; 位置由守卫
       # test_the_build_smokes_the_packages_it_produced 钉住(构建之后、打 release/ 之前)。
+      # `--report` 把逐条判据落成 smoke-report.json(失败也写), 交给下面两步转成 Allure 结论
+      # 并上传 —— 退出码管门禁, 报告管"哪一条没过"。
       - name: Smoke test the built packages
-        run: uv run python scripts/smoke_packaged.py
+        run: uv run python scripts/smoke_packaged.py --report smoke-report.json
+
+      # 冒烟结论并入汇总报告: 上面那步落的 JSON 在这里转成 Allure 结果项(每条判据一条,
+      # 两份产物各一组, 带 env=Windows 归进那个平台的环境)。挂 `if: always()` 是刻意的:
+      # 冒烟红的时候结论更要进报告 —— 只给一个退出码, 下一次还得去翻日志猜是哪一条红的。
+      # 这一步不判门禁(退出码恒 0), 详见 scripts/create_allure_smoke.py 的说明。
+      - name: Write smoke results into Allure
+        if: always()
+        run: uv run python scripts/create_allure_smoke.py --report smoke-report.json --results-dir allure-results-smoke-windows
+
+      # 产物名固定 allure-results-smoke-windows: 匹配汇总作业的 `pattern: allure-results-*`
+      # (一份 pattern 自动收走), 但不匹配每平台报告作业的 `allure-results-<os>-*` —— 不会
+      # 被错并进单平台报告(守卫 test_the_packaging_smoke_results_reach_the_final_report)。
+      # `if-no-files-found: ignore`: 冒烟步没跑(构建更早红掉)时本来就没有结论可传, "该有而
+      # 没有"由汇总作业的运行总账按条件期望点名, 不在这里叠一个误导性的红。
+      - name: Upload smoke Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-smoke-windows
+          path: allure-results-smoke-windows/
+          if-no-files-found: ignore
 
       - name: Prepare build files
         shell: pwsh

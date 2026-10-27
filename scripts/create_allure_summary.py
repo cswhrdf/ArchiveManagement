@@ -1,6 +1,6 @@
 """把性能与安全测试结果汇总进 Allure 报告.
 
-汇总要做六件事:
+汇总要做七件事:
 
 1. 写入环境信息(操作系统、Python、提交 SHA、测试类别、覆盖率门槛、本次涉及的
    平台), 让每份报告都能回答"这次结果是在哪个平台、哪个提交上跑出来的";
@@ -30,7 +30,12 @@
    结论项**并打印 ``::warning::`` —— 产物没产出/没上传/没合并进报告时, 总账里看得见,
    原生质量门也会跟着红。以前只渲染"手里有什么", 缺一整节是完全静默的(2026-10-02 漏掉
    视觉回归的产物与 ``test`` 组就是这么过去的)。
-   这一节在总账**末尾**(结论先看, 审计附录在后), 但开头留一行数 —— 见 ``run_ledger``。
+   这一节在总账**末尾**(结论先看, 审计附录在后), 但开头留一行数 —— 见 ``run_ledger``;
+7. 产物冒烟是**条件适用**的一族: ``--expect-smoke-platforms`` 传了平台才要求(打包门禁只在
+   合入 main 的 PR 上跑, CI 按 ``needs.windows-package.result`` 决定传不传 —— 打包成功/失败
+   都要求数, 被跳过则传空), 不适用时整族不进「应有」、不报假缺失; 总账另有一节
+   "构建后冒烟"按平台汇总逐条判据(判据数/未过数), 一条都没有时写明本次运行不适用,
+   不装作通过。
 
 用法(CI 汇总 job):
 ``uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux``
@@ -1053,6 +1058,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--expect-smoke-platforms",
+        default="",
+        help=(
+            "本次运行**应该**有产物冒烟结论的平台, 逗号分隔(如 Windows)。冒烟只在打包真的"
+            "跑了的运行里才应该有(打包门禁只在合入 main 的 PR 上跑), CI 由汇总作业按"
+            " needs.windows-package.result 传值: 打包成功/失败都要求数(失败也该在报告里看得"
+            "见缺了什么), 被跳过(前置红了 / 不是这条路径 / 纯文档)则传空 = 不适用, 冒烟那一族"
+            "不进「应有」清单, 缺了不报"
+        ),
+    )
+    parser.add_argument(
         "--write-failure-diagnostics",
         action="store_true",
         help=(
@@ -1065,6 +1081,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     arguments.platforms = [
         item.strip()
         for item in str(arguments.expect_platforms).split(",")
+        if item.strip()
+    ]
+    arguments.smoke_platforms = [
+        item.strip()
+        for item in str(arguments.expect_smoke_platforms).split(",")
         if item.strip()
     ]
     return arguments
@@ -1222,6 +1243,30 @@ def missing_conclusion_results(
     return messages
 
 
+def smoke_rows(payloads: list[dict[str, Any]]) -> list[tuple[str, int, int, str]]:
+    """按平台收集产物冒烟结论 ``(平台, 判据数, 未过数, 结论)``.
+
+    冒烟的逐条判据由 ``scripts/create_allure_smoke.py`` 在打包作业里写成结果项(每份产物每条
+    判据一条, ``fullName`` 以 ``archive-management.smoke.`` 开头), 这里只按身份前缀认它们。
+    一条都没有时返回空列表 —— 总账据此写"本次运行没有产物冒烟结果", 而不是装作通过;
+    "该不该有"是另一件事, 由「证据核对」的条件期望(见 ``--expect-smoke-platforms``)负责。
+    """
+    prefix = producer("smoke").identity
+    counts: dict[str, list[int]] = {}
+    for payload in payloads:
+        if not str(payload.get("fullName") or "").startswith(prefix):
+            continue
+        platform = labels_of(payload).get("env") or "default"
+        entry = counts.setdefault(platform, [0, 0])
+        entry[0] += 1
+        if str(payload.get("status")) != "passed":
+            entry[1] += 1
+    return [
+        (platform, total, failed, "通过" if failed == 0 else "**未通过**")
+        for platform, (total, failed) in sorted(counts.items())
+    ]
+
+
 def run_ledger(
     results_dir: Path,
     payloads: list[dict[str, Any]],
@@ -1267,7 +1312,7 @@ def run_ledger(
         f"- 涉及平台: {', '.join(known_platforms) if known_platforms else 'unknown'}",
         f"- 证据核对: 应有 {len(expectation)} 项 / 实有 "
         f"{len(expectation) - len(missing)} 项 / {verdict}。",
-        "- 读法: 先看各节结论(质量门 → 覆盖率 → 性能 → 安全, 每节都注明原始产物在哪条结论项"
+        "- 读法: 先看各节结论(质量门 → 覆盖率 → 性能 → 安全 → 冒烟, 每节都注明原始产物在哪条结论项"
         "里); 文末「证据核对」逐项核对这次**应该**有哪些结论项、哪些到齐了, 以及每条结论项"
         "声明的附件文件在不在。",
         "",
@@ -1352,6 +1397,30 @@ def run_ledger(
         ]
     else:
         lines.append("本次运行没有安全结论文件。")
+    lines += ["", "## 构建后冒烟(打包门禁档)", ""]
+    smoke = smoke_rows(payloads)
+    if smoke:
+        lines += [
+            "| 平台 | 判据数 | 未过 | 结论 |",
+            "| --- | ---: | ---: | --- |",
+        ]
+        lines += [
+            f"| {_cell(platform)} | {total} | {failed} | {state} |"
+            for platform, total, failed, state in smoke
+        ]
+        lines += [
+            "",
+            "- 判据 = 两份产物(onedir / onefile)各五条, 由打包作业里的 "
+            "`scripts/create_allure_smoke.py` 写成逐条结果项; 原始结论(`smoke-report.json`)"
+            "挂在各结果项的附件上。",
+            '- 门禁本身的成败由 `packaging-gate` 作业按打包结果判定, 这里只是让"哪一条没过"'
+            "在报告里看得见。",
+        ]
+    else:
+        lines.append(
+            '本次运行没有产物冒烟结果 —— 打包门禁只在"合入 main 的 PR"上执行, 其余运行不'
+            "适用; 门禁跑过却看到这句, 说明冒烟产物没并进报告(见文末「证据核对」)。"
+        )
     lines += [
         "",
         *completeness_section(expectation, missing, results_dir, payloads),
@@ -1817,7 +1886,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 反过来, 本脚本要写的性能/安全那两类由 self_written_items 补进"实有"—— 它们尚未落盘,
     # 但已经确定会落盘; 真正该盯的是它们的原始数据文件在不在。
     declared = list(arguments.platforms) or platforms
-    expected = allure_catalog.expected_items(declared, SCRIPT_DIRECTORY)
+    expected = allure_catalog.expected_items(
+        declared, SCRIPT_DIRECTORY, tuple(arguments.smoke_platforms)
+    )
     missing = allure_catalog.missing_items(
         expected,
         allure_catalog.actual_items(results_dir)
