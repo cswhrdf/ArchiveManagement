@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import sys
 from contextlib import redirect_stdout
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -137,6 +138,68 @@ def test_doctor_writes_its_report_into_the_log_too(tmp_path: Path) -> None:
     hint = "doctor 的报告要同时写日志(打包版没有控制台)"
     assert "配置目录" in log, hint
     assert "数据库 :" in log, hint
+
+
+def test_the_report_never_dies_on_a_console_that_cannot_print_chinese(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """英文区域(cp1252)的控制台编不出中文, 窗口化产物更是压根没有 stdout.
+
+    2026-10-26 的 CI: 打包版 `doctor` 在英文 runner 上 ``print`` 一句中文就抛
+    ``UnicodeEncodeError`` → PyInstaller 弹出 "Failed to execute script" 框 → 进程
+    卡着等点击 → 冒烟 120s 超时。所以要证明两件事: 标准流被调成替换模式(编不出就
+    替换, 不抛), 以及完全没有 stdout 时也不会去调 ``print``。
+    """
+    calls: list[dict[str, str]] = []
+
+    class FakeConsole(io.StringIO):
+        def reconfigure(self, **kwargs: str) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(sys, "stdout", FakeConsole())
+    # stderr 换成没有 reconfigure 的流: 不可重配的情况也要忍下来
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+
+    app_module._lenient_console()
+
+    assert calls == [{"errors": "replace"}], f"控制台要调成替换模式, 实际: {calls}"
+
+
+def test_doctor_reports_into_the_log_even_without_a_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有控制台(stdout is None)时, ``print`` 会炸 —— 报告仍然得进日志、命令仍退 0."""
+    _run_with_output(["init", "--root", str(tmp_path)])
+    monkeypatch.setattr(sys, "stdout", None)
+
+    code = app_module.run(["doctor", "--root", str(tmp_path)])
+
+    try:
+        log = (tmp_path / "logs" / "archive-management.log").read_text(encoding="utf-8")
+    finally:
+        _detach_log_handlers()
+    assert code == 0, "没有控制台也要正常退 0"
+    assert "数据库 :" in log, "报告必须进日志(打包版没有控制台)"
+
+
+def test_doctor_survives_a_cp1252_console(tmp_path: Path) -> None:
+    """英文区域的 Windows 控制台就是 cp1252: 一句中文都打不出来, 命令不能因此崩.
+
+    2026-10-26 打包版 `doctor` 在英文 runner 上就是这样红的(而且卡 120s 等弹窗)。
+    """
+    _run_with_output(["init", "--root", str(tmp_path)])
+    stream = io.TextIOWrapper(
+        io.BytesIO(), encoding="cp1252", errors="strict", write_through=True
+    )
+    with redirect_stdout(stream):
+        code = app_module.run(["doctor", "--root", str(tmp_path)])
+
+    try:
+        log = (tmp_path / "logs" / "archive-management.log").read_text(encoding="utf-8")
+    finally:
+        _detach_log_handlers()
+    assert code == 0, "cp1252 控制台也要正常退 0(不能抛 UnicodeEncodeError)"
+    assert "数据库 :" in log, "打不出来的只是控制台, 日志必须完整"
 
 
 def _detach_log_handlers() -> None:

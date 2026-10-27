@@ -110,6 +110,7 @@ def default_command() -> str:
 
 def run(argv: Sequence[str] | None = None) -> int:
     """解析命令行并分派, 返回进程退出码."""
+    _lenient_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.version:
@@ -133,12 +134,31 @@ def run(argv: Sequence[str] | None = None) -> int:
     return 1  # pragma: no cover - 上面不返回
 
 
+def _lenient_console() -> None:
+    """把标准流调成"能写就写, 编不出来就替换", 没有控制台就算了.
+
+    报告是中文, 而**英文区域的 Windows 控制台是 cp1252** —— ``print`` 一句中文就抛
+    ``UnicodeEncodeError``。这在打包版上不只是"少打一行": 异常把整个子命令搞崩,
+    窗口化产物还会弹 PyInstaller 的 "Failed to execute script" 框, 于是进程卡在那里
+    等一个永远不会来的点击(2026-10-26 CI: `doctor` 在 runner 上就卡了 120s, 两产物全红)。
+    日志是 UTF-8 的、永远写得下, 所以控制台降级成替换字符就行。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # 已经被重定向成 StringIO 之类的东西
+            continue
+        with contextlib.suppress(ValueError, OSError):  # 不可重配的流(如 pytest 捕获)
+            reconfigure(errors="replace")
+
+
 def _report(line: str) -> None:
     """报告一行: 同时写日志与控制台.
 
     打包版是 ``console=False``(没有控制台), 用户从快捷方式或命令行跑 ``doctor``/``init``
     时 ``print`` 的内容哪儿也不去 —— 日志是这种环境下唯一留得下的现场。所以两处都写,
     而且是**一行一发**: 真卡在中间时, 日志末尾就能看出卡在哪一行(冒烟也靠这个抓现场)。
+    (``sys.stdout`` 为 ``None`` 时 ``print`` 本来就不做事, 不用另外判空; 真正会造成
+    麻烦的是"有控制台但编不出中文", 那一步由 :func:`_lenient_console` 顶住。)
     """
     logger.info("%s", line)
     print(line, flush=True)
