@@ -1,10 +1,10 @@
 r"""把产物冒烟的逐条判据写进 Allure.
 
 为什么单独一个脚本: 冒烟的结论原本只有一个退出码 —— 打包门禁红了, 但"哪一条判据没过、
-两份产物各自什么表现"只在 CI 日志里, 汇总报告看不到。``scripts/smoke_packaged.py`` 用
+产物各自什么表现"只在 CI 日志里, 汇总报告看不到。``scripts/smoke_packaged.py`` 用
 ``--report`` 把逐条判据落成 ``smoke-report.json``, 这一步把它转成报告里的结果项(每条判据
-一条, onedir / onefile 各一组), 于是"这次提交编出来的包能不能起"在报告里是一条可检索、
-可按环境筛的结论。
+一条, onedir 那组 —— 2026-10-28 起 onefile 停产), 于是"这次提交编出来的包能不能起"在
+报告里是一条可检索、可按环境筛的结论。
 
 与 :mod:`create_allure_quality` 同一套做法(执行方在 ``smoke_packaged.py``, 这里只做转换):
 

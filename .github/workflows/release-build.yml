@@ -121,14 +121,15 @@ jobs:
         # 见 docs/development.md)。
         run: uv run python scripts/build_icon.py --check
 
-      - name: Build onedir and onefile packages
+      - name: Build the onedir package
+        # 2026-10-28 起 onefile 停产(发布决定), 只构建 onedir —— 见 spec 末尾的说明。
         run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
       # 产物冒烟: 「能编」与「产物能起」是两件事 —— 跑不起来的包不该被上传成"看起来能发"的样子。
       # 判据 = 退出码 + 侧效应(临时 root 下真的出现 config/data/logs、日志里出现"界面启动"),
-      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × onedir/onefile(无参数
-      # 启动 / --version / doctor / gui --smoke / 单实例闸门), 全部限时; onefile 首启要解包到
-      # %TEMP%\_MEIxxxx, 超时在脚本里按最坏情况给足。门禁档与发布档共用这一步; 位置由守卫
+      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × onedir(无参数
+      # 启动 / --version / doctor / gui --smoke / 单实例闸门), 全部限时, 超时在脚本里按
+      # CI runner 的最坏情况给足。门禁档与发布档共用这一步; 位置由守卫
       # test_the_build_smokes_the_packages_it_produced 钉住(构建之后、打 release/ 之前)。
       # `--report` 把逐条判据落成 smoke-report.json(失败也写), 交给下面两步转成 Allure 结论
       # 并上传 —— 退出码管门禁, 报告管"哪一条没过"。
@@ -136,7 +137,7 @@ jobs:
         run: uv run python scripts/smoke_packaged.py --report smoke-report.json
 
       # 冒烟结论并入汇总报告: 上面那步落的 JSON 在这里转成 Allure 结果项(每条判据一条,
-      # 两份产物各一组, 带 env=Windows 归进那个平台的环境)。挂 `if: always()` 是刻意的:
+      # 带 env=Windows 归进那个平台的环境)。挂 `if: always()` 是刻意的:
       # 冒烟红的时候结论更要进报告 —— 只给一个退出码, 下一次还得去翻日志猜是哪一条红的。
       # 这一步不判门禁(退出码恒 0), 详见 scripts/create_allure_smoke.py 的说明。
       - name: Write smoke results into Allure
@@ -165,7 +166,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
           Compress-Archive -Path dist/ArchiveManagement/* -DestinationPath "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.zip"
-          Copy-Item "dist/ArchiveManagement.exe" "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.exe"
           $files = Get-ChildItem release -File
           $hashes = foreach ($file in $files) {
             $hash = Get-FileHash $file.FullName -Algorithm SHA256

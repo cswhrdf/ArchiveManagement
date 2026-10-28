@@ -180,7 +180,7 @@ CATALOG: tuple[Producer, ...] = (
         job="windows-package",
         match=MATCH_PREFIX,
         detail=(
-            "打包后的产物冒烟(两份产物各五条判据, 每条一个结果项)"
+            "打包后的产物冒烟(onedir 产物的五条判据, 每条一个结果项)"
             "—— 目前仅 Windows; 且只在打包真的跑了的运行里适用(条件期望, 见 expected_items)"
         ),
     ),

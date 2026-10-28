@@ -102,7 +102,7 @@ jobs:
         # 正文写死版本/提交/构建号, 不接 `--generate-notes`: 这一档要的是可复现的固定内容。
         run: |
           cat > release-notes.md <<EOF
-          Windows x64 打包产物: onedir 压缩包 + onefile 可执行文件 + SHA256SUMS.txt + build-metadata.json。
+          Windows x64 打包产物: onedir 压缩包 + SHA256SUMS.txt + build-metadata.json。
 
           - 版本: $VERSION(来自 src/archive_management/packaging.py)
           - 提交: $GITHUB_SHA

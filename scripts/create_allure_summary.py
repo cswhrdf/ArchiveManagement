@@ -1410,7 +1410,7 @@ def run_ledger(
         ]
         lines += [
             "",
-            "- 判据 = 两份产物(onedir / onefile)各五条, 由打包作业里的 "
+            "- 判据 = onedir 产物的五条(2026-10-28 起 onefile 停产), 由打包作业里的 "
             "`scripts/create_allure_smoke.py` 写成逐条结果项; 原始结论(`smoke-report.json`)"
             "挂在各结果项的附件上。",
             '- 门禁本身的成败由 `packaging-gate` 作业按打包结果判定, 这里只是让"哪一条没过"'

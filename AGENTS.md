@@ -24,7 +24,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - **静态门禁**：`uv run ruff check .` / `uv run ruff format .`（CI 用 `--check` 只查不改）/ `uv run mypy` / `uv run deptry .`；复杂度另用 `uv run radon cc -s --min C src`（输出应为空）与 `uv run xenon --max-absolute B --max-modules F --max-average F src`。
 - **单点验证**（迭代时用这个，秒级）：`uv run pytest tests/unit/test_xxx.py -q`、`-k <关键词>`、`uv run pytest tests/integration -q`；性能与安全**默认不跑**：`uv run pytest tests/performance`、`uv run pytest tests/security`。
 - **要拿全量结果**一律走 `uv run python scripts/run_tests_local.py --coverage`（双进程分片 + 收尾 combine/report），**不要**裸跑单进程 `coverage run -m pytest`；透传参数用 `--` 隔开，且**别再写 `--shard-count` / `--shard-index`**（片号由脚本注入，重复给会被拒绝）。规则见 [.github/instructions/local-full-run.instructions.md](.github/instructions/local-full-run.instructions.md)。
-- **报告与打包**：`uv run pytest --alluredir=allure-results` → `allure generate allure-results --output allure-report`（先删旧目录，它不刷新数据）→ `allure open allure-report --port 8080`（必须经 HTTP，`file://` 打不开）；打包 `uv run pyinstaller --noconfirm --clean packaging/archive-management.spec`（一条命令同时产出 onedir 与 onefile），编完用 `uv run python scripts/smoke_packaged.py` 冒烟（仅 Windows）；改了 `app.svg` 后 `uv run python scripts/build_icon.py`。细节见 [docs/development.md](docs/development.md)。
+- **报告与打包**：`uv run pytest --alluredir=allure-results` → `allure generate allure-results --output allure-report`（先删旧目录，它不刷新数据）→ `allure open allure-report --port 8080`（必须经 HTTP，`file://` 打不开）；打包 `uv run pyinstaller --noconfirm --clean packaging/archive-management.spec`（产出 onedir 产物；2026-10-28 起 onefile 停产），编完用 `uv run python scripts/smoke_packaged.py` 冒烟（仅 Windows）；改了 `app.svg` 后 `uv run python scripts/build_icon.py`。细节见 [docs/development.md](docs/development.md)。
 
 ## 3. 后端架构
 

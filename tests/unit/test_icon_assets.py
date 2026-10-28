@@ -248,11 +248,11 @@ def test_find_ffmpeg_prefers_the_override_then_the_path(
 
 
 def test_the_packaging_spec_declares_the_icon_and_fails_without_it() -> None:
-    """两个产物(onedir/onefile)都要带图标; 缺位图要当场失败, 不静默打包."""
+    """产物(onedir)要带图标; 缺位图要当场失败, 不静默打包."""
     text = (_REPO_ROOT / "packaging" / "archive-management.spec").read_text(
         encoding="utf-8"
     )
-    assert text.count("icon=str(icon_file)") == 2, "onedir 与 onefile 都要带上图标"
+    assert text.count("icon=str(icon_file)") == 1, "onedir 的 EXE 要带上图标"
     assert "resources/app.ico" in text
     assert "raise SystemExit" in text, "缺图标时要当场失败, 不能默默发出默认图标"
 

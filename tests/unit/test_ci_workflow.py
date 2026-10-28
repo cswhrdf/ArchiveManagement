@@ -413,10 +413,11 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         encoding="utf-8",
     )
     # 冒烟结论项(由打包作业里的 create_allure_smoke.py 写成): 两条判据, 一条红 ——
-    # 总账的"构建后冒烟"一节要按平台数得出来, 而不是装作通过。
+    # 总账的"构建后冒烟"一节要按平台数得出来, 而不是装作通过。(onefile 已于 2026-10-28
+    # 停产, 结论项只来自 onedir 那组。)
     for slug, check, passed in (
         ("smoke-onedir-version", "onedir.version", True),
-        ("smoke-onefile-doctor", "onefile.doctor", False),
+        ("smoke-onedir-doctor", "onedir.doctor", False),
     ):
         (results / f"{slug}-result.json").write_text(
             json.dumps(
@@ -1455,7 +1456,7 @@ def test_the_packaging_gate_always_reports_a_conclusion() -> None:
 def test_the_build_smokes_the_packages_it_produced() -> None:
     """构建之后必须先冒烟再上传: 「能编」与「产物能起」是两件事.
 
-    顺序本身就是不变式: 冒烟必须在 ``Build onedir and onefile packages`` 之后(那时才有
+    顺序本身就是不变式: 冒烟必须在 ``Build the onedir package`` 之后(那时才有
     产物可冒)、在 ``Prepare build files`` 之前(跑不起来的包不该被打包上传成"看起来能发"
     的样子)。判据是退出码 + 侧效应, 全在 ``scripts/smoke_packaged.py`` 里(工作流只负责
     调用); 门禁档(ci.yml 的 windows-package)与发布档(release.yml)共用这一步, 两个入口
@@ -1465,7 +1466,7 @@ def test_the_build_smokes_the_packages_it_produced() -> None:
     smoke = "- name: Smoke test the built packages"
     assert smoke in build, "构建作业里必须有产物冒烟这一步"
     smoke_at = build.index(smoke)
-    assert smoke_at > build.index("Build onedir and onefile packages"), (
+    assert smoke_at > build.index("Build the onedir package"), (
         "冒烟必须在构建之后(不然没有产物可冒)"
     )
     assert smoke_at < build.index("Prepare build files"), (

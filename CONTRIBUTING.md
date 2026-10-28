@@ -86,7 +86,7 @@ uv run python scripts/build_icon.py                                        # 改
 uv run python scripts/build_icon.py --check                                # 只核对位图与 SVG 是否一致
 ```
 
-- 打包产出 `dist/ArchiveManagement/`（onedir，一个目录）与 `dist/ArchiveManagement.exe`（onefile，与目录同名的单个 exe）； **zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是它产的** —— 那是构建流水线（[.github/workflows/release-build.yml](.github/workflows/release-build.yml)）构建之后自己打包的（这份只读，被门禁与发布档共用）。合入 `main` 的 PR 会先用它的合并预览提交跑一次同样的打包（门禁，**不发** Release，必需检查名 `CI required packaging status`）；合入之后由 [release.yml](.github/workflows/release.yml) 的 `push` 档跑同一份构建，版本号变了才建 Release。口径见 [docs/development.md](docs/development.md) 的「发布」。
+- 打包产出 `dist/ArchiveManagement/`（onedir，一个目录；2026-10-28 起 onefile 停产，不再产出 dist 根下的单个 exe）； **zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是它产的** —— 那是构建流水线（[.github/workflows/release-build.yml](.github/workflows/release-build.yml)）构建之后自己打包的（这份只读，被门禁与发布档共用）。合入 `main` 的 PR 会先用它的合并预览提交跑一次同样的打包（门禁，**不发** Release，必需检查名 `CI required packaging status`）；合入之后由 [release.yml](.github/workflows/release.yml) 的 `push` 档跑同一份构建，版本号变了才建 Release。口径见 [docs/development.md](docs/development.md) 的「发布」。
 - 报告自检与失败现场留证、视觉回归基线见 [docs/testing-ci.md](docs/testing-ci.md)；图标流水线、打包与发布见 [docs/development.md](docs/development.md) 的「应用图标」「打包」「发布」三节。
 - `ui-review/`（逐页复核与截图）是**本地材料**，已被忽略、不进版本库。
 

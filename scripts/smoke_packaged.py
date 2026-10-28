@@ -1,7 +1,7 @@
 r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.yml 的 build 作业调用).
 
 判据 = 退出码 + 侧效应, **不读 stdout**: 窗口化产物(console=False)没有控制台, "它真的
-干活了"的证据只能取进程行为与落盘结果。每份产物(onedir / onefile)五条:
+干活了"的证据只能取进程行为与落盘结果。每份产物(onedir, 2026-10-28 起 onefile 停产)五条:
 
 ① 无参数启动: 打包版的默认命令是 ``gui``(``app.default_command``), 双击就该开窗口。
    系统目录整体重定向进临时沙箱(platformdirs 自带的 ``WIN_PD_OVERRIDE_*`` 覆盖,
@@ -15,14 +15,14 @@ r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.ym
    再起第二个 —— 第二个必须以退出码 3 退出(不开新窗, 只把已开的那个请到前台), 且
    整份日志**只有一条**"界面启动"。
 
-每条都限时(窗口起不来时 ``gui`` 会一直等, 用外部超时兜住); onefile 首次启动要解包到
-``%TEMP%\_MEIxxxx``, 比较慢, 超时按最坏情况给足。**限时命令一律落现场**: 子进程的
+每条都限时(窗口起不来时 ``gui`` 会一直等, 用外部超时兜住), 超时按 CI runner 的最坏
+情况给足。**限时命令一律落现场**: 子进程的
 stdout/stderr 写成文件, 超时或非零退出把这两份与 ``--root`` 下应用日志的末尾一并塞进
 失败消息 —— 窗口化产物没有控制台, 不给现场就只能重跑一轮去猜(2026-10-26 那次就是这样)。
 ``--report`` 把逐条判据落成 JSON(失败也写), 由 ``scripts/create_allure_smoke.py`` 转成
 Allure 结果项并入 CI 的汇总报告 —— 退出码管门禁, 报告管"哪一条没过"。用法::
 
-    uv run python scripts/smoke_packaged.py     # dist/ 下自动找两份产物
+    uv run python scripts/smoke_packaged.py     # dist/ 下自动找 onedir 产物
     uv run python scripts/smoke_packaged.py --report smoke-report.json
 """
 
@@ -51,8 +51,8 @@ _SANDBOX_OVERRIDES = ("WIN_PD_OVERRIDE_APPDATA", "WIN_PD_OVERRIDE_LOCAL_APPDATA"
 #: 第二个实例的退出码(``services.single_instance.ALREADY_RUNNING_EXIT``, 与 argparse
 #: 的 2、GUI 起不来的 2 区分开)。
 _ALREADY_RUNNING_EXIT = 3
-#: 等"界面启动"落地的上限(秒): onedir 冷启动约 2s, onefile 首启还要解包, CI runner
-#: 更慢 —— 按最坏情况给足, 把"还在启动"误判成"没起来"比多等一会儿贵。
+#: 等"界面启动"落地的上限(秒): 本机冷启动约 2s, CI runner 更慢 —— 按最坏情况给足,
+#: 把"还在启动"误判成"没起来"比多等一会儿贵。
 _LOG_WAIT_SECONDS = 90.0
 #: 一条自退命令(doctor / gui --smoke)的整体超时(秒)。
 _CMD_TIMEOUT_SECONDS = 120.0
@@ -61,15 +61,13 @@ _CMD_TIMEOUT_SECONDS = 120.0
 _SECOND_INSTANCE_TIMEOUT_SECONDS = 60.0
 #: 确认"窗口开着"前的静置(秒): 日志落地后再等一眼, 排除"刚写完启动日志就退了"。
 _ALIVE_SETTLE_SECONDS = 1.0
-#: PyInstaller onefile 的解包目录前缀(``%TEMP%\_MEIxxxx``): 正常退出会自清, **被杀不会**。
-_MEI_PREFIX = "_MEI"
 #: 冷启动上限(秒): Popen 到"界面启动"落地。本机实测(2026-10-24, Windows x64 / 不压 UPX,
-#: 同一条判据连跑 3 轮) onedir **0.5 s** / onefile **2.0 s** —— 0.5 s 是探测的粒度(Popen
-#: 之后一轮就看到了), 所以 onedir 那个数是"不超过 0.5 s"。上限按 CI runner 的最坏情况
-#: 留 10~20 倍余量: 真超了就是解包或依赖出问题了(又往包里塞大件), 不是抖动; 它不是性能
-#: 基准 —— "启动→窗口→关窗"的总时长是另一件事(1.70 s / 3.6 s, 见 docs/development.md)。
+#: 同一条判据连跑 3 轮) onedir **0.5 s**(onefile 停产前对照 2.0 s, 留档) —— 0.5 s 是探测
+#: 的粒度(Popen 之后一轮就看到了), 所以 onedir 那个数是"不超过 0.5 s"。上限按 CI runner
+#: 的最坏情况留 10~20 倍余量: 真超了就是依赖出问题了(又往包里塞大件), 不是抖动; 它不是
+#: 性能基准 —— "启动→窗口→关窗"的总时长是另一件事(1.70 s, 见 docs/development.md)。
 #: 注意探测是 0.5 s 一轮, 量到的数最多比真实值大一轮。
-_COLD_START_LIMITS_SECONDS = {"onedir": 10.0, "onefile": 20.0}
+_COLD_START_LIMITS_SECONDS = {"onedir": 10.0}
 
 
 def cold_start_problem(label: str, elapsed: float) -> str | None:
@@ -118,7 +116,7 @@ def _utf8_console() -> None:
 
 
 def _kill_tree(pid: int) -> None:
-    """杀整棵进程树(onefile 是引导进程拉子进程的形状, 单杀会留活口)."""
+    """杀整棵进程树(单杀父进程会留子进程活口: 应用自己也可能再拉进程)."""
     taskkill = shutil.which("taskkill")
     if taskkill is None:  # pragma: no cover - 系统里没有 taskkill 才走
         return
@@ -148,29 +146,17 @@ def _sandbox_env(sandbox: Path) -> dict[str, str]:
 def _temp_env(base: dict[str, str] | None, temp_dir: Path) -> dict[str, str]:
     r"""把子进程的 TEMP/TMP 指进本次工作目录.
 
-    onefile 会把整份包解到 ``%TEMP%\_MEIxxxx``, 正常退出由引导程序自清、**被杀则留残渣**
-    (实测每份约 75 MB)。冒烟里 ① 与 ⑤ 明着杀进程树, ②③④ 限时到了也杀(``_run_timed``)
-    —— 所以**每一条起产物的判据**都要走这里: 残渣随 ``shutil.rmtree(workspace)`` 一起
-    消失, 不会去撑用户的 %TEMP%(2026-10-26: ③ doctor 超时被杀, 在 %TEMP% 留下一个
-    ``_MEI000004cc2``, 就是因为它当时没盖 TEMP)。
+    子进程在本次判据里写的任何临时文件都随 ``shutil.rmtree(workspace)`` 一起清掉, 不去
+    撑用户的 %TEMP%。这条纪律是 onefile 时代落下的(2026-10-24, J-7②: onefile 解包到
+    ``%TEMP%\_MEIxxxx``, 被杀留 ~75 MB 残渣; 2026-10-26 ③ doctor 超时被杀又留一个
+    ``_MEI000004cc2``) —— onefile 已于 2026-10-28 停产, 但"冒烟起过的进程, 临时文件归
+    冒烟自己收"仍然成立, 所以**每一条起产物的判据**都继续走这里。
     """
     env = dict(os.environ) if base is None else dict(base)
     temp_dir.mkdir(parents=True, exist_ok=True)
     for name in ("TEMP", "TMP"):
         env[name] = str(temp_dir)
     return env
-
-
-def _mei_dirs(root: Path) -> set[Path]:
-    """``root`` 下的 onefile 解包目录(``_MEI`` 前缀); 读不到就当空集."""
-    try:
-        return {
-            path
-            for path in root.iterdir()
-            if path.is_dir() and path.name.startswith(_MEI_PREFIX)
-        }
-    except OSError:
-        return set()
 
 
 def _launch(
@@ -461,12 +447,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="onedir 产物的 exe(默认按 pyinstaller 的输出位置找)",
     )
     parser.add_argument(
-        "--onefile",
-        type=Path,
-        default=Path("dist/ArchiveManagement.exe"),
-        help="onefile 产物(默认按 pyinstaller 的输出位置找)",
-    )
-    parser.add_argument(
         "--report",
         type=Path,
         default=None,
@@ -478,7 +458,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     artifacts: list[tuple[str, Path]] = [
         ("onedir", args.onedir),
-        ("onefile", args.onefile),
     ]
     missing = [str(path) for _, path in artifacts if not path.is_file()]
     if missing:
@@ -488,8 +467,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     workspace = Path(tempfile.mkdtemp(prefix="am-smoke-"))
-    mei_root = Path(tempfile.gettempdir())
-    mei_before = _mei_dirs(mei_root)
     failed = 0
     report_artifacts: list[dict[str, object]] = []
     try:
@@ -520,15 +497,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.report is not None:
         write_report(args.report, report_artifacts)
         print(f"冒烟结论已写入 {args.report}")
-    leaked = sorted(_mei_dirs(mei_root) - mei_before)
-    print(f"\n临时目录残渣: 本次在 {mei_root} 新增 {len(leaked)} 个 _MEI*")
-    if leaked:
-        names = ", ".join(path.name for path in leaked)
-        print(f"::warning::冒烟自己在 %TEMP% 留下了 onefile 解包残渣: {names}")
     if failed:
         print(f"::error::产物冒烟 {failed} 条判据未过 —— 跑不起来的包不上传。")
         return 1
-    print("\n产物冒烟: 10 条判据全过(2 份产物, 每份 5 条)。")
+    print(
+        f"\n产物冒烟: {len(report_artifacts) * len(CHECK_IDENTITIES)} 条判据全过"
+        f"({len(report_artifacts)} 份产物 x {len(CHECK_IDENTITIES)} 条)。"
+    )
     return 0
 
 

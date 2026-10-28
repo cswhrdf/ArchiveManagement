@@ -67,7 +67,7 @@ def test_smoke_reports_carry_the_full_verdicts(tmp_path: Path) -> None:
 
 
 def _fake_report(path: Path) -> None:
-    """造一份两判据(一过一红)的冒烟结论, 覆盖 onedir 与 onefile 两个产物."""
+    """造一份两判据(一过一红)的冒烟结论 —— onedir 一份产物(onefile 已于 2026-10-28 停产)."""
     path.write_text(
         json.dumps(
             {
@@ -81,20 +81,15 @@ def _fake_report(path: Path) -> None:
                                 "name": "--version",
                                 "passed": True,
                                 "detail": "退出码 0",
-                            }
-                        ],
-                    },
-                    {
-                        "label": "onefile",
-                        "checks": [
+                            },
                             {
                                 "key": "doctor",
                                 "name": "doctor",
                                 "passed": False,
                                 "detail": "root 下缺 logs",
-                            }
+                            },
                         ],
-                    },
+                    }
                 ],
             },
             ensure_ascii=False,
@@ -128,10 +123,10 @@ def test_smoke_results_record_pass_and_fail(
     }
     assert set(by_identity) == {
         "archive-management.smoke.onedir.version",
-        "archive-management.smoke.onefile.doctor",
+        "archive-management.smoke.onedir.doctor",
     }, "每条判据一个结果项, 身份由产物标识 + 判据标识拼成"
     passed = by_identity["archive-management.smoke.onedir.version"]
-    failed = by_identity["archive-management.smoke.onefile.doctor"]
+    failed = by_identity["archive-management.smoke.onedir.doctor"]
     assert passed["status"] == "passed"
     assert failed["status"] == "failed", "失败也要照写 —— 报告要看得见哪条没过"
     assert "root 下缺 logs" in failed["statusDetails"]["message"]

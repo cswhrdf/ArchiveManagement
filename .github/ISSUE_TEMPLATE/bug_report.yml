@@ -23,7 +23,6 @@ body:
       options:
         - 源码运行（uv run python -m archive_management gui --root ...）
         - Windows 打包版（onedir）
-        - Windows 打包版（onefile）
         - 不确定
     validations:
       required: true
