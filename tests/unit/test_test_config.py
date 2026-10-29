@@ -68,6 +68,8 @@ _CI_ONLY_SUITES = ("performance", "security")
 # `dorny/paths-filter`、`required-check` 只 `echo` 一行, 都不需要 Python 环境, 所以
 # 按这条登记; 列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
 # 2026-10-17 又添一个: release.yml 的 `publish`(只下产物 + `gh release`, 同样不装 Python 环境)。
+# 2026-10-30 再添一个: release.yml 的 `classify`(定版)—— scripts/release_bump.py 只用
+# 标准库, runner 自带的 python3 + git 就够, 装一套 uv 环境反而引入 sync 开销。
 # 打包门禁那个 `windows-package` 不在这里登记 —— 它是**纯转调作业**(只有一条 `uses:`、自己没有
 # 步骤), 由 :func:`_calls_another_workflow` 自动豁免; 真正装环境、跑命令的是它调用的
 # release-build.yml(那份工作流照旧走完整的分组检查)。
@@ -76,6 +78,7 @@ _UV_FREE_JOBS: set[str] = {
     "required-check",
     "packaging-gate",
     "publish",
+    "classify",
 }
 # 跨模块共享的测试辅助模块.
 _SHARED_MODULES = ("helpers.py", "reporting.py")

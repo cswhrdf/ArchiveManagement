@@ -1334,24 +1334,93 @@ def test_the_release_workflow_only_publishes_from_main() -> None:
     assert "steps:" not in build, "构建步骤都在被调用的那份里, 这里只转调"
 
     publish = ci_workflow.job_block(text, "publish")
-    hint = "发布拿的是同一个运行里构建的产物"
-    assert ci_workflow.needs_of(text, "publish") == {"build"}, hint
+    hint = "发布拿的是同一个运行里构建的产物; 定版(可能推了 bump 提交)也在同一条 needs 链上"
+    assert ci_workflow.needs_of(text, "publish") == {"build", "classify"}, hint
     condition = ci_workflow.job_condition(text, "publish")
     assert "github.event_name == 'push'" in condition
     assert "inputs.publish == true" in condition, "手动档要能显式要求发布"
     assert re.search(
         r"^    permissions:\n      contents: write$", publish, re.MULTILINE
-    ), "写权限只给这一个作业"
-    # "版本没变就跳过"是**正常出口**(同一个版本合入两次是家常便饭), 判据是那个 tag 已经存在。
+    ), "写权限只给发布链的作业(这里), 不许外溢"
+    # "这个版本已经发过"是**正常出口**(自动定版之后只剩手动改版撞车/补跑同一提交两种来路),
+    # 判据是那个 tag 已经存在。
     assert "gh release view" in publish
     assert 'echo "publish=false" >> "$GITHUB_OUTPUT"' in publish
     # 两个参数不能省: `--repo`(这个作业没有 checkout, gh 推断不出仓库)与 `--target`
-    # (不给它时 gh 把新 tag 指向默认分支的当前 HEAD, 而不是这次发布的提交)。
+    # (不给它时 gh 把新 tag 指向默认分支的当前 HEAD)。target 必须是**定版传来的提交**:
+    # patch 兜底时那是 bump 提交 —— tag 指的提交里 packaging.py 才已经是这个版本号,
+    # 指到合并提交就会出现"tag 说 0.0.2 / 检出 tag 却是 0.0.1"。
     assert '--repo "$GITHUB_REPOSITORY"' in publish
-    assert '--target "$GITHUB_SHA"' in publish
+    assert '--target "$RELEASE_TARGET"' in publish
+    assert "needs.classify.outputs.ref" in publish, "tag 目标取定版作业传出的提交"
     hint = "产物名与版本号是被调用的构建工作流透传出来的(workflow_call 的 outputs)"
     assert "needs.build.outputs.version" in publish, hint
     assert "needs.build.outputs.label" in publish, hint
+
+
+def test_the_release_workflow_bumps_the_patch_version_by_default() -> None:
+    """合入 main 之后自动定版: 默认第 3 位加 1, 大版本靠 PR 里手改 packaging.py 声明.
+
+    为什么不让脚本从改动量里猜前两位: semver 段位是对用户的沟通契约(5 行可以是破坏性的
+    schema 变更, 5000 行重构可以用户无感), 任何按行数/文件数的启发式都会两头误判 —— 所以
+    "人声明 + 脚本兜底", 判定逻辑收在 scripts/release_bump.py(另有它自己的守卫), 这里钉住
+    工作流一侧的接线:
+
+    ① 定版作业先跑, 构建拿它传出的提交(patch 递增发生在它里面), tag 也指它 —— 否则
+       "构建的还是旧版本号";
+    ② bump 提交用 GITHUB_TOKEN 推回 main(那次 push 不会再触发任何工作流, 天然无循环),
+       推之前要 rebase 到最新 main: 定版窗口里可能有别的合入先落地, 不 rebase 就是
+       non-fast-forward 被拒;
+    ③ 手动档(workflow_dispatch)绝不改版本号: 它编的是任意 ref;
+    ④ 两轮紧挨着必须串行(concurrency): 否则第二次定版读到旧 tag, 算出同一个新版本号。
+    """
+    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    head = text.split("\njobs:", 1)[0]
+
+    assert "concurrency:" in head, "定版要串行: 后一轮必须等前一轮把新 tag 写完"
+    assert "cancel-in-progress: false" in head, (
+        "排队的那轮也要发它自己的版本, 不能被取消"
+    )
+
+    classify = ci_workflow.job_block(text, "classify")
+    assert re.search(
+        r"^    permissions:\n      contents: write$", classify, re.MULTILINE
+    ), "bump 提交要推回 main, 写权限按作业给(顶层保持只读)"
+    assert "fetch-depth: 0" in classify, "要全部 tag 才找得到'最近发过的版本'"
+
+    bump_step = classify.split("- name: Decide whether to bump the patch version", 1)[
+        1
+    ].split("- name:", 1)[0]
+    assert "python3 scripts/release_bump.py" in bump_step, (
+        "定版脚本只用标准库, runner 自带的 python3 就够(换成 uv 就得装环境, 别改)"
+    )
+    assert "--apply" in bump_step, "定版步要在判定为 patch 时把递增写回文件"
+    gated = re.search(r"^        if: (.+)$", bump_step, re.MULTILINE)
+    assert gated is not None, "定版步要有自己的条件(只有 push 档定版)"
+    assert "github.event_name == 'push'" in gated.group(1), (
+        "手动档编的是任意 ref, 不许顺手动 main 的版本号"
+    )
+
+    push_step = classify.split("- name: Commit and push the bump", 1)[1].split(
+        "- name:", 1
+    )[0]
+    assert "steps.bump.outputs.bump == 'patch'" in push_step, (
+        "只有判定为 patch 才提交: 首版直发与手动定档都不该产生 bump 提交"
+    )
+    assert "github.event_name == 'push'" in push_step
+    assert "github-actions[bot]" in push_step, "bump 提交是 bot 的, 别用人的身份"
+    assert "git rebase origin/main" in push_step, (
+        "定版窗口里有新合入时, bump 提交要先 rebase 到最新 main 再推(否则 non-FF 被拒)"
+    )
+    assert "git push origin HEAD:main" in push_step
+
+    build = ci_workflow.job_block(text, "build")
+    assert ci_workflow.needs_of(text, "build") == {"classify"}, (
+        "构建必须等定版完成: 它拿的 ref 是定版传出的"
+    )
+    assert "ref: ${{ needs.classify.outputs.ref }}" in build, (
+        "构建与 tag 都要指递增之后的那个提交"
+    )
 
 
 def test_the_packaging_gate_gates_pull_requests_into_main() -> None:

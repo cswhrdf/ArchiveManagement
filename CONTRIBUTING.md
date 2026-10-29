@@ -86,7 +86,7 @@ uv run python scripts/build_icon.py                                        # 改
 uv run python scripts/build_icon.py --check                                # 只核对位图与 SVG 是否一致
 ```
 
-- 打包产出 `dist/ArchiveManagement/`（onedir，一个目录；2026-10-28 起 onefile 停产，不再产出 dist 根下的单个 exe）； **zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是它产的** —— 那是构建流水线（[.github/workflows/release-build.yml](.github/workflows/release-build.yml)）构建之后自己打包的（这份只读，被门禁与发布档共用）。合入 `main` 的 PR 会先用它的合并预览提交跑一次同样的打包（门禁，**不发** Release，必需检查名 `CI required packaging status`）；合入之后由 [release.yml](.github/workflows/release.yml) 的 `push` 档跑同一份构建，版本号变了才建 Release。口径见 [docs/development.md](docs/development.md) 的「发布」。
+- 打包产出 `dist/ArchiveManagement/`（onedir，一个目录；2026-10-28 起 onefile 停产，不再产出 dist 根下的单个 exe）； **zip 压缩包、`SHA256SUMS.txt` 与 `build-metadata.json` 不是它产的** —— 那是构建流水线（[.github/workflows/release-build.yml](.github/workflows/release-build.yml)）构建之后自己打包的（这份只读，被门禁与发布档共用）。合入 `main` 的 PR 会先用它的合并预览提交跑一次同样的打包（门禁，**不发** Release，必需检查名 `CI required packaging status`）；合入之后由 [release.yml](.github/workflows/release.yml) 的 `push` 档先定版（版本号没在 PR 里手动改过就把第 3 位加 1）、再跑同一份构建并建 Release。口径见 [docs/development.md](docs/development.md) 的「发布」。
 - 报告自检与失败现场留证、视觉回归基线见 [docs/testing-ci.md](docs/testing-ci.md)；图标流水线、打包与发布见 [docs/development.md](docs/development.md) 的「应用图标」「打包」「发布」三节。
 - `ui-review/`（逐页复核与截图）是**本地材料**，已被忽略、不进版本库。
 
@@ -212,7 +212,7 @@ uv run python scripts/run_tests_local.py    # 两个进程分片跑, 约省 1/3 
 
 ## 十、提交与拉取请求
 
-- **分支**：`main` **禁止直接提交**，只接受 `dev` 或 `bugfix/*` 分支的 PR 合入。**开新功能一律从 `dev` 拉主题分支**（`dev` 是集成分支：功能先合回 `dev`，再由 `dev` 合入 `main`）；修缺陷用 `bugfix/<一句话>`。
+- **分支**：`main` **禁止直接提交**，只接受 `dev` 或 `bugfix/*` 分支的 PR 合入（唯一例外：`release.yml` 定版作业的 bot 提交，见 [docs/development.md](docs/development.md) 的「发布」）。**开新功能一律从 `dev` 拉主题分支**（`dev` 是集成分支：功能先合回 `dev`，再由 `dev` 合入 `main`）；修缺陷用 `bugfix/<一句话>`。
 - **提交信息**：**不要求中文**（用什么语言都行），一行说清"做了什么"，必要时在正文补"为什么"与实测数字。仓库里现有的常见形态是 `<范围>: <一句话>`，例如 `分支图: 让悬停那条守卫读 hovered`、`文档: markdown 不按宽度折行`。
 - **提交时**钩子会自动跑第三节那套；排版与 JSON 压缩钩子会把结果加回暂存区（这是设计行为，不需要你再 `git add` 一次）。
 - **PR 里请写清四件事**：动机（解决什么）、做法（为什么选它）、**怎么验证的**（跑了什么、改坏什么会红）、影响面（平台、界面、数据安全）。界面改动附截图，涉及用户可见行为附 `wiki/` 更新。开 PR 时 [.github/pull_request_template.md](.github/pull_request_template.md) 会把这几块预先填好，用不到的条目删掉即可。
