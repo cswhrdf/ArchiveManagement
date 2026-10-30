@@ -124,7 +124,9 @@ _EXPECTED_FONT_SITES = 168
 # 间距站点 798 → 792: 设置窗口移除六个面板的成段说明(2026-10-30, 文案归
 # docs/ui-notes.md) —— 每条说明那句 grid 的 ``padx=16`` 跟着删; “记住窗口”开关下那行
 # 原位改成错误行, 它的 ``padx``/``pady`` 原样保留(站点数不变)。
-_EXPECTED_SPACE_SITES = 792
+# 间距站点 792 → 799: 设置窗口精简空白 —— 五个右侧控件的 ``pady=16`` 收成 ``(6, 6)``
+# (每个 +1), “记住窗口”开关行补上自己的 ``pady=(0, 16)`` 撑住面板下边距(+2)。
+_EXPECTED_SPACE_SITES = 799
 
 
 def _integers(node: ast.expr) -> list[int]:

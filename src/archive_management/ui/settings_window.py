@@ -256,7 +256,7 @@ class SettingsWindow:
             text_color=palette.accent_text,
             font=ctk.CTkFont(size=12),
         )
-        self._toggle_btn.grid(row=0, column=1, padx=16, pady=16)
+        self._toggle_btn.grid(row=0, column=1, padx=16, pady=(6, 6))
         self._theme_label = ctk.CTkLabel(
             self._appearance_panel,
             text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}")),
@@ -314,9 +314,13 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_remember_switch(self._remember_window)
-        self._remember_switch.grid(row=3, column=0, columnspan=2, padx=16, sticky="w")
-        # 开关不带说明行(行为见 docs/features.md): 这行平时留空, 应用失败时才把原因写
-        # 在这里; 它同时撑着面板最后一行的底部留白(贴边的控件会盖住面板自己的下边框)。
+        # 开关行自带底部留白: 错误行平时整行收起(见 _set_transient_line), 面板下边距
+        # 由它撑住(贴边的控件会盖住面板自己的下边框)。
+        self._remember_switch.grid(
+            row=3, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
+        )
+        # 开关不带说明行(行为见 docs/features.md): 这行平时收起不占高度, 应用失败时
+        # 才带着原因占回一行。
         self._remember_error = ctk.CTkLabel(
             self._appearance_panel,
             text="",
@@ -333,6 +337,7 @@ class SettingsWindow:
             self._remember_error,
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
+        self._set_transient_line(self._remember_error, "")
 
         self._language_panel = ctk.CTkFrame(
             self._body,
@@ -369,7 +374,7 @@ class SettingsWindow:
             dropdown_font=ctk.CTkFont(size=12),
         )
         self._language_box.set(self._locale_label(self._language))
-        self._language_box.grid(row=0, column=1, padx=16, pady=16)
+        self._language_box.grid(row=0, column=1, padx=16, pady=(6, 6))
         self._language_label = ctk.CTkLabel(
             self._language_panel,
             text=tr(
@@ -420,7 +425,7 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_debug_switch(self._debug)
-        self._debug_switch.grid(row=0, column=1, padx=16, pady=16)
+        self._debug_switch.grid(row=0, column=1, padx=16, pady=(6, 6))
         self._debug_label = ctk.CTkLabel(
             self._logging_panel,
             text=self._debug_state_text(),
@@ -468,7 +473,7 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_activation_switch(self._activation)
-        self._activation_switch.grid(row=0, column=1, padx=16, pady=16)
+        self._activation_switch.grid(row=0, column=1, padx=16, pady=(6, 6))
         self._activation_label = ctk.CTkLabel(
             self._activation_panel,
             text=self._activation_state_text(),
@@ -527,7 +532,7 @@ class SettingsWindow:
             dropdown_font=ctk.CTkFont(size=12),
         )
         self._verification_box.set(self._verification_label(self._verification_mode))
-        self._verification_box.grid(row=0, column=1, padx=16, pady=16)
+        self._verification_box.grid(row=0, column=1, padx=16, pady=(6, 6))
         self._verification_status = ctk.CTkLabel(
             self._verification_panel,
             text=self._verification_state_text(),
@@ -624,9 +629,9 @@ class SettingsWindow:
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
-        # 错误行平时留空不占注意: 组合键为什么不被接受的规则在 docs/hotkeys.md 的
-        # 「自定义组合键」一节, 真按错时这里会写出具体原因(hotkey.err_*)。
-        # 面板最后一行的底部留白不能省: 贴边的文字会盖住面板自己的下边框。
+        # 错误行平时整行收起(见 _set_transient_line): 组合键为什么不被接受的规则在
+        # docs/hotkeys.md 的「自定义组合键」一节, 真按错时这里会写出具体原因
+        # (hotkey.err_*); 录制状态行同理, 静置时它们一个像素都不占。
         self._shortcut_error = ctk.CTkLabel(
             self._shortcut_panel,
             text="",
@@ -648,7 +653,6 @@ class SettingsWindow:
             self._shortcut_error,
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
-        self._paint_shortcuts()
 
         # 说明与关闭按钮在一个**固定页脚**里: 内容再长也只滚动上面的面板区,
         # 这两样永远留在窗口里可读可点(评审时定的)。
@@ -688,6 +692,10 @@ class SettingsWindow:
         )
         self._close_btn.grid(row=0, column=1, sticky="e")
 
+        # 首次着色放在页脚建好之后: 着色末尾会收一次窗口高度(录制状态行/错误行的
+        # 可见性翻转会改内容高度), 而 _refit_height 要量页脚。
+        self._paint_shortcuts()
+
         # 先定宽再量 —— 换行后的高度才是准的。之后说明一换行就再收一次(见 _refit_height)。
         window.geometry(f"{_WINDOW_WIDTH}x{_WINDOW_MIN_HEIGHT}")
         window.update_idletasks()
@@ -719,6 +727,22 @@ class SettingsWindow:
             initial=initial,
             on_change=self._refit_height,
         )
+
+    def _set_transient_line(self, label: ctk.CTkLabel, text: str) -> None:
+        """写一条"平时留空"的说明行: 空着时整行收起, 有内容才占高度.
+
+        空文案的 ``CTkLabel`` 仍有 28px 高(内边衬是控件自己的), 常驻在面板里一条就是
+        一块看得见的空白(2026-10-30 实测: 记住窗口错误行 + 录制状态行 + 快捷键错误行
+        静置时共占 84px)。``grid_remove`` 连位置带高度一起收走, ``grid()`` 会带着记忆
+        的行列与边距原样放回; 放回后标签自己发 ``<Configure>``, 跟随宽度的换行会自行
+        量准。可见性翻转之后调用方要补一次 ``_refit_height``, 否则窗口会留着一截按旧
+        内容算出来的高度。
+        """
+        label.configure(text=text)
+        if text:
+            label.grid()
+        else:
+            label.grid_remove()
 
     def _refit_height(self) -> None:
         """按当前内容重算窗口高度(说明换行变了行数就变了).
@@ -919,13 +943,16 @@ class SettingsWindow:
             return
         error = self._on_apply_remember_window(wanted)
         if error is not None:
-            self._remember_error.configure(
-                text=tr("settings.remember_failed", reason=error)
+            self._set_transient_line(
+                self._remember_error,
+                tr("settings.remember_failed", reason=error),
             )
             self._set_remember_switch(self._remember_window)
+            self._refit_height()
             return
         self._remember_window = wanted
-        self._remember_error.configure(text="")
+        self._set_transient_line(self._remember_error, "")
+        self._refit_height()
 
     # -- 交互 ---------------------------------------------------------------
 
@@ -1143,11 +1170,12 @@ class SettingsWindow:
                 border_width=2 if recording else 1,
                 border_color=palette.accent if recording else palette.input_border,
             )
-        self._capture_status.configure(text=self._recording_status())
-        self._shortcut_error.configure(text=self._error)
+        self._set_transient_line(self._capture_status, self._recording_status())
+        self._set_transient_line(self._shortcut_error, self._error)
+        self._refit_height()
 
     def _recording_status(self) -> str:
-        """录制中的说明文字(平时为空, 不占高度)."""
+        """录制中的说明文字(平时整行收起, 一像素都不占)."""
         if self._capturing is None:
             return ""
         key = dict(_SHORTCUT_ROWS).get(self._capturing, "")

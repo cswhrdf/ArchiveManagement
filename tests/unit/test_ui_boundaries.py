@@ -122,6 +122,16 @@ class _WidgetStub:
         self.exists = exists
         self.configured: list[dict[str, object]] = []
         self.destroyed = 0
+        self.gridded = 0
+        self.removed = 0
+
+    def grid(self, **_kwargs: object) -> None:
+        """被(重新)放进布局."""
+        self.gridded += 1
+
+    def grid_remove(self) -> None:
+        """被收出布局(空说明行不占高度)."""
+        self.removed += 1
 
     def winfo_exists(self) -> bool:
         """控件还在不在(已销毁为 False)."""
@@ -219,12 +229,16 @@ def test_the_remember_switch_flips_back_when_applying_fails() -> None:
     window._remember_switch = _SwitchStub(wanted=True)
     window._remember_error = _WidgetStub()
     window._on_apply_remember_window = _refuse
+    refits: list[int] = []
+    window._refit_height = lambda: refits.append(1)  # 行的可见性翻转后要重算窗口高度
 
     window._on_remember_toggled()
 
     assert window._remember_switch.deselected == 1
     assert window._remember_window is False
     assert "配置只读" in str(window._remember_error.configured[-1]["text"])
+    assert window._remember_error.gridded == 1, "失败原因出现时错误行要占回一行"
+    assert len(refits) == 1, "错误行放回后要重算一次窗口高度"
 
     window._remember_switch = _SwitchStub(wanted=True)
     window._on_apply_remember_window = lambda _wanted: None
@@ -232,6 +246,8 @@ def test_the_remember_switch_flips_back_when_applying_fails() -> None:
 
     assert window._remember_window is True, "成功之后才把新状态记下来"
     assert window._remember_error.configured[-1]["text"] == "", "成功时要把错误行清空"
+    assert window._remember_error.removed == 1, "清空的同时整行收走, 不留空白"
+    assert len(refits) == 2, "错误行收起后同样要重算一次"
 
     # 开关已经是记下来的那个状态(重复收到同一次切换) → 不去打扰主窗口。
     window._remember_error.configured.clear()
