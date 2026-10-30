@@ -22,6 +22,7 @@ pytestmark = [
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "wiki.yml"
+_RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _WIKI = _REPO_ROOT / "wiki"
 # 仓库链接占位符: 由工作流在推送前替换成真实地址(owner/repo 不能写死在文档里)。
 _PLACEHOLDER = "{{REPO_URL}}"
@@ -132,7 +133,12 @@ def test_workflow_mirrors_pages_instead_of_appending() -> None:
     assert "find wiki-target -maxdepth 1 -name '*.md' -delete" in text, (
         "缺少『先清空旧页面』这一步"
     )
-    assert "cp wiki/*.md wiki-target/" in text, "缺少整体复制这一步"
+    assert "cp wiki-stamped/*.md wiki-target/" in text, (
+        "要复制打好版本标注的副本(wiki-stamped/), 不是仓库里那份原样"
+    )
+    assert "python3 scripts/stamp_wiki_versions.py" in text, (
+        "版本标注要在复制之前现算(标注是派生物, 不写回 wiki/)"
+    )
 
 
 def test_workflow_replaces_the_repository_placeholder() -> None:
@@ -153,11 +159,42 @@ def test_workflow_can_write_to_the_wiki_and_cancels_superseded_runs() -> None:
     assert "cancel-in-progress: true" in text, "连续 push 会白跑一轮同步"
 
 
-def test_workflow_runs_only_when_the_manual_changes() -> None:
-    """只在 wiki/ 变化时触发: 手册没动就不该付一次 checkout + push."""
-    text = _WORKFLOW.read_text(encoding="utf-8")
+def test_workflow_runs_only_for_a_release_instead_of_every_push() -> None:
+    """手册要标“这页是哪个版本带上的”: 版本号只有发完版才知道, 所以它跟发版走, 不跟 push 走.
 
-    assert '"wiki/**"' in text, "push 触发条件没有限定 wiki/ 目录"
-    assert "workflow_dispatch:" in text, (
-        "没有保留手动触发入口(首次启用 Wiki 时要手动跑一次)"
+    ① 触发是 `workflow_call`(由 release.yml 的发布作业调)与手动档 —— **不再监听 push**,
+    于是 dev 上改的手册不会先上线(那时谁也不知道它会进哪个版本); ② 两个入口都必须自带
+    `tag`(否则“同步的是哪一版”说不清); ③ 不在 `main` 历史里的 tag 要拒绘同步(手动从 dev
+    发出去的那一档) —— 给手册标一个正式版根本没有的版本号, 比不标更糟。
+    """
+    text = _WORKFLOW.read_text(encoding="utf-8")
+    head = text.split("\njobs:", 1)[0]
+
+    assert "workflow_call:" in head, "要能被 release.yml 的发布作业直接调"
+    assert "push:" not in head, "不再跟着 push 跑: dev 上改手册时还没有版本号"
+    assert "workflow_dispatch:" in head, "保留手动档(补跑某一版)"
+    assert head.count("required: true") == 2, "两个入口都必须给 tag"
+    assert "merge-base --is-ancestor" in text, "要拒绝不在 main 历史里的 tag"
+    assert "ref: ${{ inputs.tag }}" in text, (
+        "checkout 的必须是那个 tag(标注靠它的历史算)"
+    )
+    assert "fetch-depth: 0" in text, "标注要沿完整历史找“最后改动它的版本”"
+
+
+def test_the_release_workflow_syncs_the_manual_after_it_tags_a_version() -> None:
+    """发布作业之后才同步手册: tag 是定版之后才有的, 而手册要标的就是它.
+
+    为什么不是“监听 release 事件”: 那一步的 `gh release create` 用的是 GITHUB_TOKEN, 它触发的
+    release 事件**不会**再生成工作流运行(GitHub 的防环规则), 监听那条路根本没人叫得动 ——
+    只能由发布作业直接调。
+    """
+    text = _RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    body = text.split("\njobs:", 1)[1]
+
+    assert "uses: ./.github/workflows/wiki.yml" in body, "发布之后要调 wiki 那份工作流"
+    assert "tag: v${{ needs.build.outputs.version }}" in body, (
+        "同步的 tag 就是这一轮发出去的版本"
+    )
+    assert "needs.publish.result == 'success'" in body, (
+        "手动档没开 publish 时没有 tag 可同步, 不该跑"
     )

@@ -1302,6 +1302,26 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     assert "不要手工编辑" in template
     assert "最终提交说明" in template
 
+    # 变更摘要那一块(2026-10-31 加): 改动文件只能从 API 拿(这个作业没有 checkout, 也不该 checkout
+    # PR 的代码)。两段自动区块必须**一次写完** —— 分两次 update 会互相覆盖(读写竞态), 而两边都
+    # 监听 synchronize/edited 时还会互相把对方叫起来。
+    assert "github.rest.pulls.listFiles" in workflow, (
+        "摘要要写到 PR 的改动文件, 只能用 API 取(作业里没有 checkout)"
+    )
+    assert "change-summary:start" in workflow
+    assert "change-summary:end" in workflow
+    # 全角括号正是被测模板里的写法(RUF001 对 .py 里的全角标点有意见)。
+    assert "## 本次变更（自动生成）" in template  # noqa: RUF001
+    assert "change-summary:start" in template
+    assert "change-summary:end" in template
+    assert workflow.count("github.rest.pulls.update") == 1, (
+        "两段自动区块必须一次写完: 分两次 update 会互相覆盖"
+    )
+    assert "const MAX_COMMITS" in workflow, (
+        "摘要要封顶: dev 那条 PR 攒了几十个提交, 一股脑铺开会让 PR 描述长到没法读"
+    )
+    assert "const MAX_PATHS" in workflow, "每类路径同样要封顶(见上一条)"
+
 
 def test_the_release_workflow_only_publishes_from_main() -> None:
     """release.yml 两个入口的口径: push 到 main(发布) / 手动; 构建交给只读的 release-build.yml.

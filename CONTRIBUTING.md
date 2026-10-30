@@ -92,7 +92,7 @@ uv run python scripts/build_icon.py --check                                # 只
 
 ### 文档改动（[第九节](#九文档与手册)）
 
-- `wiki/` 是**面向用户的手册**，也是手册的唯一内容源：合并到 `dev`/`main` 后由 [.github/workflows/wiki.yml](.github/workflows/wiki.yml) 镜像到 GitHub Wiki（首次需要在仓库设置里启用 Wikis 并保存过一页）。那里不许出现 `uv run` / `python -m` / 子命令这类内容（有守卫盯着）。
+- `wiki/` 是**面向用户的手册**，也是手册的唯一内容源：**发版之后**由 [.github/workflows/wiki.yml](.github/workflows/wiki.yml)（由 `release.yml` 的 `wiki` 作业调用）镜像到 GitHub Wiki（首次需要在仓库设置里启用 Wikis 并保存过一页）。页面上的“本页内容随 vX.Y.Z 更新”是脚本现算的派生物，**别手工写版本号**；它也不跟着 `dev` 走 —— 不发版就不上线。那里不许出现 `uv run` / `python -m` / 子命令这类内容（有守卫盯着）。
 - `docs/` 是开发与实现文档，`README.md` 只留概览与索引。机制改了同步对应 `docs/*.md`，用户看得见的改动同步 `wiki/` 与 [README](README.md)。
 
 ## 三、提交前要过的门禁
@@ -200,7 +200,7 @@ uv run python scripts/run_tests_local.py    # 两个进程分片跑, 约省 1/3 
 
 文档分三层，**不要互相复制内容**：
 
-- `wiki/`：**面向用户的使用手册**，也是手册的唯一内容源（改手册就改这里，`.github/workflows/wiki.yml` 会把它镜像到 GitHub Wiki）。
+- `wiki/`：**面向用户的使用手册**，也是手册的唯一内容源（改手册就改这里；`.github/workflows/wiki.yml` 会在**发版之后**把它镜像到 GitHub Wiki，并给改动过的页面补上“本页内容随 vX.Y.Z 更新”）。
 - `docs/`：**面向开发与实现**的说明（命令行、平台差异、测试体系、打包发布、CI）。
 - `README.md`：只留项目概览、平台支持与文档索引（命令与纪律一律指向本指南与 `docs/`）。
 

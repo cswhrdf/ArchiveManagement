@@ -56,6 +56,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - **归档的权限边界是单一来源**：`domain/game_rules.py` 的 `GameAction` / `ARCHIVED_ACTIONS` / `action_allowed` / `is_active`；归档后只保留删除、导出、取消归档、打开详情。界面用 `GameSummary.allow()`，不要在窗口里各写一遍 `if archived`。
 - **定时任务的启停与"游戏是否启用"脱钩**：停用游戏不让任务暂停，只让它到点被跳过（`schedule.skipped`）；归档才顺手暂停。改动这块要同时看 `ui/models.py` 的四种"下次备份"口径。
 - **注释写"为什么"**：这个仓库的注释里保存着实测数字、平台差异与"当时为什么选这条路"，改动时保留这类信息，别当噪音删掉。
+- **用户手册标版本、且只在发版时同步（2026-10-31 起）**：`wiki/` 里**内容变了的**页面，发版后由 `.github/workflows/wiki.yml` 在页面标题下自动补一行「本页内容随 **vX.Y.Z** 更新」，版本号取「**首个带上这次改动的 tag**」；基线（第一个 tag）那版就有的内容不追溯，标注是派生物、不许手工写进 `wiki/`。所以手册不跟着 `push` 走 —— 由 `release.yml` 的 `wiki` 作业在 Release 建好后调用（`gh release create` 用 `GITHUB_TOKEN`，它触发的 `release` 事件不会再起工作流），`dev` 上改的东西不发版就不上线。机制见 [docs/development.md](docs/development.md)「文档与 Wiki」。
 - **markdown 一段一行**：不按宽度折行（列表项续行并回同一行），表格/代码块/YAML frontmatter 不受影响；长行只改一个词时 diff 才读得懂。
 - **提交**：分支 `main` 禁止直接提交（只收 `dev` 或 `bugfix/*` 的 PR；唯一例外是 `release.yml` 定版作业的 bot 提交，见 docs/development.md「发布」节）；提交信息写成 `<范围>: <一句话>`，**正文要精炼**（最多两三条要点，只写"为什么"与关键实测数字，别写成大段说明 —— 细节留在 PR 描述、代码注释与 `docs/` 里）；钩子会就地排版并重新暂存，属设计行为。
 - **一次性探针用完即删**：为量一个数字写的脚本不要留在仓库里；长输出先落盘再读。
@@ -89,9 +90,9 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 | [CONTRIBUTING.md](CONTRIBUTING.md)                                      | **动手前必读**：环境、常用命令速查、提交前门禁、覆盖率口径、测试怎么写、代码与界面约定、提交与 PR 流程                                  |
 | [docs/features.md](docs/features.md)                                    | 界面结构与各功能（备份/分支/定时任务/恢复/原始目录/导入导出/日志）的现行行为                                                            |
 | [docs/development.md](docs/development.md)                              | 命令行、配置文件、应用目录、质量门禁、应用图标流水线、打包与发布                                                                        |
-| [docs/testing.md](docs/testing.md)                                      | 测试分层与等级、共享测试设施、性能与安全测试、写用例的通用纪律、新增测试清单                            |
-| [docs/testing-ui.md](docs/testing-ui.md)                                | 界面用例的环境与收尾纪律、时序与量法、尺寸/配色/交互/文案判据                                          |
-| [docs/testing-ci.md](docs/testing-ci.md)                                | CI 作业矩阵、报告自检、失败现场留证、分片与覆盖率口径、本地生成报告                                    |
+| [docs/testing.md](docs/testing.md)                                      | 测试分层与等级、共享测试设施、性能与安全测试、写用例的通用纪律、新增测试清单                                                            |
+| [docs/testing-ui.md](docs/testing-ui.md)                                | 界面用例的环境与收尾纪律、时序与量法、尺寸/配色/交互/文案判据                                                                           |
+| [docs/testing-ci.md](docs/testing-ci.md)                                | CI 作业矩阵、报告自检、失败现场留证、分片与覆盖率口径、本地生成报告                                                                     |
 | [docs/library.md](docs/library.md)                                      | 统一游戏主页、列表与海报、分类筛选、游戏发现、封面与图标                                                                                |
 | [docs/export-format.md](docs/export-format.md)                          | 导入导出包的文件结构、字段、上限与读取纪律（改格式先看它）                                                                              |
 | [docs/hotkeys.md](docs/hotkeys.md)                                      | 全局快捷键的默认键位、录制流程与实现约定                                                                                                |

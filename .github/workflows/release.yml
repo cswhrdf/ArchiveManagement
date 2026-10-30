@@ -182,3 +182,18 @@ jobs:
             --title "ArchiveManagement v$VERSION" \
             --notes-file release-notes.md \
             release/*
+
+  wiki:
+    # 用户手册要标"本页内容随哪个版本更新", 而版本号只有发完版才知道 —— 所以它挂在发布之后, 只沿
+    # main 发出来的那个 tag 同步(2026-10-31 定: 手册不再跟着 push 走, dev 上改的东西不发版就不上线)。
+    # 为什么是"调"而不是"监听 release 事件": 这里的 `gh release create` 用的是 GITHUB_TOKEN, 它触发
+    # 的 release 事件不会再生成工作流运行(GitHub 的防环规则), 监听那条路根本没人叫得动。
+    name: 同步用户手册到 Wiki
+    needs: [classify, build, publish]
+    # publish 被跳过(手动档没开 publish 开关)时, 也就没有 tag 可同步。
+    if: ${{ needs.publish.result == 'success' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/wiki.yml
+    with:
+      tag: v${{ needs.build.outputs.version }}

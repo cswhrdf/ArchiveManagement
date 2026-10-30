@@ -72,7 +72,7 @@ uv run python -m archive_management gui --root ./dev-data     # 启动图形界�
 
 ## 文档
 
-**使用手册（面向用户，按章节拆分）**：[`wiki/`](./wiki/) 是手册的唯一内容源，合并到 `dev`/`main` 后由 [`.github/workflows/wiki.yml`](./.github/workflows/wiki.yml) 自动镜像到 GitHub Wiki（首次需要在仓库设置里启用 Wikis 并在 Wiki 界面保存过一页，详见该工作流顶部的说明）。共 11 章：安装与首次运行、游戏与存档位置、备份/分支/时间线、恢复与删除原始目录、定时任务与全局快捷键、游戏库与分类筛选、游戏发现与平台支持、自动启停与监控队列、配置文件与日志、常见问题与故障排查、导入与导出。手册是**面向不接触命令行的用户**的：只写窗口里的操作与数据/日志位置，开发命令与配置字段的实现细节留在 `docs/`。
+**使用手册（面向用户，按章节拆分）**：[`wiki/`](./wiki/) 是手册的唯一内容源，**发版之后**由 [`.github/workflows/wiki.yml`](./.github/workflows/wiki.yml) 自动镜像到 GitHub Wiki，并给改动过的页面标上「本页内容随 vX.Y.Z 更新」（首次需要在仓库设置里启用 Wikis 并在 Wiki 界面保存过一页，详见该工作流顶部的说明）。共 11 章：安装与首次运行、游戏与存档位置、备份/分支/时间线、恢复与删除原始目录、定时任务与全局快捷键、游戏库与分类筛选、游戏发现与平台支持、自动启停与监控队列、配置文件与日志、常见问题与故障排查、导入与导出。手册是**面向不接触命令行的用户**的：只写窗口里的操作与数据/日志位置，开发命令与配置字段的实现细节留在 `docs/`。
 
 **开发文档**：
 
@@ -84,7 +84,7 @@ uv run python -m archive_management gui --root ./dev-data     # 启动图形界�
 | [hotkeys.md](./docs/hotkeys.md)             | 全局快捷键的默认键位、自定义流程与实现约定                             |
 | [platforms.md](./docs/platforms.md)         | Windows / macOS / Linux 支持矩阵、可信存档来源与平台注意事项           |
 | [development.md](./docs/development.md)     | 开发环境、命令行、配置文件、质量门禁、打包与发布                       |
-| [testing.md](./docs/testing.md)             | 测试分类与等级、共享测试设施、性能基准与安全测试、新增测试清单          |
+| [testing.md](./docs/testing.md)             | 测试分类与等级、共享测试设施、性能基准与安全测试、新增测试清单         |
 | [testing-ui.md](./docs/testing-ui.md)       | 界面用例的环境与收尾纪律、时序与量法、尺寸/配色/交互/文案判据          |
 | [testing-ci.md](./docs/testing-ci.md)       | CI 作业矩阵、失败现场留证、分片与覆盖率口径、本地生成报告              |
 | [ui-notes.md](./docs/ui-notes.md)           | 从界面移出的说明文案（备查）                                           |

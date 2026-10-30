@@ -181,10 +181,17 @@ CI 的 pytest 作业是**分片执行**的（三平台各 3 片并行，报告�
 
 仓库里的 markdown **不按宽度折行**：一段/一条写成一行（改文档时别手动折行），这样 diff 里改一个词就是一行；表格、代码块与 frontmatter 不在此列。
 
-同步机制：`.github/workflows/wiki.yml` 在 `wiki/**` 变化时（push 到 `dev`/`main`）或手动触发时，把 `wiki/*.md` **镜像**推送到 GitHub Wiki 的 git 仓库。两点注意：
+同步机制（2026-10-31 起**只在发版时同步**）：`.github/workflows/wiki.yml` 现在是 `workflow_call` + 手动两份入口，由 `release.yml` 的 `wiki` 作业在 **Release 建好之后**调用，把打好版本标注的 `wiki/*.md` **镜像**推送到 GitHub Wiki 的 git 仓库。
+
+- **为什么不跟 `push` 走**：手册要给用户看“这页是哪个版本带上的”，而版本号是合并之后由 `classify` 定出来的（见本文「发布」节）；`dev` 上改的手册在那时还没有版本号。也**不能**监听 `release` 事件 —— `gh release create` 用的是 `GITHUB_TOKEN`，它触发的 release 事件**不会**再生成工作流运行（GitHub 的防环规则，只有 `workflow_dispatch` / `repository_dispatch` 例外），那条路根本没人叫得动。
+- **页面上的版本标注**由 `scripts/stamp_wiki_versions.py` 现算，**不写回**仓库里的 `wiki/`：判据是“这一页最后一次改动，首个带上它的 tag”（`git log -1` + `git tag --contains`），语义最小的 tag 当基线，基线那一版就有的内容一律不标（现有文档不追溯）。标注是派生物 —— 评审手册时不该看见它，也别手工往页面里加。
+- **纯文档的合入不发版**（`release.yml` 的 `paths-ignore` 覆盖 `**/*.md`），所以那份手册改动会在**下一个代码版本**里一起上线、并被标上那个版本号 —— 这正是“哪个版本带上了它”的准确含义。
+- **不在 `main` 历史里的 tag 会被拒绝同步**（手动从 `dev` 发布的那一档）：给手册标一个正式版根本没有的版本号，比不标更糟。手动档必须填 `tag`。
+
+三点注意：
 
 1. **首次需要人工在网页上开一次**：仓库 Settings → Features 勾选 Wikis，并在 Wiki 里保存过至少一页 —— GitHub 是在"第一次保存页面"时才创建 `<repo>.wiki.git`，之前工作流会 clone 失败（报错信息里直接写了这一步）。
-2. 页面里的仓库链接用 `{{REPO_URL}}` 占位符（由工作流替换成真实地址），**不要写仓库相对链接**（Wiki 与仓库不在同一棵目录树里，相对链接会变成"不存在的页面"且不报错）。这两条与"章节编号/侧边栏链接齐全/镜像语义"一起由 `tests/unit/test_wiki_sync.py` 守住。
+2. 页面里的仓库链接用 `{{REPO_URL}}` 占位符（由工作流替换成真实地址），**不要写仓库相对链接**（Wiki 与仓库不在同一棵目录树里，相对链接会变成“不存在的页面”且不报错）。这一条与“章节编号/侧边栏链接齐全/镜像语义/版本标注口径”一起由 `tests/unit/test_wiki_sync.py` 与 `tests/integration/test_wiki_versions.py` 守住。
 3. **手册面向不接触命令行的用户**：只写窗口里的操作、数据与日志位置，不写 `uv run` / `python -m` / `--root` / 子命令这类内容（启动、初始化、便携模式属于 README、[CONTRIBUTING.md](../CONTRIBUTING.md) 第二节的常用命令速查与本文档）。软件按平台各自编译发布，用户拿到的是可执行包，双击即用。同样由 `tests/unit/test_wiki_sync.py` 守住。
 
 ## 应用图标
@@ -279,7 +286,7 @@ uv run python scripts/smoke_packaged.py
 构建与发布分成**两份**工作流（判据与取舍落在 `docs/testing-ci.md`）：
 
 - [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml)（Build Windows Package，**只读**）：真正的构建作业 —— 装依赖、跑构建前检查、`--check` 图标指纹、PyInstaller、产物冒烟（结论转 Allure 结果，上传 `allure-results-smoke-windows`）、上传 artifact。有两个调用方（见下表）。
-- [`.github/workflows/release.yml`](.github/workflows/release.yml)（Release Windows Package）：只负责“什么时候发”—— `push` 到 `main` 或手动触发；`classify` 作业先定版（2026-10-30 起：版本号没在 PR 里手动改过就把第 3 位加 1），然后 `uses:` 上面那份构建，最后 `publish` 作业建 Release（写权限只在这一份里）。
+- [`.github/workflows/release.yml`](.github/workflows/release.yml)（Release Windows Package）：只负责“什么时候发”—— `push` 到 `main` 或手动触发；`classify` 作业先定版（2026-10-30 起：版本号没在 PR 里手动改过就把第 3 位加 1），然后 `uses:` 上面那份构建，`publish` 作业建 Release（写权限只在这一份里），最后由 `wiki` 作业在**发布之后**调 [`.github/workflows/wiki.yml`](.github/workflows/wiki.yml) 同步用户手册（2026-10-31 起；手册的版本标注靠的就是这个 tag，机制见上文「文档与 Wiki」）。
 
 | 入口                                 | 什么时候                                                              | 编什么                                       | 发布?                          |
 | ------------------------------------ | --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------ |
