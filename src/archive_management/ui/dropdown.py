@@ -273,6 +273,19 @@ class DropdownPopup:
             listbox.pack(side="left", fill="both", expand=True)
             for value in self.values:
                 listbox.insert("end", value)
+            # 量一行的**真**行高: Listbox 实排的行距与字体 linespace 有出入(它还排自己的
+            # 行距, 亚像素上还会各自取整), 按行数限高/摆位都用这个数才准 —— 2026-10-30
+            # 实测估 15px/行、实排 ~15.3px/行, 乘十行差出小半行, 估高写窗口会把尾行
+            # 裁掉。两档请求高度的差值就是它自己认的一行高度, 不依赖窗口已显示。
+            window.update_idletasks()
+            one_row = int(listbox.winfo_reqheight())
+            listbox.configure(height=2)
+            window.update_idletasks()
+            two_rows = int(listbox.winfo_reqheight())
+            listbox.configure(height=1)
+            measured = two_rows - one_row
+            if measured > 0:
+                self.row_height = measured
         except tk.TclError:  # pragma: no cover - 锚点在弹出途中被销毁
             return False
         self.window, self.listbox = window, listbox
@@ -371,17 +384,27 @@ class DropdownPopup:
         listbox.configure(height=plan.visible_rows)
         if plan.scrolls and self.scrollbar is None:
             self._add_scrollbar()
-        self._mark_current()
+        # 先记下计划再标当前值: _mark_current 要按"这一屏显示几行"决定怎么滚.
         self.plan = plan
+        self._mark_current()
 
     def _write(self, left: int, width: int, plan: DropdownPlan) -> None:
-        """把算出来的位置与高度写进浮层窗口(高度算上描边)."""
+        """把算出来的位置与高度写进浮层窗口(高度算上描边).
+
+        内容高度以 **Listbox 自己报的请求高度**为准, 不用 ``plan.height``: 估的行高
+        (字体 linespace 取整)与它实际排的行距有亚像素差, 乘上十行就差出小半行 ——
+        窗口矮了那么一点, 尾行被窗沿裁成一条读不出字的窄带, 看起来就像"多了一条
+        空白选项"(2026-10-30 实测: 估 15px/行、实排 ~15.3px/行, 150px 的窗口只装
+        得下 9.x 行, ``yview`` 落在 (0, 0.9))。请求高度是 Listbox 按自己的行距算的,
+        以它为准就不会裁行; ``plan`` 那份估高只用来判"往哪边展开、压到几行"。
+        """
         window = self.window
-        if window is None:  # pragma: no cover - 只在本类的 _place 里调
+        listbox = self.listbox
+        if window is None or listbox is None:  # pragma: no cover - 只在本类内部调
             return
-        window.geometry(
-            f"{width}x{plan.height + 2 * DROPDOWN_BORDER}+{left}+{plan.top}"
-        )
+        window.update_idletasks()
+        height = max(plan.height, int(listbox.winfo_reqheight()))
+        window.geometry(f"{width}x{height + 2 * DROPDOWN_BORDER}+{left}+{plan.top}")
 
     def _add_scrollbar(self) -> None:
         """内容超过上限时右侧挂一条滚动条.
@@ -417,7 +440,13 @@ class DropdownPopup:
         self.scrollbar = scrollbar
 
     def _mark_current(self) -> None:
-        """把当前值标成选中项并滚到它: 打开就看得见"现在选的是哪个"."""
+        """把当前值标成选中项; 超出首屏时把它顶到视野**最上沿**.
+
+        ``see()`` 是最小滚动: 选中项贴在视野底边, 于是开头几行被滚出视野 —— 用户
+        2026-10-30 反馈"选了靠下的选项后, 下拉框自动向下滚动遮住了第一个选项"。
+        Windows 原生下拉在选中项超出首屏时是"以选中项为第一行往下排", 这里对齐它:
+        选中项永远可见, 往下还能多看到几行候选(往下挑比回头挑常见)。
+        """
         listbox = self.listbox
         if listbox is None:  # pragma: no cover - 只在本类的 _place 里调
             return
@@ -432,7 +461,13 @@ class DropdownPopup:
             index = self.values.index(current)
             listbox.selection_set(index)
             listbox.activate(index)
-            listbox.see(index)
+            visible = self.plan.visible_rows if self.plan else 0
+            if visible and index >= visible:
+                listbox.yview_moveto(index / len(self.values))
+            else:
+                # 首屏装得下: 视图钉回最上 —— 首次 _mark_current 跑在估高的旧几何上,
+                # see() 会按"差半行装不下"多滚一行, 这里把那点偏移一并归零.
+                listbox.yview_moveto(0.0)
 
     # -- 交互 ------------------------------------------------------------
     def _bind_interactions(self) -> None:
