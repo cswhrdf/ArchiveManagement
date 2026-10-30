@@ -64,14 +64,14 @@ _SCREEN_MARGIN = 120
 # 成段说明的左右内裐(单侧): 面板里的说明都按 padx=16 排版, 算可用宽度时要减掉两侧。
 _HINT_PAD = 16
 # 说明 wraplength 的下限: 这里**不能用**默认的 widgets.WRAPLENGTH_MINIMUM(240) ——
-# 窗口宽度写死不可缩放, 而右列控件会变宽(语言下拉框在 macOS 上更宽), 那时左列说明只剩
-# 228; 掉 240 当地板会把 228 抬回 240, 右边照样被裁(2026-10-01 的 macOS CI 就是这么
-# 红的: “界面语言”说明被切掉 12px)。
+# 有说明的那一格可能比 240 还窄(2026-10-01 的 macOS CI 实测: 右列下拉框更宽时左列那格
+# 只剩 228, 掉 240 当地板会把 228 抬回 240, 右边照样被裁, 当时被切掉 12px 的就是
+# “界面语言”的说明)。成段说明从设置面板移走后(见 docs/ui-notes.md), 窄格里常驻的成段
+# 说明只剩页脚那一条, 这个下限对状态行/错误行同样是保护。
 _HINT_MIN_WRAPLENGTH = 120
-# 说明的"落位"宽度(还没量出可用宽度之前就按它排): 左列说明右侧被下拉框占掉约 172px,
-# 跨两列的说明几乎占满面板, 页脚那一格右侧还有一个"关闭"按钮。这三个值**只影响窗口刚
-# 建起来那一瞬间** —— 窗口高度按内容算, 落位与实际差得多就会先长/短一下再弹回去。
-_HINT_INITIAL_WRAPLENGTH = 240
+# 说明的"落位"宽度(还没量出可用宽度之前就按它排): 现在的成段说明都是跨两列的状态行/
+# 错误行(几乎占满面板), 页脚那一格右侧还有一个"关闭"按钮。这两个值**只影响窗口刚建起
+# 来那一瞬间** —— 窗口高度按内容算, 落位与实际差得多就会先长/短一下再弹回去。
 _WIDE_INITIAL_WRAPLENGTH = 400
 _NOTE_INITIAL_WRAPLENGTH = 320
 # 应用一个新组合键; 返回 None 表示成功, 否则返回可直接展示的失败说明.
@@ -243,21 +243,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._appearance_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
-        self._appearance_hint = ctk.CTkLabel(
-            self._appearance_panel,
-            text=tr("settings.appearance_hint"),
-            anchor="w",
-            justify="left",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
-        )
-        self._appearance_hint.grid(row=1, column=0, padx=16, sticky="ew")
-        self._track_hint(
-            self._appearance_panel,
-            self._appearance_hint,
-            initial=_HINT_INITIAL_WRAPLENGTH,
-        )
+        self._appearance_title.grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
         self._toggle_btn = ctk.CTkButton(
             self._appearance_panel,
             text=self._toggle_text(),
@@ -270,7 +256,7 @@ class SettingsWindow:
             text_color=palette.accent_text,
             font=ctk.CTkFont(size=12),
         )
-        self._toggle_btn.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
+        self._toggle_btn.grid(row=0, column=1, padx=16, pady=16)
         self._theme_label = ctk.CTkLabel(
             self._appearance_panel,
             text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}")),
@@ -279,7 +265,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._theme_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 6), sticky="w"
+            row=1, column=0, columnspan=2, padx=16, pady=(0, 6), sticky="w"
         )
         # 界面字号: 1rem = 这个值(默认 16px), 界面里所有字号等比缩放。
         self._font_label = ctk.CTkLabel(
@@ -289,7 +275,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
         )
-        self._font_label.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="w")
+        self._font_label.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="w")
         self._font_box = ctk.CTkComboBox(
             self._appearance_panel,
             values=[self._font_label_of(size) for size in FONT_CHOICES],
@@ -311,7 +297,7 @@ class SettingsWindow:
             state="readonly",
         )
         self._font_box.set(self._font_label_of(self._base_font_px))
-        self._font_box.grid(row=3, column=1, padx=16, pady=(0, 16))
+        self._font_box.grid(row=2, column=1, padx=16, pady=(0, 16))
 
         # 记住窗口大小与位置(默认开): 与调试开关同一套写法 —— 只改控件的值不触发
         # command, 所以失败回滚不会递归回调。
@@ -328,21 +314,23 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_remember_switch(self._remember_window)
-        self._remember_switch.grid(row=4, column=0, columnspan=2, padx=16, sticky="w")
-        self._remember_hint = ctk.CTkLabel(
+        self._remember_switch.grid(row=3, column=0, columnspan=2, padx=16, sticky="w")
+        # 开关不带说明行(行为见 docs/features.md): 这行平时留空, 应用失败时才把原因写
+        # 在这里; 它同时撑着面板最后一行的底部留白(贴边的控件会盖住面板自己的下边框)。
+        self._remember_error = ctk.CTkLabel(
             self._appearance_panel,
-            text=tr("settings.remember_window_hint"),
+            text="",
             anchor="w",
             justify="left",
             font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            text_color=palette.danger,
         )
-        self._remember_hint.grid(
-            row=5, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
+        self._remember_error.grid(
+            row=4, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
         )
         self._track_hint(
             self._appearance_panel,
-            self._remember_hint,
+            self._remember_error,
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
@@ -362,21 +350,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._language_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
-        self._language_hint = ctk.CTkLabel(
-            self._language_panel,
-            text=tr("settings.language_hint"),
-            anchor="w",
-            justify="left",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
-        )
-        self._language_hint.grid(row=1, column=0, padx=16, sticky="ew")
-        self._track_hint(
-            self._language_panel,
-            self._language_hint,
-            initial=_HINT_INITIAL_WRAPLENGTH,
-        )
+        self._language_title.grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
         self._language_box = ctk.CTkComboBox(
             self._language_panel,
             values=list(self._locales),
@@ -395,7 +369,7 @@ class SettingsWindow:
             dropdown_font=ctk.CTkFont(size=12),
         )
         self._language_box.set(self._locale_label(self._language))
-        self._language_box.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
+        self._language_box.grid(row=0, column=1, padx=16, pady=16)
         self._language_label = ctk.CTkLabel(
             self._language_panel,
             text=tr(
@@ -408,7 +382,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._language_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+            row=1, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
         )
         self._track_hint(
             self._language_panel,
@@ -432,21 +406,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._logging_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
-        self._logging_hint = ctk.CTkLabel(
-            self._logging_panel,
-            text=tr("settings.logging_hint"),
-            anchor="w",
-            justify="left",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
-        )
-        self._logging_hint.grid(row=1, column=0, padx=16, sticky="ew")
-        self._track_hint(
-            self._logging_panel,
-            self._logging_hint,
-            initial=_HINT_INITIAL_WRAPLENGTH,
-        )
+        self._logging_title.grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
         self._debug_switch = ctk.CTkSwitch(
             self._logging_panel,
             text=tr("settings.debug_logging"),
@@ -460,7 +420,7 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_debug_switch(self._debug)
-        self._debug_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
+        self._debug_switch.grid(row=0, column=1, padx=16, pady=16)
         self._debug_label = ctk.CTkLabel(
             self._logging_panel,
             text=self._debug_state_text(),
@@ -470,7 +430,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._debug_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+            row=1, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
         )
         self._track_hint(
             self._logging_panel,
@@ -494,21 +454,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_primary,
         )
-        self._activation_title.grid(row=0, column=0, padx=16, pady=(16, 2), sticky="w")
-        self._activation_hint = ctk.CTkLabel(
-            self._activation_panel,
-            text=tr("settings.activation_hint"),
-            anchor="w",
-            justify="left",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
-        )
-        self._activation_hint.grid(row=1, column=0, padx=16, sticky="ew")
-        self._track_hint(
-            self._activation_panel,
-            self._activation_hint,
-            initial=_HINT_INITIAL_WRAPLENGTH,
-        )
+        self._activation_title.grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
         self._activation_switch = ctk.CTkSwitch(
             self._activation_panel,
             text=tr("settings.activation_auto"),
@@ -522,7 +468,7 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_activation_switch(self._activation)
-        self._activation_switch.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
+        self._activation_switch.grid(row=0, column=1, padx=16, pady=16)
         self._activation_label = ctk.CTkLabel(
             self._activation_panel,
             text=self._activation_state_text(),
@@ -532,7 +478,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._activation_label.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+            row=1, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
         )
         self._track_hint(
             self._activation_panel,
@@ -541,7 +487,8 @@ class SettingsWindow:
         )
 
         # 备份校验方式: 严格(逐文件比对内容哈希)还是快(只核对名称与大小)。选哪一种
-        # 会直接改变备份与还原的耗时, 因此这句说明里写清了代价; 并发的校验任务数由
+        # 会直接改变备份与还原的耗时, 两种方式的代价写在 docs/features.md 的「备份、
+        # 分支与时间线」一节(2026-10-30 起设置面板不再放成段说明); 并发的校验任务数由
         # 程序按本机情况定(见 services.verification), 只读展示, 不在这里改。
         self._verification_panel = ctk.CTkFrame(
             self._body,
@@ -560,21 +507,7 @@ class SettingsWindow:
             text_color=palette.text_primary,
         )
         self._verification_title.grid(
-            row=0, column=0, padx=16, pady=(16, 2), sticky="w"
-        )
-        self._verification_hint = ctk.CTkLabel(
-            self._verification_panel,
-            text=tr("settings.verification_hint"),
-            anchor="w",
-            justify="left",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
-        )
-        self._verification_hint.grid(row=1, column=0, padx=16, sticky="ew")
-        self._track_hint(
-            self._verification_panel,
-            self._verification_hint,
-            initial=_HINT_INITIAL_WRAPLENGTH,
+            row=0, column=0, padx=16, pady=(16, 6), sticky="w"
         )
         self._verification_box = ctk.CTkComboBox(
             self._verification_panel,
@@ -594,7 +527,7 @@ class SettingsWindow:
             dropdown_font=ctk.CTkFont(size=12),
         )
         self._verification_box.set(self._verification_label(self._verification_mode))
-        self._verification_box.grid(row=0, column=1, rowspan=2, padx=16, pady=16)
+        self._verification_box.grid(row=0, column=1, padx=16, pady=16)
         self._verification_status = ctk.CTkLabel(
             self._verification_panel,
             text=self._verification_state_text(),
@@ -604,7 +537,7 @@ class SettingsWindow:
             text_color=palette.text_muted,
         )
         self._verification_status.grid(
-            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+            row=1, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
         )
         self._track_hint(
             self._verification_panel,
@@ -691,24 +624,8 @@ class SettingsWindow:
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
-        # 这条说明是"为什么我按的键不被接受"的唯一出处, 因此用正文色(而不是最弱的
-        # 灰字) —— 它还要配得上"录制中"时被反复阅读(评审时定的)。
-        self._shortcut_hint = ctk.CTkLabel(
-            self._shortcut_panel,
-            text=tr("settings.shortcut_hint"),
-            anchor="w",
-            justify="left",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_body,
-        )
-        self._shortcut_hint.grid(
-            row=2 + len(_SHORTCUT_ROWS), column=0, columnspan=2, padx=16, sticky="ew"
-        )
-        self._track_hint(
-            self._shortcut_panel,
-            self._shortcut_hint,
-            initial=_WIDE_INITIAL_WRAPLENGTH,
-        )
+        # 错误行平时留空不占注意: 组合键为什么不被接受的规则在 docs/hotkeys.md 的
+        # 「自定义组合键」一节, 真按错时这里会写出具体原因(hotkey.err_*)。
         # 面板最后一行的底部留白不能省: 贴边的文字会盖住面板自己的下边框。
         self._shortcut_error = ctk.CTkLabel(
             self._shortcut_panel,
@@ -719,7 +636,7 @@ class SettingsWindow:
             text_color=palette.danger,
         )
         self._shortcut_error.grid(
-            row=3 + len(_SHORTCUT_ROWS),
+            row=2 + len(_SHORTCUT_ROWS),
             column=0,
             columnspan=2,
             padx=16,
@@ -994,21 +911,21 @@ class SettingsWindow:
     def _on_remember_toggled(self) -> None:
         """切换"记住窗口大小与位置": 交给主窗口应用与落盘; 失败时拨回去.
 
-        关掉时主窗口顺手把已经记下的几何从配置里删掉(它自己那侧负责), 界面上只用一下
-        开关的状态表达成功与否 —— 不需要再单独一行状态文字。
+        关掉时主窗口顺手把已经记下的几何从配置里删掉(它自己那侧负责); 成功与否由开关
+        的位置表达, 错误行只在失败时写原因(平时留空)。
         """
         wanted = bool(self._remember_switch.get())
         if wanted == self._remember_window:
             return
         error = self._on_apply_remember_window(wanted)
         if error is not None:
-            self._remember_hint.configure(
+            self._remember_error.configure(
                 text=tr("settings.remember_failed", reason=error)
             )
             self._set_remember_switch(self._remember_window)
             return
         self._remember_window = wanted
-        self._remember_hint.configure(text=tr("settings.remember_window_hint"))
+        self._remember_error.configure(text="")
 
     # -- 交互 ---------------------------------------------------------------
 
@@ -1041,17 +958,12 @@ class SettingsWindow:
             (self._activation_title, palette.text_primary),
             (self._verification_title, palette.text_primary),
             (self._shortcut_title, palette.text_primary),
-            (self._appearance_hint, palette.text_hint),
-            (self._language_hint, palette.text_hint),
             (self._language_label, palette.text_muted),
             (self._font_label, palette.text_body),
-            (self._logging_hint, palette.text_hint),
             (self._debug_label, palette.text_muted),
-            (self._activation_hint, palette.text_hint),
             (self._activation_label, palette.text_muted),
-            (self._verification_hint, palette.text_hint),
             (self._verification_status, palette.text_muted),
-            (self._shortcut_hint, palette.text_body),
+            (self._remember_error, palette.danger),
             (self._capture_status, palette.accent),
             (self._shortcut_error, palette.danger),
             (self._note_label, palette.text_hint),
@@ -1076,9 +988,6 @@ class SettingsWindow:
                 button_hover_color=palette.item_hover,
                 fg_color=palette.input_bg,
             )
-        # 开关下面那行说明也是文字控件: 漏在重绘表外时它会留着旧主题的次要色
-        # (实测: 切主题后它的 text_color 仍属于上一套调色板)。
-        self._remember_hint.configure(text_color=palette.text_muted)
         # 下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
         for box in (self._font_box, self._language_box, self._verification_box):
             _paint_combo(box, palette)

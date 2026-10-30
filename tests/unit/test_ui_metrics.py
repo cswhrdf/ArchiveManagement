@@ -69,7 +69,10 @@ _EXPECTED_RADIUS_SITES = 66
 # 字号站点 176 → 174: 那两枚 CTkSwitch 换成"状态词 + 按钮"(2026-10-21) —— 开关自己的
 # `CTkFont(size=12)` 跟着没了; 换上的 `kit.label(size=12)` 与 `kit.button(...)` 不在调用方
 # 建字体(字体在 widgets 里统一定)。
-_EXPECTED_FONT_SITES = 174
+# 字号站点 174 → 168: 设置窗口移除六个面板的成段说明(2026-10-30, 文案归 docs/ui-notes.md)
+# —— 每条说明自带一个 `CTkFont(size=12)`; “记住窗口”开关下那行原位改成错误行,
+# 它的 `CTkFont(size=11)` 保留。
+_EXPECTED_FONT_SITES = 168
 # 字号站点 178 → 174: 导入对话框移除“合并到”目标选择区(2026-10-20) —— 单包的目标
 # 小标题与锁定/解锁两行提示、批量卡片的目标下拉框字体, 共 4 处 `CTkFont(size=..)`
 # 跟着删除; 同名那一款改由后端按原始名称自动确定。
@@ -118,7 +121,10 @@ _EXPECTED_FONT_SITES = 174
 # 固定的 ``pady=(6, 0)`` 之后是两个整数, 于是多算 1 个站点。
 # 间距站点 802 → 798: 任务卡不再重复概要区的"下次运行"(2026-10-22) —— 那两行
 # (说明 ``padx=16`` 与值的 ``padx=16``/``pady=(2, 0)``)一起删掉, 4 个整数都在刻度上。
-_EXPECTED_SPACE_SITES = 798
+# 间距站点 798 → 792: 设置窗口移除六个面板的成段说明(2026-10-30, 文案归
+# docs/ui-notes.md) —— 每条说明那句 grid 的 ``padx=16`` 跟着删; “记住窗口”开关下那行
+# 原位改成错误行, 它的 ``padx``/``pady`` 原样保留(站点数不变)。
+_EXPECTED_SPACE_SITES = 792
 
 
 def _integers(node: ast.expr) -> list[int]:

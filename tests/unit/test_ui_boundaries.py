@@ -18,7 +18,6 @@ from typing import Any, cast
 import pytest
 
 from archive_management.exceptions import ArchiveManagementError
-from archive_management.i18n import tr
 from archive_management.ui import (
     activation_page,
     schedule_window,
@@ -218,30 +217,28 @@ def test_the_remember_switch_flips_back_when_applying_fails() -> None:
     window: Any = settings_window.SettingsWindow.__new__(settings_window.SettingsWindow)
     window._remember_window = False
     window._remember_switch = _SwitchStub(wanted=True)
-    window._remember_hint = _WidgetStub()
+    window._remember_error = _WidgetStub()
     window._on_apply_remember_window = _refuse
 
     window._on_remember_toggled()
 
     assert window._remember_switch.deselected == 1
     assert window._remember_window is False
-    assert "配置只读" in str(window._remember_hint.configured[-1]["text"])
+    assert "配置只读" in str(window._remember_error.configured[-1]["text"])
 
     window._remember_switch = _SwitchStub(wanted=True)
     window._on_apply_remember_window = lambda _wanted: None
     window._on_remember_toggled()
 
     assert window._remember_window is True, "成功之后才把新状态记下来"
-    assert window._remember_hint.configured[-1]["text"] == tr(
-        "settings.remember_window_hint"
-    )
+    assert window._remember_error.configured[-1]["text"] == "", "成功时要把错误行清空"
 
     # 开关已经是记下来的那个状态(重复收到同一次切换) → 不去打扰主窗口。
-    window._remember_hint.configured.clear()
+    window._remember_error.configured.clear()
     window._on_apply_remember_window = _refuse
     window._on_remember_toggled()
 
-    assert window._remember_hint.configured == []
+    assert window._remember_error.configured == []
 
 
 class _SwitchStub:

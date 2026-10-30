@@ -30,7 +30,7 @@ from archive_management.services.hotkeys import (
     format_accelerator,
 )
 from archive_management.ui.main_window import ArchiveApp
-from archive_management.ui.widgets import scaled_px, scrollbar_needed
+from archive_management.ui.widgets import scrollbar_needed
 from button_support import (
     _drain,
     _label_texts,
@@ -511,10 +511,11 @@ def test_settings_choices_cannot_be_hand_edited(
 def test_settings_window_fits_its_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """设置窗口的高度按内容算: 底部说明与"关闭"按钮必须在窗口里, 说明也不能被裁.
+    """设置窗口的高度按内容算: 底部说明与"关闭"按钮必须在窗口里, 状态行也不能被裁.
 
-    说明文字会随语言换行(实测中文 630px、英文 644px), 写死高度时"关闭"按钮会被推到
-    窗口外面 —— 用户看不到也点不到; 界面语言的说明还会被右侧下拉框挤掉一截。
+    文字会随语言换行, 写死高度时"关闭"按钮会被推到窗口外面 —— 用户看不到也点不到
+    (2026-10 实测: 面板还带成段说明时中文要 630px、英文要 644px)。成段说明移出后,
+    面板里常驻的多行文字是各面板的状态行与页脚说明。
     """
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -536,72 +537,15 @@ def test_settings_window_fits_its_content(
         hint = f"{name}被推出窗口: {edge} > {bottom}"
         assert edge <= bottom, hint
     for name, label in (
-        ("外观说明", window._appearance_hint),
-        ("界面语言说明", window._language_hint),
-        ("快捷键说明", window._shortcut_hint),
+        ("界面语言当前值", window._language_label),
+        ("调试状态", window._debug_label),
+        ("启停状态", window._activation_label),
+        ("校验状态", window._verification_status),
+        ("页脚说明", window._note_label),
     ):
         cut = label.winfo_reqwidth() - label.winfo_width()
         hint = f"{name}被裁掉 {cut}px(换行宽度超过了可用宽度)"
         assert cut <= 1, hint
-
-
-def test_settings_window_hints_follow_a_narrow_column(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """说明的换行宽度要跟着**它自己那一格**走: 一格只有 228px 时不能还按 240 排.
-
-    CI 的 macOS runner 上说明那一格比 Windows 窄 16px(控件度量不同), 那时写死的
-    ``wraplength=240`` 会让 Tk 按 240 排成一行, 再在标签边界处硬裁掉右边 12px: 既不换行
-    也没有省略号, 后半句直接看不到(2026-10-01 的 :func:`test_settings_window_fits_its_content`
-    报的就是"界面语言说明被裁掉 12px")。本机桌面宽, 原样永远量不出那一格, 所以这里把右列
-    两个下拉框各撑宽 16px 来复现同一个窄列 —— 量的是"说明有没有跟着这一格换行", 不是控件
-    宽度本身。
-    """
-    from archive_management.ui.demo_backend import DemoArchiveService
-
-    _patch_dialogs(monkeypatch)
-    app = gui_app(_new_app, DemoArchiveService(delay=0))
-    _pump(app)
-    window = _settings_window(app, [])
-    assert _wait_for(app, lambda: window._note_label.winfo_width() > 1), "窗口未布局"
-
-    # 右列变宽 = 左边那一格被挤窄(macOS 上由控件度量造成, 这里手动复现)。
-    window._language_box.configure(width=156)
-    window._font_box.configure(width=156)
-
-    narrow = (
-        ("外观说明", window._appearance_hint),
-        ("界面语言说明", window._language_hint),
-        ("日志说明", window._logging_hint),
-        ("自动启停说明", window._activation_hint),
-    )
-    wide = (
-        ("界面语言当前值", window._language_label),
-        ("调试状态", window._debug_label),
-        ("启停状态", window._activation_label),
-        ("快捷键说明", window._shortcut_hint),
-        ("页脚说明", window._note_label),
-    )
-    # 界面语言的说明文案在 240 宽度下正好要 240px —— 报错里那 12px 就是从这里来的,
-    # 所以它这一格一窄过 240 就是"按 240 排、右边被裁"的现场。
-    language = window._language_hint
-    # 240 是**设计**值(逻辑像素), 而 ``winfo_width`` 是物理像素: 125% 的屏上窄列
-    # 实测 285(=228 逻辑), 拿逻辑值直接比就是假红。
-    narrow_limit = scaled_px(language, 240)
-    assert _wait_for(app, lambda: 1 < language.winfo_width() < narrow_limit), (
-        f"界面语言说明这一格没被挤窄: {language.winfo_width()}"
-    )
-    # 窄列已经成立, 现在等说明按这一格重排完(延后到 idle 才量宽)。
-    cut = language.winfo_reqwidth() - language.winfo_width()
-    assert _wait_for(
-        app, lambda: language.winfo_reqwidth() <= language.winfo_width()
-    ), (
-        f"说明的换行宽度没跟着被挤窄的那一格收窄: 这一格 {language.winfo_width()}px, "
-        f"说明要 {language.winfo_reqwidth()}px(裁掉 {cut}px)"
-    )
-    for name, label in narrow + wide:
-        cut = label.winfo_reqwidth() - label.winfo_width()
-        assert cut <= 1, f"{name}被裁掉 {cut}px(换行宽度没跟着这一格走)"
 
 
 def test_settings_window_scrollbar_only_when_the_content_overflows(
