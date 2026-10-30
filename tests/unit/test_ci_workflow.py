@@ -1377,6 +1377,96 @@ def test_the_release_workflow_only_publishes_from_main() -> None:
     assert "needs.build.outputs.version" in publish, hint
     assert "needs.build.outputs.label" in publish, hint
 
+    # 正式版一发布, dev 的预发布就作废: 仓库里同时挂着"最新正式版 + 更旧的 dev 快照", 用户只会
+    # 下错包。所以发包前要按 `isPrerelease` 把它们删掉(连 tag), 而且必须排在建 Release **之前**。
+    assert "--prerelease" not in publish, (
+        "合入 main 的这一档发的必须是正式版: 预发布只从 dev 快照档出"
+    )
+    assert "isPrerelease" in publish, "要按预发布标记筛出来删, 不能碰正式版"
+    assert "--yes --cleanup-tag" in publish, (
+        "删 Release 要连 tag 一起删, 否则 tag 列表会堆脏"
+    )
+    assert publish.index("Delete the previous pre-releases") < publish.index(
+        "Create the release"
+    ), "顺序反了就等于删不掉刚发出去的那个"
+
+
+def test_the_dev_snapshot_workflow_requires_ci_and_publishes_a_pre_release() -> None:
+    """dev 的手动快照档: 版本号四段、只看跑绿的提交、产出带 Pre-release 标签的包.
+
+    四条判据, 每条都对着一个"看起来在工作、其实没有"的写法:
+
+    ① **手动触发且串行**: 自动跑会在每次 push 时产一堆快照; 并发的两条会算出同一个第 4 位,
+       然后把对方刚发的预发布删掉(`dev-release` 的 concurrency 组固定, 不按 ref 分);
+    ② **前置是"这个提交的 ci.yml 全绿"**: 只列一下运行记录而不判结论, 等于没有这道门 ——
+       拿到红的提交出包就绕过了本仓库唯一的质量关;
+    ③ **版本号来自脚本**(`dev_snapshot_version.py`, 四段), 并且 `checks: build-only` +
+       `version_override`: 不在 Windows runner 上重跑一遍全量, 而覆盖版本号只允许配 build-only;
+    ④ **预发布标签 + 删旧预发布**, 且删除排在创建之前。
+    """
+    text = ci_workflow.DEV_RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    head = text.split("\njobs:", 1)[0]
+
+    assert "workflow_dispatch:" in head, "dev 快照只能手动触发"
+    for trigger in ("push:", "pull_request:", "release:", "schedule:"):
+        assert trigger not in head, f"不该有 {trigger} 触发: 快照只手动出"
+    assert "cancel-in-progress: false" in head, (
+        "排队的那条也要发它自己的快照, 不能被取消"
+    )
+    assert "group: dev-release" in head, (
+        "组名不按 ref 分: 两条并发会互相删掉对方的预发布"
+    )
+    assert re.search(r"^permissions:\n  contents: read$", head, re.MULTILINE), (
+        "顶层只读, 写权限只给发预发布那个作业"
+    )
+
+    # 只看真正生效的行: 注释里提一句 `--prerelease` / `gh run list` 就能把这些断言喂饱
+    # —— 2026-10-31 咬合验证当场踩到(删掉 `--prerelease` 后守卫照样绿)。
+    prepare = _without_comments(ci_workflow.job_block(text, "prepare"))
+    assert "gh run list" in prepare, "前置条件是去查这个提交上的 ci.yml 运行"
+    assert "--workflow ci.yml" in prepare, "查的必须是 CI 这一份, 不是别的运行"
+    assert "actions: read" in prepare, (
+        "gh run list 走 Actions 的 REST API: 顶层只读会把未声明的范围置成 none"
+    )
+    assert "--commit" in prepare, "要按提交查, 不能按分支(分支头随时会动)"
+    assert "pending" in prepare, "只列运行记录而不判结论等于没有这道门: 未完成的要拦住"
+    assert "failed" in prepare, "失败的那条也必须拦住"
+    version_step = prepare.split("- name: Compute the four-part snapshot version", 1)[
+        1
+    ].split("- name:", 1)[0]
+    assert "python3 scripts/dev_snapshot_version.py" in version_step, (
+        "四段版本号由脚本按 git 历史算(只用标准库, 不装 uv)"
+    )
+    assert '"$GITHUB_OUTPUT"' in version_step, "算出来的号要透传给构建"
+
+    build = _without_comments(ci_workflow.job_block(text, "build"))
+    assert "uses: ./.github/workflows/release-build.yml" in build, (
+        "构建只留一处定义: 与正式版、门禁跑同一份"
+    )
+    assert "steps:" not in build, "转调作业里不该有自己的步骤"
+    assert "checks: build-only" in build, (
+        "CI 已经跑过全量, 不在 Windows runner 上重来一遍"
+    )
+    assert "version_override: ${{ needs.prepare.outputs.version }}" in build, (
+        "要让产物里的版本号也变成快照号, 而不只是 Release 的 tag"
+    )
+
+    snapshot = _without_comments(ci_workflow.job_block(text, "snapshot"))
+    assert re.search(
+        r"^    permissions:\n      contents: write$", snapshot, re.MULTILINE
+    ), "发 Release(以及删旧的)需要写权限, 且只给这个作业"
+    assert "--prerelease" in snapshot, "不标预发布会被 GitHub 当成最新正式版"
+    assert '--target "$SHA"' in snapshot, (
+        "不给 --target 时 tag 会指向默认分支的当前 HEAD, 而不是被 CI 验过的那个提交"
+    )
+    assert "isPrerelease" in snapshot, "要按预发布标记筛出来删, 不能碰正式版"
+    assert "--yes --cleanup-tag" in snapshot, (
+        "删 Release 要连 tag 一起删, 否则 tag 列表会堆脏"
+    )
+    assert snapshot.index("Delete the previous pre-releases") < snapshot.index(
+        "Create the pre-release"
+    ), "顺序反了等于删不掉刚发的那个"
+
 
 def test_the_release_workflow_bumps_the_patch_version_by_default() -> None:
     """合入 main 之后自动定版: 默认第 3 位加 1, 大版本靠 PR 里手改 packaging.py 声明.
@@ -1499,10 +1589,14 @@ def test_the_packaging_gate_path_never_holds_write_permission() -> None:
     assert "contents: write" not in _without_comments(build), (
         "只读的构建里不许出现写权限(说明里引用报错原文不算)"
     )
-    hint = "门禁只传这两样(要构建哪个 ref、检查档位); 发布开关属于 release.yml"
-    assert set(re.findall(r"\n      ([a-z]+):\n", head)) == {
+    hint = (
+        "门禁传的是要构建哪个 ref 与检查档位(预发布覆盖版本号只在 dev-release.yml 用, "
+        "发布开关属于 release.yml)"
+    )
+    assert set(re.findall(r"\n      ([a-z_]+):\n", head)) == {
         "ref",
         "checks",
+        "version_override",
         "version",
         "label",
     }, hint

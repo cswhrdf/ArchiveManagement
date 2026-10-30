@@ -1,0 +1,170 @@
+name: Dev Pre-release
+
+# **dev 的手动快照档(2026-10-31 起)**: 给 `dev` 编一份带 Pre-release 标签的包, 供"想先试试"的
+# 人下载。与正式版的关系见 docs/development.md 的「发布」节:
+#   * 正式版只从 `main` 发(release.yml), 版本号是三段, 唯一的真相是 packaging.py;
+#   * 这里的版本号是**四段** `<基础版本>.<第 4 位>`, 完全由 git 历史算出来
+#     (scripts/dev_snapshot_version.py): 第 4 位 = 距最近一次正式发布的提交数。
+#     四段 tag 不会被定版脚本看见(release_bump.py 只认三段), 所以预发布不会打乱正式版。
+#
+# **手动触发, 且前置是这个提交已经跑过 CI**: 拿红的提交出包等于绕过本仓库唯一的质量门,
+# 所以 prepare 作业先查 `ci.yml` 在这个提交上的运行(全部完成、全部成功)才往下走。
+#
+# 预发布只留**最新一份**: 发包前把此前所有 Pre-release 删掉(连 tag 一起), 否则 Release 页会
+# 被一堆 dev 快照淹掉, 也没人说得清哪份是当前的。正式版发布时同样会清掉它们(release.yml)。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要出快照的分支或提交(默认 dev)"
+        required: false
+        default: dev
+        type: string
+
+# 一次只跑一条: 两条并发会算出同一个第 4 位, 然后互相把对方刚发的预发布删掉。
+concurrency:
+  group: dev-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# 这个工作流自己不装 uv(构建在被调用的 release-build.yml 里), 留着这一行只为与另外三份口径一致
+# —— 守卫要求每个工作流顶层都关掉 `uv run` 的隐式 sync。
+env:
+  UV_NO_SYNC: "1"
+
+jobs:
+  prepare:
+    name: 校验 CI 与算快照版本
+    runs-on: ubuntu-latest
+    # 顶层只给了 `contents: read`，而 `gh run list` 走的是 Actions 的 REST API：
+    # 不声明 `actions: read` 会被 403 拦掉（未声明的范围在作业级权限里是 none）。
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+      base: ${{ steps.version.outputs.base }}
+      build: ${{ steps.version.outputs.build }}
+      previous: ${{ steps.version.outputs.previous }}
+    steps:
+      - name: Check out the requested ref
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          # 第 4 位要数"距最近一次正式发布的提交数", 得拿到全部历史与 tag。
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Record the commit being snapshotted
+        id: meta
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Require a green CI run for this commit
+        # 判据是**全部**已完成的 ci.yml 运行都是成功(同一提交可能既有 push 又有 PR 两条):
+        # 有一条红或还在跑就不放行。只写 `gh run list` 而不判结论的话, 这个前置等于没有。
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          set -eu
+          list=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$SHA" --limit 20 --json status,conclusion \
+            --jq '.[] | "\(.status) \(.conclusion)"')
+          summary=$(printf '%s\n' "$list" | awk '
+            NF { total++; if ($1 != "completed") pending++; else if ($2 == "success") passed++; else if ($2 != "skipped") failed++ }
+            END { printf "%d %d %d %d\n", total, pending, passed, failed }')
+          read -r total pending passed failed <<< "$summary"
+          echo "ci.yml 在这个提交上: 共 $total 条, 成功 $passed, 未完成 $pending, 失败 $failed"
+          if [ "$total" -eq 0 ]; then
+            echo "::error::提交 $SHA 没有 ci.yml 的运行记录 —— 要么还没开始跑, 要么这次改动全在 ci.yml 的忽略清单里(纯文档)。纯文档提交不产生运行记录, 也就不出快照: 换成含代码改动的提交再触发。"
+            exit 1
+          fi
+          if [ "$pending" -gt 0 ]; then
+            echo "::error::提交 $SHA 的 ci.yml 还没跑完 —— 等它绿了再来。"
+            exit 1
+          fi
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::提交 $SHA 的 ci.yml 有失败记录 —— 预发布不能绕过质量门。"
+            exit 1
+          fi
+          if [ "$passed" -eq 0 ]; then
+            echo "::error::提交 $SHA 没有一条成功的 ci.yml 运行。"
+            exit 1
+          fi
+
+      - name: Compute the four-part snapshot version
+        id: version
+        # 只用标准库 + git: runner 自带的 python3 就够, 不装 uv 环境。
+        run: python3 scripts/dev_snapshot_version.py >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 构建预发布产物
+    needs: prepare
+    # 转调只读的构建工作流(构建步骤只有一处定义); 这个作业自己不跑命令。
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      # 上一步已经确认这个提交被 CI 跑绿了, 不在 Windows runner 上重跑一遍全量。
+      checks: build-only
+      version_override: ${{ needs.prepare.outputs.version }}
+
+  snapshot:
+    name: 发预发布
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      BASE: ${{ needs.prepare.outputs.base }}
+      BUILD: ${{ needs.prepare.outputs.build }}
+      PREVIOUS: ${{ needs.prepare.outputs.previous }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      LABEL: ${{ needs.build.outputs.label }}
+    steps:
+      - name: Download the build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ArchiveManagement-${{ needs.build.outputs.label }}-windows-x64
+          path: release
+
+      - name: Delete the previous pre-releases
+        # 预发布只留最新一份。`--cleanup-tag` 连 tag 一起删: 四段 tag 不是历史(正式版只认三段),
+        # 留着只会让 `git tag -l` 变脏, 而且这些包本来就随时会被下一份替换。
+        run: |
+          set -eu
+          tags=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isPrerelease --jq '.[] | select(.isPrerelease) | .tagName')
+          for tag in $tags; do
+            echo "删除旧的预发布 $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done
+
+      - name: Create the pre-release
+        # `--target` 必须给: 不给它时 gh 把新 tag 指向**默认分支的当前 HEAD**, 而我们发的是
+        # 刚才那个提交(--target 也保证 tag 落在被 CI 验过的那个提交上)。
+        # `--prerelease` 让 GitHub 不把它算作 Latest, /releases/latest 也不会指向它。
+        run: |
+          set -eu
+          cat > release-notes.md <<EOF
+          dev 快照(不是正式版): 基础版本 v$BASE 之后第 $BUILD 个提交。
+
+          - 快照版本: $VERSION(第四段 = 距最近一次正式发布的提交数, 越大越新)
+          - 基础版本: $BASE(最近一次正式发布; dev 的 packaging.py 不一定跟上)
+          - 提交: $SHA
+          - 构建: $LABEL
+
+          > 预发布随时会被下一份快照替换, 也会在下一次正式版发布时被删掉。要稳定使用请下最新正式版。
+          EOF
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "ArchiveManagement v$VERSION (dev 快照)" \
+            --prerelease \
+            --notes-file release-notes.md \
+            release/*

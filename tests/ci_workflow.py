@@ -20,9 +20,16 @@ RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 # 只读的构建工作流: ci.yml 的打包门禁与 release.yml 的发布档都调它(命令都在这一个文件里, 见
 # `UV_STEP_WORKFLOWS`)。
 RELEASE_BUILD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-build.yml"
+# dev 的手动快照档: 四段版本号 + Pre-release 标签, 构建同样交给上面那份只读工作流。
+DEV_RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "dev-release.yml"
 # 守"依赖分组 / `uv run` 的隐式 sync / 缓存输入"这批不变式的工作流: 构建那一份是上面两个的**共同
 # 下游**(门禁与发布各调它一次), 所以它一个不少地参与。
-UV_STEP_WORKFLOWS = (WORKFLOW, RELEASE_WORKFLOW, RELEASE_BUILD_WORKFLOW)
+UV_STEP_WORKFLOWS = (
+    WORKFLOW,
+    RELEASE_WORKFLOW,
+    RELEASE_BUILD_WORKFLOW,
+    DEV_RELEASE_WORKFLOW,
+)
 
 # runner 镜像 → 报告里的平台展示名(与 allurerc.mjs 的 matcher、runner.os 一致).
 OS_PLATFORMS = {

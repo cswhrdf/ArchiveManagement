@@ -285,14 +285,22 @@ uv run python scripts/smoke_packaged.py
 
 构建与发布分成**两份**工作流（判据与取舍落在 `docs/testing-ci.md`）：
 
-- [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml)（Build Windows Package，**只读**）：真正的构建作业 —— 装依赖、跑构建前检查、`--check` 图标指纹、PyInstaller、产物冒烟（结论转 Allure 结果，上传 `allure-results-smoke-windows`）、上传 artifact。有两个调用方（见下表）。
+- [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml)（Build Windows Package，**只读**）：真正的构建作业 —— 装依赖、跑构建前检查、`--check` 图标指纹、PyInstaller、产物冒烟（结论转 Allure 结果，上传 `allure-results-smoke-windows`）、上传 artifact。有三个调用方（见下表）。
 - [`.github/workflows/release.yml`](.github/workflows/release.yml)（Release Windows Package）：只负责“什么时候发”—— `push` 到 `main` 或手动触发；`classify` 作业先定版（2026-10-30 起：版本号没在 PR 里手动改过就把第 3 位加 1），然后 `uses:` 上面那份构建，`publish` 作业建 Release（写权限只在这一份里），最后由 `wiki` 作业在**发布之后**调 [`.github/workflows/wiki.yml`](.github/workflows/wiki.yml) 同步用户手册（2026-10-31 起；手册的版本标注靠的就是这个 tag，机制见上文「文档与 Wiki」）。
 
-| 入口                                 | 什么时候                                                              | 编什么                                       | 发布?                          |
-| ------------------------------------ | --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------ |
-| `ci.yml` 的 `windows-package` 作业   | **合入 `main` 的 PR**，且 CI 的结论（含覆盖率门槛与原生质量门）都过了 | 该 PR 的**合并预览提交**                     | ❌ 只上传 artifact（打包门禁） |
-| `release.yml` 的 `push` 到 `main`    | 合入之后                                                              | 定版后的提交（未手改版本时 = bump 提交）     | 每次都发（未手改则 patch+1）   |
-| `release.yml` 的 `workflow_dispatch` | 手动                                                                  | `ref` 指的分支或提交（`dev` 只有这一个入口） | 看 `publish` 开关              |
+| 入口                                 | 什么时候                                                              | 编什么                                       | 发布?                           |
+| ------------------------------------ | --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------- |
+| `ci.yml` 的 `windows-package` 作业   | **合入 `main` 的 PR**，且 CI 的结论（含覆盖率门槛与原生质量门）都过了 | 该 PR 的**合并预览提交**                     | ❌ 只上传 artifact（打包门禁）  |
+| `release.yml` 的 `push` 到 `main`    | 合入之后                                                              | 定版后的提交（未手改版本时 = bump 提交）     | 每次都发（未手改则 patch+1）    |
+| `release.yml` 的 `workflow_dispatch` | 手动                                                                  | `ref` 指的分支或提交（`dev` 只有这一个入口） | 看 `publish` 开关               |
+| `dev-release.yml` 的手动档           | 手动，且该提交的 `ci.yml` 必须**已跑绿**                              | 该提交（默认 `dev` 的头）                    | 带 `Pre-release` 标签，先删旧的 |
+
+- **dev 快照（2026-10-31 起，`.github/workflows/dev-release.yml`）**：给 `dev` 编一份能装能看的包，但不占正式版的位置。三件事各自钉住：
+  - **前置**：这个提交必须已经跑过 `ci.yml` 且全绿（`gh run list --commit` 判结论，还在跑或有失败都拦）—— 拿红的提交出包等于绕过本仓库唯一的质量关。纯文档提交**没有**运行记录（`ci.yml` 的 `paths-ignore` 覆盖 `**/*.md`），所以它对这一档报"没有运行记录"是正常的：换成含代码改动的提交再触发；
+  - **版本号是四段** `<基础版本>.<第 4 位>`，由 `scripts/dev_snapshot_version.py` 按 git 历史算：基础版本取 `packaging.py` 与最近三段 tag 里**语义较大**的那个（自动定版的 bump 提交只落在 `main` 上，dev 的 `packaging.py` 常常还停在上一版，照它算会得到“比已发布版本还旧”的号），第 4 位 = 距最近一个三段 tag 的提交数（0 记 1；必须 < 65536，Windows 版本资源每段是 16 位字段）。它是派生量：同一个提交永远算出同一个号，且天然单调；
+  - **产物里的版本号也是快照号**：`release-build.yml` 的 `version_override` 在构建前把四段号写进**工作区**的 `packaging.py`（不提交），于是 `--version` / `doctor` / `build-metadata.json` 报的是同一个快照号；它只允许配 `checks: build-only`（full 档会跑用例，而用例里有一批“`packaging.py` 是三段”的断言）；
+  - 四段 tag **不会**被 `release_bump.py` 看见（它只认三段），所以预发布不会打乱正式版的定版。
+- **预发布只留最新一份**：两条发布链在**发包前**都会把此前所有 `Pre-release` 删掉（连 tag —— 四段 tag 不是历史）。dev 出快照前删旧的，避免 Release 页被一堆快照淹没；正式版一发布 dev 快照就作废，同时挂着“最新正式版 + 更旧的 dev 快照”只会让用户下错包。
 
 - **为什么构建与发布不能合成一份**（2026-10-17 实测，不是设计洁癖）：GitHub 对**嵌套工作流**的权限是**逐作业静态校验**的 —— 一份工作流里只要有作业声明 `contents: write`，而调用它那次运行（PR）只给得起 `contents: read`，整份工作流就判 `not valid`（原文：`The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`），报错在**解析阶段**，一个 job 都起不来，运行期的 `publish: false` 拦不住。所以门禁调的是只读的 `release-build.yml` —— 否则想让门禁跑起来，就得给 PR 那次运行发一个带写权限的 token，而 PR 里的代码是会被拉下来执行的。
 - **打包门禁**：`ci.yml` 的 `windows-package` 作业在 `release-build.yml` 上跑 `checks: build-only`（同一轮 CI 已经跑过三平台全量，不在 Windows 上重跑一遍），构建完跑产物冒烟（无参数启动 / `--version` / `doctor` / `gui --smoke` 四条判据 × onedir，外加单实例闸门，全部指向临时 `--root`；2026-10-28 起 onefile 停产）。分支保护里要勾的必需检查是 **`CI required packaging status`**（`packaging-gate` 那个恒跑的“结论”作业）—— 干活的那个作业在纯文档改动的 PR 上会被跳过，被跳过的必需检查会永久停在 pending，所以结论交给另一个作业。2026-10-27 重排后 `windows-package` 只等 `changes`/`quality`/`pytest`/`security`（**不再等报告链**），报告作业反过来等它、把冒烟结论收进汇总报告 —— 因此分支保护里**报告链的检查（`pytest-report` / `allure-summary`）也要勾为必需**，否则存在“打包绿了但报告红”的合入盲区（见 [testing-ci.md](testing-ci.md) 第 2 节）。

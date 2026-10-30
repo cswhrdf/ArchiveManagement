@@ -23,6 +23,11 @@ on:
         required: false
         default: full
         type: string
+      version_override:
+        description: "覆盖版本号(留空 = 从 packaging.py 读)。预发布快照传四段号, 见 dev-release.yml"
+        required: false
+        default: ""
+        type: string
     outputs:
       version:
         description: "从 packaging.py 读出的版本号(发布作业用它判要不要建 Release)"
@@ -57,6 +62,32 @@ jobs:
           # 被调用时 `github.sha` 是**调用方**的提交(PR 轮次里就是那个 PR 的合并预览提交) —— 正是要构建的
           # 东西; 手动/发布档没给 `ref` 时也同样落在触发这次运行的那个提交上。
           ref: ${{ inputs.ref || github.sha }}
+
+      - name: Stamp the snapshot version into the source
+        # 预发布的第 4 位是**派生**量(scripts/dev_snapshot_version.py 按 git 历史算), 它不进 git ——
+        # dev 上的 packaging.py 必须保持三段, 那是正式版本的单一真相(release_bump.py 按三段判档)。
+        # 所以只在这次构建的工作区里就地改这一行: 于是产物的 `--version`、`doctor` 与
+        # build-metadata.json 报的是同一个快照号, 而不是一个连预发布都看不出来的基础版本。
+        # **只配 build-only**: full 档会跑用例, 而用例里有一批"packaging.py 是三段"的断言 ——
+        # 那个红是故意的, 这里提前一步说清楚。
+        if: ${{ inputs.version_override != '' }}
+        shell: pwsh
+        env:
+          SNAPSHOT_VERSION: ${{ inputs.version_override }}
+          CHECKS: ${{ inputs.checks }}
+        run: |
+          if ($env:CHECKS -ne 'build-only') {
+            throw "version_override 只能配 checks: build-only(预发布档的前提是 CI 已经把这个提交跑绿了)"
+          }
+          $path = "src/archive_management/packaging.py"
+          $source = Get-Content $path -Raw
+          $replacement = '__version__ = "' + $env:SNAPSHOT_VERSION + '"'
+          $updated = [regex]::Replace($source, '__version__\s*=\s*"[^"]+"', $replacement)
+          if ($updated -eq $source) {
+            throw "$path 里没有可替换的 __version__"
+          }
+          Set-Content -Path $path -Value $updated -NoNewline
+          Write-Host "快照版本号已写入: $env:SNAPSHOT_VERSION"
 
       - name: Resolve build metadata
         id: build

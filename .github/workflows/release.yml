@@ -161,6 +161,19 @@ jobs:
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
+      - name: Delete the previous pre-releases
+        # 正式版一发布, dev 的快照就作废了: 仓库里同时挂着"最新正式版 + 更旧的 dev 快照",
+        # 用户只会下错包。删 Release 连 tag 一起删(四段 tag 不是历史, 正式版只认三段)。
+        if: ${{ steps.decision.outputs.publish == 'true' }}
+        run: |
+          set -eu
+          tags=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isPrerelease --jq '.[] | select(.isPrerelease) | .tagName')
+          for tag in $tags; do
+            echo "删除旧的预发布 $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done
+
       - name: Create the release
         if: ${{ steps.decision.outputs.publish == 'true' }}
         # 两个参数不能省: ① `--repo` —— 这个作业没有 checkout, gh 无法从仓库推断出该操作哪一个;
