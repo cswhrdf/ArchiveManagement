@@ -257,16 +257,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
         )
         self._toggle_btn.grid(row=0, column=1, padx=16, pady=(6, 6))
-        self._theme_label = ctk.CTkLabel(
-            self._appearance_panel,
-            text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}")),
-            anchor="w",
-            font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
-        )
-        self._theme_label.grid(
-            row=1, column=0, columnspan=2, padx=16, pady=(0, 6), sticky="w"
-        )
+        # "当前主题"说明行 2026-10-30 收掉: 按钮文案本身就写着点完会变成哪套主题.
         # 界面字号: 1rem = 这个值(默认 16px), 界面里所有字号等比缩放。
         self._font_label = ctk.CTkLabel(
             self._appearance_panel,
@@ -275,7 +266,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
             text_color=palette.text_body,
         )
-        self._font_label.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="w")
+        self._font_label.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="w")
         self._font_box = ctk.CTkComboBox(
             self._appearance_panel,
             values=[self._font_label_of(size) for size in FONT_CHOICES],
@@ -297,7 +288,7 @@ class SettingsWindow:
             state="readonly",
         )
         self._font_box.set(self._font_label_of(self._base_font_px))
-        self._font_box.grid(row=2, column=1, padx=16, pady=(0, 16))
+        self._font_box.grid(row=1, column=1, padx=16, pady=(0, 16))
 
         # 记住窗口大小与位置(默认开): 与调试开关同一套写法 —— 只改控件的值不触发
         # command, 所以失败回滚不会递归回调。
@@ -317,7 +308,7 @@ class SettingsWindow:
         # 开关行自带底部留白: 错误行平时整行收起(见 _set_transient_line), 面板下边距
         # 由它撑住(贴边的控件会盖住面板自己的下边框)。
         self._remember_switch.grid(
-            row=3, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
+            row=2, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="w"
         )
         # 开关不带说明行(行为见 docs/features.md): 这行平时收起不占高度, 应用失败时
         # 才带着原因占回一行。
@@ -330,7 +321,7 @@ class SettingsWindow:
             text_color=palette.danger,
         )
         self._remember_error.grid(
-            row=4, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
+            row=3, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
         )
         self._track_hint(
             self._appearance_panel,
@@ -374,26 +365,27 @@ class SettingsWindow:
             dropdown_font=ctk.CTkFont(size=12),
         )
         self._language_box.set(self._locale_label(self._language))
-        self._language_box.grid(row=0, column=1, padx=16, pady=(6, 6))
-        self._language_label = ctk.CTkLabel(
+        # "当前语言"说明行 2026-10-30 收掉: 下拉框自己就展示当前语言; 底部留白挪到
+        # 它身上(错误行平时整行收起, 不再由它撑住面板下边距).
+        self._language_box.grid(row=0, column=1, padx=16, pady=(6, 8))
+        # 切换失败时的提示平时收起不占高度(见 _set_transient_line), 失败才占回一行.
+        self._language_error = ctk.CTkLabel(
             self._language_panel,
-            text=tr(
-                "settings.current_language",
-                language=self._locale_label(self._language),
-            ),
+            text="",
             anchor="w",
             justify="left",
             font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            text_color=palette.danger,
         )
-        self._language_label.grid(
-            row=1, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+        self._language_error.grid(
+            row=1, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
         )
         self._track_hint(
             self._language_panel,
-            self._language_label,
+            self._language_error,
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
+        self._set_transient_line(self._language_error, "")
 
         self._logging_panel = ctk.CTkFrame(
             self._body,
@@ -425,23 +417,27 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_debug_switch(self._debug)
-        self._debug_switch.grid(row=0, column=1, padx=16, pady=(6, 6))
-        self._debug_label = ctk.CTkLabel(
+        # "调试日志: 已开启/已关闭"说明行 2026-10-30 收掉: 开关自己就表达当前状态;
+        # 底部留白挪到开关行(错误行平时整行收起).
+        self._debug_switch.grid(row=0, column=1, padx=16, pady=(6, 8))
+        # 应用失败时的提示平时收起不占高度(见 _set_transient_line), 失败才占回一行.
+        self._debug_error = ctk.CTkLabel(
             self._logging_panel,
-            text=self._debug_state_text(),
+            text="",
             anchor="w",
             justify="left",
             font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            text_color=palette.danger,
         )
-        self._debug_label.grid(
-            row=1, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+        self._debug_error.grid(
+            row=1, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
         )
         self._track_hint(
             self._logging_panel,
-            self._debug_label,
+            self._debug_error,
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
+        self._set_transient_line(self._debug_error, "")
 
         self._activation_panel = ctk.CTkFrame(
             self._body,
@@ -473,23 +469,27 @@ class SettingsWindow:
             fg_color=palette.input_bg,
         )
         self._set_activation_switch(self._activation)
-        self._activation_switch.grid(row=0, column=1, padx=16, pady=(6, 6))
-        self._activation_label = ctk.CTkLabel(
+        # "自动启停: 已开启/已关闭"说明行 2026-10-30 收掉: 开关自己就表达当前状态;
+        # 底部留白挪到开关行(错误行平时整行收起).
+        self._activation_switch.grid(row=0, column=1, padx=16, pady=(6, 8))
+        # 应用失败时的提示平时收起不占高度(见 _set_transient_line), 失败才占回一行.
+        self._activation_error = ctk.CTkLabel(
             self._activation_panel,
-            text=self._activation_state_text(),
+            text="",
             anchor="w",
             justify="left",
             font=ctk.CTkFont(size=11),
-            text_color=palette.text_muted,
+            text_color=palette.danger,
         )
-        self._activation_label.grid(
-            row=1, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew"
+        self._activation_error.grid(
+            row=1, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
         )
         self._track_hint(
             self._activation_panel,
-            self._activation_label,
+            self._activation_error,
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
+        self._set_transient_line(self._activation_error, "")
 
         # 备份校验方式: 严格(逐文件比对内容哈希)还是快(只核对名称与大小)。选哪一种
         # 会直接改变备份与还原的耗时, 两种方式的代价写在 docs/features.md 的「备份、
@@ -535,7 +535,7 @@ class SettingsWindow:
         self._verification_box.grid(row=0, column=1, padx=16, pady=(6, 6))
         self._verification_status = ctk.CTkLabel(
             self._verification_panel,
-            text=self._verification_state_text(),
+            text=self._verification_parallel_text(),
             anchor="w",
             justify="left",
             font=ctk.CTkFont(size=11),
@@ -788,11 +788,10 @@ class SettingsWindow:
         """校验方式在列表里显示的名字."""
         return tr(_VERIFICATION_LABELS[normalize_verification_mode(mode)])
 
-    def _verification_state_text(self) -> str:
-        """当前校验方式的说明(顺便把生效的并发校验数告诉用户)."""
+    def _verification_parallel_text(self) -> str:
+        """并发校验数的说明(校验方式本身由下拉框展示, 2026-10-30 起不再复述)."""
         return tr(
-            "settings.current_verification",
-            mode=self._verification_label(self._verification_mode),
+            "settings.verification_parallel",
             parallel=self._verification_parallel,
         )
 
@@ -822,7 +821,7 @@ class SettingsWindow:
             )
             return
         self._verification_mode = mode
-        self._verification_status.configure(text=self._verification_state_text())
+        self._verification_status.configure(text=self._verification_parallel_text())
 
     @staticmethod
     def _locale_label(locale: str) -> str:
@@ -862,14 +861,10 @@ class SettingsWindow:
         if error is None:
             self._window.destroy()
             return
-        self._language_label.configure(
-            text=tr("settings.language_failed", reason=error)
+        self._set_transient_line(
+            self._language_error, tr("settings.language_failed", reason=error)
         )
-
-    def _debug_state_text(self) -> str:
-        """调试开关当前状态的说明文字."""
-        state = tr("settings.debug_on" if self._debug else "settings.debug_off")
-        return tr("settings.debug_state", state=state)
+        self._refit_height()
 
     def _set_debug_switch(self, enabled: bool) -> None:
         """把开关拨到指定状态.
@@ -889,19 +884,16 @@ class SettingsWindow:
             return
         error = self._on_apply_debug(wanted)
         if error is not None:
-            self._debug_label.configure(text=tr("settings.debug_failed", reason=error))
+            self._set_transient_line(
+                self._debug_error, tr("settings.debug_failed", reason=error)
+            )
+            self._refit_height()
             # 开关拨回实际生效的状态: 否则看起来像已经改成功了.
             self._set_debug_switch(self._debug)
             return
         self._debug = wanted
-        self._debug_label.configure(text=self._debug_state_text())
-
-    def _activation_state_text(self) -> str:
-        """自动启停开关当前状态的说明文字."""
-        state = tr(
-            "settings.activation_on" if self._activation else "settings.activation_off"
-        )
-        return tr("settings.activation_state", state=state)
+        self._set_transient_line(self._debug_error, "")
+        self._refit_height()
 
     def _set_activation_switch(self, enabled: bool) -> None:
         """把开关拨到指定状态(不触发 ``command``, 所以失败回滚不会递归)."""
@@ -917,13 +909,15 @@ class SettingsWindow:
             return
         error = self._on_apply_activation(wanted)
         if error is not None:
-            self._activation_label.configure(
-                text=tr("settings.activation_failed", reason=error)
+            self._set_transient_line(
+                self._activation_error, tr("settings.activation_failed", reason=error)
             )
+            self._refit_height()
             self._set_activation_switch(self._activation)
             return
         self._activation = wanted
-        self._activation_label.configure(text=self._activation_state_text())
+        self._set_transient_line(self._activation_error, "")
+        self._refit_height()
 
     def _set_remember_switch(self, enabled: bool) -> None:
         """把"记住窗口大小与位置"拨到指定状态(不触发 ``command``)."""
@@ -985,16 +979,15 @@ class SettingsWindow:
             (self._activation_title, palette.text_primary),
             (self._verification_title, palette.text_primary),
             (self._shortcut_title, palette.text_primary),
-            (self._language_label, palette.text_muted),
             (self._font_label, palette.text_body),
-            (self._debug_label, palette.text_muted),
-            (self._activation_label, palette.text_muted),
             (self._verification_status, palette.text_muted),
             (self._remember_error, palette.danger),
+            (self._language_error, palette.danger),
+            (self._debug_error, palette.danger),
+            (self._activation_error, palette.danger),
             (self._capture_status, palette.accent),
             (self._shortcut_error, palette.danger),
             (self._note_label, palette.text_hint),
-            (self._theme_label, palette.text_muted),
         ):
             label.configure(text_color=color)
         self._toggle_btn.configure(
@@ -1022,9 +1015,6 @@ class SettingsWindow:
         # (浅色主题的深灰文字落在深色面板上, 就是一条几乎看不见的淡灰字)。
         for label in self._shortcut_labels:
             label.configure(text_color=palette.text_body)
-        self._theme_label.configure(
-            text=tr("settings.current_theme", theme=tr(f"theme.name_{self._theme}"))
-        )
         self._close_btn.configure(
             fg_color=palette.raised,
             hover_color=palette.item_hover,

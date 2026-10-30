@@ -199,7 +199,7 @@ def test_settings_window_language_switch_closes_the_window() -> None:
 
 
 def test_settings_window_toggles_debug_logging() -> None:
-    """设置窗口里拨调试开关: 交给主窗口应用, 并就地更新状态说明."""
+    """设置窗口里拨调试开关: 交给主窗口应用, 成功时错误行保持整行收起."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
     app = gui_app(_new_app, DemoArchiveService(delay=0))
@@ -218,9 +218,9 @@ def test_settings_window_toggles_debug_logging() -> None:
 
     assert applied == [True]
     assert window._debug is True
-    assert window._debug_label.cget("text") == tr(
-        "settings.debug_state", state=tr("settings.debug_on")
-    )
+    # 状态说明行已收掉(2026-10-30): 开关自己表达状态, 成功时错误行不占高度.
+    assert window._debug_error.cget("text") == ""
+    assert window._debug_error.winfo_manager() == ""
 
 
 def test_settings_window_reverts_the_switch_when_applying_fails() -> None:
@@ -239,11 +239,12 @@ def test_settings_window_reverts_the_switch_when_applying_fails() -> None:
 
     assert window._debug is False
     assert bool(window._debug_switch.get()) is False
-    assert "写配置失败" in window._debug_label.cget("text")
+    assert "写配置失败" in window._debug_error.cget("text")
+    assert window._debug_error.winfo_manager() == "grid"
 
 
 def test_settings_window_toggles_auto_activation() -> None:
-    """设置窗口里拨自动启停开关: 交给主窗口应用, 并就地更新状态说明."""
+    """设置窗口里拨自动启停开关: 交给主窗口应用, 成功时错误行保持整行收起."""
     from archive_management.ui.demo_backend import DemoArchiveService
 
     app = gui_app(_new_app, DemoArchiveService(delay=0))
@@ -257,9 +258,9 @@ def test_settings_window_toggles_auto_activation() -> None:
 
     assert app._activation is True
     assert window._activation is True
-    assert window._activation_label.cget("text") == tr(
-        "settings.activation_state", state=tr("settings.activation_on")
-    )
+    # 状态说明行已收掉(2026-10-30): 开关自己表达状态, 成功时错误行不占高度.
+    assert window._activation_error.cget("text") == ""
+    assert window._activation_error.winfo_manager() == ""
 
 
 def test_settings_window_reverts_the_activation_switch_when_applying_fails() -> None:
@@ -277,7 +278,8 @@ def test_settings_window_reverts_the_activation_switch_when_applying_fails() -> 
 
     assert window._activation is False
     assert bool(window._activation_switch.get()) is False
-    assert "写配置失败" in window._activation_label.cget("text")
+    assert "写配置失败" in window._activation_error.cget("text")
+    assert window._activation_error.winfo_manager() == "grid"
 
 
 def test_auto_activation_polls_only_when_switched_on(
@@ -455,7 +457,8 @@ def test_settings_window_holds_theme_and_hotkey_shortcuts(
         DEFAULT_BRANCH_ACCELERATOR
     )
 
-    # 点按钮即切换主题, 按钮文案与当前主题标签同步更新.
+    # 点按钮即切换主题, 按钮文案同步更新; "当前主题"说明行已收掉(2026-10-30),
+    # 当前值由按钮文案自己表达.
     window._toggle_btn.invoke()
     _pump(app)
     assert app._theme != before
@@ -464,7 +467,7 @@ def test_settings_window_holds_theme_and_hotkey_shortcuts(
         tr("theme.to_light"),
         tr("theme.to_dark"),
     }
-    assert tr(f"theme.name_{app._theme}") in window._theme_label.cget("text")
+    assert not hasattr(window, "_theme_label")
 
     # 界面字号/界面语言两个下拉框也要跟着换配色: 它们不在 UiKit 的重绘表里, 漏在
     # restyle 之外时同一个窗口里会留着上一套主题的底色(用户实测: 要重开窗口才恢复)。
@@ -514,8 +517,9 @@ def test_settings_window_fits_its_content(
     """设置窗口的高度按内容算: 底部说明与"关闭"按钮必须在窗口里, 状态行也不能被裁.
 
     文字会随语言换行, 写死高度时"关闭"按钮会被推到窗口外面 —— 用户看不到也点不到
-    (2026-10 实测: 面板还带成段说明时中文要 630px、英文要 644px)。成段说明移出后,
-    面板里常驻的多行文字是各面板的状态行与页脚说明。
+    (2026-10 实测: 面板还带成段说明时中文要 630px、英文要 644px)。成段说明与各
+    面板的"当前状态"行移出后, 常驻的多行文字只剩校验面板的并发数说明与页脚说明
+    (语言/调试/启停的错误行平时整行收起, 没有可量的宽度).
     """
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -537,10 +541,7 @@ def test_settings_window_fits_its_content(
         hint = f"{name}被推出窗口: {edge} > {bottom}"
         assert edge <= bottom, hint
     for name, label in (
-        ("界面语言当前值", window._language_label),
-        ("调试状态", window._debug_label),
-        ("启停状态", window._activation_label),
-        ("校验状态", window._verification_status),
+        ("校验并发数说明", window._verification_status),
         ("页脚说明", window._note_label),
     ):
         cut = label.winfo_reqwidth() - label.winfo_width()
@@ -967,14 +968,17 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
             DEFAULT_SAVE_ACCELERATOR
         )
 
-        # ③ 校验方式: 成功时下拉停在新值, 状态说明跟着改成新方式(不再显示旧值).
+        # ③ 校验方式: 成功时下拉停在新值; 说明行不再复述方式名(2026-10-30 收掉,
+        # 下拉框自己就是当前值), 只剩并发数那句。
         name_label = window._verification_label("name")
         window._verification_box.set(name_label)
         window._on_verification_selected(name_label)
 
         assert window._verification_box.get() == name_label
         assert window._verification_mode == "name"
-        assert name_label in window._verification_status.cget("text")
+        assert window._verification_status.cget("text") == tr(
+            "settings.verification_parallel", parallel=2
+        )
     finally:
         window.close()
         app.destroy()
