@@ -37,7 +37,7 @@ jobs:
             });
             const body = current.data.body || "";
 
-            // 定位一段自动区块; 标记缺失、重复或顺序颠倒时返回 null(交给下面统一判红)。
+            // 定位一段自动区块; 标记缺失、重复或顺序颠倒时返回 null(由调用方区分是哪一种)。
             const locate = (text, [startMarker, endMarker]) => {
               const start = text.indexOf(startMarker);
               const end = text.indexOf(endMarker);
@@ -53,10 +53,25 @@ jobs:
             for (const [name, markers] of Object.entries(MARKERS)) {
               const slot = locate(body, markers);
               if (slot === null) {
-                core.setFailed(`PR 描述缺少 ${name} 区标记，请重新应用仓库 PR 模板。`);
+                // **缺一格不判红**(2026-11-01 实测): 这一节在模板里是可选的 —— 摘要那格已经删了,
+                // 而旧描述、手工重写的描述都可能只有一部分。缺了就是"没什么要同步", 记一条
+                // notice 跳过; 真正坏了的是"开始标记出现多次 / 结束标记在开始之前", 那种才判红。
+                const occurrences = body.split(markers[0]).length - 1;
+                if (occurrences === 0) {
+                  core.notice(`PR 描述里没有 ${name} 区标记, 这一格跳过。`);
+                  continue;
+                }
+                core.setFailed(
+                  `PR 描述里的 ${name} 区标记格式不对(重复或顺序颠倒), 请重新应用仓库 PR 模板。`,
+                );
                 return;
               }
               slots[name] = slot;
+            }
+
+            if (Object.keys(slots).length === 0) {
+              core.info("PR 描述里没有需要同步的自动区块, 跳过。");
+              return;
             }
 
             const selected = {

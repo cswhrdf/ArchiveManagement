@@ -1310,6 +1310,18 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     assert "github.rest.pulls.listFiles" not in workflow, hint
     assert "## 本次变更" in template, "模板要留这一节, 发布页说明就是从这里取的"
     assert "自动生成" not in template, hint
+
+    # 缺一格 marker **不判红**(2026-11-01 实测): 摘要那格从模板里删掉之后, 旧版工作流在 main 上
+    # 仍然要求它, 于是每个按新模板开的 PR 都被判"缺少 summary 区标记" —— 红的是检查本身。现在
+    # 缺了只记 notice 跳过; 真正该红的是"开始标记重复 / 结束标记在开始之前"(描述被写坏了)。
+    skip_hint = (
+        "缺 marker 只该跳过、不该判红: 这一节在模板里是可选的(摘要那格已删), "
+        "旧描述也可能只有一部分"
+    )
+    assert "这一格跳过" in workflow, skip_hint
+    assert "格式不对" in workflow, "重复或顺序颠倒才是真坏了, 那种要判红"
+    assert "PR 描述缺少" not in workflow, "旧的'缺失即判红'文案不该回来"
+
     assert workflow.count("github.rest.pulls.update") == 1, (
         "署名那一格必须一次写完: 分两次 update 会互相覆盖"
     )
