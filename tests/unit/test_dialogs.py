@@ -390,8 +390,16 @@ class _FakeParent(_FakeWidget):
     def winfo_height(self) -> int:
         return 600
 
-    def attributes(self, name: str, _value: Any = None) -> Any:
-        """假窗口属性: 只回答置顶读数(对话框收尾要镜像宿主的置顶状态)."""
+    def winfo_toplevel(self) -> Any:
+        """沿到顶层窗口(判定宿主置顶的第一步, 2026-10-31 起): 假件自己就是那个窗口."""
+        return self
+
+    def wm_attributes(self, name: str, _value: Any = None) -> Any:
+        """窗口属性读数: 只回答置顶(对话框收尾要镜像宿主的置顶状态).
+
+        用 ``wm_attributes``(全平台都在的名字): ``attributes`` 是 ``Wm`` 的平台别名,
+        Linux 存根的 ``Misc`` 上没有它。
+        """
         return self.pinned if name == "-topmost" else None
 
     def winfo_id(self) -> int:

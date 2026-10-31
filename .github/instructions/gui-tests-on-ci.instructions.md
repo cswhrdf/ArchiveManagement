@@ -162,6 +162,8 @@ _tkinter.TclError: bad window path name ".!ctkframe2.!...!ctkscrollableframe.!ct
 有类红与"CI 环境"无关, 而是**平台给同一个写法的默认值不同**。它们在本机(Windows)恒绿, 在 macOS/Linux 恒红, 所以最容易当成产品 bug 去查。
 
 - **macOS 的无边框窗口 `-topmost` 默认读出来是 1**(Windows 上是 0)。所以"浮层没有 topmost ⇒ 读 `wm_attributes('-topmost')` 应当为假"这条判据只在 macOS 上红(2026-10-03 实测)。要守这条性质就**显式写一次** `attributes("-topmost", False)` —— 否则"默认值"就是平台契约的一部分, 只在 Windows 上量到的结论不算跨平台结论。
+- **X11 的 `-topmost` 对无边框(override-redirect)窗口是空操作**(2026-10-31 Linux CI 实测: 写 `True` 读回仍是 0)—— 那里连"窗口管理器级置顶"这个概念都不适用于无边框窗口。所以"宿主置顶了 ⇒ 浮层读数也为真"这条判据只能在 Windows 上钉读数; macOS 恒读 1(上一条), X11 恒读 0。跨平台钉得住的用户可见事实是 `wm stackorder` 里"浮层没有排在宿主之下"(test_gui_dropdown 的"跟随强制置顶"一节)。
+- **`attributes` / `wm_attributes` 是 `Wm`(窗口)的方法, 普通控件没有**(2026-10-31 CI: `CTkFrame` 当宿主传进弹窗收口, Linux/macOS 当场 `AttributeError`, Windows 却绿 —— 因为 Windows 分支只调 `winfo_id`)。判定"宿主窗口状态"的入口要先 `winfo_toplevel()` 沿到窗口再问; mypy 也要用 `wm_attributes`(Linux 存根的 `Misc` 上根本没有 `attributes`)。
 - **X11 不算尾随空行的高度**: `text=f"{name}\n"` 想让标签"占两行"在 Linux 上没有效果(那台机器上 CTkLabel 退回默认高度 28, 而两行名是 39 —— 2026-10-03 的 Linux CI 报 `元信息那一行差 11px`, 同代码的 Windows/macOS 是绿的)。要让控件占**固定行数**的高度, 用字体度量算出来显式配:
 
   ```python

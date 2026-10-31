@@ -111,6 +111,8 @@ def _win32_style_has_topmost(app: Any) -> bool:
     不碰 Tk 的 ``attributes`` 读数: 那次读会触发 Tk 拿缓存样式回写操作系统, 顺手把外部
     置上的位抹掉(2026-10-30 探针实测) —— 读一次就毁证。
     """
+    if sys.platform != "win32":  # mypy 收窄: windll 只在 Windows, 调用点已挡
+        return False
     user32 = ctypes.windll.user32
     user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     user32.GetAncestor.restype = ctypes.c_void_p
@@ -126,6 +128,8 @@ def _pin_window_from_outside(app: Any, after: int) -> None:
     **读不到**(2026-10-30 探针实测: 置顶后读数仍是 0) —— 判定必须越过 Tk 直查窗口样式,
     这条路就是给它喂真凭据的。``after`` 传 -1(置顶)或 -2(取消置顶)。
     """
+    if sys.platform != "win32":  # mypy 收窄: windll 只在 Windows, 调用点已挡
+        return
     user32 = ctypes.windll.user32
     user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     user32.GetAncestor.restype = ctypes.c_void_p
@@ -207,9 +211,13 @@ def test_the_popup_follows_a_force_pinned_main_window(app: Any) -> None:
         popup = _open(combo, app)
         window = popup.window
         assert window is not None
-        if sys.platform != "darwin":
-            assert window.attributes("-topmost"), "宿主置顶了, 浮层没跟着置顶"
+        # 读数判据**只在 Windows 上钉得住**: X11 的 ``-topmost`` 对无边框(override-
+        # redirect)窗口是空操作(2026-10-31 Linux CI 实测: 写 True 读回仍是 0, 那
+        # 里连"置顶"这个 WM 概念都没有); macOS 则是无边框窗口**恒读 1**(见上面那条
+        # 长下拉用例的说明)。其它平台钉得住的用户可见事实是"浮层没被压到宿主之下"。
         if sys.platform == "win32":
+            assert window.attributes("-topmost"), "宿主置顶了, 浮层没跟着置顶"
+        if sys.platform != "darwin":
             order = _stack_order(app)
             assert order.index(str(window)) > order.index(str(app)), (
                 "浮层被压在主窗口底下"
