@@ -1614,6 +1614,39 @@ def test_the_packaging_gate_path_never_holds_write_permission() -> None:
     assert "contents: write" not in _without_comments(called), hint
 
 
+def test_workflows_that_run_pytest_on_windows_force_utf8_stdio() -> None:
+    """在 Windows runner 上跑 pytest 的工作流必须设 `PYTHONUTF8=1`.
+
+    2026-10-31 实测(release.yml 首次跑 full 档那一轮): `release-build.yml` 在
+    `windows-latest` 上跑 `uv run pytest --cov`, 而收集期 `conftest` 打印的一句中文
+    (`_cluster_shared_ui_sessions` 的 `[order] 共享 UI 会话的同池模块已聚成一段执行`)
+    直接撞上 cp1252 —— 英文 Windows 的控制台编码, `print` 抛 `UnicodeEncodeError`,
+    pytest 以 `INTERNALERROR` 收场(`no tests ran`), 整个发布链断在这一步。
+
+    `ci.yml` 一直有这一行, 所以同一批用例在 CI 上从来不红: 差的就是"环境地板"只在一边
+    铺了。这条守卫把它推广到每一份会在 Windows 上跑 pytest 的工作流, 并钉住当前是哪两份
+    —— 新增一份时它会红, 提醒你决定要不要也铺上。
+    """
+    workflows = sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "一个工作流都没找到, 这条守卫失去了检查对象"
+
+    checked: list[str] = []
+    for workflow in workflows:
+        commands = _without_comments(workflow.read_text(encoding="utf-8"))
+        if "windows" not in commands or "pytest" not in commands:
+            continue
+        checked.append(workflow.name)
+        hint = (
+            f"{workflow.name} 会在 Windows runner 上跑 pytest, 却没设 PYTHONUTF8=1:"
+            " 英文 Windows 的控制台是 cp1252, 收集期打印中文会抛 UnicodeEncodeError"
+        )
+        assert re.search(r'^\s+PYTHONUTF8:\s*"?1"?$', commands, re.MULTILINE), hint
+
+    assert checked == ["ci.yml", "release-build.yml"], (
+        f"在 Windows 上跑 pytest 的工作流变了: {checked} —— 新增的那份也要设 PYTHONUTF8"
+    )
+
+
 def test_the_packaging_gate_always_reports_a_conclusion() -> None:
     """必需检查必须是"总会报结论"的作业 —— 被跳过的必需检查会永久停在 pending.
 

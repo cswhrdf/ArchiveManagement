@@ -43,6 +43,12 @@ permissions:
 # 依赖装回来(这个作业已经显式装了 test / quality / package 三组)。
 env:
   UV_NO_SYNC: "1"
+  # **Windows runner 的控制台是 cp1252**(英文系统), 而用例与收集期会打印中文: `conftest` 的
+  # `_cluster_shared_ui_sessions` 一句 `[order] 共享 UI 会话的同池模块已聚成一段执行` 就够让
+  # `print` 抛 UnicodeEncodeError、pytest 以 INTERNALERROR 收场("no tests ran")。
+  # 2026-10-31 实测: release.yml 首次跑 full 档(此前打包门禁都是 build-only)就断在这一步。
+  # ci.yml 一直有这一行, 所以同一个用例在 CI 上从来不红 —— 两份工作流的环境地板必须一致。
+  PYTHONUTF8: "1"
 
 jobs:
   build:
