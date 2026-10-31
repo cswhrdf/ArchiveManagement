@@ -1586,6 +1586,46 @@ def test_the_release_workflow_never_pushes_to_main() -> None:
     )
 
 
+def test_manual_republish_refuses_a_version_that_is_already_released() -> None:
+    """手动重发这一档要先确认"这个版本没在 Releases 里" —— 它的用途就是补一次发坏的包.
+
+    手动档(`workflow_dispatch` + `publish`)存在的理由很具体: 某次发包出了问题, 人手动把那个
+    Release 删掉之后, 走 push 那条路发不出同一个版本。所以它必须:
+
+    ① **先检查再编译** —— 检查写在 `classify`(build 依赖它)里, 不是写在 `publish` 里, 否则先白编
+       一轮才告诉你"这个版本已经发过";
+    ② 判据是 **`gh release view`**(用户删的就是 Release), 存在就 `exit 1` 并给出"怎么删"的命令;
+    ③ 版本号取 `packaging.py` 的**当前值**(`release_bump.py` 输出里的 `previous`), 不是它给的
+       "建议下一版号" —— 重发的是仓库里现在写的这个版本;
+    ④ 只在手动档且勾了 `publish` 时检查(纯构建不该被"已发过"拦住); tag 还在时只提醒(重建的
+       Release 会复用那个 tag), 不阻断。
+    """
+    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    classify = _without_comments(ci_workflow.job_block(text, "classify"))
+
+    name = "- name: Refuse to republish a version that is already released"
+    assert name in classify, "手动重发缺前置检查: 会把已经发过的版本再发一遍"
+    step = classify.split(name, 1)[1].split("- name:", 1)[0]
+
+    assert "gh release view" in step, "判据是 Release 是否存在(用户删的就是它)"
+    assert "exit 1" in step, "已经发过就要当场拦住 —— 编译都不用开始"
+    assert "--cleanup-tag" in step, "失败信息要给出'怎么删', 否则人还得去查文档"
+
+    assert "workflow_dispatch" in step, "只在手动档检查"
+    assert "inputs.publish" in step, "只构建不发版时不该被'已发过'拦住"
+
+    assert "previous" in step, "版本号取 packaging.py 的当前值, 不是建议的下一版号"
+    assert "release_bump.py" in step, "版本号仍从那一行读(与构建期同一份抽取)"
+
+    assert "tag v$version 已存在" in step, (
+        "只删了 Release 时 tag 还在: 重建会复用那个 tag, 要提醒但别阻断"
+    )
+
+    assert ci_workflow.needs_of(text, "build") == {"classify"}, (
+        "检查在 classify 里, 才轮得到'先检查再编译'"
+    )
+
+
 def test_pull_requests_into_main_get_a_version_bump_hint() -> None:
     """合入 main 的 PR 会被提醒"该定版本号了" —— 且这条提示不是门禁.
 

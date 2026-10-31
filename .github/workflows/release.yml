@@ -37,14 +37,14 @@ on:
           - full
           - build-only
       publish:
-        description: "构建完是否发布 GitHub Release"
+        description: "构建完是否发布 GitHub Release(勾上后先检查这个版本有没有发过)"
         required: false
         default: false
         type: boolean
 
-# 定版(classify)要读"最近发过的 tag"并可能推一个 bump 提交回 main: 两次合入紧挨着时,
-# 后一次必须排队等前一次把新 tag 写完再定版 —— 否则两次会算出同一个新版本号(第二次就只剩
-# publish 的"已发过"分支, 白构建一轮)。串行而不是取消: 排队的那轮也要发它自己的版本。
+# 两次合入紧挨着时, 后一次必须排队等前一次把新 tag 写完再判版 —— 否则两次会撞上同一个
+# 版本号(第二次就只剩 publish 的"已发过"分支, 白构建一轮)。串行而不是取消: 排队的那轮
+# 也要发它自己的版本。
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -78,7 +78,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          # 要全部历史与 tag 才找得到"最近发过的版本"; bump 提交也从这里长出来。
+          # 要全部历史与 tag 才找得到"最近发过的版本", 手动重发那道前置检查也要 tag 表。
           fetch-depth: 0
 
       - name: Decide which version this commit would release
@@ -93,6 +93,34 @@ jobs:
           python3 scripts/release_bump.py \
             --file src/archive_management/packaging.py \
             --tags $tags >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to republish a version that is already released
+        # 手动重发(workflow_dispatch + publish)的**前置检查**(2026-11-01 加): 这一档存在的理由
+        # 就是"某次发包出了问题, 手动把那个 Release 删掉之后按原有流程发不出去"。所以先确认
+        # 这个版本**不在 Releases 里** —— 在就直接拦住, 编译都不用开始; 删干净了才继续。
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # 版本号取 packaging.py 的**当前值**(输出里的 previous), 不是 release_bump 的"建议下一版号":
+          # 重发的就是仓库里现在写的这个版本。
+          reported=$(python3 scripts/release_bump.py \
+            --file src/archive_management/packaging.py --tags $(git tag -l))
+          version=$(printf '%s\n' "$reported" | sed -n 's/^previous=//p')
+          if [ -z "$version" ]; then
+            echo "::error::读不出 src/archive_management/packaging.py 的版本号。"
+            exit 1
+          fi
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$version 已经发过 Release。要重发请先在 Releases 页面删掉它, 或跑 gh release delete v$version --cleanup-tag, 再回来触发这一档。"
+            exit 1
+          fi
+          echo "::notice::v$version 目前没有 Release, 继续按当前仓库的版本编译并发布。"
+          # 只删了 Release(或 tag 还在)时提醒一句: 重建的 Release 会**复用那个 tag**。
+          if existing=$(git rev-parse --verify --quiet "v$version^{commit}"); then
+            echo "::warning::tag v$version 已存在, 指向 $existing —— 重建的 Release 会复用它。若那次发包的产物是坏的, 先删 tag 再触发。"
+          fi
 
       - name: Record the ref to build and tag
         id: ref
