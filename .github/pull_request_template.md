@@ -3,6 +3,8 @@
 
 本项目约定：`main` 不接受直接提交，只接受 `dev` 或 `bugfix/*` 分支的 PR 合入（新功能从 `dev` 拉分支）。
 
+**要发版就在本 PR 里改版本号**：把 `src/archive_management/packaging.py` 的 `__version__` 往上加一位（如 `0.0.2` → `0.0.3`，大版本自己定）；不改的话合入后只构建、不新建 Release（`main` 有分支保护，合入之后谁都改不了它）。忘了改时 `release-hint` 会在这个 PR 下留一条提示。
+
 门禁：**PR 与 push 都跑全量**（三平台分片用例 + 静态检查 + 安全用例；2026-10-14 起不再按改动路径挑层）。**每一轮都出覆盖率判定与完整 Allure 报告**。所以覆盖率结论看那一轮报告里的「Coverage report」条目（或按 CONTRIBUTING 第四节在本机跑那两步）。**合入 `main` 的 PR 还要过打包门禁**（`CI required packaging status`：等 CI 的结论都出来之后，用这个 PR 的合并预览提交构建 Windows 产物并跑产物冒烟）—— 它比别的检查晚一步。 -->
 
 ## 本次变更

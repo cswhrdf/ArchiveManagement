@@ -1414,7 +1414,7 @@ def test_the_release_workflow_only_publishes_from_main() -> None:
     assert re.search(
         r"^    permissions:\n      contents: write$", publish, re.MULTILINE
     ), "写权限只给发布链的作业(这里), 不许外溢"
-    # "这个版本已经发过"是**正常出口**(自动定版之后只剩手动改版撞车/补跑同一提交两种来路),
+    # "这个版本已经发过"是**正常出口**(定版前移到 PR 之后只剩"忘了改版本号"/补跑同一提交两种来路),
     # 判据是那个 tag 已经存在。
     assert "gh release view" in publish
     assert 'echo "publish=false" >> "$GITHUB_OUTPUT"' in publish
@@ -1520,76 +1520,104 @@ def test_the_dev_snapshot_workflow_requires_ci_and_publishes_a_pre_release() -> 
     ), "顺序反了等于删不掉刚发的那个"
 
 
-def test_the_release_workflow_bumps_the_patch_version_by_default() -> None:
-    """合入 main 之后自动定版: 默认第 3 位加 1, 大版本靠 PR 里手改 packaging.py 声明.
+def test_the_release_workflow_never_pushes_to_main() -> None:
+    """定版前移到 PR(2026-11-01): 合入 main 之后**不许**再往 main 推任何东西.
 
-    为什么不让脚本从改动量里猜前两位: semver 段位是对用户的沟通契约(5 行可以是破坏性的
-    schema 变更, 5000 行重构可以用户无感), 任何按行数/文件数的启发式都会两头误判 —— 所以
-    "人声明 + 脚本兜底", 判定逻辑收在 scripts/release_bump.py(另有它自己的守卫), 这里钉住
-    工作流一侧的接线:
+    分支保护禁止一切直接推送(包括 `github-actions[bot]`), 所以"合入之后自动加一位"必然
+    以 `protected branch` 收场。改法是把定版前移到 PR 阶段(人在 PR 里改 `packaging.py`,
+    `ci.yml` 的 `release-hint` 作业负责提醒), `release.yml` 的 `classify` 只读地复查。
 
-    ① 定版作业先跑, 构建拿它传出的提交(patch 递增发生在它里面), tag 也指它 —— 否则
-       "构建的还是旧版本号";
-    ② bump 提交用 GITHUB_TOKEN 推回 main(那次 push 不会再触发任何工作流, 天然无循环),
-       推之前要 rebase 到最新 main: 定版窗口里可能有别的合入先落地, 不 rebase 就是
-       non-fast-forward 被拒;
-    ③ 手动档(workflow_dispatch)绝不改版本号: 它编的是任意 ref;
-    ④ 两轮紧挨着必须串行(concurrency): 否则第二次定版读到旧 tag, 算出同一个新版本号。
+    这条守卫钉住五件事:
+    ① classify 没有写权限; ② 整份工作流里没有 `HEAD:main` / dev 的推送(含"把 dev 快进到
+       bump 提交"那句 —— 没有 bump 提交了); ③ 判定步不许带 `--apply`(脚本不写文件);
+    ④ 手动档仍不判版本号; ⑤ 版本号没动时发布作业要**出声**, 不能安静地什么都不发。
     """
     text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
     head = text.split("\njobs:", 1)[0]
 
-    assert "concurrency:" in head, "定版要串行: 后一轮必须等前一轮把新 tag 写完"
+    assert "concurrency:" in head, "两轮紧挨着必须串行: 否则会读到旧 tag"
     assert "cancel-in-progress: false" in head, (
         "排队的那轮也要发它自己的版本, 不能被取消"
     )
 
-    classify = ci_workflow.job_block(text, "classify")
-    assert re.search(
-        r"^    permissions:\n      contents: write$", classify, re.MULTILINE
-    ), "bump 提交要推回 main, 写权限按作业给(顶层保持只读)"
-    assert "fetch-depth: 0" in classify, "要全部 tag 才找得到'最近发过的版本'"
-
-    bump_step = classify.split("- name: Decide whether to bump the patch version", 1)[
-        1
-    ].split("- name:", 1)[0]
-    assert "python3 scripts/release_bump.py" in bump_step, (
-        "定版脚本只用标准库, runner 自带的 python3 就够(换成 uv 就得装环境, 别改)"
+    classify_code = _without_comments(ci_workflow.job_block(text, "classify"))
+    assert "contents: write" not in classify_code, (
+        "classify 只读: 它不能再往 main 推东西(分支保护会拒, 整条发布链就红在这里)"
     )
-    assert "--apply" in bump_step, "定版步要在判定为 patch 时把递增写回文件"
-    gated = re.search(r"^        if: (.+)$", bump_step, re.MULTILINE)
-    assert gated is not None, "定版步要有自己的条件(只有 push 档定版)"
+    assert "git push" not in classify_code, "不许推 main, 也不许顺手推 dev"
+    assert "HEAD:main" not in classify_code
+    assert "HEAD:refs/heads/dev" not in classify_code, (
+        "没有 bump 提交要同步, dev 的快进没有意义"
+    )
+
+    text_all = _without_comments(text)
+    assert "HEAD:main" not in text_all, "整份工作流都不许往 main 推"
+    assert "HEAD:refs/heads/dev" not in text_all
+
+    check_step = text.split(
+        "- name: Decide which version this commit would release", 1
+    )[1].split("- name:", 1)[0]
+    assert "python3 scripts/release_bump.py" in check_step, (
+        "判定脚本只用标准库, runner 自带的 python3 就够(换成 uv 就得装环境, 别改)"
+    )
+    assert "--apply" not in check_step, (
+        "脚本不再写文件: --apply 会把 checkout 出来的源码改掉, 而合入之后没人能提交它"
+    )
+    gated = re.search(r"^        if: (.+)$", check_step, re.MULTILINE)
+    assert gated is not None, "判定步要有自己的条件(只有 push 档判)"
     assert "github.event_name == 'push'" in gated.group(1), (
-        "手动档编的是任意 ref, 不许顺手动 main 的版本号"
+        "手动档编的是任意 ref, 版本号与它无关"
     )
 
-    push_step = classify.split("- name: Commit and push the bump", 1)[1].split(
-        "- name:", 1
-    )[0]
-    assert "steps.bump.outputs.bump == 'patch'" in push_step, (
-        "只有判定为 patch 才提交: 首版直发与手动定档都不该产生 bump 提交"
+    publish_code = _without_comments(ci_workflow.job_block(text, "publish"))
+    assert "needs.classify.outputs.reason == 'needs-bump'" in publish_code, (
+        "版本号没动时要出声: 发布页安静地不动, 没人知道为什么"
     )
-    assert "github.event_name == 'push'" in push_step
-    assert "github-actions[bot]" in push_step, "bump 提交是 bot 的, 别用人的身份"
-    assert "git rebase origin/main" in push_step, (
-        "定版窗口里有新合入时, bump 提交要先 rebase 到最新 main 再推(否则 non-FF 被拒)"
-    )
-    assert "git push origin HEAD:main" in push_step
-
-    # dev 在合并那一刻被自动删掉了, ensure-dev 重建出来的那份指向**合并提交**(它跑在 bump
-    # 之前)。不同步的话 dev 永远比 main 少这一行版本号, 下一次 `dev -> main` 的 PR 会把它
-    # "改回去" —— 版本号倒退, 下一次定版就会撞上已存在的 tag。
-    assert "HEAD:refs/heads/dev" in push_step, (
-        "bump 之后要把 dev 快进到同一个提交(非 FF 时只记 notice, 不覆盖别人的工作)"
+    assert "::warning::" in publish_code, (
+        "这是一条 warning 而不是失败(不发版是正常出口)"
     )
 
     build = ci_workflow.job_block(text, "build")
     assert ci_workflow.needs_of(text, "build") == {"classify"}, (
-        "构建必须等定版完成: 它拿的 ref 是定版传出的"
+        "构建仍要等 classify 复查完"
     )
     assert "ref: ${{ needs.classify.outputs.ref }}" in build, (
-        "构建与 tag 都要指递增之后的那个提交"
+        "构建与 tag 共用同一个提交出口"
     )
+
+
+def test_pull_requests_into_main_get_a_version_bump_hint() -> None:
+    """合入 main 的 PR 会被提醒"该定版本号了" —— 且这条提示不是门禁.
+
+    定版前移到 PR 之后, "忘了改版本号"的表现是**安静地不发新版**。所以 `ci.yml` 里有一个
+    轻量作业在 PR 上留一句(当前号 / 建议号 / 不改会怎样), 并按 marker 原地更新 —— 否则每次
+    push 都会新加一条, 一个 PR 攒出七八条。
+    """
+    block = _without_comments(
+        ci_workflow.job_block(ci_workflow.workflow_text(), "release-hint")
+    )
+
+    hint = "这个作业要读 tag 且能写 PR 评论"
+    assert "contents: read" in block, hint
+    assert "pull-requests: write" in block, "留评论需要写权限"
+
+    assert "needs.changes.outputs.should_run == 'true'" in block, (
+        "纯文档改动不跑 CI, 也不会触发发布: 不需要提示"
+    )
+    assert "github.event_name == 'pull_request'" in block
+    assert "github.base_ref == 'main'" in block, "只对合入 main 的 PR 提示"
+    assert "head.repo.full_name == github.repository" in block, (
+        "fork 的 PR 拿不到写权限: 直接跳过, 别让它因 403 变红"
+    )
+
+    assert "scripts/release_bump.py" in block, "用同一份判定脚本算出建议号"
+    assert "scripts/release_hint.py" in block, "正文由脚本生成(可单测)"
+    assert "needs-bump" in block, "只在版本号还没动时留"
+    assert "PATCH" in block, "已有评论要原地更新, 不能每次 push 新加一条"
+
+    forbid = "提示不是门禁: 版本号没动是'这次不发版', 不该让 PR 变红"
+    assert "exit 1" not in block, forbid
+    assert "::error::" not in block, forbid
 
 
 def test_the_packaging_gate_gates_pull_requests_into_main() -> None:

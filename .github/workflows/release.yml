@@ -1,8 +1,9 @@
 name: Release Windows Package
 
 # 两个入口(口径见 docs/development.md 的「打包」「发布」两节):
-#   ① `push` 到 main —— 合入之后先定版(默认第 3 位加 1, 见 scripts/release_bump.py 与
-#      classify 作业), 再构建并发布 Release;
+#   ① `push` 到 main —— 合入之后构建并发布 Release。**版本号由人在 PR 里改**(2026-11-01 起:
+#      main 开了分支保护, 谁都推不进去 —— 包括 bot, 所以定版前移到 PR 阶段, 由 ci.yml 的
+#      `release-hint` 作业提醒), `classify` 只读地复查"这次合入到底有没有动版本号";
 #   ② `workflow_dispatch` —— 手动编任意分支/提交(dev 只有这一个入口), 不动版本号。
 # 构建本身在 .github/workflows/release-build.yml 里(只读, 一个作业): 这里只转调它, 再加一个
 # 专门管发布的作业 —— 于是"构建步骤只有一处定义"与"写权限只出现在这一份"同时成立。
@@ -58,19 +59,21 @@ env:
 
 jobs:
   classify:
-    # 合入 main 之后先定版: 默认把第 3 位加 1(手动预改版优先 + 自动 patch 兜底, 判定逻辑全在
-    # scripts/release_bump.py, 取舍见 docs/development.md「发布」节)。要发 0.1.0 / 1.0.0 这类
-    # "动前两位"的版本, 由人在 PR 里手改 packaging.py —— 那份 diff 经过评审; 定版作业看到
-    # "版本号已经变了"就按人写的发, 不再叠 patch。
-    name: 定版本号
+    # 合入 main 之后**只读地复查**版本号(判定逻辑全在 scripts/release_bump.py, 取舍见
+    # docs/development.md「发布」节): 版本号由人在 PR 里改 —— 2026-11-01 起 main 有分支保护,
+    # 合入之后谁也推不进去, "自动加一位"那条路已经不存在了(实测 protected branch)。
+    # 要发 0.1.0 / 1.0.0 这类"动前两位"的版本, 同样是在 PR 里手改 packaging.py: 那份 diff
+    # 经过评审, 定版作业看到"版本号已经变了"就按人写的发, 不需要任何兜底动作。
+    name: 检查版本号
     runs-on: ubuntu-latest
     outputs:
-      # tag 与构建共用的提交: patch 兜底发生时是 bump 提交, 否则是触发这次运行的提交。
+      # 构建与 tag 都要指这个提交。2026-11-01 起**没有 bump 提交**了(定版前移到 PR),
+      # 所以它就是触发这次运行的那个提交 —— 留成 output 是为了让 build 与 publish 共用一处。
       ref: ${{ steps.ref.outputs.ref }}
-    # bump 提交要推回 main: 与 publish 一样按作业给写权限(顶层保持只读)。这份工作流没有
-    # workflow_call 入口, PR 门禁永远不会调它 —— 嵌套权限"逐作业静态校验"的老坑与此无关。
-    permissions:
-      contents: write
+      # first-release | manual | needs-bump: push 档拿它决定要不要说"版本号没动"。
+      reason: ${{ steps.check.outputs.reason }}
+    # **只读**: 定版不再改 main —— 分支保护禁止一切直接推送(bot 也不例外), 于是它前移到 PR 阶段
+    # (由人在 PR 里改 packaging.py, ci.yml 的 release-hint 作业负责提醒)。这里只读版本号与 tag。
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -78,44 +81,18 @@ jobs:
           # 要全部历史与 tag 才找得到"最近发过的版本"; bump 提交也从这里长出来。
           fetch-depth: 0
 
-      - name: Decide whether to bump the patch version
-        # 只有 push 档定版: 手动档编的是任意 ref, 不该顺手动 main 的版本号。
-        # 脚本只用标准库(scripts/release_bump.py), runner 自带的 python3 就够, 不装 uv 环境。
+      - name: Decide which version this commit would release
+        # 只有 push 档判: 手动档编的是任意 ref, 版本号与它无关。
+        # 脚本只用标准库(release_bump.py), runner 自带的 python3 就够, 不装 uv 环境;
+        # 它**不写文件** —— 定版前移到 PR 了, 这里只是复查"这次合入到底有没有动版本号"。
         if: ${{ github.event_name == 'push' }}
-        id: bump
+        id: check
         run: |
           tags=$(git tag -l)
           # tag 名不含空白, 故意不加引号按词拆开(tag 表为空时 --tags 落成空列表 = 首版直发)。
           python3 scripts/release_bump.py \
             --file src/archive_management/packaging.py \
-            --tags $tags \
-            --apply >> "$GITHUB_OUTPUT"
-
-      - name: Commit and push the bump
-        if: ${{ github.event_name == 'push' && steps.bump.outputs.bump == 'patch' }}
-        env:
-          PREVIOUS: ${{ steps.bump.outputs.previous }}
-          VERSION: ${{ steps.bump.outputs.version }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/archive_management/packaging.py
-          git commit -m "发布: 版本号 $PREVIOUS → $VERSION"
-          # 定版窗口里可能有别的合入先落了 main: 把 bump 提交 rebase 到最新 main 再推,
-          # 否则 non-fast-forward 被拒; 若那次合入也改了版本号, rebase 冲突会大声红掉。
-          git fetch origin main
-          git rebase origin/main
-          git push origin HEAD:main
-          # GITHUB_TOKEN 推的提交不会再触发任何工作流(含本工作流), 天然无循环; 代价是
-          # 那一次 bump 提交不跑 CI —— 一行版本号改动, 门禁在合入前已跑过。
-          #
-          # dev 在合并那一刻被 GitHub 自动删掉了, `ensure-dev.yml` 重建出来的那份指向**合并
-          # 提交**(它跑在 bump 之前)。不补这一句, dev 就永远比 main 少这一行版本号, 下一次
-          # `dev -> main` 的 PR 会把它"改回去"(版本号倒退, 下一次定版就会撞上已存在的 tag)。
-          # 所以这里把 dev 快进到同一个提交: 只是直线上的 FF; dev 已被别人动过(非 FF)时
-          # push 会被拒 —— 那是有意的, 只记一条 notice, 绝不覆盖别人的工作。
-          git push origin HEAD:refs/heads/dev \
-            || echo "::notice::dev 不是可快进的祖先(或被改动过), 跳过同步; 下次 main 推进时 ensure-dev 会重建它"
+            --tags $tags >> "$GITHUB_OUTPUT"
 
       - name: Record the ref to build and tag
         id: ref
@@ -125,7 +102,8 @@ jobs:
     # 只转调, 自己没有步骤: 命令、依赖分组与 `UV_NO_SYNC` 都在被调用的那份里(那种"纯调用作业"
     # 不装 Python 环境, 见 tests/unit/test_test_config.py 的 `_calls_another_workflow`)。
     # checks 原样透传: push 档取不到 `inputs`(空串) —— 空串不等于 build-only, 所以照跑 full。
-    # ref 固定取 classify 传出的提交: patch 递增发生在它里面, 构建与 tag 都要指递增之后那个。
+    # ref 取 classify 传出的提交: 定版前移到 PR 之后它就是触发这次运行的提交, 但构建与 tag 仍
+    # 共用同一处出口(手动档要能改)。
     name: 构建 Windows 发布包
     needs: [classify]
     uses: ./.github/workflows/release-build.yml
@@ -162,9 +140,16 @@ jobs:
           name: ArchiveManagement-${{ needs.build.outputs.label }}-windows-x64
           path: release
 
+      - name: Say why this commit publishes nothing
+        # 版本号没动 = 这次合入不发新版。这是**正常出口**, 不是失败: 定版在 PR 里做, 合入之后
+        # 谁也改不了 main。把话说进构建日志, 免得有人以为发布链坏在定版那一步。
+        if: ${{ github.event_name == 'push' && needs.classify.outputs.reason == 'needs-bump' }}
+        run: |
+          echo "::warning::这次合入没有改 src/archive_management/packaging.py 的版本号, 本轮只构建、不发 Release。下次合入前在 PR 里把 __version__ 往上加一位。"
+
       - name: Decide whether this version still needs a release
-        # 自动定版之后, "这个版本已经发过"只剩两种来路: 手动改版撞上已发的版本号, 或补跑同一个
-        # 提交 —— 都是**正常出口而不是失败**(记一条 notice)。判据是那个 tag/release 已经存在,
+        # 定版前移到 PR 之后, "这个版本已经发过"有两种来路: 忘了改版本号(照旧号发), 或补跑同
+        # 一个提交 —— 都是**正常出口而不是失败**(记一条 notice)。判据是那个 tag/release 已经存在,
         # 与"这一轮改了哪些文件"无关 —— 比路径过滤可靠(不必猜哪些文件算"该发版")。
         id: decision
         run: |
@@ -190,9 +175,9 @@ jobs:
 
       - name: Compose the release notes from the pull request
         # 版本说明**由发起者在 PR 里手写**(模板的「本次变更」一节), CI 不再自动汇总(2026-10-31 定)。
-        # 找 PR 用合入提交(`github.sha`), **不是** `RELEASE_TARGET`: 自动定版时后者是 bump 提交,
-        # 与 PR 没有关联 —— squash 合入只把合并提交挂在那个 PR 上。手动档没有 PR, 脚本会回退成
-        # 一句说明(不写版本/提交号, 那些在 Release 标题与页面上已经有了)。
+        # 找 PR 用合入提交(`github.sha`), **不是** `RELEASE_TARGET`: 后者是 classify 传出的构建
+        # 目标(手动档可以是任意 ref), 不一定关联着某个 PR —— 而 squash 合入只把**合并提交**
+        # 挂在那个 PR 上。手动档没有 PR, 脚本会回退成一句说明。
         if: ${{ steps.decision.outputs.publish == 'true' }}
         run: |
           set -eu
