@@ -413,11 +413,11 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         encoding="utf-8",
     )
     # 冒烟结论项(由打包作业里的 create_allure_smoke.py 写成): 两条判据, 一条红 ——
-    # 总账的"构建后冒烟"一节要按平台数得出来, 而不是装作通过。(onefile 已于 2026-10-28
-    # 停产, 结论项只来自 onedir 那组。)
+    # 总账的"构建后冒烟"一节要按平台数得出来, 而不是装作通过。(发布产物是一份单文件 exe,
+    # 结论项只来自 onefile 那组。)
     for slug, check, passed in (
-        ("smoke-onedir-version", "onedir.version", True),
-        ("smoke-onedir-doctor", "onedir.doctor", False),
+        ("smoke-onefile-version", "onefile.version", True),
+        ("smoke-onefile-doctor", "onefile.doctor", False),
     ):
         (results / f"{slug}-result.json").write_text(
             json.dumps(
@@ -1302,25 +1302,29 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     assert "不要手工编辑" in template
     assert "最终提交说明" in template
 
-    # 变更摘要那一块(2026-10-31 加): 改动文件只能从 API 拿(这个作业没有 checkout, 也不该 checkout
-    # PR 的代码)。两段自动区块必须**一次写完** —— 分两次 update 会互相覆盖(读写竞态), 而两边都
-    # 监听 synchronize/edited 时还会互相把对方叫起来。
-    assert "github.rest.pulls.listFiles" in workflow, (
-        "摘要要写到 PR 的改动文件, 只能用 API 取(作业里没有 checkout)"
+    # 「本次变更」自 2026-10-31 起**由发起者手写**, CI 不再汇总 —— 它要成为 GitHub Release 的说明,
+    # 而自动摘要只能说"改了几个文件"。所以这里做**反向**断言: 摘要那一段不许再回到工作流, 模板里
+    # 也不许再出现"自动生成"或那对 marker(否则 release_notes.py 会把 marker 一起写进发布页)。
+    hint = "变更摘要已改成手写(2026-10-31): 工作流不许再改写 PR 描述里的这一节"
+    assert "change-summary" not in workflow, hint
+    assert "github.rest.pulls.listFiles" not in workflow, hint
+    assert "## 本次变更" in template, "模板要留这一节, 发布页说明就是从这里取的"
+    assert "自动生成" not in template, hint
+
+    # 缺一格 marker **不判红**(2026-11-01 实测): 摘要那格从模板里删掉之后, 旧版工作流在 main 上
+    # 仍然要求它, 于是每个按新模板开的 PR 都被判"缺少 summary 区标记" —— 红的是检查本身。现在
+    # 缺了只记 notice 跳过; 真正该红的是"开始标记重复 / 结束标记在开始之前"(描述被写坏了)。
+    skip_hint = (
+        "缺 marker 只该跳过、不该判红: 这一节在模板里是可选的(摘要那格已删), "
+        "旧描述也可能只有一部分"
     )
-    assert "change-summary:start" in workflow
-    assert "change-summary:end" in workflow
-    # 全角括号正是被测模板里的写法(RUF001 对 .py 里的全角标点有意见)。
-    assert "## 本次变更（自动生成）" in template  # noqa: RUF001
-    assert "change-summary:start" in template
-    assert "change-summary:end" in template
+    assert "这一格跳过" in workflow, skip_hint
+    assert "格式不对" in workflow, "重复或顺序颠倒才是真坏了, 那种要判红"
+    assert "PR 描述缺少" not in workflow, "旧的'缺失即判红'文案不该回来"
+
     assert workflow.count("github.rest.pulls.update") == 1, (
-        "两段自动区块必须一次写完: 分两次 update 会互相覆盖"
+        "署名那一格必须一次写完: 分两次 update 会互相覆盖"
     )
-    assert "const MAX_COMMITS" in workflow, (
-        "摘要要封顶: dev 那条 PR 攒了几十个提交, 一股脑铺开会让 PR 描述长到没法读"
-    )
-    assert "const MAX_PATHS" in workflow, "每类路径同样要封顶(见上一条)"
 
 
 def test_the_dev_branch_is_recreated_without_touching_an_existing_one() -> None:
@@ -1766,8 +1770,8 @@ def test_the_packaging_gate_always_reports_a_conclusion() -> None:
 def test_the_build_smokes_the_packages_it_produced() -> None:
     """构建之后必须先冒烟再上传: 「能编」与「产物能起」是两件事.
 
-    顺序本身就是不变式: 冒烟必须在 ``Build the onedir package`` 之后(那时才有
-    产物可冒)、在 ``Prepare build files`` 之前(跑不起来的包不该被打包上传成"看起来能发"
+    顺序本身就是不变式: 冒烟必须在 ``Build the onefile package`` 之后(那时才有
+    产物可冒)、在 ``Prepare the release file`` 之前(跑不起来的包不该被打包上传成"看起来能发"
     的样子)。判据是退出码 + 侧效应, 全在 ``scripts/smoke_packaged.py`` 里(工作流只负责
     调用); 门禁档(ci.yml 的 windows-package)与发布档(release.yml)共用这一步, 两个入口
     同时被它覆盖。
@@ -1776,11 +1780,11 @@ def test_the_build_smokes_the_packages_it_produced() -> None:
     smoke = "- name: Smoke test the built packages"
     assert smoke in build, "构建作业里必须有产物冒烟这一步"
     smoke_at = build.index(smoke)
-    assert smoke_at > build.index("Build the onedir package"), (
+    assert smoke_at > build.index("Build the onefile package"), (
         "冒烟必须在构建之后(不然没有产物可冒)"
     )
-    assert smoke_at < build.index("Prepare build files"), (
-        "冒烟必须在打 release/ 之前(跑不起来的包不上传)"
+    assert smoke_at < build.index("Prepare the release file"), (
+        "冒烟必须在拷 release/ 之前(跑不起来的包不上传)"
     )
     step = build.split(smoke, 1)[1].split("- name:", 1)[0]
     assert "scripts/smoke_packaged.py" in step, "判据只在脚本里一处定义, 工作流只调用"
@@ -1810,7 +1814,7 @@ def test_the_packaging_smoke_results_reach_the_final_report() -> None:
     assert smoke_at < writer_at < upload_at, (
         "转结论与上传必须紧跟冒烟步(先有 JSON 才能转, 转完才有东西可传)"
     )
-    assert upload_at < build.index("- name: Prepare build files"), (
+    assert upload_at < build.index("- name: Prepare the release file"), (
         "冒烟结论的上传排在打 release/ 之前 —— 与冒烟本身同一个理由, 跑不起来的包不该"
         '被上传成"看起来能发"的样子'
     )

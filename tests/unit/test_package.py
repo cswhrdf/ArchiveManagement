@@ -62,7 +62,7 @@ _SPEC_PATH = (
 
 
 def _upx_keywords() -> list[ast.keyword]:
-    """取出 spec 里所有 `upx=` 关键字参数(onedir 的 EXE + COLLECT)."""
+    """取出 spec 里所有 `upx=` 关键字参数(单文件产物的那块 EXE)."""
     tree = ast.parse(_SPEC_PATH.read_text(encoding="utf-8"), filename=str(_SPEC_PATH))
     return [
         keyword
@@ -87,78 +87,80 @@ def test_the_spec_asks_for_upx_explicitly_off() -> None:
 
 
 def test_every_build_target_declares_its_upx_choice() -> None:
-    hint = "EXE 与 COLLECT 共两处 upx=: 新增构建目标时一起决定压不压"
-    assert len(_upx_keywords()) == 2, hint
+    hint = "单文件产物只有一块 EXE upx=: 新增构建目标时一起决定压不压"
+    assert len(_upx_keywords()) == 1, hint
 
 
 _ROOT = Path(__file__).resolve().parents[2]
 
 
-def _build_names() -> tuple[str, str, int]:
-    """解析 spec: onedir 目录名 / 目录里 exe 的名字 / EXE 块的总数.
+def _build_names() -> tuple[str, int]:
+    """解析 spec: 单文件产物的名字 / EXE 块的总数.
 
-    目录与文件可以同名(PyInstaller 产出 `dist/<目录>/`), 所以这里分开取: `COLLECT` 的是
-    目录名, `exclude_binaries=True` 那块 `EXE` 是目录里的 exe。EXE 总数给"只产 onedir"
-    的停产守卫用(2026-10-28 起 onefile 停产, 不带 `exclude_binaries` 的那块 EXE 不该回来).
+    产物是 `dist/<name>.exe`(onefile): 那块 `EXE` 把 binaries 与 datas 一起收进来。EXE 总数
+    给"只产一份单文件"的守卫用(2026-10-31 起发布产物回到 onefile)。
     """
     tree = ast.parse(_SPEC_PATH.read_text(encoding="utf-8"), filename=str(_SPEC_PATH))
-    onedir_exe = folder = ""
+    exe_name = ""
     exe_calls = 0
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
-        if node.func.id not in {"EXE", "COLLECT"}:
+        if node.func.id != "EXE":
             continue
         keywords = {keyword.arg: keyword.value for keyword in node.keywords}
         name = keywords.get("name")
         hint = f"spec 的 {node.func.id} 必须写字面量 name="
         assert isinstance(name, ast.Constant), hint
         assert isinstance(name.value, str), hint
-        excluded = keywords.get("exclude_binaries")
-        if node.func.id == "COLLECT":
-            folder = name.value
-        else:
-            exe_calls += 1
-            if isinstance(excluded, ast.Constant) and excluded.value is True:
-                onedir_exe = name.value
-    missing = [
-        label
-        for label, value in (
-            ("onedir", onedir_exe),
-            ("目录", folder),
-        )
-        if not value
-    ]
-    assert missing == [], f"spec 里没找到这些构建目标: {missing}"
-    return onedir_exe, folder, exe_calls
+        exe_calls += 1
+        exe_name = name.value
+    assert exe_name, "spec 里没找到 EXE 的 name="
+    return exe_name, exe_calls
 
 
-def test_the_spec_builds_only_the_onedir_artifact() -> None:
-    """onefile 停产(2026-10-28, 发布决定): spec 只许剩 onedir 那块 EXE.
+def test_the_spec_builds_a_single_file_exe() -> None:
+    """发布产物是**一份单文件 exe**(2026-10-31 定, 见 spec 末尾的说明).
 
-    多出来的 EXE(不带 `exclude_binaries`)就是 onefile 回来了 —— 它得连带冒烟清单、发布
-    文件与文档一起恢复, 不能只在 spec 里悄悄加回来.
+    onefile 的判据不是"代码里写了 EXE": 而是"那块 EXE 把 binaries/datas 收进来、没有
+    `exclude_binaries`", 并且 spec 里**没有** COLLECT(那是 onedir 的目录目标)。反过来,
+    COLLECT 一回来就说明有人只改了 spec —— 冒烟清单、发布文件与文档都还指着单文件。
     """
-    _, _, exe_calls = _build_names()
-    assert exe_calls == 1, "onefile 已停产: spec 里只该有 onedir 的那块 EXE"
+    _, exe_calls = _build_names()
+    assert exe_calls == 1, "发布产物是单文件: spec 里只该有一块 EXE"
+    # 按 AST 判而不是搜原文: 注释里就写着「不带 `exclude_binaries`」, 拿原文子串会把自己喂红。
+    tree = ast.parse(_SPEC_PATH.read_text(encoding="utf-8"), filename=str(_SPEC_PATH))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    exes = [
+        node
+        for node in calls
+        if isinstance(node.func, ast.Name) and node.func.id == "EXE"
+    ]
+    assert exes, "spec 里没找到 EXE"
+    hint = "单文件 EXE 不能带 exclude_binaries —— 那会退化成 onedir 的「目录+独立 exe」"
+    assert all(keyword.arg != "exclude_binaries" for keyword in exes[0].keywords), hint
+    assert [
+        node
+        for node in calls
+        if isinstance(node.func, ast.Name) and node.func.id == "COLLECT"
+    ] == [], "发布产物是单文件: spec 里不该再有 COLLECT"
 
 
 def test_the_smoke_script_and_the_workflow_follow_the_spec_names() -> None:
-    """产物改名是一处改、三处跟: spec 的 name= → 冒烟脚本默认路径 → 发布作业的打包来源."""
-    onedir_exe, folder, _ = _build_names()
+    """产物名是一处改、三处跟: spec 的 name= → 冒烟脚本默认路径 → 发布作业拷的文件."""
+    exe_name, _ = _build_names()
     smoke = (_ROOT / "scripts" / "smoke_packaged.py").read_text(encoding="utf-8")
     workflow = (_ROOT / ".github" / "workflows" / "release-build.yml").read_text(
         encoding="utf-8"
     )
     hint = "改了 spec 的产物名就要同步冒烟脚本与 release-build.yml 的路径"
-    assert f"dist/{folder}/{onedir_exe}.exe" in smoke, hint
-    assert f"dist/{folder}/" in workflow, hint
-    # onefile 停产(2026-10-28): 冒烟脚本不该再有第二份产物的入口, 发布作业不该再拷
-    # dist 根下的单个 exe —— 它们回来了就说明有人只改了一处.
-    assert "--onefile" not in smoke, "onefile 已停产, 冒烟脚本不再有它的参数"
-    assert 'dist/ArchiveManagement.exe"' not in workflow, (
-        "onefile 已停产, 发布作业不再拷 dist 根下的单个 exe"
-    )
+    assert f"dist/{exe_name}.exe" in smoke, hint
+    assert f"release/{exe_name}.exe" in workflow, hint
+    assert f"dist/{exe_name}/" not in workflow, "发布作业不再收 onedir 目录"
 
 
 def _smoke_source() -> str:
@@ -183,10 +185,10 @@ def _load_smoke_module() -> ModuleType:
 
 
 def test_the_artifact_has_a_cold_start_bound() -> None:
-    """J-7①: 给了上限才能拦住"又往包里塞大件"(onefile 的 20 s 上限随停产一起移除)."""
+    """J-7①: 给了上限才能拦住"又往包里塞大件"(单文件产物要留出解包到 %TEMP% 的开销)."""
     limits = _load_smoke_module()._COLD_START_LIMITS_SECONDS
     hint = "产物要有冷启动上限(Popen → '界面启动' 落地)"
-    assert set(limits) == {"onedir"}, hint
+    assert set(limits) == {"onefile"}, hint
     assert all(limit > 0 for limit in limits.values()), "上限必须是正数"
 
 
