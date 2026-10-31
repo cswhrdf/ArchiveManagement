@@ -1,0 +1,1279 @@
+"""守卫: 每个作业失败时都要留下现场, 而且**只有兜底现场**才传得上去.
+
+约定(见 .github/workflows/ci.yml): 每个作业最后都有一对步骤
+``Collect failure diagnostics`` + ``Upload failure diagnostics``。收集步挂 ``if: failure()``
+(前面的步骤都成功时**根本不跑**), 但它只负责**判定**: 普通失败的证据已经在 Allure 结果与
+运行日志里, 这一对步骤只兜底"进程级崩溃 / 证据缺失"。判定写进 ``$GITHUB_OUTPUT``, 上传步
+按它跑 —— 所以"某个用例红了"不会再多一份 artifact, 也不会出现在全局附件里
+(用户 2026-10-04 的要求)。
+
+为什么要有这些守卫: 这一整套的价值只在**真失败时**才体现出来 —— 而那时才发现"没配上"已经晚
+了。所以用测试把它钉住: 少一个作业、条件写成 ``if: always()``、上传不按判定走、汇总作业忘了
+下载或忘了过滤, 都要在本地就红。
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import importlib.util
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+import crash_capture
+
+pytestmark = [
+    pytest.mark.minor,
+    pytest.mark.epic("工程与发布"),
+    pytest.mark.feature("测试基础设施"),
+    pytest.mark.story("失败现场与作业诊断"),
+    pytest.mark.layer("unit"),
+]
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+ALLURE_CONFIG = REPO_ROOT / "allurerc.mjs"
+
+# 轻量门禁作业(路径过滤 + 必需检查结论)不跑测试、不产生 Allure 结果或覆盖率,
+# 没有"兜底现场"可收 —— 所以它们不在这对步骤的适用范围内。
+# 2026-10-17 又添两个: 打包门禁那一对 —— `windows-package` 是**纯转调作业**(`uses:
+# release-build.yml`, 自己没有步骤), `packaging-gate` 只读上游的 result 并 echo 一行; 真正构建
+# 与冒烟的步骤在 release-build.yml 里(那个工作流没有这套诊断步骤)。
+_GATE_ONLY_JOBS = {
+    "changes",
+    "required-check",
+    "windows-package",
+    "packaging-gate",
+}
+
+
+def _load_script(name: str) -> ModuleType:
+    """按路径加载 ``scripts/`` 下的脚本(它们不是包, 只能用 importlib 按文件加载)."""
+    spec = importlib.util.spec_from_file_location(
+        name, REPO_ROOT / "scripts" / f"{name}.py"
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _job_blocks(workflow: str) -> dict[str, str]:
+    """把 ci.yml 按顶层作业切成 ``{作业名: 文本}``(只要带 ``runs-on`` 的才算作业)."""
+    matches = list(re.finditer(r"^  ([a-z][a-z0-9_-]+):$", workflow, re.MULTILINE))
+    blocks: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(workflow)
+        blocks[match.group(1)] = workflow[match.start() : end]
+    return {name: text for name, text in blocks.items() if "runs-on:" in text}
+
+
+def _step(job: str, name: str) -> str:
+    """切出一个步骤的文本(到下一个步骤名为止): 条件是写在里面的, 不切出来会看成别的步骤的."""
+    start = job.index(f"name: {name}")
+    end = job.find("\n      - name: ", start)
+    return job[start : end if end != -1 else len(job)]
+
+
+def test_every_job_has_a_failure_diagnostics_pair() -> None:
+    """每个作业都要有那一对步骤, 而且收集步要落在作业的**后半段**(约定是"放最后")."""
+    jobs = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))
+    jobs = {name: job for name, job in jobs.items() if name not in _GATE_ONLY_JOBS}
+
+    assert len(jobs) == 5, f"作业数量变了, 这份守卫要跟着改: {sorted(jobs)}"
+    for name, job in jobs.items():
+        collect = job.index("name: Collect failure diagnostics")
+        assert "name: Upload failure diagnostics" in job, name
+        assert "scripts/collect_job_diagnostics.py" in job, name
+        assert collect > len(job) / 2, f"{name} 的收集步没有放在作业末尾"
+        # 条件必须是"失败才跑": 写成 always() 就等于每轮 CI 都多传一份空产物。
+        assert "failure()" in _step(job, "Collect failure diagnostics"), name
+
+
+def test_upload_runs_only_for_a_backstop_scene() -> None:
+    """上传步必须按收集步给出的**兜底判定**跑, 而且判定说了有现场就必须真有东西.
+
+    用户 2026-10-04 的要求: 普通失败(断言输出、门禁不通过、步骤报错)的证据已经在 Allure
+    结果与运行日志里, 不要再用一份 artifact 与一段附件把它抄一遍 —— 那一段只留给
+    **进程级崩溃 / 证据缺失**。判定只在一个地方算(脚本), 工作流只读它。
+    """
+    jobs = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))
+    jobs = {name: job for name, job in jobs.items() if name not in _GATE_ONLY_JOBS}
+
+    for name, job in jobs.items():
+        collect = _step(job, "Collect failure diagnostics")
+        assert "id: diagnostics" in collect, f"{name} 的收集步没有 id, 上传步读不到判定"
+        assert "--github-output" in collect, f"{name} 没把判定写进 $GITHUB_OUTPUT"
+        assert "--expect" in collect, f"{name} 没声明预期证据, 判定会永远为假"
+        upload = _step(job, "Upload failure diagnostics")
+        assert "steps.diagnostics.outputs.scene == 'true'" in upload, (
+            f"{name} 的上传步没按兜底判定走, 普通失败也会多传一份"
+        )
+        # 判定说"有现场"就必须真的有: 静默少传一份, 等于把"附件里为什么没有这个作业"变成谜。
+        assert "if-no-files-found: error" in upload, f"{name} 允许静默上传空产物"
+
+
+def test_summary_job_pulls_every_diagnostics_artifact() -> None:
+    """汇总作业要按 pattern 收全各作业的诊断, 并且**不合并**到同一目录."""
+    summary = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["allure-summary"]
+
+    assert "pattern: job-diagnostics-*" in summary, "少了 pattern 就只能收到一份"
+    # merge-multiple 会把各份同名的 summary.md 压成一份(后到的盖掉先到的)。
+    # 只看**这一步**里的情况: 同一个作业里其它下载步用了它是另一回事。
+    step = summary.index("pattern: job-diagnostics-*")
+    assert "merge-multiple" not in summary[step : step + 400], (
+        "合并到同一目录会互相覆盖"
+    )
+
+
+def test_pytest_job_collects_crash_reports_before_uploading_the_artifact() -> None:
+    """pytest 作业的收集步必须排在 crash-dumps 上传步**之前**.
+
+    macOS 的 ReportCrash 在进程死后几秒才异步落盘 ``.ips``, 收集步带着
+    ``--crash-report-wait`` 把它等来并拷进 ``crash-dumps/``(2026-10-05 之前收集步排在
+    上传之后, 于是那一轮的 crash-dumps artifact 里没有 ``.ips`` —— 完整原生栈只存在于
+    摘要里截断的 4000 字里, 用户下载 artifact 只能看到空白的现场)。
+    """
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+
+    collect = job.index("name: Collect failure diagnostics")
+    upload = job.index("name: Upload crash dumps")
+    assert collect < upload, "收集步要在 crash-dumps 上传之前: .ips 得先拷进目录再上传"
+
+
+def test_pytest_job_runs_the_ui_suite_in_its_own_process() -> None:
+    """UI 用例必须与非 UI 用例分两个 pytest 进程跑(进程隔离, 2026-10-05).
+
+    macOS 上 Tk 的原生崩溃(SIGTRAP)会带走整个 pytest 进程 —— 覆盖率(pytest-cov 要等
+    会话**结束**才落盘)与崩溃点之后的所有用例结果全部陪葬。非 UI 段先跑、UI 段单独
+    进程加 ``--cov-append`` 之后, 崩掉时丢的只有 UI 自己那段。
+    """
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+
+    durable = job.index('-m "not ui" --cov')
+    ui = job.index('-m "ui" --cov --cov-append')
+    assert durable < ui, "非 UI 段先跑: 它的产物落盘之后, UI 段的崩溃才不陪葬"
+    assert "--cov-append" in job[ui:], "UI 段要并进同一份覆盖率数据, 而不是另写一份"
+
+
+def test_diagnostics_report_lands_in_the_allure_config() -> None:
+    """报告首页的全局附件里要有那份"失败现场", 而且它是**按文件在不在条件收的**.
+
+    用户 2026-10-04: 没有兜底现场时这份文档不该生成 —— 否则不点开只会以为"是不是崩过"。
+    两处一起才行: 脚本不写文件(见 test_no_backstop_scene_means_no_attachment), 配置按
+    ``existsSync`` 决定收不收 —— 否则 Allure 会在报告里留一条"附件找不到"的告警。
+    """
+    module = _load_script("create_allure_summary")
+    config = ALLURE_CONFIG.read_text(encoding="utf-8")
+
+    assert "globalAttachments:" in config, "配置里要有 globalAttachments"
+    name = module.FAILURE_DIAGNOSTICS_REPORT.name
+    assert name == "allure-failure-diagnostics.md"
+    assert name in config, "配置里要点名这份附件"
+    assert f'existsSync("{name}")' in config, (
+        "这份附件要按文件在不在决定收不收(没有现场时不该出现)"
+    )
+    # 它是 CI 生成物, 也必须被忽略: 否则本地跑一次汇总就会污染工作区(另两份附件同样在列)。
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert name in ignored
+
+
+def test_diagnostics_report_is_a_pointer_not_a_copy(tmp_path: Path) -> None:
+    """现场只清点、不搬运大文件: 摘要里给的是清单, 报告才不会被上兆的 dump 拖死.
+
+    路径故意用一个**不存在**的位置: `crash-dumps/` 在仓库里恰好存在, 拿它当输入就测不到
+    "路径不在时怎么写"这条分支。
+    """
+    module = _load_script("collect_job_diagnostics")
+    text = module.build_summary(
+        "pytest (ubuntu-latest, 分片 0)", [tmp_path / "crash-dumps"]
+    )
+
+    assert "crash-dumps" in text
+    assert "**不存在**" in text, "路径不在时要写明, 那本身就是证据"
+    assert "`crash-dumps` artifact" in text, "要指路到真正的现场, 而不是把本体塞进来"
+
+
+def test_summary_lists_files_and_sizes(tmp_path: Path) -> None:
+    """存在但很大的路径要报出文件数与大小, 并列出最大的几个文件."""
+    module = _load_script("collect_job_diagnostics")
+    directory = tmp_path / "allure-results"
+    directory.mkdir()
+    (directory / "small.json").write_text("{}", encoding="utf-8")
+    (directory / "big.json").write_text("x" * 4096, encoding="utf-8")
+
+    text = module.build_summary("label", [directory])
+
+    assert "2 个文件" in text
+    assert "`big.json`" in text, "要让人一眼看出哪个文件占地方"
+
+
+def test_main_writes_the_summary_and_echoes_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """主入口把摘要写盘并回显 —— 失败时最顺手的地方仍然是运行日志."""
+    module = _load_script("collect_job_diagnostics")
+    monkeypatch.setenv("GITHUB_JOB", "pytest")
+    output = tmp_path / "job-diagnostics"
+
+    code = module.main(["--output", str(output), "crash-dumps"])
+    echoed = capsys.readouterr().out
+
+    assert code == 0
+    assert (output / "summary.md").is_file()
+    assert "# 作业失败现场: pytest" in echoed, "没传 --label 时要退回 GITHUB_JOB"
+
+
+def test_no_backstop_scene_means_no_attachment(tmp_path: Path) -> None:
+    """没有兜底现场时**不写**这份附件 —— 返回 None, 由调用方保证文件不存在."""
+    module = _load_script("create_allure_summary")
+
+    assert module.failure_diagnostics_report(tmp_path / "missing") is None
+
+
+def test_attachment_keeps_only_backstop_scenes(tmp_path: Path) -> None:
+    """只有判定为"有兜底现场"的作业进附件 —— 普通失败不进(用户 2026-10-04 的要求).
+
+    样本按 **CI 真实的目录布局**造: artifact 里装的是 `job-diagnostics/` 的**内容**
+    (`summary.md` 在根), 下载到 `failure-diagnostics/<artifact 名>/` 后只有一层 —— 原来
+    这里多造了一层 `job-diagnostics/`, 与脚本里那条同样多一层的 glob 一起把那次的 bug 盖
+    住了(2026-10-05 从报告里发现"崩溃的作业白上传")。
+    """
+    module = _load_script("create_allure_summary")
+    ordinary = tmp_path / "job-diagnostics-linux-0"
+    scene = tmp_path / "job-diagnostics-macos-latest-0"
+    for owner, scene_flag in ((ordinary, False), (scene, True)):
+        owner.mkdir(parents=True)
+        (owner / "summary.md").write_text(
+            f"# 作业失败现场: {owner.name}\n", encoding="utf-8"
+        )
+        (owner / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+            json.dumps({"scene": scene_flag}), encoding="utf-8"
+        )
+
+    text = module.failure_diagnostics_report(tmp_path)
+
+    assert "## job-diagnostics-macos-latest-0" in text
+    assert "job-diagnostics-linux-0" not in text
+    # 没有 verdict.json 的产物按"有现场"处理: 宁可多显示一段, 也不要在最需要证据的时候
+    # 因为少了一个字段把现场藏起来。
+    (ordinary / module.FAILURE_DIAGNOSTICS_VERDICT).unlink()
+    assert "job-diagnostics-linux-0" in module.failure_diagnostics_report(tmp_path)
+
+
+def test_diagnostics_are_found_with_an_extra_level_too(tmp_path: Path) -> None:
+    """上传时若传的是**父目录**(artifact 里多一层 `job-diagnostics/`), 也要认得出来.
+
+    两种布局都收: 不是为了兼容, 而是因为这种"换一层目录"的改动我们真的做过
+    (见 test_attachment_keeps_only_backstop_scenes): 只认一种时, 换布局就会静默失效。
+    """
+    module = _load_script("create_allure_summary")
+    owner = tmp_path / "job-diagnostics-quality" / "job-diagnostics"
+    owner.mkdir(parents=True)
+    (owner / "summary.md").write_text("# 作业失败现场: quality\n", encoding="utf-8")
+
+    text = module.failure_diagnostics_report(tmp_path)
+
+    assert text is not None
+    assert "## job-diagnostics-quality" in text, (
+        "节标题仍然用 artifact 名, 不带中间那层"
+    )
+
+
+def test_a_crashed_job_becomes_a_countable_conclusion_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """有兜底现场时, 除了首页附件还要写一条 broken 结论项 —— 否则它进不了任何统计.
+
+    用户 2026-10-05: "有崩溃异常的时候要将异常记录到报告里便于统计"。附件是文档, 不进
+    计数也不能按环境/等级筛; 结论项才是可统计的那一份 —— 环境用崩溃作业所在的平台(切到
+    那个平台就能看到它), 等级 critical, `testCategory=diagnostics`(不是用例, 原生质量门
+    那条"每个平台都要有用例"因此不会把它当成"这个平台测过了")。
+    """
+    module = _load_script("create_allure_summary")
+    diagnostics = tmp_path / "failure-diagnostics"
+    owner = diagnostics / "job-diagnostics-macos-latest-0"
+    owner.mkdir(parents=True)
+    (owner / "summary.md").write_text(
+        "# 作业失败现场: pytest (macos-latest, 分片 0)\n", encoding="utf-8"
+    )
+    (owner / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+        json.dumps(
+            {
+                "label": "pytest (macos-latest, 分片 0)",
+                "scene": True,
+                "reasons": ["收到系统级崩溃报告 python3.12-….ips"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    attachment = tmp_path / "allure-failure-diagnostics.md"
+    monkeypatch.setattr(module, "FAILURE_DIAGNOSTICS_DIRECTORY", diagnostics)
+    monkeypatch.setattr(module, "FAILURE_DIAGNOSTICS_REPORT", attachment)
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+
+    assert module.main(["--write-failure-diagnostics"]) == 0
+
+    assert attachment.is_file(), "有现场时首页附件照旧要写"
+    items = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in results.glob("*-result.json")
+    ]
+    assert len(items) == 1
+    item = items[0]
+    labels = {entry["name"]: entry["value"] for entry in item["labels"]}
+    assert item["status"] == "broken"
+    assert item["name"] == "作业崩溃: pytest (macos-latest, 分片 0)"
+    assert labels["env"] == "macOS", "结论项要落在崩溃作业那个平台的环境里"
+    assert labels["testCategory"] == "diagnostics"
+    assert labels["severity"] == "critical"
+    assert item["statusDetails"]["message"].startswith("作业崩溃(兜底现场)")
+    assert item["attachments"], "现场摘要要挂在结论项上"
+    assert "失败现场已写入" in capsys.readouterr().out
+
+
+def test_no_scene_writes_neither_attachment_nor_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """没有兜底现场时: 附件清掉、结论项一条不写(用户的后半句要求: 避免误解)."""
+    module = _load_script("create_allure_summary")
+    attachment = tmp_path / "allure-failure-diagnostics.md"
+    attachment.write_text("上一次留下的", encoding="utf-8")
+    ordinary = tmp_path / "failure-diagnostics" / "job-diagnostics-linux-0"
+    ordinary.mkdir(parents=True)
+    (ordinary / "summary.md").write_text("# 普通失败\n", encoding="utf-8")
+    (ordinary / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+        json.dumps({"scene": False}), encoding="utf-8"
+    )
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    monkeypatch.setattr(
+        module, "FAILURE_DIAGNOSTICS_DIRECTORY", tmp_path / "failure-diagnostics"
+    )
+    monkeypatch.setattr(module, "FAILURE_DIAGNOSTICS_REPORT", attachment)
+    monkeypatch.setattr(module, "RESULTS_DIRECTORY", results)
+
+    assert module.main(["--write-failure-diagnostics"]) == 0
+
+    assert not attachment.exists(), "没有现场时那份附件不该留在报告里"
+    assert list(results.glob("*-result.json")) == [], "也不该写任何结论项"
+    assert "没有兜底现场" in capsys.readouterr().out
+
+
+def test_failure_diagnostics_are_concatenated_by_job(tmp_path: Path) -> None:
+    """有兜底现场时按作业分节拼起来, 节标题用 artifact 名(能看出是哪台机器)."""
+    module = _load_script("create_allure_summary")
+    for name in ("job-diagnostics-macos-latest-0", "job-diagnostics-quality"):
+        owner = tmp_path / name
+        owner.mkdir(parents=True)
+        (owner / "summary.md").write_text(f"# 作业失败现场: {name}\n", encoding="utf-8")
+        (owner / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+            json.dumps({"scene": True}), encoding="utf-8"
+        )
+
+    text = module.failure_diagnostics_report(tmp_path)
+
+    assert "## job-diagnostics-macos-latest-0" in text
+    assert "## job-diagnostics-quality" in text
+    assert text.count("# 作业失败现场: ") == 2, "两份摘要都要在, 不能互相覆盖"
+
+
+def test_a_single_artifact_laid_out_flat_is_still_recognized(tmp_path: Path) -> None:
+    """pattern 只匹配到一个诊断 artifact 时, download-artifact 会把内容**平铺**到下载目录.
+
+    2026-10-05 实测: 那一轮只有 ``job-diagnostics-macos-latest-0`` 一份, 平铺之后
+    ``crash_scenes`` 按子目录找一条都匹配不到 —— 汇总日志写着"没有兜底现场", 报告首页的
+    "失败现场"附件与 broken 结论项**静默**消失(这正是用户报的"入口一直不生效")。
+    这个样本按平铺布局造, 认不出就该红。
+    """
+    module = _load_script("create_allure_summary")
+    diagnostics = tmp_path / "failure-diagnostics"
+    diagnostics.mkdir()
+    (diagnostics / "summary.md").write_text(
+        "# 作业失败现场: pytest (macos-latest, 分片 0)\n", encoding="utf-8"
+    )
+    (diagnostics / module.FAILURE_DIAGNOSTICS_VERDICT).write_text(
+        json.dumps(
+            {
+                "label": "pytest (macos-latest, 分片 0)",
+                "scene": True,
+                "reasons": ["faulthandler.log 有栈"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    scenes = module.crash_scenes(diagnostics)
+
+    assert len(scenes) == 1, "平铺布局下也要认出这份现场, 而不是静默跳过"
+    assert scenes[0].owner == "pytest (macos-latest, 分片 0)", (
+        "丢了 artifact 名, 节标题要退回 verdict.json 里的作业标签"
+    )
+    assert scenes[0].platform == "macOS", "平台归属不能跟着丢(报告里按环境筛)"
+    assert "## pytest (macos-latest, 分片 0)" in module.failure_diagnostics_report(
+        diagnostics
+    )
+
+
+def test_diagnostic_label_defaults_to_local_outside_ci(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有 CI 变量时标成 local: 本地跑同一脚本不该崩, 也不该假装自己是某个作业."""
+    module = _load_script("collect_job_diagnostics")
+    monkeypatch.delenv("GITHUB_JOB", raising=False)
+
+    assert module.build_summary("local", []).startswith("# 作业失败现场: local")
+
+
+def test_utf8_helper_does_not_need_the_project_package() -> None:
+    """诊断脚本要在 `--no-install-project` 的作业里跑, 所以不能 import 项目包."""
+    source = (REPO_ROOT / "scripts" / "collect_job_diagnostics.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "from archive_management" not in source
+    assert "def ensure_utf8_output()" in source, "要自带一份, 否则中文摘要在本地会乱码"
+
+
+def test_diagnostics_are_downloaded_before_the_attachment_is_written() -> None:
+    """附件必须在"下载各作业诊断"**之后**写 —— 写早了它永远是"本轮没有作业失败".
+
+    现场(用户 2026-10-04): 报告的全局附件里那句话一直不变, 而作业明明是红的。原因是汇总
+    脚本的主流程(写性能/安全结论那一步)跑在下载之前, 顺手把附件也写了。
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    download = workflow.index("Download failure diagnostics from every job")
+    writer = workflow.index("--write-failure-diagnostics")
+    assert download < writer, "附件写在了下载之前, 内容必然是空的"
+    # 主流程仍要在下载**之前**跑(报告生成需要它写的那些结果), 但它不能再写这份附件。
+    assert workflow.index("create_allure_summary.py --expect-platforms") < download
+
+
+def test_system_crash_reports_are_collected(tmp_path: Path) -> None:
+    """系统级崩溃报告(macOS 的 `.ips`)要收进 crash-dumps/ —— 原生栈才是定位 C 崩溃的依据."""
+    module = _load_script("collect_job_diagnostics")
+    source = tmp_path / "DiagnosticReports"
+    source.mkdir()
+    fresh = source / "python-2026-10-04.ips"
+    fresh.write_text('{"exception": {"signal": "SIGSEGV"}}', encoding="utf-8")
+    old = source / "python-2020-01-01.ips"
+    old.write_text("上一次运行的现场", encoding="utf-8")
+    os.utime(old, (1, 1))
+    (source / "not-a-report.txt").write_text("无关文件", encoding="utf-8")
+    target = tmp_path / "crash-dumps"
+
+    copied = module.collect_crash_reports(source, target, wait_seconds=0)
+
+    assert [path.name for path in copied] == [fresh.name]
+    assert (target / fresh.name).is_file()
+    assert not (target / old.name).exists(), "上一次运行的现场不该混进来"
+
+
+def test_missing_crash_report_directory_costs_nothing(tmp_path: Path) -> None:
+    """来源目录不存在(Linux/Windows)时一秒都不等 —— 不能为了 macOS 把别的平台拖慢."""
+    module = _load_script("collect_job_diagnostics")
+    started = time.monotonic()
+
+    copied = module.collect_crash_reports(
+        tmp_path / "没有这个目录", tmp_path / "out", wait_seconds=30
+    )
+
+    assert copied == []
+    assert time.monotonic() - started < module.POLL_SECONDS
+
+
+def test_summary_inlines_the_crash_log(tmp_path: Path) -> None:
+    """faulthandler 的线程栈要**内联**进摘要: 报告首页就看得见, 不必再去下 artifact."""
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    (crashes / "faulthandler.log").write_text(
+        "Fatal Python error: Segmentation fault\n"
+        '  File "tkinter/__init__.py", line 1379 in update_idletasks\n',
+        encoding="utf-8",
+    )
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "## 崩溃现场摘录" in text
+    assert "### `faulthandler.log`" in text
+    assert "in update_idletasks" in text, "栈本身要看得见"
+
+
+def test_huge_crash_reports_are_truncated_in_the_summary(tmp_path: Path) -> None:
+    """上兆的现场只摘开头: 这份附件要在报告里渲染, 整份塞进去会把页面卡死."""
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    (crashes / "python-2026-10-04.ips").write_text(
+        "x" * (module.INLINE_LIMIT * 3), encoding="utf-8"
+    )
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "已截断" in text
+    assert len(text) < module.INLINE_LIMIT * 2
+
+
+def test_truncated_excerpts_name_the_artifact_and_keep_the_link_outside_the_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """截断标记点名**哪份** artifact; 链接只在围栏外, 且用 markdown 语法.
+
+    2026-10-05 的三轮读者反馈: ①"... (已截断, 全文 98.2 KiB 见 artifact)"没说是哪份、
+    去哪下; ②补上链接后它被嵌进 ``~~~`` 代码围栏里 —— 围栏里的 URL 点不了, 还把栈文本
+    斜插成两半; ③链接本身是往运行地址后拼 ``artifacts``, 那个后缀页打不开(产物其实挂在
+    运行页自己的 Artifacts 区)。所以规矩是: 围栏内只有 artifact 名, "排查提示"末条用
+    ``[文本](地址)`` 指向**本次运行页面**。
+    """
+    module = _load_script("collect_job_diagnostics")
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "cswhrdf/ArchiveManagement")
+    monkeypatch.setenv("GITHUB_RUN_ID", "37270928260")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    (crashes / "python3.12-2026-10-05-061413.ips").write_text(
+        "x" * (module.INLINE_LIMIT * 3), encoding="utf-8"
+    )
+
+    text = module.build_summary(
+        "pytest (macos-latest, 分片 0)",
+        [],
+        crashes,
+        full_copy_at=["crash-dumps-macos-latest-0"],
+    )
+
+    assert "已截断" in text
+    fence = text.split("~~~")[1]
+    assert "见 artifact `crash-dumps-macos-latest-0`" in fence, "围栏内要点名 artifact"
+    assert "https://" not in fence, "代码围栏里不许嵌链接: 点不了, 还把栈文本截成两半"
+    assert (
+        "[本次运行页面](https://github.com/cswhrdf/ArchiveManagement"
+        "/actions/runs/37270928260)" in text
+    ), "排查提示末条用 markdown 链接指向本次运行页面"
+    assert "/artifacts" not in text, "产物挂在运行页的 Artifacts 区, 拼后缀的地址打不开"
+
+
+def test_the_artifact_hint_degrades_without_the_ci_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地跑(没有 CI 变量)时链接拼不出来: 点名 artifact 仍然成立, 不许因此报错."""
+    module = _load_script("collect_job_diagnostics")
+    for name in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"):
+        monkeypatch.delenv(name, raising=False)
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    (crashes / "python-2026-10-05.ips").write_text(
+        "x" * (module.INLINE_LIMIT * 2), encoding="utf-8"
+    )
+
+    text = module.build_summary("label", [], crashes, full_copy_at=["crash-dumps-x-0"])
+
+    assert "已截断" in text
+    assert "见 artifact `crash-dumps-x-0`" in text, "没有 CI 变量时仍然要点名 artifact"
+    assert "https://" not in text.split("~~~")[1], "围栏内永远不嵌链接"
+    assert "[本次运行页面]" not in text, "没有 run 变量时不许编一个链接出来"
+
+
+def test_the_fatal_error_headline_is_rescued_from_a_huge_log(tmp_path: Path) -> None:
+    """几百 MiB 的 faulthandler 日志只截开头会**漏掉崩溃线程**: 它的栈在尾部那次 dump 里.
+
+    2026-10-05 的 macOS 分片: faulthandler.log 有 584.5 MiB, 摘要的开头 4000 字全是等在
+    ``threading.wait`` 里的旁观线程(多半还是泄漏的调度线程), "Current thread"的栈根本
+    不在其中 —— 所以 ``.log`` 的摘录要额外从尾部找回最后一次 ``Fatal Python error``
+    的头部。样本造得比搜索块还大, 顺带覆盖"往回走不止一块"的路径。
+    """
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    filler = "Thread 0x0000000deadbeef (most recent call first):\n" * 30000
+    tail = (
+        "Fatal Python error: Segmentation fault\n\n"
+        "Current thread 0x000000016e70f000 (most recent call first):\n"
+        '  File "tkinter/__init__.py", line 1379 in update_idletasks\n'
+    )
+    (crashes / "faulthandler.log").write_text(filler + tail, encoding="utf-8")
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "Fatal Python error: Segmentation fault" in text
+    assert "in update_idletasks" in text, (
+        "崩溃线程的栈要进摘要, 不能只留给 584 MiB 的 artifact"
+    )
+
+
+def test_the_backward_search_survives_a_marker_straddling_block_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """从尾部往回找 marker 的扫描要允许 marker 横跨块边界(相邻块之间有重叠).
+
+    没有重叠时, 骑在边界上的那一次出现会被前后两块同时错过 —— 找回来的就是更早的
+    一次, 或者干脆找不到。这里把块调小, 让 marker 恰好压在边界上。
+    """
+    module = _load_script("collect_job_diagnostics")
+    monkeypatch.setattr(module, "BACKWARD_SEARCH_CHUNK", 100)
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    # "Fatal Python error" 长 19 字节, 落在 5000+95 处; 块大小 100 时第一块从 5104 起
+    # —— 正好把 marker 切成两半, 只有重叠回读的那一块才装得下完整的它。
+    content = "a" * 95 + "Fatal Python error" + "z" * 90
+    (crashes / "faulthandler.log").write_text("x" * 5000 + content, encoding="utf-8")
+
+    headline = module.last_fatal_error_headline(crashes / "faulthandler.log")
+
+    assert headline.startswith("Fatal Python error")
+
+
+def test_pytest_job_names_the_artifact_holding_the_full_copies() -> None:
+    """pytest 作业的收集步要点名承载全文的 artifact: 那是工作流才知道的事实."""
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+    step = _step(job, "Collect failure diagnostics")
+
+    assert '--full-copy-at "crash-dumps-${{ matrix.os }}-${{ matrix.shard }}"' in step
+
+
+def test_the_rescue_falls_back_to_the_last_dump_when_the_fatal_header_is_empty(
+    tmp_path: Path,
+) -> None:
+    """致命头是空壳时, 捞回要回退到最后一份用户信号转储的 ``Current thread`` 块.
+
+    这不是想象的边界, 是 2026-10-05 的真实现场: 584.5 MiB 的 faulthandler.log 末尾
+    308 字节只有一个"Fatal Python error: Segmentation fault"头加一行 Extension
+    modules —— 致命路径刚开始转储就又崩了, 一个线程栈都没落盘; 有货的是(注册的信号
+    处理器转储后返回、故障指令反复重新执行留下的)上万份转储里的**最后一份**, 它的
+    第一个块正是崩溃用例的 Python 栈。只认致命头的话, 捞回来的是个空壳。
+    """
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    bystanders = (
+        "Thread 0x0000000deadbeef (most recent call first):\n"
+        '  File ".../threading.py", line 355 in wait\n' * 90
+    )
+    dump = (
+        "Current thread 0x00000001f132a180 (most recent call first):\n"
+        '  File ".../tkinter/__init__.py", line 1373 in update\n'
+        '  File "tests/integration/test_gui_dropdown.py", line 150'
+        " in test_a_dropdown_near_the_bottom_opens_upwards\n"
+        "Thread 0x0000000feedface (most recent call first):\n"
+        '  File ".../threading.py", line 355 in wait\n'
+    )
+    empty_header = (
+        "Fatal Python error: Segmentation fault\n\n\n"
+        "Extension modules: PIL._imaging (total: 13)\n\n"
+    )
+    (crashes / "faulthandler.log").write_text(
+        bystanders + dump + empty_header, encoding="utf-8"
+    )
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "in test_a_dropdown_near_the_bottom_opens_upwards" in text, (
+        "崩溃用例的栈必须被捞回: 空壳致命头后面什么都没有"
+    )
+    assert "文件尾部捞回的崩溃线程栈" in text
+
+
+def test_dumps_without_any_fatal_header_still_rescue_the_crashing_thread(
+    tmp_path: Path,
+) -> None:
+    """日志里只有用户信号转储(没走到致命路径)时, 也要把崩溃线程的栈捞回来."""
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    bystanders = (
+        "Thread 0x0000000deadbeef (most recent call first):\n"
+        '  File ".../threading.py", line 355 in wait\n' * 90
+    )
+    dump = (
+        "Current thread 0x00000001f132a180 (most recent call first):\n"
+        '  File ".../tkinter/__init__.py", line 1373 in update\n'
+    )
+    (crashes / "faulthandler.log").write_text(bystanders + dump, encoding="utf-8")
+
+    text = module.build_summary("label", [], crashes)
+
+    assert "Current thread" in text
+    assert "line 1373 in update" in text, "崩溃线程的栈不能只留在 artifact 里"
+
+
+# ---- 崩溃重试(2026-10-05): 只认"死于信号/原生异常", 带到期日, 不许烂尾 ----
+
+# 子进程剧本: 往计数文件追加一行(数它跑了几次), 往被看护目录写一个"本次运行"的
+# 残缺结果(名字带本次序号), 再按参数给定的退出码退出 —— 用它模拟"pytest 跑到一半
+# 被信号带走/正常失败"两种形态, 三平台都能跑(不用真的发信号: 128+n 的退出码就等于
+# shell 对"死于信号 n"的报告)。
+_CHILD_SCRIPT = (
+    "import pathlib, sys\n"
+    "counter = pathlib.Path(sys.argv[1])\n"
+    "runs = counter.read_text(encoding='utf-8').count('run') if counter.exists() else 0\n"
+    "with counter.open('a', encoding='utf-8') as handle:\n"
+    "    handle.write('run\\n')\n"
+    "watched = pathlib.Path(sys.argv[2])\n"
+    "watched.mkdir(parents=True, exist_ok=True)\n"
+    "(watched / f'partial-run{runs}.json').write_text('{}', encoding='utf-8')\n"
+    "raise SystemExit(int(sys.argv[3]))\n"
+)
+
+
+def test_only_signal_deaths_count_as_crash_exits() -> None:
+    """重试的闸门只对"进程被信号/原生异常杀死"的退出码开: 普通退出码一个都不许过."""
+    module = _load_script("run_pytest_with_crash_retry")
+
+    for code in (0, 1, 2, 4, 5, 120, 127, 255):
+        assert not module.is_crash_exit(code), code
+    assert not module.is_crash_exit(None)
+    for code in (-11, -7, -6, -5, -4, 132, 133, 134, 135, 139):
+        assert module.is_crash_exit(code), code
+    assert module.is_crash_exit(0xC0000005), "Windows 读违例也算原生崩溃"
+    assert module.is_crash_exit(0xC0000409), "Windows fail-fast 也算原生崩溃"
+
+
+def test_the_retry_window_closes_the_day_after_its_deadline() -> None:
+    """窗口到期日当天还能用, 次日关闭 —— 续期时这条守卫不用跟着改."""
+    module = _load_script("run_pytest_with_crash_retry")
+
+    assert module.retry_window_open(module.RETRY_UNTIL)
+    assert not module.retry_window_open(module.RETRY_UNTIL + dt.timedelta(days=1))
+
+
+def test_the_crash_retry_window_has_not_been_forgotten() -> None:
+    """到期日起这条测试必须红: "临时缓解"不许悄悄烂尾(用户 2026-10-05 的要求).
+
+    这不是普通的回归测试 —— 它就是到期提醒本身: 变红即"该回来处理这层包装了",
+    要么移除, 要么写清上游仍未修复的依据后**明确续期**(改 RETRY_UNTIL)。包装现在管两种
+    死法(原生崩溃与用例超时), 窗口也是共用的。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    today = dt.datetime.now(dt.UTC).date()
+
+    assert today <= module.RETRY_UNTIL, (
+        f"崩溃/超时重试的窗口已在 {module.RETRY_UNTIL} 到期: 请移除这层临时包装"
+        "(ci.yml 两个 UI 步骤外面包的 scripts/run_pytest_with_crash_retry.py, 以及"
+        " docs/testing-ci.md 的说明), 或确认上游(macOS 26 + Tcl/Tk 9.0)与 Windows 的"
+        "卡顿仍未修复后明确续期"
+    )
+
+
+def test_a_native_crash_triggers_exactly_one_clean_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """原生崩溃 → 清掉该次的残缺结果 → 原样重跑一次; 重跑仍崩就按它的退出码收场.
+
+    清理必须只动**这一次新增**的条目: 前一段进程(not ui)已写进 allure-results 的结果
+    在快照之外 —— 动了它们, 重跑后的报告就缺了半边, 那才是真的伤准确率。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.chdir(tmp_path)
+    summary = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    counter = tmp_path / "counter.txt"
+    # 预置"前一段进程"留下的结果: 重试的清理不许碰它。
+    (tmp_path / "allure-results").mkdir()
+    kept = tmp_path / "allure-results" / "from-not-ui-step.json"
+    kept.write_text("{}", encoding="utf-8")
+
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            "139",
+        ]
+    )
+
+    assert rc == 139, "第二次仍死于同一退出码, 按它收场"
+    assert counter.read_text(encoding="utf-8").count("run") == 2, "只重跑一次"
+    assert kept.exists(), "快照之外的结果不许被动"
+    assert not (tmp_path / "allure-results" / "partial-run0.json").exists(), (
+        "崩溃那次的残缺结果要清掉, 不然重跑后同一用例有两份结论"
+    )
+    assert (tmp_path / "allure-results" / "partial-run1.json").exists()
+    captured = capsys.readouterr()
+    assert "::warning::" in captured.err
+    assert "SIGSEGV(139)" in captured.err
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "原生崩溃重试" in summary_text
+    assert "SIGSEGV(139)" in summary_text
+
+
+def test_plain_failures_are_never_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """普通失败(断言红、门禁不过)一次都不许重跑 —— 真回归不能被重试稀释或掩盖."""
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    counter = tmp_path / "counter.txt"
+
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            "1",
+        ]
+    )
+
+    assert rc == 1
+    assert counter.read_text(encoding="utf-8").count("run") == 1, "退出码 1 不触发重试"
+    assert (tmp_path / "allure-results" / "partial-run0.json").exists(), (
+        "没有重试就没有清理"
+    )
+    assert "::warning::" not in capsys.readouterr().err
+
+
+def test_the_retry_passes_through_once_the_window_has_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """窗口过期后: 崩溃照常透传失败(缓解自然失效), 但要把"该处理了"喊出来."""
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        module, "RETRY_UNTIL", dt.datetime.now(dt.UTC).date() - dt.timedelta(days=1)
+    )
+    counter = tmp_path / "counter.txt"
+
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            "139",
+        ]
+    )
+
+    assert rc == 139
+    assert counter.read_text(encoding="utf-8").count("run") == 1, "过期后不再重试"
+    assert "过期" in capsys.readouterr().err, "失效不能是静默的"
+
+
+# ---- 超时重试(2026-10-16): 与崩溃同一层包装, 但判据是"留证痕迹"而不是退出码 ----
+
+# 出事的用例(2026-10-16 run 38758273842 真的卡在这条上; 用它当 nodeid 只是为了让日志可读)。
+_TIMEOUT_NODEID = (
+    "tests/integration/test_gui_lifecycle.py::test_run_gui_reports_every_config_state"
+)
+
+# 子进程剧本(超时): 每遍都记一行计数、往被看护目录写"本次的残缺结果"、把自己的命令行**覆盖**
+# 写进 argv 日志(第三遍有没有带上 --deselect 就靠它); 按 mode 决定装不装"卡到 60s 上限":
+#   once       —— 只有第一遍卡住(写结果/附件/dump), 之后正常退出 0;
+#   always     —— 只要命令行里没有 --deselect 就卡住(第二遍仍卡 ⇒ 逼出第三遍的 deselect);
+#   no-results —— 每遍都卡住, 但只落 dump(没配 --alluredir 的形态, 拿不到 nodeid)。
+# 卡住时退出码 1(``tests/timeout_guard.py`` 是 ``os._exit(1)``), 正常退出 0 —— 关键是这两种
+# 退出码**都不在** CRASH_EXIT_CODES 里, 所以"能不能认出超时"全靠痕迹。
+_TIMEOUT_CHILD_SCRIPT = (
+    "import json, pathlib, sys\n"
+    "counter = pathlib.Path(sys.argv[1])\n"
+    "runs = counter.read_text(encoding='utf-8').count('run') if counter.exists() else 0\n"
+    "with counter.open('a', encoding='utf-8') as handle:\n"
+    "    handle.write('run\\n')\n"
+    "watched = pathlib.Path(sys.argv[2])\n"
+    "watched.mkdir(parents=True, exist_ok=True)\n"
+    "pathlib.Path(sys.argv[3]).write_text(' '.join(sys.argv), encoding='utf-8')\n"
+    "(watched / f'partial-run{runs}.json').write_text('{}', encoding='utf-8')\n"
+    "mode, node = sys.argv[4], sys.argv[5]\n"
+    "hangs = '--deselect' not in sys.argv and (mode != 'once' or runs == 0)\n"
+    "if hangs:\n"
+    "    stem = f'{runs}-9f2c'\n"
+    "    (watched / f'{stem}-threads.txt').write_text('pytest 主线程', encoding='utf-8')\n"
+    "    (watched / f'{stem}-notes.txt').write_text('notes', encoding='utf-8')\n"
+    "    if mode != 'no-results':\n"
+    "        payload = {'uuid': stem, 'fullName': 'archive-management.timeout.' + node,\n"
+    "                   'name': '超时留证: ' + node, 'status': 'broken',\n"
+    "                   'attachments': [{'name': 'threads.txt', 'source': f'{stem}-threads.txt'},\n"
+    "                                   {'name': 'notes.txt', 'source': f'{stem}-notes.txt'}]}\n"
+    "        (watched / f'{stem}-result.json').write_text(\n"
+    "            json.dumps(payload, ensure_ascii=False), encoding='utf-8')\n"
+    "    dumps = pathlib.Path('crash-dumps')\n"
+    "    dumps.mkdir(parents=True, exist_ok=True)\n"
+    "    dump = dumps / ('tests_integration_test_gui_lifecycle.py__'\n"
+    "                    'test_run_gui_reports_every_config_state_timeout.dump')\n"
+    "    dump.write_text('dump ' * (runs + 1), encoding='utf-8')\n"
+    "raise SystemExit(1 if hangs else 0)\n"
+)
+
+
+def _run_timeout_child(
+    module: ModuleType,
+    tmp_path: Path,
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[int, Path, Path, Path]:
+    """按剧本跑一遍包装, 返回 ``(退出码, 计数文件, argv 日志, 结果目录)``."""
+    monkeypatch.chdir(tmp_path)
+    counter = tmp_path / "counter.txt"
+    argv_log = tmp_path / "argv.txt"
+    results = tmp_path / "allure-results"
+    results.mkdir(exist_ok=True)
+    # 预置"前一段进程"留下的结果: 清理不许碰它。
+    (results / "from-not-ui-step.json").write_text("{}", encoding="utf-8")
+    rc = module.main(
+        [
+            "--watch-dir",
+            "allure-results",
+            "--",
+            sys.executable,
+            "-c",
+            _TIMEOUT_CHILD_SCRIPT,
+            str(counter),
+            "allure-results",
+            str(argv_log),
+            mode,
+            _TIMEOUT_NODEID,
+        ]
+    )
+    return rc, counter, argv_log, results
+
+
+def test_a_timeout_triggers_one_plain_rerun_and_drops_the_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """超时: 原样重跑一遍; 这一遍过了就把那条"超时留证"清掉(用户 2026-10-16 的决定).
+
+    清掉的理由: 那条结论描述的是**上一次意外卡顿**, 不是这次运行的结论; 重跑已经证明这次
+    没事。但清理只动**本次新增**的条目, 前一段进程(not ui)写的结果在快照之外 —— 不许碰。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    summary = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    rc, counter, argv_log, results = _run_timeout_child(
+        module, tmp_path, "once", monkeypatch
+    )
+
+    assert rc == 0, "重跑成功就按 0 收场"
+    assert counter.read_text(encoding="utf-8").count("run") == 2, "只原样重跑一次"
+    assert not list(results.glob("*-result.json")), (
+        "那条 `超时留证` 与它的附件要清掉, 不然报告里留着一个不会再出现的卡顿"
+    )
+    assert (results / "from-not-ui-step.json").exists(), "快照之外的结果不许被动"
+    assert not (results / "partial-run0.json").exists(), "卡住那次的残缺结果要清"
+    assert (results / "partial-run1.json").exists()
+    assert "--deselect" not in argv_log.read_text(encoding="utf-8"), (
+        "第一遍过了就没必要 deselect"
+    )
+    assert list((tmp_path / "crash-dumps").glob("*_timeout.dump")), (
+        "dump 是现场证据, 不清(它不进报告, 但 artifact 里有)"
+    )
+    captured = capsys.readouterr()
+    assert "::warning::" in captured.err
+    assert "超时" in captured.err, "重试不能是静默的"
+    text = summary.read_text(encoding="utf-8")
+    assert "### 用例超时重试" in text
+    assert "退出码 0" in text
+
+
+def test_a_second_timeout_deselects_the_hung_case_and_keeps_its_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """两遍都卡住 ⇒ 第三遍把它 deselect 掉跑完其余用例, 而那条超时结论**留在报告里**.
+
+    为什么留: 挂住是真信号。清掉它, 那条用例就从报告里静默消失了 —— 比一份"卡住"的结论
+    危险得多。为什么 deselect: 2026-10-16 那次事故真正的代价是**其余 34 条用例与覆盖率没了**。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    summary = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    rc, counter, argv_log, results = _run_timeout_child(
+        module, tmp_path, "always", monkeypatch
+    )
+
+    assert rc == 0, "deselect 之后其余用例过了, 这一遍就该是绿的"
+    assert counter.read_text(encoding="utf-8").count("run") == 3, "一共跑了三遍"
+    assert f"--deselect {_TIMEOUT_NODEID}" in argv_log.read_text(encoding="utf-8"), (
+        "第三遍要把挂住的那条挑出去"
+    )
+    assert sorted(entry.name for entry in results.glob("*-result.json")) == [
+        "1-9f2c-result.json"
+    ], "第二次的 `超时留证` 要留着(挂住是真信号), 而它的残缺结果要清掉"
+    assert (results / "1-9f2c-threads.txt").exists(), "结论的附件也要留着, 不然是空链"
+    assert (results / "1-9f2c-notes.txt").exists()
+    assert not (results / "partial-run1.json").exists(), (
+        "第二遍的残缺结果要清掉, 免得同一用例在报告里两份结论"
+    )
+    assert (results / "partial-run2.json").exists(), "第三遍的结果是有效的, 不许动"
+    assert (results / "from-not-ui-step.json").exists()
+    err = capsys.readouterr().err
+    assert "::warning::" in err
+    assert "--deselect" in err or "deselect" in err
+    text = summary.read_text(encoding="utf-8")
+    assert "deselect" in text
+    assert "留在报告里" in text
+
+
+def test_a_timeout_without_any_result_file_reruns_once_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """拿不到 nodeid(没配 --alluredir)时: 只靠 dump 认出超时, 重跑一次就收手, 什么都不删.
+
+    不猜 nodeid、也不清第二遍的结果 —— 那些结果(含超时结论)是这场事故的全部证据。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    rc, counter, argv_log, results = _run_timeout_child(
+        module, tmp_path, "no-results", monkeypatch
+    )
+
+    assert rc == 1, "两遍都卡住, 按最后一遍的退出码收场"
+    assert counter.read_text(encoding="utf-8").count("run") == 2, "拿不到 id 就不再重跑"
+    assert "--deselect" not in argv_log.read_text(encoding="utf-8")
+    assert (results / "partial-run1.json").exists(), "没有 deselect 就什么都不删"
+    assert list((tmp_path / "crash-dumps").glob("*_timeout.dump"))
+    err = capsys.readouterr().err
+    assert "::warning::" in err
+    assert "拿不到" in err, "收场理由要写清, 别让人以为是漏了"
+
+
+def test_the_timeout_retry_shares_the_crash_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """窗口过期后: 超时照常透传失败(缓解自然失效), 但要把"该处理了"喊出来."""
+    module = _load_script("run_pytest_with_crash_retry")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        module, "RETRY_UNTIL", dt.datetime.now(dt.UTC).date() - dt.timedelta(days=1)
+    )
+
+    rc, counter, _, results = _run_timeout_child(
+        module, tmp_path, "always", monkeypatch
+    )
+
+    assert rc == 1
+    assert counter.read_text(encoding="utf-8").count("run") == 1, "过期后不再重试"
+    assert (results / "partial-run0.json").exists(), "没有重试就没有清理"
+    assert "过期" in capsys.readouterr().err, "失效不能是静默的"
+
+
+def test_the_timeout_marker_matches_what_the_guard_writes() -> None:
+    """两边必须对得上: 包装靠 fullName 前缀与 ``_timeout.dump`` 认超时 —— 那边一改这边就瞎了.
+
+    这条守卫同时钉住 dump 目录的默认值: 包装的 ``--timeout-dump-dir`` 与 conftest 的
+    ``--crash-dump-dir`` 不一致时, 兜底信号永远看不到(超时就彻底认不出来了)。
+    """
+    module = _load_script("run_pytest_with_crash_retry")
+    guard = (REPO_ROOT / "tests" / "timeout_guard.py").read_text(encoding="utf-8")
+
+    assert module.TIMEOUT_FULL_NAME == "archive-management.timeout."
+    assert f'f"{module.TIMEOUT_FULL_NAME}{{item.nodeid}}"' in guard, (
+        "tests/timeout_guard.py 写的 fullName 前缀与包装认的不是同一个"
+    )
+    assert '"source": target.name' in guard, "包装按 attachments[].source 认附件名"
+    dump = crash_capture.dump_target(
+        "tests/x.py::test_y [timeout]", directory=Path("crash-dumps")
+    )
+    assert dump.name.endswith(module.TIMEOUT_DUMP_SUFFIX), (
+        "dump 文件名要带 [timeout] 才有 _timeout 后缀, 包装就靠它兜底"
+    )
+    assert module.parse_args(["--", "pytest"]).timeout_dump_dir == Path(
+        crash_capture.DUMP_DIRECTORY
+    ), "dump 目录的默认值要与 conftest 的 --crash-dump-dir 一致"
+
+
+def test_ui_steps_are_wrapped_in_the_crash_retry_guard() -> None:
+    """两个 UI 段要套上重试包装(崩溃与超时同一层); not ui 段不许被碰.
+
+    同时钉住 deselect 那条路的前提: 被包装的 pytest 命令必须配着 ``--alluredir=allure-results``
+    —— 挂住的用例 id 只能从那边的 ``超时留证`` 结论里读出来, 没配就没法 deselect。
+    """
+    job = _job_blocks(WORKFLOW.read_text(encoding="utf-8"))["pytest"]
+
+    for name in (
+        "Pytest with coverage, UI suite in its own process (Linux)",
+        "Pytest with coverage, UI suite in its own process (Windows/macOS)",
+    ):
+        step = _step(job, name)
+        assert "scripts/run_pytest_with_crash_retry.py" in step, name
+        assert "--watch-dir allure-results" in step, f"{name}: 重试前要清残缺结果"
+        assert "--alluredir=allure-results" in step, (
+            f"{name}: 没配 --alluredir 就读不到挂住的用例 id, deselect 那条路直接废掉"
+        )
+    for name in (
+        "Pytest with coverage, non-UI suite first (Linux)",
+        "Pytest with coverage, non-UI suite first (Windows/macOS)",
+    ):
+        run_line = next(
+            line
+            for line in _step(job, name).splitlines()
+            if line.strip().startswith("run:")
+        )
+        assert "run_pytest_with_crash_retry.py" not in run_line, (
+            f"{name}: 普通失败的重试面不扩大(注释里提到不算, run: 行才是命令)"
+        )
+
+
+def test_ordinary_failure_is_not_a_backstop_scene(tmp_path: Path) -> None:
+    """普通失败(断言红了)不算兜底现场: 结果目录在、没有栈 —— 证据在结果里, 不该再抄一遍."""
+    module = _load_script("collect_job_diagnostics")
+    results = tmp_path / "allure-results"
+    results.mkdir()
+    (results / "result.json").write_text("{}", encoding="utf-8")
+
+    verdict = module.backstop_verdict([results], tmp_path / "crash-dumps")
+
+    assert verdict.scene is False
+    assert verdict.reasons == []
+
+
+def test_missing_coverage_is_a_backstop_scene(tmp_path: Path) -> None:
+    """覆盖率文件是**会话结束**才落盘的: 它不在 = 进程没走到最后(被信号杀了 / 超时中断).
+
+    这正是兜底要抓的那一类: 结果里只会看到"某一片没有产物", 看不到为什么。
+    """
+    module = _load_script("collect_job_diagnostics")
+
+    verdict = module.backstop_verdict(
+        [tmp_path / ".coverage.shard-0"], tmp_path / "crash-dumps"
+    )
+
+    assert verdict.scene is True
+    assert ".coverage.shard-0" in verdict.reasons[0]
+
+
+def test_empty_paths_count_as_missing(tmp_path: Path) -> None:
+    """空目录与 0 字节文件都算不在: 与"根本没生成"是同一件事."""
+    module = _load_script("collect_job_diagnostics")
+    empty_directory = tmp_path / "allure-results"
+    empty_directory.mkdir()
+    empty_file = tmp_path / ".coverage.shard-0"
+    empty_file.write_text("", encoding="utf-8")
+
+    verdict = module.backstop_verdict(
+        [empty_directory, empty_file], tmp_path / "crash-dumps"
+    )
+
+    assert verdict.scene is True
+    assert len(module.missing_evidence([empty_directory, empty_file])) == 2
+
+
+def test_only_a_crash_log_with_a_stack_is_a_backstop_scene(tmp_path: Path) -> None:
+    """空的 faulthandler 日志不算现场 —— 那是每轮都有的文件, 有栈才是真崩了."""
+    module = _load_script("collect_job_diagnostics")
+    crashes = tmp_path / "crash-dumps"
+    crashes.mkdir()
+    log = crashes / "faulthandler.log"
+
+    log.write_text("", encoding="utf-8")
+    assert module.backstop_verdict([], crashes).scene is False
+
+    log.write_text("Fatal Python error: Segmentation fault\n", encoding="utf-8")
+    verdict = module.backstop_verdict([], crashes)
+    assert verdict.scene is True
+    assert "faulthandler.log" in verdict.reasons[0]
+
+
+def test_system_crash_reports_skip_the_wait_without_a_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有崩溃迹象就**不等**系统级报告: 普通失败不该为 macOS 的 ReportCrash 多花 20 秒."""
+    module = _load_script("collect_job_diagnostics")
+    source = tmp_path / "DiagnosticReports"
+    source.mkdir()
+    (source / "python-2026-10-04.ips").write_text("{}", encoding="utf-8")
+    proof = tmp_path / "allure-results"
+    proof.mkdir()
+    (proof / "result.json").write_text("{}", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    monkeypatch.setattr(module, "CRASH_DUMP_DIRECTORY", scratch)
+    arguments = module.parse_args(
+        [
+            "--output",
+            str(tmp_path / "job-diagnostics"),
+            "--crash-reports-from",
+            str(source),
+            "--crash-report-wait",
+            "30",
+        ]
+    )
+
+    started = time.monotonic()
+    verdict = module.collect_and_judge(arguments, [proof])
+    elapsed = time.monotonic() - started
+
+    assert verdict.scene is False
+    assert elapsed < module.POLL_SECONDS, "没有迹象时不该等系统级报告"
+    assert not scratch.exists(), "没有迹象时不该去碰 crash-dumps"
+
+
+def test_github_output_carries_the_verdict_on_one_line(tmp_path: Path) -> None:
+    """``$GITHUB_OUTPUT`` 里一个键只能占一行: 多行的说明要先压成一行."""
+    module = _load_script("collect_job_diagnostics")
+    output = tmp_path / "github-output"
+
+    module.write_github_output(
+        output, {"scene": "true", "reason": "预期缺失\n第二行\n\n"}
+    )
+
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "scene=true",
+        "reason=预期缺失 第二行",
+    ]
+
+
+def test_main_writes_the_verdict_and_the_github_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """主入口把判定写进 ``verdict.json`` 与 ``$GITHUB_OUTPUT`` —— 工作流的条件读的就是它."""
+    module = _load_script("collect_job_diagnostics")
+    monkeypatch.setattr(module, "CRASH_DUMP_DIRECTORY", tmp_path / "crash-dumps")
+    output = tmp_path / "job-diagnostics"
+    github_output = tmp_path / "github-output"
+    missing = tmp_path / ".coverage.shard-0"
+
+    code = module.main(
+        [
+            "--output",
+            str(output),
+            "--github-output",
+            str(github_output),
+            "--expect",
+            str(missing),
+        ]
+    )
+    capsys.readouterr()
+
+    assert code == 0
+    payload = json.loads((output / module.VERDICT_NAME).read_text(encoding="utf-8"))
+    assert payload["scene"] is True
+    assert "scene=true" in github_output.read_text(encoding="utf-8")
+    # `--expect` 的路径也进清单: 清点与判据不必让人写两遍。
+    assert str(missing) in (output / "summary.md").read_text(encoding="utf-8")
+
+
+def test_workflow_runs_the_script_it_guards() -> None:
+    """守卫的作业名与脚本名要对得上 —— 改名了这里就该红, 而不是等 CI 静默少一层诊断."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert (REPO_ROOT / "scripts" / "collect_job_diagnostics.py").is_file()
+    assert workflow.count("scripts/collect_job_diagnostics.py") == 5, "五个作业各一次"

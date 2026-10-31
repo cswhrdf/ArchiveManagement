@@ -1,0 +1,219 @@
+name: Build Windows Package
+
+# **只读的构建工作流**: 这里只做"编出产物 + 上传 artifact", 一个写权限都没有。两个调用方(口径见
+# docs/development.md 的「打包」「发布」两节):
+#   ① `ci.yml` 的 `windows-package` 作业 —— "合入 main 的 PR 且 CI 全绿"时的打包门禁;
+#   ② `release.yml` 的 `build` 作业 —— 合入 main 之后发布, 或手动编任意分支/提交。
+# **为什么构建与发布必须是两份工作流**(2026-10-17 实测, 不是设计洁癖): GitHub 对嵌套工作流的权限
+# 是**逐作业静态校验**的 —— 被调用的那份里只要有一个作业声明 `contents: write`, 而调用方(PR 那次
+# 运行, 顶层 `contents: read`)给不出写权限, 整份工作流就判 "not valid", 报错原文是
+# `The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`;
+# 它发生在**解析阶段**, 连一个 job 都不会启动(与运行期的 `if: publish == false` 无关)。所以发布那一档
+# 留在 release.yml(只有它需要写权限), 门禁调这一份只读的。
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "要构建的分支或提交, 留空 = 触发这次运行的那个提交"
+        required: false
+        default: ""
+        type: string
+      checks:
+        description: "构建前的检查档位: full(ruff/格式/mypy/pytest --cov) | build-only(只构建, 给 CI 已经跑过全量的门禁档用)"
+        required: false
+        default: full
+        type: string
+      version_override:
+        description: "覆盖版本号(留空 = 从 packaging.py 读)。预发布快照传四段号, 见 dev-release.yml"
+        required: false
+        default: ""
+        type: string
+    outputs:
+      version:
+        description: "从 packaging.py 读出的版本号(发布作业用它判要不要建 Release)"
+        value: ${{ jobs.build.outputs.version }}
+      label:
+        description: "产物名里的构建标签(<ref>-build-<本次构建号>)"
+        value: ${{ jobs.build.outputs.label }}
+
+permissions:
+  contents: read
+
+# 与 ci.yml 同理: 关掉 `uv run` 的隐式 sync, 否则它会按 pyproject 的**默认组**把整套开发
+# 依赖装回来(这个作业已经显式装了 test / quality / package 三组)。
+env:
+  UV_NO_SYNC: "1"
+
+jobs:
+  build:
+    # 不写作业级 `if:`: 两个调用方都是"该构建时才调" —— ci.yml 只在合入 main 的 PR 上调, release.yml
+    # 的 push 档在 `paths-ignore` 就把纯文档合入挡掉了。原来那条 `pull_request: closed` + 来源分支名
+    # (dev / bugfix/*)的判据有个盲区: 从别的分支(如 hotfix/x)合入 main 就不构建 —— 已换成 push。
+    name: 构建 Windows 发布包
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      label: ${{ steps.build.outputs.label }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # 被调用时 `github.sha` 是**调用方**的提交(PR 轮次里就是那个 PR 的合并预览提交) —— 正是要构建的
+          # 东西; 手动/发布档没给 `ref` 时也同样落在触发这次运行的那个提交上。
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Stamp the snapshot version into the source
+        # 预发布的第 4 位是**派生**量(scripts/dev_snapshot_version.py 按 git 历史算), 它不进 git ——
+        # dev 上的 packaging.py 必须保持三段, 那是正式版本的单一真相(release_bump.py 按三段判档)。
+        # 所以只在这次构建的工作区里就地改这一行: 于是产物的 `--version`、`doctor` 与
+        # build-metadata.json 报的是同一个快照号, 而不是一个连预发布都看不出来的基础版本。
+        # **只配 build-only**: full 档会跑用例, 而用例里有一批"packaging.py 是三段"的断言 ——
+        # 那个红是故意的, 这里提前一步说清楚。
+        if: ${{ inputs.version_override != '' }}
+        shell: pwsh
+        env:
+          SNAPSHOT_VERSION: ${{ inputs.version_override }}
+          CHECKS: ${{ inputs.checks }}
+        run: |
+          if ($env:CHECKS -ne 'build-only') {
+            throw "version_override 只能配 checks: build-only(预发布档的前提是 CI 已经把这个提交跑绿了)"
+          }
+          $path = "src/archive_management/packaging.py"
+          $source = Get-Content $path -Raw
+          $replacement = '__version__ = "' + $env:SNAPSHOT_VERSION + '"'
+          $updated = [regex]::Replace($source, '__version__\s*=\s*"[^"]+"', $replacement)
+          if ($updated -eq $source) {
+            throw "$path 里没有可替换的 __version__"
+          }
+          Set-Content -Path $path -Value $updated -NoNewline
+          Write-Host "快照版本号已写入: $env:SNAPSHOT_VERSION"
+
+      - name: Resolve build metadata
+        id: build
+        shell: pwsh
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          # PR 轮次里 `github.ref_name` 是 `<PR 号>/merge`, 所以来源分支要单独排在它前面。
+          HEAD_REF: ${{ github.head_ref }}
+          DEFAULT_REF: ${{ github.ref_name }}
+        run: |
+          # 产物名里的 ref 依次取: 显式传入的 ref → PR 的来源分支 → 触发这次运行的分支。
+          $ref = if ($env:INPUT_REF) {
+            $env:INPUT_REF
+          } elseif ($env:HEAD_REF) {
+            $env:HEAD_REF
+          } else {
+            $env:DEFAULT_REF
+          }
+          $source = Get-Content src/archive_management/packaging.py -Raw
+          $match = [regex]::Match($source, '__version__\s*=\s*"([^"]+)"')
+          if (-not $match.Success) {
+            throw "Could not find __version__ in packaging.py"
+          }
+          $version = $match.Groups[1].Value
+          $safe_ref = $ref -replace '[^A-Za-z0-9._-]', '-'
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "label=$safe_ref-build-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # 只装这个作业要用的组(见 pyproject 的 [dependency-groups]): 构建前的门禁要
+        # 质量组(ruff/mypy)与测试组(pytest --cov), 打包要 package 组(pyinstaller)。
+        # `--no-install-project`: 打包靠 spec 里的 pathex 指向 src, 不需要把项目装进 .venv
+        # (见 pyproject 的 [tool.uv]; 与 ci.yml 的其它作业一致)。
+        # 门禁档(`checks: build-only`)跑的是同一套组 —— 为了省一次 sync 而拆两套环境不划算, 而
+        # 且下面那批守卫是**按命令**算该装哪几组的。
+        run: uv sync --locked --no-default-groups --group test --group quality --group package --no-install-project
+
+      - name: Run build checks
+        # 门禁档传 `checks: build-only`: 同一轮 CI 已经跑过三平台的用例与静态检查, 再在 Windows
+        # runner(2 倍计价)上跑一遍只是多花时间。发布/手动档默认 full, 留着这一轮自证。
+        # 注意 push 档取不到 `inputs`(空串) —— 空串不等于 build-only, 所以照跑。
+        if: ${{ inputs.checks != 'build-only' }}
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy src
+          uv run pytest --cov
+
+      - name: Check the application icon is up to date
+        # 硬门禁: 入库的位图必须出自当前这份 resources/app.svg("改了 SVG 忘了重画"就在这里判红)。
+        # 这一步**不需要 ffmpeg**(只比指纹), 所以发布不依赖 runner 上有渲染工具 —— 也从不在
+        # CI 上重画: 图标只在本地更新(2026-10-15 拆掉了原来的信息探针与 `Icon probe` 工作流,
+        # 见 docs/development.md)。
+        run: uv run python scripts/build_icon.py --check
+
+      - name: Build the onedir package
+        # 2026-10-28 起 onefile 停产(发布决定), 只构建 onedir —— 见 spec 末尾的说明。
+        run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
+
+      # 产物冒烟: 「能编」与「产物能起」是两件事 —— 跑不起来的包不该被上传成"看起来能发"的样子。
+      # 判据 = 退出码 + 侧效应(临时 root 下真的出现 config/data/logs、日志里出现"界面启动"),
+      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × onedir(无参数
+      # 启动 / --version / doctor / gui --smoke / 单实例闸门), 全部限时, 超时在脚本里按
+      # CI runner 的最坏情况给足。门禁档与发布档共用这一步; 位置由守卫
+      # test_the_build_smokes_the_packages_it_produced 钉住(构建之后、打 release/ 之前)。
+      # `--report` 把逐条判据落成 smoke-report.json(失败也写), 交给下面两步转成 Allure 结论
+      # 并上传 —— 退出码管门禁, 报告管"哪一条没过"。
+      - name: Smoke test the built packages
+        run: uv run python scripts/smoke_packaged.py --report smoke-report.json
+
+      # 冒烟结论并入汇总报告: 上面那步落的 JSON 在这里转成 Allure 结果项(每条判据一条,
+      # 带 env=Windows 归进那个平台的环境)。挂 `if: always()` 是刻意的:
+      # 冒烟红的时候结论更要进报告 —— 只给一个退出码, 下一次还得去翻日志猜是哪一条红的。
+      # 这一步不判门禁(退出码恒 0), 详见 scripts/create_allure_smoke.py 的说明。
+      - name: Write smoke results into Allure
+        if: always()
+        run: uv run python scripts/create_allure_smoke.py --report smoke-report.json --results-dir allure-results-smoke-windows
+
+      # 产物名固定 allure-results-smoke-windows: 匹配汇总作业的 `pattern: allure-results-*`
+      # (一份 pattern 自动收走), 但不匹配每平台报告作业的 `allure-results-<os>-*` —— 不会
+      # 被错并进单平台报告(守卫 test_the_packaging_smoke_results_reach_the_final_report)。
+      # `if-no-files-found: ignore`: 冒烟步没跑(构建更早红掉)时本来就没有结论可传, "该有而
+      # 没有"由汇总作业的运行总账按条件期望点名, 不在这里叠一个误导性的红。
+      - name: Upload smoke Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-smoke-windows
+          path: allure-results-smoke-windows/
+          if-no-files-found: ignore
+
+      - name: Prepare build files
+        shell: pwsh
+        env:
+          BUILD_LABEL: ${{ steps.build.outputs.label }}
+          BUILD_VERSION: ${{ steps.build.outputs.version }}
+          BUILD_REF: ${{ steps.build.outputs.ref }}
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path dist/ArchiveManagement/* -DestinationPath "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.zip"
+          $files = Get-ChildItem release -File
+          $hashes = foreach ($file in $files) {
+            $hash = Get-FileHash $file.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLowerInvariant())  $($file.Name)"
+          }
+          $hashes | Set-Content release/SHA256SUMS.txt -Encoding ascii
+          @{
+            application = "ArchiveManagement"
+            version = $env:BUILD_VERSION
+            ref = $env:BUILD_REF
+            platform = "windows-x64"
+            commit = "${{ github.sha }}"
+            built_at = (Get-Date).ToUniversalTime().ToString("o")
+          } | ConvertTo-Json | Set-Content release/build-metadata.json -Encoding utf8
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ArchiveManagement-${{ steps.build.outputs.label }}-windows-x64
+          path: release/

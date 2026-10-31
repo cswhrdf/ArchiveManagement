@@ -1,0 +1,15 @@
+# 议题模板的入口配置。
+#
+# 这里只做两件事: 决定"能不能开空白议题", 以及把"该先看哪儿"放在新建议题页最显眼处。
+# 三类联系入口的顺序按"用户最可能先撞上什么"排: 用法问题 -> 平台/权限问题 -> 想动手改。
+blank_issues_enabled: true
+contact_links:
+  - name: 使用手册（安装、备份/恢复、常见问题）
+    url: https://github.com/cswhrdf/ArchiveManagement/blob/main/wiki/Home.md
+    about: 面向用户的逐步说明与故障排查；wiki/ 是手册的唯一内容源，改手册请改那里。
+  - name: 平台与权限差异（Linux 图形环境、macOS 辅助功能等）
+    url: https://github.com/cswhrdf/ArchiveManagement/blob/main/docs/platforms.md
+    about: 快捷键、注册表探测、回收站、目录位置在各平台上的差异都在这里。
+  - name: 贡献指南（环境准备、提交与 PR 流程、本仓库特有的约定）
+    url: https://github.com/cswhrdf/ArchiveManagement/blob/main/CONTRIBUTING.md
+    about: 动手改之前先读这份：门禁、覆盖率口径、测试与界面改动的额外要求。

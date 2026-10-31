@@ -1,0 +1,174 @@
+name: Co-author attribution
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify-co-authors:
+    name: Verify squash co-authors
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate and sync co-author trailers
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pullRequest = context.payload.pull_request;
+            if (pullRequest.draft) {
+              core.notice("Draft PR: 变更摘要与署名会在标记为可评审后同步。");
+              return;
+            }
+
+            // 两段自动区块。它们必须待在**同一段脚本**里、共用一次读改写: 两个作业各写一遍 PR 描述
+            // 会互相覆盖(读改写竞态), 而两边都监听 synchronize/edited 时还会互相把对方叫起来。
+            const MARKERS = {
+              summary: ["<!-- change-summary:start -->", "<!-- change-summary:end -->"],
+              authors: ["<!-- co-author-trailers:start -->", "<!-- co-author-trailers:end -->"],
+            };
+            // 摘要只给"够用就好"的粒度: 超出就先截断再折成计数, 指向 Commits / Files changed 标签页。
+            const MAX_COMMITS = 5;
+            const MAX_PATHS = 4;
+            const DOC_ROOTS = ["docs/", "wiki/"];
+
+            const current = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullRequest.number,
+            });
+            const body = current.data.body || "";
+
+            // 定位一段自动区块; 标记缺失、重复或顺序颠倒时返回 null(交给下面统一判红)。
+            const locate = (text, [startMarker, endMarker]) => {
+              const start = text.indexOf(startMarker);
+              const end = text.indexOf(endMarker);
+              const broken =
+                start < 0 ||
+                end < start + startMarker.length ||
+                text.indexOf(startMarker, start + startMarker.length) >= 0 ||
+                text.indexOf(endMarker, end + endMarker.length) >= 0;
+              return broken ? null : { start, end, startMarker };
+            };
+
+            const slots = {};
+            for (const [name, markers] of Object.entries(MARKERS)) {
+              const slot = locate(body, markers);
+              if (slot === null) {
+                core.setFailed(`PR 描述缺少 ${name} 区标记，请重新应用仓库 PR 模板。`);
+                return;
+              }
+              slots[name] = slot;
+            }
+
+            const selected = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullRequest.number,
+            };
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              ...selected,
+              per_page: 100,
+            });
+            // 改动文件取自 API 而不是本地 diff: 这个作业没有 checkout(也不该 checkout PR 的代码)。
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...selected,
+              per_page: 100,
+            });
+            const trailerPattern = /^Co-authored-by:\s*(.+?)\s*<([^<>\s]+)>\s*$/gim;
+            const authors = new Map();
+            const addAuthor = (name, email) => {
+              const key = email.trim().toLowerCase();
+              const safeName = name.trim().replace(/[<>\r\n]/g, "");
+              const safeEmail = email.trim();
+              if (key && safeName && !/[<>\s]/.test(safeEmail)) {
+                authors.set(key, { name: safeName, email: safeEmail });
+              }
+            };
+
+            for (const commit of commits) {
+              const author = commit.commit.author;
+              if (!author?.name || !author.email) {
+                core.setFailed(`无法确定提交作者身份: ${commit.sha}`);
+                return;
+              }
+              if (commit.author?.login?.toLowerCase() !== pullRequest.user.login.toLowerCase()) {
+                addAuthor(author.name, author.email);
+              }
+              for (const match of commit.commit.message.matchAll(trailerPattern)) {
+                addAuthor(match[1], match[2]);
+              }
+            }
+
+            const trailers = [...authors.values()]
+              .map((author) => `Co-authored-by: ${author.name} <${author.email}>`)
+              .join("\n");
+
+            // 摘要的顺序与内容全部取自 API 的稳定顺序, **不写时间戳** —— 否则每次重写都算出不同的
+            // 正文, 于是触发 edited、再跑一轮、再重写, 自激不停。
+            const oneLine = (text) => text.replace(/\s+/g, " ").replace(/`/g, "'").trim();
+            const isDoc = (path) =>
+              DOC_ROOTS.some((root) => path.startsWith(root)) ||
+              (!path.includes("/") && path.endsWith(".md"));
+            const titles = commits.map(
+              (commit) => `「${oneLine(commit.commit.message.split("\n")[0])}」`,
+            );
+            const titleLine =
+              titles.length > MAX_COMMITS
+                ? `${titles.slice(0, MAX_COMMITS).join("、")} 等 ${titles.length} 条(详见 Commits 标签页)`
+                : titles.join("、");
+            const listPaths = (paths) => {
+              const shown = paths.slice(0, MAX_PATHS).map((path) => `\`${path}\``).join("、");
+              return paths.length > MAX_PATHS ? `${shown} 等 ${paths.length} 个` : shown;
+            };
+            const changedPaths = files.map((file) => file.filename);
+            const docPaths = changedPaths.filter(isDoc);
+            const otherPaths = changedPaths.filter((path) => !isDoc(path));
+            // 一条提交都没有时 titles 为空: 直接拼会留一个空行, 这里给出明确占位。
+            const summary = [
+              `**变更摘要**：${commits.length} 个提交 · ${files.length} 个文件`,
+              "",
+              `- 提交：${titleLine || "(空)"}`,
+            ];
+            if (otherPaths.length) {
+              summary.push(`- 代码与配置：${listPaths(otherPaths)}`);
+            }
+            if (docPaths.length) {
+              const wiki = docPaths.some((path) => path.startsWith("wiki/"))
+                ? "，含用户手册(发版后同步到 Wiki)"
+                : "";
+              summary.push(`- 文档：${listPaths(docPaths)}${wiki}`);
+            }
+
+            const payloads = {
+              summary: `\n\n${summary.join("\n")}\n`,
+              authors: trailers
+                ? `\n\n\`\`\`text\n${trailers}\n\`\`\``
+                : "\n\n（无共同作者需要署名）",
+            };
+
+            // 从后往前替换: 前一段替换会改变后一段的下标, 倒着来就不必重算一遍。
+            let updatedBody = body;
+            for (const [name, slot] of Object.entries(slots).sort(
+              (a, b) => b[1].start - a[1].start,
+            )) {
+              const cut = slot.start + slot.startMarker.length;
+              updatedBody =
+                updatedBody.slice(0, cut) + payloads[name] + "\n" + updatedBody.slice(slot.end);
+            }
+
+            if (updatedBody !== body) {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullRequest.number,
+                body: updatedBody,
+              });
+              core.info(
+                `已同步 PR 描述: ${authors.size} 位共同作者, ${commits.length} 个提交 / ${files.length} 个文件。`,
+              );
+            } else {
+              core.info("PR 描述里的自动区块已是最新状态。");
+            }

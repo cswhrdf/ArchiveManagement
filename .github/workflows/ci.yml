@@ -1,0 +1,1683 @@
+name: CI
+
+# 分支规则只写一次, push 与 PR 两个触发器共用(YAML 锚点 `&ci_branches`)。
+# **锚点必须挂在 GitHub 认得的键上**: 顶层开一个 `x-ci-*` 键会让整份工作流直接报
+# `Unexpected value 'x-ci-branches'` 而**完全不生效**(2026-10-06 实测, 连"文档改动不跑 CI"
+# 这条都不成立 —— 是没有 CI 可跑), 守卫 test_ci_workflow_only_uses_top_level_keys_github_knows
+# 会把顶层键的集合钉住。
+#
+# **"纯文档改动"那份忽略清单不用锚点**(2026-10-13 删掉了一个没人引用的 `&ci_ignore_patterns`):
+# PR 侧那份是 `dorny/paths-filter` 的**块状字符串过滤器**, 锚点根本进不去，所以两处各写一份、
+# 由守卫 test_ci_cancels_superseded_runs_and_skips_docs_only_changes **逐条对齐**。
+on:
+  push:
+    branches: &ci_branches [main, dev]
+    # 这里保留 `paths-ignore`，因为它只在 push 触发时生效：文档类修改不需要跑整套 CI。
+    # 对 `pull_request` 不能直接用它，否则工作流在路径命中忽略时根本不会出任何 job,
+    # 分支保护里的 required status checks 会永久停在 pending。PR 侧改成轻量 `changes` 作业
+    # 再用条件跳过重量级作业，保证检查结果总能出现。
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/instructions/**"
+      - ".github/prompts/**"
+  pull_request:
+    branches: *ci_branches
+
+# 连续 push 时取消被取代的运行: 旧的那轮没人看, 却跟新的那轮一样贵(一轮 16 个作业
+# 实例; 纯文档改动那一轮更少 —— 被跳过的作业不占 runner)。
+# 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。
+# 注意 `always()` 的语义是“即使被取消也返回 true”: 取消后就不该再启动的作业要用
+# `always() && !cancelled()` 表达(见 pytest-report / allure-summary 的作业条件),
+# 否则被取代的那一轮照样会把报告合并、生成、上传跑一遍。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+# Windows runner 的控制台是 cp1252: Python 默认按该编码输出, 打中文日志会直接报
+# UnicodeEncodeError 把步骤打断(2026-09-17 的报告自检就踩过)。统一开 UTF-8 模式,
+# 顺带让文件默认编码与仓库约定一致(代码里本来就处处显式写 utf-8)。
+env:
+  PYTHONUTF8: "1"
+  # `uv run` 默认会先 sync 一次环境 —— 而 sync 装的是**默认组**(见 pyproject 的
+  # [tool.uv] default-groups), 于是每个作业里第一句 `uv run ...` 就会把整套开发依赖
+  # (bandit / pip-audit / pyinstaller ...) 又装回来, 上面那句按作业分组的
+  # `uv sync --no-default-groups --group X` 就白做了(实测: 只装 test 组的临时环境里跑一次
+  # `uv run pytest`, 51 个包被重新装回, 包括 ruff/mypy/pyinstaller)。所以 CI 里统一关掉
+  # 隐式 sync: 环境只由每个作业自己那句 `uv sync --locked --no-default-groups --group ...` 决定。
+  # 少写一组依赖时的表现是**响亮**的失败(uv run 报 "Failed to spawn: ruff", 退出码 2)。
+  # 本地不受影响(默认组装全部), 所以这里只是在工作流层面覆盖。
+  UV_NO_SYNC: "1"
+
+jobs:
+  changes:
+    name: Check relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Detect files that require CI
+        id: filter
+        # 它若失败, needs: [changes] 的所有作业跟着跳过, 整轮就死了。
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            # 只判"要不要跑": 纯文档改动 (`.md` / `docs/**` / 指令与提示词) 不跑整套 CI。
+            # 这里**不再区分前后端两层**(2026-10-14 回退): 每一轮都跑全量。
+            should_run:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!.github/instructions/**'
+              - '!.github/prompts/**'
+
+      - name: Decide whether CI should run
+        id: decide
+        # 各作业统一从 decide 取输出: 触发只剩 push / PR, dorny 的答案直接透传。
+        shell: bash
+        env:
+          FILTERED_SHOULD_RUN: ${{ steps.filter.outputs.should_run }}
+        run: |
+          echo "should_run=$FILTERED_SHOULD_RUN" >> "$GITHUB_OUTPUT"
+
+  required-check:
+    name: CI required status
+    needs: [changes]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the CI gate decision
+        shell: bash
+        run: |
+          if [ "${{ needs.changes.outputs.should_run }}" = "true" ]; then
+            echo "Relevant changes detected; full CI will run."
+            exit 0
+          fi
+          echo "No code-impacting changes; heavy CI jobs were skipped, but the required status is still green."
+
+  quality:
+    name: 质量检查、静态分析、性能基准与视觉回归 (ubuntu-latest)
+    needs: [changes]
+    if: needs.changes.outputs.should_run == 'true'
+    # 四批检查在一个作业里依次跑: ruff / ruff format / mypy(宿主平台)、deptry / bandit /
+    # pip-audit / radon / xenon、性能基准、界面视觉回归(感知哈希 + SSIM)。它们都与平台无关
+    # (不涉及路径分隔符; 视觉回归要显示环境, 但由本作业自己的 xvfb 提供, 截出来的画面在这里
+    # 就是"标准画面"), 只在 Ubuntu 跑一遍就够 —— 每个作业实例都要重付一遍 checkout / uv
+    # 安装 / 依赖同步的固定开销。
+    # 平台专属的两次 mypy 不在这个作业里(见 pytest 作业的片 0)。
+    # 视觉回归**不按平台展开**: 基线图入库、只在 Linux 采, 多平台会把"字体度量不同"变成
+    # 一堆假红。
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          save-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # 只装这一作业需要的组(见 pyproject 的 [dependency-groups]): 这个作业跑四道门禁
+        # —— 质量组(ruff/格式/mypy)、静态分析组(deptry/bandit/pip-audit/radon/xenon)、
+        # 性能基准(要 pytest + allure-pytest, 即测试组)与视觉回归(视觉组: imagehash +
+        # scikit-image, 那套 numpy/scipy/networkx 只在**这里**装一次, 不进每个分片)。
+        # `--no-default-groups` 是必需的: 默认组是给本地开发用的, 在 CI 里它会静悄悄把
+        # 全套依赖装回来(守卫会核对每次 uv sync 都显式列组)。
+        # 这个作业是**唯一**不跳过安装项目的: 下面的 CLI 冒烟要真的用上可编辑包
+        # (视觉回归也靠它 import 应用代码)。
+        run: uv sync --locked --no-default-groups --group test --group quality --group analysis --group visual
+
+      - name: Verify the CLI runs from the editable install
+        # 项目装成可编辑包(见 pyproject 的 [tool.uv]), 其余作业都带 --no-install-project,
+        # 所以用一次冒烟把"任意目录都能跑 python -m archive_management"钉住: cwd 故意换到
+        # 工作区外面 —— 只有指向 src 的 .pth 能让它导入成功。
+        run: |
+          cd "$RUNNER_TEMP"
+          uv run --project "$GITHUB_WORKSPACE" python -m archive_management init --root "$RUNNER_TEMP/am-cli-smoke"
+
+      - name: Run quality gates (ruff / format / mypy)
+        # 三项检查在脚本里依次执行: 未通过时脚本以非 0 退出(作业照常红), 但结论与完整输出
+        # 已经写进 allure-results-quality, 汇总报告里能看到"哪一项没过 + 原始输出"。
+        run: uv run python scripts/create_allure_quality.py --group core --results-dir allure-results-quality
+
+      - name: Upload quality Allure results
+        # 这份结论与平台无关, 不再需要按平台挑选: 质量作业只在 Ubuntu 跑。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-quality
+          path: allure-results-quality/
+          if-no-files-found: ignore
+
+      - name: Run static analysis (deptry / bandit / pip-audit / radon / xenon)
+        # 上一步没过也要跑完静态分析: 两类结论各管各的, 报告里一并展示。
+        # 依赖卫生与漏洞、安全扫描、复杂度: 逐项跑并写进 allure-results-analysis。
+        if: always()
+        run: uv run python scripts/create_allure_quality.py --group analysis --results-dir allure-results-analysis
+
+      - name: Upload analysis Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-analysis
+          path: allure-results-analysis/
+          if-no-files-found: ignore
+
+      - name: Run performance benchmarks
+        # 基准只在单一平台采集: 跨运行比较需要稳定的运行环境, 换平台会让数值失去可比性。
+        # 与上面两批检查合并到同一个作业: 它们都是"跑一次就够"的公共结论, 分作业只是多付
+        # 一整套 checkout / uv / 依赖同步的固定开销。
+        # 前面的门禁没过也要跑完: 三类结论各管各的, 报告里一并展示。
+        # 阈值写在用例里: 超出预算即失败, 性能回归直接体现在 CI 状态上。
+        if: always()
+        run: uv run pytest tests/performance -m performance --alluredir=allure-results-performance
+
+      - name: Upload performance baseline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-results
+          path: |
+            performance-results.json
+            performance-results.csv
+          if-no-files-found: ignore
+
+      - name: Upload performance Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-performance
+          path: allure-results-performance/
+          if-no-files-found: ignore
+
+      - name: Install Xvfb, a CJK font, and the distro Tk 8.6
+        # 视觉回归要一个真实显示: Tk 在无头环境里起不来, 而"起不来"不该被记成"画面没问题"。
+        # 与 pytest 作业里那一步同一个配方(连 Chrome 源失效的绕行也一样): 界面是中文的,
+        # 而 Tk 的量宽全靠字形度量 —— 没有 CJK 字体时汉字会被量成近乎零宽, 截出来的画面
+        # 与基线对不上, 而且会以"文字没换行/没省略"的形态出现(2026-09-27 在分片里踩过)。
+        #
+        # 后面三行是给**视觉回归那一步**准备的(详见那一步的说明): 它的解释器仍然是 uv 托管的
+        # 那份(与其余作业同一个版本), 但 ``_tkinter`` 这个扩展模块要换成发行版的 —— uv 托管
+        # 的 CPython 自带的 Tcl/Tk 是 python-build-standalone 自己编的, 在 X11 上只走**核心
+        # 位图字体**(符号表里只有 XLoadQueryFont 那套, 没有 fontconfig/FreeType), 装多少 TTF
+        # 都画不出汉字。发行版的 Tk 8.6 走 Xft/fontconfig, 与 fonts-noto-cjk 配套。
+        #
+        # 前面几批门禁没过也要装完再走(与性能基准那一步同一个口径): 视觉结论是独立的
+        # 一类。"这一步被跳过"与"它没产出"在下面那一步看起来一模一样(都是没有文件),
+        # 于是报告里少一块结论, 却报成"没有文件"这种误导性的红(2026-10-10 实测)。
+        if: always()
+        shell: bash
+        run: |
+          # 已装即跳过 apt(与 pytest 作业里那一步同一个理由): 自建持久机上这套包一轮装过
+          # 就一直在, 而 apt-get update 是"包已装齐也每轮必付"的网络敞口。注意**只跳过 apt**:
+          # 末尾拷 ``_tkinter`` 那段依赖 $RUNNER_TEMP, 它每轮都是新目录, 必须每次都跑。
+          installed=0
+          for pkg in xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6; do
+            dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' && installed=$((installed + 1))
+          done
+          if [ "$installed" -eq 5 ]; then
+            echo "xvfb / CJK 字体 / 发行版 Tk 8.6 已在机上, 跳过 apt"
+          else
+            while IFS= read -r -d '' source; do
+              if grep -q 'dl.google.com/linux/chrome' "$source"; then
+                sudo mv "$source" "${source}.disabled"
+              fi
+            done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
+            sudo apt-get update
+            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6
+          fi
+          # 把发行版 python3-tk 的 ``_tkinter`` 留一份: 它链的是发行版 libtk8.6(Xft/fontconfig),
+          # 而那几个库由 tcl8.6/tk8.6 两个包提供。
+          mkdir -p "$RUNNER_TEMP/tk-xft"
+          cp "$(/usr/bin/python3 -c 'import _tkinter; print(_tkinter.__file__)')" "$RUNNER_TEMP/tk-xft/"
+          /usr/bin/python3 -c "import _tkinter, tkinter; print('发行版 Tk:', _tkinter.__file__, tkinter.TkVersion)"
+
+      - name: Run the visual regression
+        # 起一个真实窗口、拍两套画面(演示数据 + 空库)、与入库的基线图比(感知哈希距离 + SSIM)。
+        # 这是一道**门禁**: 界面变了就要有人看一眼再合, 所以不一致时这一步直接红。
+        # 基线图在 tests/visual-baselines/(入库); 还没有基线时本脚本只产出候选基线并写明
+        # "基线尚未入库", 不判失败 —— 否则第一轮永远卡住(见脚本的模块说明)。
+        # 结论写进 allure-results-visual, 由汇总作业收进报告(标签 env=common +
+        # testCategory=quality, 于是它落进 Common 环境与"工程门禁:质量检查未通过"分类)。
+        #
+        # `-s "-screen 0 1600x1000x24"` 是必需的, 不是顺手加的: 画面尺寸直接进基线, 而
+        # xvfb-run 的默认屏幕(1280x1024)装不下应用请求的 1360x860 窗口 —— 窗口会被夹到
+        # 屏幕宽, 于是"默认屏幕是多少"就变成了画面尺寸的隐藏输入(xvfb-run 换默认值时
+        # 假红)。显式写死屏幕后, 截出来就是应用自己的 1360x860。深度 24 同理: 默认深度
+        # 偏低时颜色会被量化, 与基线对不上。
+        #
+        # 脚本**自包含, 不依赖任何未入库的本地目录**: 那类目录被它们自己的 .gitignore 挡在
+        # 仓库外(CI 上根本不存在), 而且只是开发阶段的临时物 —— 曾经因为复用界面评审用的
+        # 那个抓图脚本, 这一步在 CI 上直接以"找不到复用脚本"退出 2。现在建窗口/切状态都在
+        # 脚本里, 只复用 tests/ 下已被 Linux 分片验证的抓图原语。
+        #
+        # **这一步用项目版解释器 + 发行版 Tk**(2026-10-02 调整): 解释器必须是 uv 托管的那份 ——
+        # 与其余作业同一个版本, 报告里"平台 / Python / Tk"那行的 Python 才是这一轮的真相
+        # (之前这一步用 ``/usr/bin/python3.12`` 去拿发行版的 Tk, 而 Ubuntu 24.04 的系统
+        # Python 是 3.12.3 —— 报告里因此写着一个项目里哪里都不用的版本)。
+        #
+        # 实测(2026-10-02): uv 装的 CPython 里带的 ``libtcl9tk9.0.so`` 在 X11 上只走**核心位图
+        # 字体** —— 符号表里只有 ``XLoadQueryFont`` / ``XCreateFontSet`` 那一套, 没有
+        # fontconfig/FreeType, 于是它看不到任何 TTF: 截出来的画面里汉字一个都没画出来(整排
+        # 按钮是空的), 拉丁字形也是位图字体(锯齿), 而这与装了多少字体无关。
+        #
+        # 做法: 把发行版 ``python3-tk`` 的 ``_tkinter`` 模块放在 PYTHONPATH 最前面, 它自己会
+        # 加载发行版的 libtk8.6/libtcl8.6(走 Xft/fontconfig, 与 ``fonts-noto-cjk`` 配套) ——
+        # 模块同名、CPython 同一个小版本 ABI 兼容, 所以换的只是"Tk 从哪来", 解释器没变。
+        # ``UV_PROJECT_ENVIRONMENT`` 让它装进独立环境, 不动本作业其余步骤共用的 .venv。
+        #
+        # 脚本自己也会拦: 汉字量不出宽度时它标红**且不产出候选基线**(见 tests/unit/
+        # test_report_visual_catalog.py 的守卫), 并把探针(模块与库的实际路径)写进 fonts.txt ——
+        # 宁可这一轮没有基线, 也不拿一张看不清的图当"正确"。
+        # 同上: 前面的门禁红了也要把这一轮画面拍出来并写结论 —— 它的上传步是
+        # `always()` + `if-no-files-found: error`, 产出方与消费方的门禁必须一致。
+        if: always()
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv-visual
+        run: |
+          # 组要装齐**这一步真正用到的**: visual(感知哈希/SSIM) + test —— 脚本复用
+          # ``tests/crash_capture.py`` 的抓图原语, 而那个模块 import allure(附件 API);
+          # 少装 test 组时会在运行的一瞬间以 "No module named 'allure'" 退出 2
+          # (2026-10-02 实测: 34 个包装完, 脚本第一步就挂)。
+          uv sync --locked --no-default-groups --group test --group visual
+          # 发行版的 `_tkinter` 放最前面: PYTHONPATH 在 sys.path 里排在标准库之前, 所以它顶掉的
+          # 是解释器自带的那一个(那个目录里只有这一个文件, 不会影响其它导入)。
+          export PYTHONPATH="$RUNNER_TEMP/tk-xft${PYTHONPATH:+:$PYTHONPATH}"
+          # 先自检一次再拍图: 换没换上必须当场知道(发行版模块不生效时探针也会拦, 但那要等
+          # 建完窗口; 这里一秒就能判定)。若将来探针仍报位图字体, 说明发行版模块绑到了解释器
+          # 自带的同名库上 —— 那时再用 ``LD_PRELOAD`` 把发行版那两个 .so 压上去。
+          uv run --no-sync python -c "import _tkinter, sys; print('解释器', sys.version.split()[0], '/ _tkinter', _tkinter.__file__); assert '$RUNNER_TEMP/tk-xft' in (_tkinter.__file__ or ''), '发行版的 _tkinter 没被用上(PYTHONPATH 被忽略了?)'"
+          xvfb-run -a -s "-screen 0 1600x1000x24" uv run --no-sync python scripts/create_allure_visual.py --results-dir allure-results-visual --baselines tests/visual-baselines --candidates visual-baselines-candidates
+
+      - name: Upload visual Allure results
+        # 与质量/分析两份同理: 结论要进汇总报告。`if-no-files-found: error` —— 这一份缺了
+        # 报告里就少一类结论, 而作业状态看不出来。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-visual
+          path: allure-results-visual/
+          if-no-files-found: error
+
+      - name: Upload candidate baselines
+        # 这一份是**给人看的输入**而不是结论: 基线缺失或界面有意改动时, 把本轮真实画面传上来
+        # 供下载后提交到 tests/visual-baselines/。所以 `ignore` 而不是 `error` —— 它没有产出
+        # 时, 上面那一步已经红了, 再红一次只是噪音。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-baselines-candidates
+          path: visual-baselines-candidates/
+          if-no-files-found: ignore
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 这一步是**兜底**, 不是"失败记录的另一个副本"(2026-10-04 按用户的期望收紧): 普通
+        # 失败的证据(断言输出、门禁不通过、步骤报错)已经在 Allure 结果与运行日志里了, 这里
+        # 只回答"进程是不是根本没走到最后 / 有没有运行时崩溃的现场", 并把判定写进
+        # ``$GITHUB_OUTPUT``(scene)。没有兜底现场时下面的上传步不跑 —— 它也就不会出现在报告
+        # 首页那份附件里。
+        # 全绿时这一步根本不跑, 所以不会给每轮 CI 多挂一份空产物。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "质量检查 (quality)" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results-quality \
+            --expect allure-results-performance \
+            --expect allure-results-visual \
+            crash-dumps allure-results-visual visual-baselines-candidates \
+            performance-results.json performance-results.csv
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步): 结果里已经写清楚的失败不再多占一份 artifact,
+        # 也不再出现在报告首页的附件里。
+        # `if-no-files-found: error`: 判定说有现场就必须真的有东西 —— 静默地少传一份, 等于把
+        # "附件里为什么没有这个作业"变成无解的谜。诊断目录 + 崩溃现场一起收: 一个 artifact 就够。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-quality
+          path: |
+            job-diagnostics/
+            crash-dumps/
+          if-no-files-found: error
+
+  pytest:
+    needs: [changes]
+    # 每一次触发都跑**全量**(2026-10-14 起): 三平台各 3 片, 四段 pytest 与静态检查一个不少。
+    # 之前那条"只有 push 按改动路径选层"的规则已回退 —— 合并那一轮也照跑全量。
+    # 纯文档改动在触发层就被挡掉(push 的 `paths-ignore` / PR 的 dorny), should_run=false
+    # 会跳过整个作业(与 quality 作业按 should_run 跳过同一个模式, 必需检查由
+    # required-check 兜底)。
+    if: needs.changes.outputs.should_run == 'true'
+    # 套件按平台拆成几片并行跑, 各片只负责自己那部分用例, 由后续的 pytest-report
+    # 作业把 Allure 结果与覆盖率数据合并成一份报告 —— 墙钟时间只取决于最慢的一片。
+    # 平台专属的 mypy 检查也在这个作业里(片 0 的各平台各跑一次), 不再单独开作业:
+    # 单独开只是多付一整套 checkout / uv / 依赖同步的固定开销, 而这里本来就有对应平台的作业。
+    name: Pytest 分片测试 (${{ matrix.platform }} · 片 ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # **两个轴**(os × shard) + 三条 include: 片数现在三平台一致, 于是矩阵写成轴最省 ——
+        # include 里每条按 ``os`` 匹配, 一次把"该平台的展示名与片数"补给它的三片
+        # (GitHub 的 include 就是"能对上就合并"这个语义, tests/ci_workflow.py 也按它展开)。
+        # 片号必须从 0 连续编到"片数-1": 缺号或越界会让一部分用例静默不跑
+        # (pytest 按 --shard-index 取模选片), 所以轴里就写 0..2。
+        # 片数按固定开销算: 某平台总时长 ≈ 片数 × 固定开销 + 串行测试时间 T ——
+        # 减片省额度、加片省墙钟。**三个平台一视同仁各 3 片**(2026-10-10): 仓库转公开后
+        # Actions 不再计费, 当初"macOS 按 Linux 的 10 倍计价, 只给它 1 片"的理由就消失了
+        # —— 那一条曾是三平台片数不同的唯一原因。
+        # **哪天某个平台的片数又要单独调**, 这里就得退回"逐条 include 列出来"的写法
+        # (两个轴表达不了"各平台片数不同"), 并同时改报告作业的 expect_shards ——
+        # tests/unit/test_sharding.py 会核对两边, 产物清单也照它声明"必须有哪几片"。
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        shard: [0, 1, 2]
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+            shards: 3
+          - os: windows-latest
+            platform: Windows
+            shards: 3
+          - os: macos-latest
+            platform: macOS
+            shards: 3
+
+    # macOS 片的解释器来源与其它平台不同(见下面 "Set up Python (macOS, ...)" 一步):
+    # 只认机器上已装好的解释器, 不许 uv 再去下载 standalone(它捆 Tcl/Tk 9.0, 崩溃记录
+    # 见那一步的注释)。其它平台显式写 "managed" —— 与 uv 默认一致, 只为让这个表达式在
+    # 两个分支里都有定义。
+    env:
+      UV_PYTHON_PREFERENCE: ${{ matrix.os == 'macos-latest' && 'only-system' || 'managed' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 依赖缓存的唯一写入者是**每个平台的分片 0**: 同一个 uv.lock 在同一平台会算出同一个
+          # cache key, 三片并行保存时只有一个能抢到, 其余两片会打印
+          # "Failed to save: Unable to reserve cache ... another job may be creating this cache"
+          # (分片上线后三个平台都出现过)。所以只让片 0 写, 与本 job 的其它分片、以及其它 job
+          # 都只读复用(见各自的 save-cache: false) —— 每个平台只有一个写入者。
+          enable-cache: true
+          save-cache: ${{ matrix.shard == 0 }}
+
+      - name: Set up Python (uv-managed, Linux/Windows)
+        # 先普通安装(命中 uv 的下载缓存时很快), **不**无条件 --reinstall: 那等于每次都
+        # 重下解释器。Tcl 数据文件损坏的情况交给下面"自检失败才重装"那一步。
+        # macOS 不走这一步(见下一步): uv 托管的 python-build-standalone 在 macOS 捆绑
+        # Tcl/Tk 9.0, 其 Aqua 位图绘制路径上有确定性 use-after-free(2026-10-05 两轮 CI
+        # 实锤: 退出码闸门 + 原地重跑也救不了, 只是多攒一份 584 MiB 的 faulthandler 现场)。
+        if: runner.os != 'macOS'
+        run: uv python install 3.12
+
+      - name: Set up Python (macOS, python.org build with Tcl/Tk 8.6)
+        # 2026-10-05: macOS 分片连续两轮死在同一个原生崩溃上(Python 栈停在
+        # test_gui_dropdown.py 的 update 泵, .ips 的原生栈是 -[NSCGSContext dealloc]
+        # 一族)。根因在解释器自带的 Tcl/Tk —— uv 托管构建捆 **Tcl/Tk 9.0**, UI 用例在
+        # 9.0 的 Aqua 路径上必崩; python.org 官方构建捆绑 **Tcl/Tk 8.6**, 无此缺陷。
+        # setup-python 在 macOS 上对 3.11+ 直接再分发 python.org 的 universal2 安装包
+        # (见 actions/python-versions 的 README), 所以这里装到的就是 python.org 3.12。
+        # 配合本作业 env 的 UV_PYTHON_PREFERENCE=only-system, 之后所有 uv 命令
+        # (sync/run)都只认这台机器上的解释器, 不会再悄悄下载回 standalone。
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Assert Tcl/Tk stays on the 8.6 series (macOS)
+        # 上面换构建的"眼睛": 规避只有在解释器真的带 Tk 8.6 时才成立。哪天镜像或上游
+        # 变了(macOS 又回到 9.x), 这一步立刻红 —— 而不是等 UI 分段崩成一串、每轮多攒
+        # 半个 GiB 的 faulthandler 现场。TkVersion 是 float(8.6 / 9.0)。用 PATH 上的
+        # python(setup-python 刚装好)而不经 uv —— 此时 .venv 还没建。
+        if: runner.os == 'macOS'
+        run: |
+          python - <<'PY'
+          import sys
+          import tkinter
+
+          print(sys.version)
+          print(f"Tcl/Tk {tkinter.TkVersion}")
+          assert tkinter.TkVersion < 9, (
+              "解释器又带回 Tcl/Tk 9.x 了: 见 docs/testing-ci.md 的 macOS 原生崩溃"
+              "一节 —— 要么确认 setup-python 仍装的是 python.org 构建, 要么先确认"
+              "上游修好了 9.0 的 Aqua 缺陷, 再考虑撤掉这道闸"
+          )
+          PY
+
+      - name: Install dependencies
+        # 只装测试组(pytest / pytest-cov / allure-pytest / 超时插件 / 失败现场留证)**与
+        # 质量组** —— 后者是给片 0 的平台专属检查用的(它跑 mypy --platform win32, 由
+        # scripts/create_allure_quality.py 的 platform 组调用)。矩阵是共享的, 所以各片
+        # 都装同样的组: 按片加条件会让这两句话各自带一份 ${{ }} 表达式, 得不偿失。
+        # `--no-install-project`: 用例靠 pytest 的 pythonpath 导入源码, 不必把项目装进 .venv
+        # (见 pyproject 的 [tool.uv])—— 带上它连构建后端都不用下。
+        run: uv sync --locked --no-default-groups --group test --group quality --no-install-project
+
+      - name: Verify Tkinter works (Windows/macOS)
+        # GUI 用例把"Tk 起不来"当作环境问题 skip(见 tests/integration/test_gui_*.py 的
+        # 环境守卫), 于是 Tcl 坏掉只会表现为一堆 skip —— 而 GUI 用例占覆盖率很大一块,
+        # 默不作声地全 skip 会让覆盖率门槛变成一个难定位的失败(实测 67.88% < 85%)。
+        # 这一步失败**不等于**作业失败(continue-on-error): 先给一次修复机会, 真正的判定
+        # 在后面那次复检 —— 修不好照样红(所以不如"直接 --reinstall"容易漏掉问题)。
+        # Linux 的显示环境由下面的 xvfb 提供, 不在这里检查。
+        id: tkinter
+        if: runner.os != 'Linux'
+        continue-on-error: true
+        run: uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK')"
+
+      - name: Repair the interpreter and re-check Tkinter
+        # 只有上一步真的失败了才重装(跳过与失败不同, 所以 Linux 不会走到这里)。uv 托管的
+        # standalone 构建靠自身目录里的 tcl 数据文件定位 Tcl, 那份副本陈旧或不完整(缓存
+        # 复用后出现过)时 tkinter 会报 "Can't find a usable init.tcl"(上游 astral-sh/uv#7036)。
+        # 重建解释器比事后设 TCL_LIBRARY/TK_LIBRARY 更可靠, 也不影响其它平台; 重装后再 sync
+        # 一次让虚拟环境跟着新解释器走, 然后立刻复检(这一步没有 continue-on-error)。
+        # macOS 不会走到这里(见上面 setup-python 那步与下面 macOS 专属的失败步):
+        # 那台机器上的解释器是 setup-python 装的 python.org 构建(自带 Tcl/Tk 8.6 框架),
+        # 不是 uv 的托管副本, "重装 uv 解释器"这味药不存在。
+        if: steps.tkinter.outcome == 'failure' && runner.os != 'macOS'
+        run: |
+          uv python install --reinstall 3.12
+          uv sync --locked --no-default-groups --group test --group quality --no-install-project
+          uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tkinter OK after repair')"
+
+      - name: Fail loudly if Tkinter is broken on the python.org build (macOS)
+        # 上面修复步的镜像分支: macOS 的 tkinter 自检失败时没有"重装解释器"可修 ——
+        # 失败只能是镜像或 Tcl/Tk 8.6 框架层损坏。直接红掉并说清原因, 别让 GUI 用例
+        # 静默 skip、把问题变成"覆盖率门槛难定位的失败"(见上面 "Verify Tkinter
+        # works" 注释里 67.88% < 85% 的教训)。
+        if: steps.tkinter.outcome == 'failure' && runner.os == 'macOS'
+        run: |
+          echo "::error::python.org 构建(setup-python 安装)的 tkinter 起不来 —— 镜像或 Tcl/Tk 8.6 框架损坏, 不是 uv 缓存问题, 没有\"重装解释器\"这味药"
+          exit 1
+
+      - name: Install Xvfb and a CJK font (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # 已装即跳过: 自建持久机上这两个包一轮装过就一直在, 而 apt-get update 是
+          # "包已装齐也每轮必付"的网络敞口 —— 自建机访问发行版源时快时慢, 慢的那几轮
+          # setup 段能拖十几分钟(2026-10-24 一轮同机三片的排队缺口 764s/353s)。托管
+          # runner 每次全新, 走不到快路径, 下面的冷路径原样保留。
+          installed=0
+          for pkg in xvfb fonts-noto-cjk; do
+            dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' && installed=$((installed + 1))
+          done
+          if [ "$installed" -eq 2 ]; then
+            echo "xvfb / fonts-noto-cjk 已在机上, 跳过 apt"
+            exit 0
+          fi
+          # The hosted runner may have a stale Google Chrome index. It is unrelated to Xvfb
+          # and can make apt-get update fail with a Hash Sum mismatch.
+          while IFS= read -r -d '' source; do
+            if grep -q 'dl.google.com/linux/chrome' "$source"; then
+              sudo mv "$source" "${source}.disabled"
+            fi
+          done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
+          sudo apt-get update
+          # fonts-noto-cjk 不是可选项: 界面是中文的, 而 Tk 的量宽全靠当前字体的字形度量
+          # —— 裸 runner 上没有任何中日韩字体时, 汉字会被量成近乎零宽, "按宽度裁剪/折行"
+          # 的判定因此得出"放得下"的结论, 长路径不省略、状态列不折行(2026-09-27 实测:
+          # Linux 分片里 test_discovery_rows_clip_long_paths... 与 test_state_column_never_
+          # shows_half_a_chip 两条红, 而 Windows 上绿)。
+          sudo apt-get install -y xvfb fonts-noto-cjk
+
+      # 用例分**两段**跑(2026-10-05 起): 先跑不开窗口的大部队(``-m "not ui"``), 再让 UI 用例
+      # (``-m "ui"``, 即所有真正开 Tk 窗口的用例)单独一个进程收尾。为什么: macOS 分片曾连续多轮
+      # 死在 Tk 的原生崩溃上(EXC_BREAKPOINT/SIGTRAP, 退出码 133) —— pytest 进程一死, 覆盖率
+      # (pytest-cov 要等会话**结束**才落盘)与崩溃点之后的所有用例结果全部陪葬, 那几轮连
+      # `.coverage.shard-0` 都不存在, 上传步报错、报告缺片。拆成两段后:
+      #   * UI 段再怎么原生崩溃, 丢的也只有 UI 自己那段 —— 前一段的覆盖率与结果**早已落盘**,
+      #     `if: always()` 的上传步照样拿得到;
+      #   * 两段共用同一个 COVERAGE_FILE, 第二段加 `--cov-append` 并进去 —— 崩掉时少掉的只是
+      #     它自己没写完的那部分;
+      #   * 分片键是"当次收集到的用例"(见 tests/sharding.py 与 conftest 的 _apply_shard),
+      #     两段的用例集合互补(一个 not ui、一个 ui), 各平台的片合起来仍是全集, 不重不漏。
+      # 第二段的条件带 `always() && !cancelled()`: 第一段有普通红(断言失败)时 UI 段照跑 ——
+      # 一半用例的失败不该吞掉另一半的结果; 整轮被取消则不再起新进程。
+      #
+      # 不再按改动路径选层(2026-10-14 回退): 每一轮四段都跑, 段的条件只看平台与
+      # "第一段跑完 / 整轮没被取消"。作业级的 if 只要求 should_run(纯文档改动才为假),
+      # 所以总有一段把结果与覆盖率写出来 —— 上传步的 `if-no-files-found: error` 不会
+      # 因为某段被跳过而误伤。
+      - name: Pytest with coverage, non-UI suite first (Linux)
+        if: runner.os == 'Linux'
+        env:
+          # 每片写一份自己的覆盖率数据(合并放到 pytest-report 作业里)。
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        run: xvfb-run -a uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+
+      # UI 段外面包了一层"死法重试"(2026-10-05, scripts/run_pytest_with_crash_retry.py):
+      # 原生崩溃(macOS 26.6.2 + Tcl/Tk 9.0 的 Tk Aqua 位图绘制 use-after-free 会把 pytest
+      # 进程整个杀死, 同一用例在 Linux/Windows 都过)与**用例超时**(2026-10-16 的 Windows 片:
+      # 一条 GUI 用例卡到 60s 上限, timeout_guard 写完现场就 os._exit(1), 那之后的 34 条用例
+      # 与覆盖率一起没了)是同一类事故 —— 进程死了, 它后面的一切都没了 —— 所以一并接管。
+      # 判据都是**硬的**: 崩溃只认"死于信号/原生异常"的退出码(SIGTRAP=133/SIGSEGV=139 这一类),
+      # 超时只认 timeout_guard 留下的痕迹(那条 `超时留证` 结论或 `*_timeout.dump`) ——
+      # 断言失败、门禁不过都是普通退出码且没有这两个痕迹, 一次都不会重跑, 真回归不会被稀释。
+      # 重试前会清掉死掉那次新写进 allure-results 的半套结果(同一用例不能有两份结论), 只清
+      # 快照之后新增的(前一段进程的结果不动); 覆盖率不用清(pytest-cov 只在会话结束才落盘)。
+      # 超时那条路多一步: 先原样重跑一遍(环境卡顿多半不会连着来, 这一遍就全过了, 那条超时结论
+      # 也随之清掉); 若仍超时, 第三遍把挂住的那条用例 --deselect 掉 —— 其余用例与覆盖率先拿到
+      # 手, 而那次超时的结论**留在报告里**(挂住是真信号, 不许静默消失)。
+      # 这是**带到期日的临时缓解**: 窗口一过脚本自动透传不再重试, 守卫测试
+      # (tests/unit/test_ci_diagnostics.py)同时变红, 催着人回来移除这层包装或明确续期。
+      - name: Pytest with coverage, UI suite in its own process (Linux)
+        if: always() && !cancelled() && runner.os == 'Linux'
+        env:
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        run: xvfb-run -a uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
+
+      - name: Pytest with coverage, non-UI suite first (Windows/macOS)
+        if: runner.os != 'Linux'
+        env:
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        # 单片覆盖率天生偏低, 所以这里关掉报告与门槛(--cov-report= / --cov-fail-under=0):
+        # 门槛只在合并后的总覆盖率上判, 见 pytest-report 作业。
+        run: uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "not ui" --cov --cov-report= --cov-fail-under=0 --alluredir=allure-results
+
+      - name: Pytest with coverage, UI suite in its own process (Windows/macOS)
+        if: always() && !cancelled() && runner.os != 'Linux'
+        env:
+          COVERAGE_FILE: .coverage.shard-${{ matrix.shard }}
+        run: uv run python scripts/run_pytest_with_crash_retry.py --watch-dir allure-results -- uv run pytest --shard-count ${{ matrix.shards }} --shard-index ${{ matrix.shard }} -m "ui" --cov --cov-append --cov-report= --cov-fail-under=0 --alluredir=allure-results
+
+      - name: Upload shard Allure results
+        # `if-no-files-found: error`: 这一片**没产出结果**时必须在这里响亮地失败。
+        # 原来写的是 `ignore` —— 结果是产物根本没被创建, 而下游(pytest-report)只能报一句
+        # “某平台缺片”, 得再翻回去看这个作业才知道是哪儿断的(2026-09-30 的 macOS 分片就是
+        # 这样: `allure-results-macos-latest-*` 一个目录都没匹配到, 而报告里只有它的安全结果)。
+        # 这一片本来就是红的, 所以把“为什么没有产物”提到这里说, 不丢任何结论。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-${{ matrix.os }}-${{ matrix.shard }}
+          path: allure-results/
+          if-no-files-found: error
+
+      - name: Upload shard coverage data
+        # .coverage.shard-* 是隐藏文件, 要显式允许上传。
+        # `if-no-files-found: error` 的理由同上一处: 缺一片覆盖率数据会让合并后的百分比
+        # 说成“覆盖率下路”, 而真相是这一片没跑起来。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
+          path: .coverage.shard-${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 失败现场留证(见 tests/crash_capture.py): 用例失败的 coredumpy dump 已经挂在 Allure
+        # 附件里, 但**进程级崩溃**(SIGSEGV/SIGABRT/SIGTRAP) 挂不进 —— coredumpy 是 Python 层的
+        # 钩子, 进程被内核杀掉时它没机会跑, pytest-cov 也来不及落盘覆盖率。它挂不进结果, 却是
+        # 这一整套诊断**唯一**真正需要它的地方, 所以判定就看两件事: faulthandler 有没有栈
+        # (SIGTRAP 也已注册, 见 TRAPPED_SIGNALS)、`--expect` 的覆盖率文件在不在 —— 两段跑
+        # 之后覆盖率的"在"只能说明前一段落盘了, 崩溃迹象主要靠 faulthandler 的栈。
+        # 断言失败这类普通红不会被算成现场(覆盖率文件在、没有栈) —— 它们的证据在用例详情里,
+        # 上下两个步骤也就都不会把它们再抄一遍(2026-10-04 按用户的期望收紧)。
+        # **必须排在下面 "Upload crash dumps" 之前**(2026-10-05 的教训): macOS 的 ReportCrash
+        # 在进程死后几秒才异步落盘 `.ips`, 这一步带着 `--crash-report-wait` 把它等来、拷进
+        # `crash-dumps/` —— 排在上传之后等于拷给一个已经传完的目录: 那一轮的 crash-dumps
+        # artifact 里没有 `.ips`, 完整原生栈只剩 summary.md 里截断的 4000 字。
+        # 回显 faulthandler 日志是保留的老习惯: 排查时最顺手的地方仍然是运行日志。
+        # `--full-copy-at`: 摘要里被截断的现场(`.ips` / faulthandler 日志)要能被**点着找到**
+        # —— 截断标记与排查提示会写上 artifact 名和本次运行 artifact 列表页的链接
+        # (`<run>/artifacts`)。2026-10-05 之前只写"见 artifact"三个字: 98.2 KiB 的 `.ips`
+        # 被截断在半路, 读者得自己猜是哪一份、去哪下。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "pytest (${{ matrix.os }}, 分片 ${{ matrix.shard }})" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results \
+            --expect .coverage.shard-${{ matrix.shard }} \
+            crash-dumps allure-results allure-results-quality-platform \
+            allure-manifest.json .coverage.shard-${{ matrix.shard }} coverage.xml \
+            --crash-reports-from "$HOME/Library/Logs/DiagnosticReports" \
+            --crash-report-wait 20 \
+            --full-copy-at "crash-dumps-${{ matrix.os }}-${{ matrix.shard }}"
+          for log in crash-dumps/*.log; do
+            [ -f "$log" ] || continue
+            echo "===== $log ====="
+            cat "$log"
+          done
+
+      - name: Upload crash dumps
+        # 失败现场留证(见 tests/crash_capture.py):
+        #   * 用例失败的 coredumpy dump 已经挂在 Allure 附件里(随上面那份结果一起上传);
+        #   * **进程级崩溃**(SIGSEGV/SIGABRT) 挂不进 Allure —— coredumpy 是 Python 层的钩子,
+        #     进程被内核杀掉时它没机会跑, pytest-cov 也来不及落盘覆盖率。2026-10-03 的
+        #     macOS 分片正是这种情况, 事后只能去翻那一次运行的日志。
+        # 所以这里把整个目录也当 artifact 收一份(faulthandler 的输出会写进
+        # `crash-dumps/faulthandler.log`, 见 conftest 的 pytest_configure)。
+        # macOS 的系统级崩溃报告(`.ips`, "C 层到底是谁碰坏了内存"唯一能回答的证据)由上面的
+        # 收集步拷进来 —— 所以这一步必须排在它**之后**。
+        # `if-no-files-found: ignore`: 大多数分片本来就没有崩溃现场, 不该因此变红。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-dumps-${{ matrix.os }}-${{ matrix.shard }}
+          path: crash-dumps/
+          if-no-files-found: ignore
+
+      - name: Echo crash dumps into the run log
+        # 崩溃日志写进了文件(见上一步), 这里再回显一遍: 排查时最顺手的地方仍然是运行日志,
+        # 不该逼着人先下载 artifact。没有文件时什么都不做。
+        if: always()
+        shell: bash
+        run: |
+          for log in crash-dumps/*.log; do
+            [ -f "$log" ] || continue
+            echo "===== $log ====="
+            cat "$log"
+          done
+
+      - name: Run the platform-specific check (Windows/macOS, shard 0)
+        # 平台专属类型检查(mypy --platform win32 / darwin)只在该平台上跑: `--platform` 只是
+        # "检查哪支代码", 并不校验执行环境 —— 放到 Ubuntu 上跑出来的结论, 挂到 Windows 环境里
+        # 就是假的归属(见 scripts/create_allure_quality.py 的 platform 组)。
+        # 放在测试与上传之后: 它是门禁, 而门禁失败不该让这次的测试结果拿不到。
+        # 片 0 兼顾两件事(依赖缓存写入 + 这条检查), 其余片与 Linux 都不跑。
+        if: matrix.shard == 0 && runner.os != 'Linux' && always()
+        run: uv run python scripts/create_allure_quality.py --group platform --results-dir allure-results-quality-platform
+
+      - name: Upload platform check Allure results
+        # 结论归入那个平台的环境, 与同一平台的测试结果一起看。
+        if: matrix.shard == 0 && runner.os != 'Linux' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-quality-platform-${{ matrix.os }}
+          path: allure-results-quality-platform/
+          if-no-files-found: ignore
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步): 断言失败这类红在结果里已经写清楚了。
+        # 得等系统级报告的那 20 秒也只在"已经有崩溃迹象"时才花(见脚本里的 collect_and_judge)。
+        # `if-no-files-found: error`: 判定说有现场就必须真的有东西。
+        # crash-dumps 不在这个路径里: 分片级的 `crash-dumps-<os>-<shard>` 仍由中间那步上传
+        # (名字不变, 免得已经在下它的流程断掉), 这里只收清点出来的诊断摘要。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-${{ matrix.os }}-${{ matrix.shard }}
+          path: job-diagnostics/
+          if-no-files-found: error
+
+  windows-package:
+    # 打包门禁: **合入 main 的 PR** 在 CI 的检查都过了之后, 才拿这个 PR 的合并预览提交去构建。
+    # 「用例绿」与「能编 + 产物能起」是两件事 —— 后者只有真跑一次 PyInstaller 才知道, 而它最容易
+    # 悄悄坏(资源没进包、spec 少一行、隐藏导入失效), 等到发布那一刻才发现就晚了。
+    # 为什么用 `uses:` 调 release-build.yml 而不在这里抄一遍构建步骤: 构建只有一处定义, 门禁这条路
+    # 与发布那条路(release.yml 的 build 作业调的也是同一份)跑的是同一份步骤, 不会各自漂移。
+    # **调的是"只读的构建"那一份, 不是 release.yml**(2026-10-17 实测): 嵌套工作流的权限是**逐作业
+    # 静态校验**的 —— release.yml 里 `publish` 要 `contents: write`, 而这个作业只给得起 `contents: read`
+    # (顶层的权限), 整份工作流就判 "not valid"
+    # (`The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`),
+    # 报错在**解析阶段**、连一个 job 都起不来, 运行期的 `if` 拦不住。所以构建与发布拆成两份: PR 这条
+    # 路全程只读, 写权限只留在 release.yml 的发布作业上。
+    # 为什么门禁是"这个作业 + 下面的聚合结论"两个, 而不是把它自己写进必需检查: 纯文档改动的 PR 会
+    # 跳过它(见 changes 作业), 被跳过的必需检查会停在 pending —— 必需检查得交给"总会报一次结论"
+    # 的作业(与 required-check 同一套理由, 见文件开头的注释)。
+    # needs 排布(2026-10-27 重排): 只等"产出结论"的核心作业(质量/用例/安全), **不等报告链** ——
+    # 报告(pytest-report / allure-summary)翻转成反过来等这个作业, 好把构建后冒烟的结论产物收进
+    # 汇总报告。报告链的红(覆盖率门槛、原生质量门)由它们自己的必需检查兜住, 不再挡打包的墙钟;
+    # 而这里的前置(quality/pytest/security)红了 => 本作业被跳过(default needs 语义) =>
+    # packaging-gate 判红, 合入照样被拦。
+    name: 打包 Windows 产物 (仅合入 main 的 PR)
+    needs: [changes, quality, pytest, security]
+    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && needs.changes.outputs.should_run == 'true' }}
+    uses: ./.github/workflows/release-build.yml
+    with:
+      # 同一轮 CI 已经跑过三平台的全量用例与静态检查: 这一档只构建 + 产物冒烟。
+      # 门禁只出 artifact, 不发 Release —— 这一份工作流**没有** publish 开关(发布是合入之后
+      # release.yml 那条路), 所以下面不能写 `publish: false`。
+      checks: build-only
+
+  packaging-gate:
+    # 给分支保护用的**必需检查**: 恒有一份结论(跳过也是结论), 所以它不会停在 pending。
+    # 三种情况: ① 纯文档改动 ⇒ 不需要编译, 绿; ② 不是合入 main 的 PR ⇒ 不在这条门禁范围内, 绿;
+    # ③ 合入 main 的 PR ⇒ 上面那个作业必须真的成功(被跳过也算不成功 —— 那意味着前置检查红了,
+    # 那时本来就该拦住合入)。
+    name: CI required packaging status
+    needs: [changes, windows-package]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the packaging gate decision
+        shell: bash
+        env:
+          SHOULD_RUN: ${{ needs.changes.outputs.should_run }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PACKAGE_RESULT: ${{ needs.windows-package.result }}
+        run: |
+          if [ "$SHOULD_RUN" != "true" ]; then
+            echo "纯文档改动: 本轮不需要编译, 打包门禁按通过计。"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$BASE_REF" != "main" ]; then
+            echo "不是合入 main 的 PR: 打包门禁不适用, 按通过计。"
+            exit 0
+          fi
+          if [ "$PACKAGE_RESULT" != "success" ]; then
+            echo "::error::打包未通过(结果=$PACKAGE_RESULT) —— 合入 main 前必须能构建并通过产物冒烟"
+            exit 1
+          fi
+          echo "打包与产物检查通过。"
+
+  pytest-report:
+    # 每个平台一份报告: 把该平台各片的 Allure 结果与覆盖率数据合并成一份。
+    # **两台机器都在 Ubuntu 上**(矩阵里只列平台, 不再列 runner): 合并、覆盖率汇总、报告生成
+    # 与自检全是纯文件操作, 与产出数据的平台无关 —— Windows runner 要按 2 倍计价, 而结论
+    # 完全一样(原来那些 pwsh 分支也一起没了)。
+    # 归到哪个平台由矩阵的 platform 决定, **不能再用 runner.os**(两台都是 Linux): 否则报告里
+    # 会出现"产自 Ubuntu 的 Windows 结论"。覆盖率数据也是**按平台分开**合并与判门槛的。
+    # 产物名与以前完全一致(allure-resources-/coverage-/allure-report-<runner 镜像名>), 汇总
+    # 作业与历史回填都照旧读它们 —— 历史也按平台各一条, 改名会把累计曲线清零。
+    name: 合并测试报告 (${{ matrix.platform }})
+    needs: [changes, pytest]
+    # 分片作业失败也要出报告: 报告正是用来看"哪一片挂了"的。
+    # 但**被取代的运行不必再出报告**: 这一条要用 `!cancelled()` 表达, 不能只写 `always()`
+    # —— `always()` 连“整轮被取消”也返回 true, 那样旧的那一轮会在取消后照样启动本作业
+    # (合并/生成/上传白跑一遍, 而且被取消的作业按已用时长计费)。
+    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 pytest 作业同一个平台列表与同一套片数(见那里的说明): 条目里的 os 只用来拼
+        # 产物名(哪个平台的产物), platform 是报告里的环境名。
+        # expect_shards 必须与那个平台在 pytest 矩阵里的片号一致
+        # (tests/unit/test_sharding.py 会核对): 声明一个根本没人跑的片号等于白声明。
+        #
+        # download_path 是产物**下载落地的目录**, 按平台分开写 —— 因为
+        # `download-artifact` 只在匹配到**多个**产物时才逐个建"以产物名命名的子目录",
+        # 只匹配到一个时它把内容直接解到 ``path`` 里, 不建那层目录。macOS 曾经只有 1 片,
+        # 正好撞上这条: path 写 "." 时那 12689 个结果文件摊在工作区根, 合并脚本按"分片目录"
+        # 找就一个都匹配不到 —— 于是 macOS 的结论与覆盖率全程没进报告, 合并作业报
+        # "以下模式没匹配到目录"、覆盖率报"缺片"(2026-10-01 run 36754229023 实测: 下载成功、
+        # digest 校验通过、macOS 分片作业自己 2206 passed)。所以**单片平台的 path 直接写成
+        # 那个分片目录名**; 现在三个平台都是 3 片, 三处都写 "."(各片各自成目录)。哪天又给
+        # 某个平台只开 1 片, 记得把它改回分片目录名 —— 这条纪律不会因为片数变整齐而失效。
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+            expect_shards: "0,1,2"
+            download_path: .
+          - os: windows-latest
+            platform: Windows
+            expect_shards: "0,1,2"
+            download_path: .
+          - os: macos-latest
+            platform: macOS
+            expect_shards: "0,1,2"
+            download_path: .
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 依赖缓存的写入者是 pytest 作业的分片 0(见其注释), 这里只读复用。
+          enable-cache: true
+          save-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # 这个作业不跑用例: 它只用覆盖率 CLI 把各片数据合起来、判门槛、出报告(报告与
+        # 自检脚本只用标准库), 所以只装覆盖率那一组; --no-install-project 与其它作业同理。
+        run: uv sync --locked --no-default-groups --group coverage --no-install-project
+
+      - name: Cache the npm download of the Allure CLI
+        # 11.3 第 6 条(2026-09-30 落地): 每轮 CI 要现装 4 次 allure CLI(pytest-report × 3 +
+        # allure-summary), 每次 10~20s。这里缓存 npm 自己的下载缓存目录(~/.npm), 命中后
+        # 那 10~20s 就省下来了。
+        # key 里带**钉住的版本号**: 升级 CLI 时自动换一把新钥匙, 不会拿旧版本的缓存去凑。
+        # key 里再带 matrix.os: 不然三个报告作业会抢着保存同一个 key, 后两个会打印
+        # "Failed to save: Unable to reserve cache"(分片上线时在 uv 缓存上碰到过同一个坑,
+        # 所以 setup-uv 那时改成了只让片 0 写)。
+        # **不写 runner.os**: 这个作业有一条守卫要求"平台只能来自矩阵"(两台机器都是 Linux,
+        # 看一眼 runner.os 就会把两个平台的结论标成 Linux), 缓存 key 也不该开这个头。
+        # 不写 restore-keys: 旧钥匙里的包对不上新版本, 回退命中只会把语义弄混乱。
+        # `~/.npm` 是 npm 的内容寻址缓存(按 integrity 存), 缓存被改过会校验失败并重下; 且
+        # 低信任触发(PR)默认只读(见 GitHub 的 cache-mode 说明), 所以不必担心缓存被投毒。
+        # 版本取自 GitHub 官方文档的示例(仓库里没有这个 action 的先例)。
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-allure-3-${{ matrix.os }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install Allure 3 CLI
+        run: npm install --global allure@3
+
+      - name: Check Allure version
+        # 版本下限在**运行期**判定: 工作流用的是浮动标签 `allure@3`(2026-10-04 用户按需求改成
+        # 动态取最新), 而 3.13~3.17 在配了 historyPath 时会让**质量门静默放行**(退 0 且不输出
+        # 任何内容, issue #895; 3.18.0 的 PR #962 修复) —— 那种失效在报告里看不出来, 所以装完
+        # 当场比一次。静态那一条由 tests/unit/test_ci_workflow.py 守着(只允许浮动标签
+        # 或 ≥ 配置里最低要求的钉住版本)。
+        shell: bash
+        run: |
+          version="$(allure --version)"
+          echo "Allure CLI: ${version}"
+          major="${version%%.*}"
+          rest="${version#*.}"
+          minor="${rest%%.*}"
+          if [ "${major:-0}" -lt 3 ] || { [ "${major:-0}" -eq 3 ] && [ "${minor:-0}" -lt 18 ]; }; then
+            echo "::error::Allure CLI ${version} 低于 3.18.0: 配了 historyPath 时质量门会静默放行"
+            exit 1
+          fi
+
+      - name: Download shard Allure results
+        # 落地目录按平台给(见矩阵里 download_path 的说明): 单片平台的 path 必须**正好是那个
+        # 分片目录名** —— download-artifact 只在匹配到多个产物时才逐个建子目录, 只匹配到
+        # 一个时把内容直接解到 path 里。merge-multiple 显式写 false: 各片落在自己的目录里,
+        # 合并交给脚本它逐片打印文件数, 少了一片能一眼看出来。
+        # continue-on-error: 某片在跑测试前就挂了(没来得及上传产物)时不要连累整个作业 ——
+        # 这时候更需要一份报告来看“到底哪一片没结果”。
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: allure-results-${{ matrix.os }}-*
+          path: ${{ matrix.download_path }}
+          merge-multiple: false
+
+      - name: Download shard coverage data
+        # 这里故意仍写 ".": 单片平台的产物会被摊到工作区根, 而 ``collect_coverage_data.py``
+        # 两个布局都认(以产物名命名的子目录, 或直接在工作目录里的 ``.coverage.shard-<片>``)
+        # —— 换成 download_path 反而两边都对不上。
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: coverage-data-${{ matrix.os }}-*
+          path: .
+
+      - name: Merge shard Allure results
+        # 参数用引号包住通配符: pwsh 不会自己展开它, 由脚本统一展开(bash 展开了也无妨)。
+        # --platform 是这个平台的**展示名**(不是 runner 镜像名): 它写进产物清单, 汇总作业
+        # 拿它与报告里的环境对齐; 两台报告作业都跑在 Ubuntu 上, 所以只能由矩阵给出。
+        # --expect-shards 与矩阵的 shard 列表一致(tests/unit/test_sharding.py 会核对):
+        # 少一片时合并照常成功、报告也只是安静地少一部分用例(环境/通过率都看不出来),
+        # 所以把"谁报了多少条、缺哪几片"写成产物清单, 随产物上传给汇总作业对数。
+        run: uv run python scripts/merge_allure_results.py --output allure-results --platform "${{ matrix.platform }}" --expect-shards ${{ matrix.expect_shards }} --manifest allure-manifest.json "allure-results-${{ matrix.os }}-*"
+
+      - name: Collect coverage data
+        # 各片的 COVERAGE_FILE 是隐藏文件, 合并要求它们就在当前目录(coverage combine
+        # 只扫工作目录); 下载来的产物各自落在以产物名命名的子目录里, 所以先摊平。
+        # **刻意不用 `cp coverage-data-*/.coverage.shard-* ./`**: 少一片时 bash 只报一句
+        # `cannot stat`, 从日志里看不出缺的是哪一片; 更糟的是只匹配到一个产物时下载动作
+        # 会把它直接解到 `.`(没有 coverage-data-* 这层目录), 那条通配符什么都匹配不到 ——
+        # 一个分片的数据就这么静默地没进合并, 而后面 `coverage xml` 会自己合并剩下那份
+        # 并照 fail_under 报"覆盖率不达标"(2026-09-30 实测: Windows 被判 89.99% 未达标,
+        # 真相是少了一片的数据)。脚本按**片号**收, 两个布局都认, 缺片点名并非 0 退出。
+        # continue-on-error: 缺片时后面的步骤要能按 outcome 跳过(而不是照旧给一个残缺
+        # 结论); 作业成败由末尾的 `Report the shard gap` 统一判定。
+        id: collect-coverage
+        continue-on-error: true
+        shell: bash
+        run: |
+          uv run python scripts/collect_coverage_data.py --expect-shards "${{ matrix.expect_shards }}"
+
+      - name: Combine coverage data
+        # 只含**这一个平台**各片的数据(这一步的下载范围就是本平台的产物): 混在一起的话
+        # 某个平台掉了一半数据也看不出来。
+        # 该到的片没到齐就不合并: 残缺数据的百分比没有意义。
+        if: steps.collect-coverage.outcome == 'success'
+        run: uv run coverage combine
+
+      - name: Write the platform coverage config
+        # 平台专属代码只在**别的**平台被排除(见 scripts/coverage_platform.py 的模块说明)。
+        # 这台机器是 Ubuntu, 而它合并/判定的是**某个平台**的数据 ⇒ 平台名取矩阵里的展示名,
+        # 不取宿主平台。写进 GITHUB_ENV 之后, 下面三步(判门槛 / 出 XML / 挂结论)共用它。
+        if: steps.collect-coverage.outcome == 'success'
+        shell: bash
+        run: |
+          uv run python scripts/coverage_platform.py write .coverage-platform.rc --platform "${{ matrix.platform }}"
+          echo "COVERAGE_RCFILE=$PWD/.coverage-platform.rc" >> "$GITHUB_ENV"
+
+      - name: Enforce the coverage threshold
+        # 门槛值在 pyproject 的 [tool.coverage.report] fail_under 里(与本地一致)。
+        # **这一步不再决定这个作业的成败**(用户 2026-10-05: "这一步应该只关心用例是否缺失,
+        # 合并报告是否失败") —— 覆盖率是对**结果**的判定, 让它以非 0 退出会把合并作业弄红,
+        # 而那个红与"某一片没上传产物"长得一模一样, 从作业状态上看不出真相是哪一种。
+        # 判定并没有消失, 只是换了个地方下结论(三道都在, 少一道才叫把门禁变成警告):
+        #   * 这一步照旧打印门槛与缺行清单(退出码也留在日志里, 当场就能看);
+        #   * `Attach coverage report to Allure` 把结论写成报告里的「Coverage report」条目 ——
+        #     低于门槛时那条**结果本身**就是 failed(见 scripts/create_allure_coverage.py);
+        #   * 汇总作业的原生质量门(规则集一: 不过滤 + `maxFailures: 0`)会把那条 failed 算进去
+        #     ⇒ 该红的仍然红, 红在"下结论"的那一步(见 allurerc.mjs 的 qualityGate 说明)。
+        continue-on-error: true
+        if: steps.collect-coverage.outcome == 'success'
+        run: uv run coverage report --show-missing
+
+      - name: Write the coverage report
+        # 数据不全时**什么报告都不产出**: 残缺数据的百分比会把"少了一片"说成"覆盖率掉了"。
+        # `--fail-under=0`: 门槛判定只留给上面那一步 —— 否则同一个失败被报两次, 而且这里的
+        # 文案会把缺片说成覆盖率不够。
+        # 只写 XML: HTML 那份产物已经不上传了(见 Upload coverage XML 的说明), 没必要再生成。
+        if: always() && steps.collect-coverage.outcome == 'success'
+        run: uv run coverage xml -o coverage.xml --fail-under=0
+
+      - name: Attach coverage report to Allure
+        # 脚本把覆盖率摘要写成一条结果(按平台归到各环境), 并把原始 coverage.xml 作为
+        # 附件一起放进 allure-results —— 报告里能直接下载原始数据, 不只是渲染好的表。
+        # 描述开头就是达标结论("当前覆盖率 X% 大于预期覆盖率 Y%, 验证通过。"): 低于
+        # fail_under 时这一项本身直接是 failed, 不再另写一条汇总结论项。
+        # --platform 是这个平台的展示名: 这台机器是 Ubuntu, 但它合并的是那个平台的数据,
+        # 宿主平台自己认(platform.system()) 会把结论标成 Linux。
+        # 数据不全时不写这条结论: 报告里那一格会显示为"缺覆盖率结论"(汇总脚本按平台核对),
+        # 比给一个看起来"掉了几个点"的百分比诚实。
+        if: always() && steps.collect-coverage.outcome == 'success'
+        run: uv run python scripts/create_allure_coverage.py --platform "${{ matrix.platform }}" --publish-dir allure-results-coverage
+
+      - name: Upload the coverage conclusion
+        # 这条覆盖率结论是这个作业**独有**的产出(别的作业不会写它), 而合并后的
+        # `allure-results/` 从 2026-10-04 起不再上传 —— 少这一份, 汇总报告里
+        # 三个平台会全部报“缺少结论: Coverage report”, 而报告作业自己是绿的, 作业状态上看不出
+        # 任何异常。目录名以 `allure-results-` 开头, 汇总作业用一份 `pattern: allure-results-*`
+        # 就能收走(artifact 名用 matrix.platform: 三个平台的这个作业都跑在 ubuntu 上,
+        # 用 matrix.os 会撞名并互相合并)。
+        # 缺片时上一步不写结论, 这里也就不传 —— 那时“缺覆盖率结论”本身就是如实的状态。
+        if: always() && steps.collect-coverage.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-coverage-${{ matrix.platform }}
+          path: allure-results-coverage/
+          if-no-files-found: error
+
+      - name: Report the shard gap
+        # 缺片的结论必须落在作业状态上: 上面那步是 continue-on-error(不让它把后面的步骤
+        # 一起掐掉), 所以这里补一次判定, 并把"该去哪找原因"写进错误信息。
+        if: always() && steps.collect-coverage.outcome != 'success'
+        run: |
+          echo "::error::覆盖率数据不全(缺片): 本轮不判覆盖率门槛。请到本平台的分片作业里看哪一片没上传产物。"
+          exit 1
+
+      - name: Resolve previous run with Allure history
+        id: prev-run
+        # 基线**不要求**那一轮是 success(2026-10-05 教训): 只认成功运行时, 连续失败的
+        # 时期(如 macOS Tk 崩溃那几天)没有任何一轮被消费, 基线会冻结在更早的成功运行上
+        # —— 恰逢历史键的形状变了(environments 多出一段), 于是每轮都按旧形状"修",
+        # 报告里每条用例只剩自己的点, 红运行写得再多也永远接不上。失败轮的历史行本来就
+        # 该出现在趋势里(Allure 的趋势正是用来看失败的); "有没有产物"由下面的 artifact
+        # 检查把关, 中途取消/没跑到上传的运行自然被跳过。
+        uses: actions/github-script@v9
+        env:
+          ARTIFACT_NAME: allure-resources-${{ matrix.os }}
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 30,
+            });
+            const candidates = runs.data.workflow_runs.filter(
+              (r) =>
+                r.name === "CI" &&
+                r.id !== context.runId &&
+                r.status === "completed",
+            );
+            for (const candidate of candidates) {
+              const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: candidate.id,
+                per_page: 100,
+              });
+              const history = artifacts.data.artifacts.find(
+                (artifact) =>
+                  artifact.name === process.env.ARTIFACT_NAME &&
+                  !artifact.expired,
+              );
+              if (history) {
+                core.setOutput("run_id", String(candidate.id));
+                break;
+              }
+            }
+
+      - name: Download previous Allure history
+        if: steps.prev-run.outputs.run_id != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-resources-${{ matrix.os }}
+          run-id: ${{ steps.prev-run.outputs.run_id }}
+          path: .previous-allure-resources
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore previous Allure history
+        # artifact 内的路径取决于上传时 path 的形状: 只列**一个**文件(.allure/history.jsonl)
+        # 时, 最短公共祖先是 .allure/, 文件落在压缩包**根部**; 列多个路径(如平台产物里的
+        # allure-manifest.json)才会保留 .allure/ 前缀。两种布局都认 —— 2026-10-05 实测:
+        # 汇总作业的上传侧从多路径改成单路径后, 下一轮的 cp 在两种布局里都只找得到其中
+        # 一种, 于是 final 历史链悄悄断掉(每轮清零重来)。找不到时响亮报错而不是静默跳过。
+        if: steps.prev-run.outputs.run_id != ''
+        shell: bash
+        run: |
+          mkdir -p .allure
+          for candidate in \
+            .previous-allure-resources/.allure/history.jsonl \
+            .previous-allure-resources/history.jsonl
+          do
+            if [ -f "${candidate}" ]; then
+              cp "${candidate}" .allure/history.jsonl
+              exit 0
+            fi
+          done
+          echo "::error::allure-resources-${{ matrix.os }} 里找不到 history.jsonl(试过 .allure/history.jsonl 与根下的 history.jsonl) —— 上传侧的打包形状变了, 请对照 'Upload Allure resources' 的 path 列表。"
+          exit 1
+
+      - name: Repair previous Allure history
+        # 报告的“趋势”是按身份键**精确匹配**的(见 allurerc.mjs 的 historyPath), 而 CLI
+        # 用的是**动态版本** —— 键的形状跟着版本/配置变就会把全部旧历史变成“接不上”:
+        # 2026-10-05 实测采用 environments 那轮之后, 7231 条结果里 7226 条历史长度为 1,
+        # 而那一条还是本次运行自己重复追加的快照(看起来就是“历史全丢了”)。
+        # 这一步去重同一轮的重复快照、把旧形状的键按唯一前缀补成当前形状(前缀对上
+        # 多个平台的键时按条目自己的 environment 对准); 实在补不出来时清空历史重新
+        # 开始 —— 无论哪种都会写一份记录挂进首页「全局附件」, 不许静默发生。
+        # `--allure-version` 记的是**这一轮实际用的版本**, 下次形状再变能一眼对上是哪次更新。
+        if: always()
+        shell: bash
+        run: uv run python scripts/repair_allure_history.py --allure-version "$(allure --version)"
+
+      - name: Generate Allure report
+        # 历史设置(historyPath/appendHistory/historyLimit)与环境映射都在仓库根的
+        # allurerc.mjs 里, CLI 会从工作目录自动读取 —— 不再临时写 `.allure/allurerc.json`
+        # 再 `--config` 指定(那样会忽略仓库配置, 平台也就不会成为报告的"环境").
+        # 但这里用 **allurerc.per-platform.mjs**: 3.20.0 起 `generate` 也会执行质量门, 而
+        # `environmentsTested` 只在汇总那份报告里成立 —— 本作业只合并**一个平台**的结果,
+        # 用主配置生成会以退 1 收场(实测)。那份配置从主配置继承, 只摘掉 qualityGate。
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p .allure
+          if [ -n "$(find allure-results -type f -print -quit 2>/dev/null)" ]; then
+            allure generate allure-results --output allure-report --config allurerc.per-platform.mjs
+          else
+            echo "没有可用的 allure-results, 跳过报告生成"
+          fi
+
+      - name: Verify Allure report
+        # 报告是静态站点: 用例详情页要按需取 data/test-results/*.json。这个目录一旦
+        # 在传输/解压环节丢掉, 报告就只剩"通过/失败", 点开用例是空的 —— 所以上传前
+        # 先自检, 并通过 --archive 打成单个文件(整目录被静默丢掉的情况不会再出现)。
+        # 打包交给系统的 tar: 本作业在 Ubuntu 上, 一万多个小文件用一个子进程完事; 而
+        # 上传时 GitHub 的 artifact 传输**自己**会再压一层 zip, 那一层不是我们套的。
+        # --expect-platforms 传的是矩阵里的平台: 要求这份报告里真的有**用例**结果,
+        # 只有覆盖率/安全汇总项不算(本作业跑在 Ubuntu 上, runner.os 会说 Linux)。
+        # --manifest 把报告里的用例数与分片自报的条数对齐 —— 少一片只有这里能发现。
+        id: verify-report
+        if: always()
+        shell: bash
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --archive --expect-platforms "${{ matrix.platform }}" --manifest allure-manifest.json
+
+      - name: Upload Allure resources
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-resources-${{ matrix.os }}
+          # 只留"下一次运行要用到的两样": 历史(趋势)与产物清单(对数)。**合并后的
+          # `allure-results/` 不再重复上传**: 分片作业已经各上传了一份, 而汇总作业直接下
+          # 分片的产物就是同一批文件(`merge_allure_results.py` 只按文件名搬到一处, 不改
+          # 内容), 再传一份等于把整份结果集多传一次(每平台一万多个文件)。
+          path: |
+            .allure/history.jsonl
+            allure-manifest.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+      - name: Upload coverage XML
+        # 以前连 `htmlcov/` 一起传: 那是每平台几百个 HTML 文件, 而同一份数据已经在报告里
+        # 以 `coverage.xml` 附件挂着(见 pytest-report 的 Attach coverage report to Allure),
+        # 本地想看 HTML 一条 `uv run coverage html` 就能生成。这里只留 XML。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      - name: Upload Allure report
+        # 自检不通过时不上传报告: 宁可让作业红着, 也不要把"打不开详情"的报告发出去。
+        if: always() && steps.verify-report.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-report-${{ matrix.os }}
+          path: allure-report.tar.gz
+          if-no-files-found: ignore
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 报告作业失败的原因多半是"输入不齐": 哪个平台的用例没合并进来、哪份结果目录是空的。
+        # 所以除了结果目录, 连自检用的 manifest 与生成出来的报告一起清点。
+        # 仍是**兜底**语义(2026-10-04 收紧): `--expect` 只看"结果集与报告到底有没有生成出来"
+        # —— 生成了就说明这只是普通失败(断言、自检不通过、缺片), 证据在结果与日志里, 不上传。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "报告生成 (${{ matrix.os }})" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results \
+            --expect allure-report \
+            allure-results allure-results-* allure-manifest.json \
+            allure-report allure-report.tar.gz
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步)。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-report-${{ matrix.os }}
+          path: job-diagnostics/
+          if-no-files-found: error
+
+  security:
+    needs: [changes]
+    # 安全用例验的是后端语义(越权 / 路径逃逸 / 副作用防护, 不开窗口), 每一轮都跑
+    # (2026-10-14 起不再按改动路径挑层)。
+    if: needs.changes.outputs.should_run == 'true'
+    name: 安全测试 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 三个平台一个不少、**每轮都跑**(与 pytest 的矩阵、报告要求的平台三处一致)。安全用例要验
+        # 平台语义(大小写不敏感的文件系统、符号链接权限), 所以不做"只在默认分支跑 macOS"的降频:
+        # 降频期间 PR 与 dev 推送上看不到 macOS 的路径/权限语义, 而报告里会因此少一份
+        # `Security findings(macOS)` —— 那正是 2026-10-02 那次误报的来源。
+        # 代价要认: macOS runner 按 Linux 的 10 倍计价, 每个 PR 因此多一个 macOS 实例。
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # 安全防护是跨平台正确性属性: 路径越界、符号链接与权限差异都要在每个平台验证.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
+          enable-cache: true
+          save-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # 安全用例也是 pytest 跑的, 同样只需要测试组; 项目本身不装(--no-install-project)。
+        run: uv sync --locked --no-default-groups --group test --no-install-project
+
+      - name: Run security tests
+        run: uv run pytest tests/security -m security --alluredir=allure-results-security
+
+      - name: Upload security findings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-results-${{ matrix.os }}
+          path: security-results.json
+          if-no-files-found: ignore
+
+      - name: Upload security Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-security-${{ matrix.os }}
+          path: allure-results-security/
+          if-no-files-found: ignore
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 安全用例也是 pytest 跑的, 判定与 pytest 作业同一条: 结果目录生成了就说明这只是
+        # 普通失败(断言、门禁不通过), 只有**进程级崩溃 / 结果目录压根没生成**才算兜底现场
+        # (2026-10-04 收紧)。
+        if: failure()
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "安全测试 (${{ matrix.os }})" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results-security \
+            crash-dumps security-results.json security-findings allure-results-security
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步); `if-no-files-found: error` 的理由同其它作业。
+        if: failure() && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-security-${{ matrix.os }}
+          path: |
+            job-diagnostics/
+            crash-dumps/
+          if-no-files-found: error
+
+  allure-summary:
+    # 只生成一份汇总报告并作为 artifact 上传（2026-10-06 起不再发布到 GitHub Pages）:
+    # 站点发布用的 pages / id-token 权限、github-pages 环境与三个发布步骤一并删除,
+    # 报告的可达性交给 `allure-report-final` 产物。
+    name: Allure 汇总报告
+    needs: [changes, quality, pytest-report, security, windows-package]
+    # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
+    if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
+    # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure
+    # 结果的作业"一致(tests/unit/test_sharding.py 会核对)。
+    # 平台专属检查、静态分析与性能基准现在都跑在 pytest 的片 0 与 quality 作业里, 所以清单里
+    # 不再有 quality-platform / analysis / performance: 它们要出的产物都由这两个作业上传,
+    # 等它们跑完即可。
+    # windows-package(2026-10-27 重排): 打包作业里的构建后冒烟会上传
+    # `allure-results-smoke-windows`, 靠下面的 `pattern: allure-results-*` 一并收进汇总报告
+    # —— 不等它就会在它传完之前去下载, 报告静默少一节。被跳过的 need 不拦 `always()` 作业:
+    # 测试红 / 非门禁路径 / 纯文档的轮次里它就是 skipped, 汇总照常出报告, 冒烟那一族按
+    # 条件期望处理(见后面调 create_allure_summary.py 的那一步)。
+    # 这个作业只跑仓库自己的脚本(不跑 PR 里的代码), 权限与顶层一致即可:
+    # `contents: read`(checkout 要它) + `actions: read`(取本轮的产物)。
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        # 这一步不能少: 下面每一句都是 `uv ...`, 而 runner 上并不预装 uv —— 少了它要到
+        # 几十行之后才以 "uv: command not found" 挂掉(2026-10-10 实测)。
+        # 缓存开关属于**这个** action: 挂到 checkout 上只会得到一句"未知输入"的告警,
+        # 参数静默失效(见 tests/unit/test_test_config.py 的那条守卫)。
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 只读复用依赖缓存(写入交给 pytest 第 0 片).
+          enable-cache: true
+          save-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # 这个作业一行 Python 依赖都不需要: 脚本只用标准库(读 JSON/XML、写 Allure 结果),
+        # Allure CLI 由 npm 提供。所以一个开发组都不装 —— 这一档里最划算的一个作业。
+        # `--no-install-project` 保住这一点: 不带它的话, 装可编辑包要先下构建后端(hatchling)。
+        run: uv sync --locked --no-default-groups --no-install-project
+
+      - name: Cache the npm download of the Allure CLI
+        # 与 pytest-report 那一处同一个规则(见那里的说明): 版本号定钥匙。
+        # 这里没有矩阵, 而且这个作业固定跑在 ubuntu-latest 上(见上面的 runs-on), 所以
+        # 平台直接写成字面量 —— 也不用 runner.os(理由同 pytest-report 那处)。
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-allure-3-linux
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Allure 3 CLI
+        # 与 pytest 作业同一个钉住的版本(质量门在这里跑, 版本不对会静默放行)。
+        run: npm install --global allure@3
+
+      - name: Download Allure resources
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: allure-resources-*
+          path: downloaded-allure-resources
+          merge-multiple: false
+
+      - name: Download Allure results from every job
+        # **一份 pattern 收全**: 各分片的原始结果 + 质量/静态分析/性能/平台检查/视觉/安全
+        # 那几份结论项。以前是五次按名字下载(而分片结果走的是 `allure-resources-<平台>` 里
+        # 那份"合并后的副本") —— 现在合并副本不再上传, 这里直接下分片产物。
+        # `merge-multiple: false`: 每片落在自己目录里, 下面按目录摊平(一片没下来能一眼看出
+        # 缺了谁)。不能直接 `merge-multiple: true` 摊进 `allure-results/`: 产物内部保留的
+        # 是路径**相对最近公共祖先**的部分, 摊出来会是 `allure-results/allure-results/*`。
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: allure-results-*
+          path: downloaded-shard-results
+          merge-multiple: false
+
+      - name: Collect platform Allure results
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p allure-results
+          if [ -d downloaded-shard-results ]; then
+            # 一次 cp 多个文件(-exec ... +): 这里动辄上万个文件, 每个文件起一个 cp 太慢。
+            find downloaded-shard-results -type f -exec cp -t allure-results/ {} +
+          fi
+
+      - name: Collect shard manifests
+        # 各平台报告作业写的产物清单(逐分片条数 + 缺哪几片): 各平台同名, 用产物目录名
+        # 区分后放到同一个目录里, 交给下面的校验脚本一次性对齐。
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p allure-manifests
+          if [ -d downloaded-allure-resources ]; then
+            find downloaded-allure-resources -type f -name 'allure-manifest.json' \
+              -print0 | while IFS= read -r -d '' source; do
+              cp "${source}" "allure-manifests/$(basename "$(dirname "${source}")").json"
+            done
+          fi
+          ls -1 allure-manifests || true
+
+      - name: Download performance baseline
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: performance-results
+          path: .
+          merge-multiple: true
+
+      - name: Download security findings
+        if: always()
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: security-results-*
+          path: security-findings
+          # 各平台的产物同名, 分开存放才能各自出现在汇总报告里(不能被后写的覆盖).
+          merge-multiple: false
+
+      - name: Resolve previous run with Allure history
+        id: prev-run
+        # 与逐平台作业同一条理由: 基线不问成败, 只看那一轮是否真的传了产物 ——
+        # 只认成功运行会把链条冻结在旧基线上(连续失败时期 + 键形状变更 = 历史永远
+        # 接不上), 详见 pytest-report 作业里那段说明。
+        if: always()
+        uses: actions/github-script@v9
+        env:
+          ARTIFACT_NAME: allure-resources-final
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 30,
+            });
+            const candidates = runs.data.workflow_runs.filter(
+              (r) =>
+                // 与逐平台作业同一理由: 历史链只认本工作流(名字是 "CI")的运行。
+                r.name === "CI" &&
+                r.id !== context.runId &&
+                r.status === "completed",
+            );
+            for (const candidate of candidates) {
+              const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: candidate.id,
+                per_page: 100,
+              });
+              const history = artifacts.data.artifacts.find(
+                (artifact) =>
+                  artifact.name === process.env.ARTIFACT_NAME &&
+                  !artifact.expired,
+              );
+              if (history) {
+                core.setOutput("run_id", String(candidate.id));
+                break;
+              }
+            }
+
+      - name: Download previous Allure history
+        if: steps.prev-run.outputs.run_id != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-resources-final
+          run-id: ${{ steps.prev-run.outputs.run_id }}
+          path: .previous-allure-resources
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore previous final Allure history
+        # 与逐平台作业同一步的两种布局兼容(见那边说明): final 产物恰恰是断链现场 ——
+        # 2026-10-05 起上传侧只列一个文件, artifact 里就没有 .allure/ 前缀了, 这里却
+        # 按带前缀的路径去 cp, 每轮都失败, 修复步骤跟着"读入 0 份", 最终报告的历史
+        # 每轮清零。找不到时响亮报错: 这一步的前一步刚确认过产物存在, 拷不出来只能是
+        # 布局变了, 不能让"趋势从零开始"再静默发生一次。
+        if: steps.prev-run.outputs.run_id != ''
+        shell: bash
+        run: |
+          mkdir -p .allure
+          for candidate in \
+            .previous-allure-resources/.allure/history.jsonl \
+            .previous-allure-resources/history.jsonl
+          do
+            if [ -f "${candidate}" ]; then
+              cp "${candidate}" .allure/history.jsonl
+              exit 0
+            fi
+          done
+          echo "::error::allure-resources-final 里找不到 history.jsonl(试过 .allure/history.jsonl 与根下的 history.jsonl) —— 上传侧的打包形状变了, 请对照 'Upload final Allure resources' 的 path 列表。"
+          exit 1
+
+      - name: Repair previous Allure history
+        # 与逐平台作业同一步的理由(见 pytest 作业里那段说明): 历史键的形状一变, 旧点就
+        # 全部接不上; 这一步去重/重键, 实在不行就重置, 并把结论写进首页「全局附件」。
+        if: always()
+        shell: bash
+        run: uv run python scripts/repair_allure_history.py --allure-version "$(allure --version)"
+
+      - name: Validate the quality gate
+        # 规则在仓库根的 allurerc.mjs 里(唯一来源, 这里不重复传参)。
+        # **必须排在下面写运行总账那一步之前**: 总账在 "Summarize performance and security
+        # into Allure" 里拼, 它把这份日志收进首页「全局附件」的「原生质量门」一节 ——
+        # 2026-10-04 之前顺序是反的, 于是那一节永远写着"本次没有质量门输出"。
+        # 校验不通过时先不中断作业(报告还要生成、上传), 由最后一步用退出码判定。
+        id: quality-gate
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p allure-results
+          if [ -n "$(ls -A allure-results)" ]; then
+            # quality-gate 也会按 allurerc 的 appendHistory 写 historyPath(3.20.0 实测,
+            # 本地最小复现: 配了 historyPath+appendHistory 后跑一次 quality-gate,
+            # .allure/history.jsonl 里就多一行)。这一步排在性能/安全结果并入**之前**,
+            # 它追加的那条"半套快照"会冒充上一轮 —— 2026-10-05 的最终报告趋势里同一轮
+            # 出现两个点(7516 条的假历史 + 7520 条的本次), 就是它和后面的 generate
+            # 各追加一次。所以跑之前把真历史藏到**同目录**(改名即回), 跑完丢掉它写的,
+            # 再放回真历史。质量门的规则只看本次结果(见 allurerc.mjs 的 qualityGate),
+            # 历史文件它根本不需要。
+            kept=".allure/history.keep.$$"
+            if [ -f .allure/history.jsonl ]; then
+              mv .allure/history.jsonl "${kept}"
+            fi
+            set +e
+            allure quality-gate --config allurerc.mjs allure-results 2>&1 \
+              | tee allure-quality-gate.txt
+            code=${PIPESTATUS[0]}
+            # 把退出码也写进日志: 运行总账据此给出"通过/未通过", 不用去猜文本。
+            echo "退出码: ${code}" >> allure-quality-gate.txt
+            rm -f .allure/history.jsonl
+            if [ -f "${kept}" ]; then
+              mv "${kept}" .allure/history.jsonl
+            fi
+            exit "${code}"
+          fi
+          echo "没有可用的 allure-results, 跳过质量门校验" | tee allure-quality-gate.txt
+
+      - name: Summarize performance and security into Allure
+        # `--expect-platforms` 与 allurerc.mjs 的 `environmentsTested`、以及下面
+        # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账末节
+        # 「证据核对」的"应有" —— 某个平台的产物整体没交上来时, 那些行会直接点名缺失
+        # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
+        # `--expect-smoke-platforms` 是**条件期望**(2026-10-27): 产物冒烟只在"打包真的跑了"的
+        # 运行里才应该有 —— 打包门禁只在合入 main 的 PR 上执行, 无条件要求会让 push 到 dev、
+        # 测试红了被跳过的 PR 每轮都报一条假缺失。取值由 needs.windows-package.result 推出:
+        # success / failure 都要求数(失败=冒烟红或构建红, 两种都该在报告里看得见缺了什么),
+        # skipped / cancelled(前置红了、不是这条路径、纯文档)传空 = 不适用。
+        if: always()
+        env:
+          SMOKE_EXPECTED: ${{ (needs.windows-package.result == 'success' || needs.windows-package.result == 'failure') && 'Windows' || '' }}
+        shell: bash
+        run: |
+          mkdir -p allure-results
+          uv run python scripts/create_allure_summary.py --expect-platforms Windows,macOS,Linux --expect-smoke-platforms "$SMOKE_EXPECTED"
+
+      - name: Download failure diagnostics from every job
+        # 各作业只在**失败时**上传诊断(见各自的 Collect/Upload failure diagnostics)。
+        # 用 pattern 一次收全; **不** merge 到同一目录: 各 artifact 都含同名的 summary.md,
+        # 合并会互相覆盖, 而这里正需要看得出"哪一份来自哪个作业"(每份都有自己的作业标签)。
+        # 落盘后是 `failure-diagnostics/<artifact 名>/summary.md` —— 只有一层: 各作业上传
+        # 的是 `path: job-diagnostics/`, artifact 里装的就是那个目录的**内容**(2026-10-05
+        # 才发现: 汇总脚本原来按多一层的路径找, 于是崩溃现场永远没进报告)。
+        # 没有失败作业时这一步什么也不下载, 脚本也就不写附件、不写结论项。
+        if: always()
+        uses: actions/download-artifact@v7
+        with:
+          pattern: job-diagnostics-*
+          path: failure-diagnostics
+
+      - name: Write the failure-diagnostics attachment
+        # 必须排在上面那一步**之后**: 附件的内容就是刚收下来的那些摘要。
+        # 为什么会单独成一步(2026-10-04): 汇总脚本的另一半(性能/安全结论)写在更早的
+        # "Summarize performance and security into Allure" 里, 那时还没下载, 顺手把这份
+        # 附件也写了 —— 结果它永远显示"本轮没有作业失败", 与作业红不红无关。
+        # 有兜底现场时还会给每个崩溃作业写一条 broken 结论项(可统计、可按环境筛, 用户
+        # 2026-10-05); 没有现场时附件清掉、结论项一条不写。
+        if: always()
+        shell: bash
+        run: uv run python scripts/create_allure_summary.py --write-failure-diagnostics
+
+      - name: Generate final Allure report
+        # 同 pytest 作业: 历史与环境设置都在仓库根的 allurerc.mjs 里。
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p .allure
+          if [ -n "$(ls -A allure-results)" ]; then
+            allure generate allure-results --output allure-report
+          else
+            echo "没有可用的 allure-results, 跳过报告生成"
+          fi
+
+      - name: Verify final Allure report
+        # 与 pytest 作业同一套自检: 缺 data/test-results 的报告只能看到用例是否通过。
+        id: verify-report
+        if: always()
+        shell: bash
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --archive
+
+      - name: Check every platform contributed tests
+        # "环境存在"很容易被覆盖率/安全汇总项或平台专属的质量检查满足 —— 那样"某个平台的
+        # 用例全没合并进来"就没人发现(实测: 删掉 Linux 的 1166 条用例后环境依然齐全)。
+        # --manifest 再补一道"分片都到齐了吗": 少一片时环境、通过率、格式自检全都正常,
+        # 只有把分片自报的条数与最终条数对齐才能看出来。
+        # --expect-platforms 要与实际跑的矩阵一致(要求了却没跑, 报告必然不完整、门禁
+        # 无意义地红); 守卫会把三处拷在一起。
+        # 这一条不直接判作业红(`continue-on-error`): 这属于**内容**问题, 而报告正是用来看
+        # "哪个平台没数据"的东西, 拦下来反而拿不到证据; 判定交给末尾的门禁结论步骤。
+        # 另外它也是仓库自己表达同一道不变式的地方(不只靠 Allure 配置里的 filter)。
+        id: verify-platforms
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: uv run python scripts/verify_allure_report.py allure-report --results allure-results --expect-platforms Windows,macOS,Linux --manifest "allure-manifests/*.json"
+
+      - name: Upload final Allure resources
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-resources-final
+          # 与各平台的 `allure-resources-<os>` 同一个道理: 历史文件是下一轮唯一要取回的
+          # 东西(见上面的 Resolve previous run with Allure history), 而**整份结果集**在这里再传一次
+          # 是本工作流里最大的单笔上传 —— 它是 `allure-results-<os>-<分片>` 那几份的合集,
+          # 人要原始数据去下分片产物即可。
+          path: .allure/history.jsonl
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+      - name: Upload final Allure report
+        # 报告不再发布到 GitHub Pages(2026-10-06): 想浏览时下载这份 `allure-report-final` 产物
+        # (单个 tar.gz, `archive: false` 不再多套一层 zip)。自检不通过时不上传: 宁可让作业红着,
+        # 也不给出"打不开详情"的报告。
+        if: always() && steps.verify-report.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-report-final
+          path: allure-report.tar.gz
+          archive: false # 不打包，直接上传原始文件
+          if-no-files-found: ignore
+
+      - name: Collect failure diagnostics
+        id: diagnostics
+        # 位置说明: 放在门禁结论步**之前**。报告/自检/原生质量门这些步骤的失败都发生在这里
+        # 之前, `failure()` 已经为真; 唯一的例外是"有平台没有用例结果"——那是结论步自己判的,
+        # 所以那个条件单独补一次。不放在结论步之后, 是因为结论步只写一行日志、不产出文件,
+        # 没有现场可收。
+        # 判定(2026-10-04 收紧): 只有**结果集或最终报告压根没生成**(说明是崩溃/中断, 而不是
+        # 某个结论不达标)才算兜底现场 —— 门禁不过、某个平台缺片这类失败的证据已经在结果与
+        # 日志里了, 不再上传一份相册。
+        if: always() && (failure() || steps.verify-platforms.outcome == 'failure')
+        shell: bash
+        run: |
+          uv run python scripts/collect_job_diagnostics.py \
+            --output job-diagnostics \
+            --label "汇总 (allure-summary)" \
+            --github-output "$GITHUB_OUTPUT" \
+            --expect allure-results \
+            --expect allure-report \
+            allure-results allure-results-* allure-report allure-report.tar.gz \
+            allure-manifest.json coverage.xml performance-results.json security-results.json
+
+      - name: Upload failure diagnostics
+        # 只有**兜底现场**才上传(判定来自上一步); `if-no-files-found: error` 的理由同其它作业。
+        if: always() && (failure() || steps.verify-platforms.outcome == 'failure') && steps.diagnostics.outputs.scene == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-diagnostics-summary
+          path: job-diagnostics/
+          if-no-files-found: error
+
+      - name: Report quality gate verdict
+        # 质量门是"结论"而不是"步骤": 报告已生成、两份 artifact 都上传完了, 现在再用它的
+        # 退出码决定作业成败 —— 否则门禁不通过时连报告都拿不到(结论与输出都在首页
+        # 「全局附件」的运行总账里)。放在最末尾也免得后面的 `if: success()` 步骤被跳过。
+        # "有平台没有用例结果"也在这里一起判: 它同样属于"报告已经出来了才敢下结论"的事。
+        if: always() && (steps.quality-gate.outcome == 'failure' || steps.verify-platforms.outcome == 'failure')
+        shell: bash
+        run: |
+          echo "::error::质量门未通过 或 有平台没有合并进用例结果 —— 见上面的逐平台条数与报告首页「全局附件」的运行总账"
+          exit 1

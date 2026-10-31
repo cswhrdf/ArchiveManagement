@@ -1,0 +1,7 @@
+# 图标资源的文本文件统一 LF: ``app-icon.stamp`` 记的是 SVG 内容的 sha256, 换行风格
+# 属于"谁检出"而不是"内容"(见 services/icon_assets.fingerprint 的说明) —— 钉死 eol
+# 之后, 任何 autocrlf 配置都改变不了这些文件的工作区字节, 指纹跨平台天然一致。
+# 位图(ico/png)是二进制, git 不会动它们, 不需要规则。
+src/archive_management/resources/*.svg text eol=lf
+src/archive_management/resources/*.stamp text eol=lf
+

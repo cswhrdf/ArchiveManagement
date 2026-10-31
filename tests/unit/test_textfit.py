@@ -1,0 +1,199 @@
+"""按像素裁剪文本的单元测试.
+
+用一个"汉字 2 单位、其余 1 单位"的假字体测量, 覆盖: 放得下时原样返回、单行截断补
+省略号、限定行数时逐行填满、英文在空格处断行、容器极窄或参数非法时不崩。
+
+真实字体与真实控件的效果由 ``tests/integration/test_gui_layout.py`` 的长名称用例
+把关(那边需要真的建窗口)。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from archive_management.ui.textfit import ELLIPSIS, fit_path, fit_text
+
+pytestmark = [
+    pytest.mark.normal,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("文本裁剪"),
+    pytest.mark.story("长文本按宽度折行与截断"),
+    pytest.mark.layer("unit"),
+]
+
+# 假字号: 一个"单位"= 10px, 汉字算 2 个单位(接近真实中文字体的宽高比).
+_UNIT = 10
+
+
+class _FakeFont:
+    """只实现 ``measure`` 的字体替身(不需要 Tk 窗口)."""
+
+    def measure(self, text: str) -> int:
+        """汉字按 2 个单位、其余按 1 个单位累加."""
+        return sum(2 if ord(char) > 0x2E80 else 1 for char in text) * _UNIT
+
+
+def test_text_that_fits_is_returned_unchanged() -> None:
+    """放得下时原样返回: 不引入换行, 也不补省略号."""
+    assert fit_text("abc", _FakeFont(), 30) == "abc"
+    assert fit_text("abc", _FakeFont(), 3000) == "abc"
+
+
+def test_single_line_is_truncated_with_an_ellipsis() -> None:
+    """单行放不下时截断, 用省略号占掉它自己的宽度."""
+    assert fit_text("abcdefghijklmnop", _FakeFont(), 100) == f"abcdefghi{ELLIPSIS}"
+
+
+def test_lines_fill_greedily_and_only_the_last_one_is_truncated() -> None:
+    """限定行数时逐行填满, 只有最后一行带省略号."""
+    text = "abcdefghijklmnopqrstuvwxyz"
+    fitted = fit_text(text, _FakeFont(), 100, max_lines=2)
+
+    assert fitted == f"abcdefghij\nklmnopqrs{ELLIPSIS}"
+    lines = fitted.splitlines()
+    assert len(lines) == 2
+    assert all(_FakeFont().measure(line) <= 100 for line in lines)
+
+
+def test_wide_characters_are_measured_by_pixels_not_by_char_count() -> None:
+    """中文按宽度算: 10 个汉字(20 单位)在 5 单位的宽度里只放得下 2 个字加省略号."""
+    fitted = fit_text("超级长的游戏名称示例", _FakeFont(), 50, max_lines=1)
+
+    assert fitted == f"超级{ELLIPSIS}"
+    assert _FakeFont().measure(fitted) <= 50
+
+
+def test_english_text_breaks_at_spaces_when_wrapping() -> None:
+    """折行时尽量保持单词完整."""
+    assert fit_text("hello world again", _FakeFont(), 110, max_lines=2) == (
+        "hello world\nagain"
+    )
+
+
+def test_ellipsis_only_when_truncated_in_a_single_line() -> None:
+    """刚好放得下(不截断)时不能多出省略号."""
+    assert fit_text("hello", _FakeFont(), 50) == "hello"
+
+
+def test_a_width_too_small_for_the_ellipsis_returns_nothing() -> None:
+    """宽度连省略号都放不下时返回空串, 而不是把容器撑宽."""
+    assert fit_text("abc", _FakeFont(), 5) == ""
+
+
+@pytest.mark.parametrize(
+    ("width", "max_lines"), [(0, 1), (-10, 1), (100, 0), (100, -1)]
+)
+def test_invalid_budgets_return_the_text_unchanged(width: int, max_lines: int) -> None:
+    """非法预算(0/负数)不裁剪: 上层给错值时不要静默吞掉文本."""
+    assert fit_text("abc", _FakeFont(), width, max_lines=max_lines) == "abc"
+
+
+def test_leading_whitespace_can_end_the_wrap_loop_without_a_break() -> None:
+    """整段放不下、去掉首尾空白后却放得下: 循环按条件自然结束, 也不补省略号.
+
+    这是唯一会走 ``while remaining:`` 的假分支(其余出口都是循环体内的 ``break``)
+    的输入形态: 首尾空白让整段超出预算, 而真正要排的内容一行就够。
+    """
+    assert fit_text("  hello", _FakeFont(), 50, max_lines=2) == "hello"
+
+
+def test_empty_text_stays_empty() -> None:
+    assert fit_text("", _FakeFont(), 10) == ""
+
+
+def test_container_too_narrow_for_one_character_yields_nothing() -> None:
+    """多行时限宽连一个字符都放不下: 直接结束, 不硬塞字符、也不崩."""
+    assert fit_text("abcdefgh", _FakeFont(), 5, max_lines=2) == ""
+
+
+class _PaddedFont(_FakeFont):
+    """把"长整串"量得更宽的字体替身.
+
+    真实字体对整串的测量并不等于各部分相加(字距/取整), 因此"头部 + 省略号 + 尾部"
+    可能刚好超出预算 —— :func:`fit_path` 的最后一层兜底就是为这种情况写的。
+    """
+
+    def measure(self, text: str) -> int:
+        """长度超过 8 个字符时多算 40px(两个单位)."""
+        base = super().measure(text)
+        return base + 4 * _UNIT if len(text) > 8 else base
+
+
+def test_path_that_fits_is_returned_unchanged() -> None:
+    """放得下的路径原样返回: 不该多出省略号."""
+    assert fit_path("C:/Saves/Game", _FakeFont(), 300) == "C:/Saves/Game"
+
+
+def test_long_paths_keep_the_head_and_the_tail() -> None:
+    """长路径中间省略: 头(盘符/根)与尾(目录名)都留, 且不超宽(评审时定的)."""
+    font = _FakeFont()
+    path = "C:/Users/ycswh/Documents/COMPILE HEART/约会大作战/saves"
+    width = 200
+
+    fitted = fit_path(path, font, width)
+
+    assert fitted.startswith("C:/"), "尾部更重要, 但盘符/根也要留一段"
+    assert fitted.endswith("saves"), "路径尾部(目录名)必须完整"
+    assert ELLIPSIS in fitted
+    assert font.measure(fitted) <= width
+
+
+@pytest.mark.parametrize("width", [0, -10])
+def test_path_with_an_invalid_budget_is_returned_unchanged(width: int) -> None:
+    """非法预算(0/负数)不裁剪: 上层给错值时不要静默吞掉文本."""
+    assert fit_path("C:/Saves", _FakeFont(), width) == "C:/Saves"
+
+
+def test_path_width_too_small_for_the_ellipsis_returns_nothing() -> None:
+    """宽度连省略号都放不下时返回空串, 而不是把卡片撑宽."""
+    assert fit_path("C:/Saves/Game", _FakeFont(), 5) == ""
+
+
+def test_path_too_narrow_for_a_tail_falls_back_to_head_truncation() -> None:
+    """连一个尾部字符都放不进剩下的空间时退回头部截断(省略号仍然在)."""
+    fitted = fit_path("C:/Saves/Game", _FakeFont(), 15)
+
+    assert fitted == ELLIPSIS
+    assert _FakeFont().measure(fitted) <= 15
+
+
+def test_path_that_still_overflows_with_both_ends_uses_head_truncation() -> None:
+    """字体取整让"两侧都留"略超预算时退回头部截断, 保证不溢出."""
+    font = _PaddedFont()
+    path = "C:/Users/ycswh/Documents/saves"
+
+    fitted = fit_path(path, font, 130)
+
+    assert fitted == fit_text(path, font, 130)
+    assert font.measure(fitted) <= 130
+
+
+def test_cut_lands_on_the_space_when_the_next_character_is_itself_a_space() -> None:
+    """切点正好停在空格边界时直接切, 不为了"保持单词完整"回退丢掉后面的内容."""
+    fitted = fit_text("abc def", _FakeFont(), 30, max_lines=2)
+
+    assert fitted == "abc\ndef"
+
+
+def test_truncated_text_leaves_at_most_two_character_widths_unused() -> None:
+    """截断后剩下的缝隙不超过"两个字符宽(取整 + 省略号 + 断字处裁掉的一个空格)".
+
+    GUI 的不变量断言(``test_gui_layout._assert_name_fills``)靠的就是这条性质:
+    省略号要占自己的宽度, 二分取整又会剩不到一个字符, 切点正好落在空格上时还会被
+    ``rstrip`` 掉 —— 于是缝隙必然大过"一个字符", 拿它当上界就会在 CI 上误报。
+    这里把真实上界钉下来, 并拿连续宽度扫一遍(只挑几个样本的话, 取整那一档就漏了)。
+    """
+    font = _FakeFont()
+    text = "Kaiju Princess 2 ASMR 超长的游戏名称示例"
+    budget = 2 * font.measure("超") + 1
+    checked = 0
+    for width in range(font.measure("a") * 2, 400):
+        fitted = fit_text(text, font, width)
+        if len(fitted) >= len(text):
+            continue
+        assert fitted.endswith(ELLIPSIS)
+        slack = width - font.measure(fitted)
+        hint = f"宽度 {width}px 下缝隙 {slack}px 超过上界 {budget}px: {fitted!r}"
+        assert slack <= budget, hint
+        checked += 1
+    assert checked > 20, "扫过的宽度太少, 这条断言没实际比对到什么"

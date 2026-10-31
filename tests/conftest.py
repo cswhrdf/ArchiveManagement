@@ -1,0 +1,855 @@
+"""测试严重等级与 Allure 元数据(含四层标签).
+
+严重等级使用 Allure 官方分级: blocker/critical/normal/minor/trivial/no_severity,
+**语义是"用例失败的影响面", 与测试层次无关**(层次用 ``layer`` 表达):
+
+- ``blocker``: 安全与数据完整性底线, 以及**会让软件崩溃/卡死的缺陷** —— 路径越界/危险目标
+  必须被拒、快照或清单被篡改必须拒绝恢复、游戏运行中不得静默覆盖存档、界面不得因事件递归
+  而崩溃或抽死(如按需滚动条引发的 `maximum recursion depth exceeded`, 见
+  ``.github/instructions/ctk-scrollbar-twitch.instructions.md``);
+- ``critical``: 核心业务不可用或结果不正确 —— 备份/快照/恢复/删除计划、仓储事务、
+  数据库迁移、调度、GUI 真实后端、全链路流水线;
+- ``normal``: 常规功能与交互 —— 配置、平台探测、主页聚合、对话框、CLI、热键、
+  审计、存档位置与命名、展示模型;
+- ``minor``: 展示与辅助 —— 调色板/控件样式/渲染修正、i18n 文案、打包元数据、
+  演示后端、性能基准;
+- ``trivial``: 极低影响 —— 色值、以及脚本生成的报告汇总项(覆盖率/性能/安全摘要).
+
+解析优先级: 用例或模块上显式标注的等级优先(如 ``@pytest.mark.blocker`` 可覆盖模块级
+``critical``), 否则按目录兜底(unit/integration=normal, performance=minor,
+security=critical)。**每个测试模块都必须显式声明等级**(守卫见
+``tests/unit/test_test_config.py``), 兜底只是防止新目录在报告里冒出 no_severity 桶。
+
+本地 CI(pre-commit)通过 ``--min-severity=critical`` 只保留 blocker+critical, 即
+"数据安全 + 核心逻辑"子集; 其余等级交给 GitHub Actions 的全量执行。调整等级请按
+影响面判断, 不要按目录/层次照搬 —— 这个选择同时决定了本地钩子能拦到哪些回归。
+
+Allure 标签语义(与 Allure 3 报告控件一一对应):
+
+- ``epic``: 产品级模块, 取值限定在 ``_EPICS``(基础工程/数据持久化/界面框架/
+  游戏与存档位置/备份与分支/工程与发布);
+- ``feature``: 功能模块, 与生产模块一一对应(如 快照服务、数据仓储);
+- ``story``: 具体用户场景(如 删除备份节点、创建备份与分支);
+- ``layer``: 测试层次, ``unit`` / ``integration`` / ``e2e`` / ``performance`` /
+  ``security``, 供 Allure 的"测试金字塔"与"按层耗时"控件使用。判定标准是**用例实际
+  接了什么**而不是它放在哪个目录: ``unit`` = 单个组件 + 替身/内存数据;
+  ``integration`` = 真实数据库/文件系统/领域服务之间的协作(例如真 SQLite 的仓储与
+  迁移、真实快照与恢复); ``e2e`` = 从真实入口(窗口/命令行)走完整用户流程。
+  因此 ``tests/unit`` 下真实读写 SQLite 与文件系统的模块声明为 ``integration``。
+
+测试模块用 ``pytestmark`` 声明默认标签, 单个用例可用同名标记覆盖
+(``@pytest.mark.story("...")``)。``layer`` 未声明时按 ``integration`` 标记或目录推断,
+保证直方图不会缺数据; 声明的 ``epic``/``layer`` 必须属于闭集, 拼错在收集期直接报错,
+以避免报告里冒出只有一个用例的畸形分类。
+
+另外两个跨平台相关的约定:
+
+- **平台参与用例身份**: CI 会把三个平台的结果合并成一份报告, 同一个用例会在
+  Windows/Linux/macOS 各跑一次。平台写成**参数**(并同步写 suite 层级与 ``os`` 标签),
+  因为 Allure 的 ``historyId`` 由"用例全名 + 非 excluded 参数"算出 —— 不加参数时
+  三份结果会被当成"同一个用例重试了多次", 报告里只看得到重复执行、看不出是哪台机器;
+- **标题还原转义**: pytest 会把非 ASCII 的参数 id 转义成 Unicode 转义序列, 直接用会
+  变成一串编码, 因此展示前先还原成可读文字; 标题要通过 ``__allure_display_name__``
+  (即 ``@allure.title`` 的属性)交给 allure-pytest, 因为 ``allure.dynamic.title`` 在
+  fixture 之后会被它用 ``item.name`` 覆盖。
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import logging
+from collections.abc import Generator, Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import allure
+import pytest
+
+import crash_capture
+import durations
+import gui_support
+import sharding
+import timeout_guard
+import tk_guard
+import ui_sharing
+from archive_management.i18n import DEFAULT_LOCALE, set_locale
+from archive_management.services.audit import AUDIT_LOGGER_NAME
+from archive_management.services.platforms import current_platform, platform_label
+
+
+def _install_platform_coverage_config() -> None:
+    """装上"本平台专属"的覆盖率配置(平台专属代码只在别的平台被排除).
+
+    为什么必须在**导入期**做: ``COVERAGE_RCFILE`` 只在 coverage 建配置的那一刻读一次。
+
+    **但要说清楚它到底对谁生效**(2026-10-06 实测):
+
+    - 对 ``coverage report`` / ``coverage xml`` 这类命令行**生效** —— CI 判单平台覆盖率正是走
+      那两步(合并后写这份 rc 到 ``GITHUB_ENV``, 再 ``coverage report --show-missing``);
+    - 对 ``pytest --cov`` **不生效**: pytest-cov 在导入根 conftest **之前**就构造了 Coverage
+      (见它的 ``pytest_load_initial_conftests``), 这里再改环境变量已经晚了。所以本地
+      ``pytest --cov`` 跑出来的是**合并口径**(不做平台排除), 与 ``coverage combine`` 一致。
+
+    生成失败时 ``setup_environment`` 会打印原因并退回 pyproject 的基线配置: 装配置这件事
+    不该把整个会话弄挂(退回之后的行为与改动前完全一致)。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "coverage_platform",
+        Path(__file__).resolve().parents[1] / "scripts" / "coverage_platform.py",
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - 文件就在仓库里
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.setup_environment()
+
+
+_install_platform_coverage_config()
+
+_SEVERITY_LEVELS = ("blocker", "critical", "normal", "minor", "trivial")
+_SEVERITY_RANK = {
+    "blocker": 5,
+    "critical": 4,
+    "normal": 3,
+    "minor": 2,
+    "trivial": 1,
+    "no_severity": 0,
+}
+_ALLURE_LEVELS = {
+    "blocker": allure.severity_level.BLOCKER,
+    "critical": allure.severity_level.CRITICAL,
+    "normal": allure.severity_level.NORMAL,
+    "minor": allure.severity_level.MINOR,
+    "trivial": allure.severity_level.TRIVIAL,
+}
+
+# 测试层次: 闭集, 供 Allure "按层耗时" 直方图分组使用.
+# performance/security 是只在 CI 执行的两类测试, 单独成层
+# 可以一眼看出它们占用的时间, 不会和普通单元/集成测试混在一起。
+_LAYERS = ("unit", "integration", "e2e", "performance", "security")
+# 层次在 suite 视图里的展示名(Allure 3 部分控件只认 suite 标签, 双保险).
+_LAYER_SUITES = {
+    "unit": "单元测试 unit",
+    "integration": "集成测试 integration",
+    "e2e": "端到端测试 e2e",
+    "performance": "性能测试 performance",
+    "security": "安全测试 security",
+}
+# 目录名到默认层次的映射(未显式声明 layer 时的兜底).
+_DIRECTORY_LAYERS = {
+    "integration": "integration",
+    "performance": "performance",
+    "security": "security",
+}
+# 产品级模块: 闭集, 新增产品级模块时在此登记.
+_EPICS = (
+    "基础工程",
+    "数据持久化",
+    "界面框架",
+    "游戏与存档位置",
+    "备份与分支",
+    "工程与发布",
+)
+# 标签取值约束: None 表示自由文本(功能模块与场景随功能增长).
+_LABEL_ALLOWED: dict[str, tuple[str, ...] | None] = {
+    "epic": _EPICS,
+    "feature": None,
+    "story": None,
+    "layer": _LAYERS,
+}
+_METADATA_MARKERS = frozenset(_LABEL_ALLOWED)
+# 元数据与等级标记不再重复当作 tag(其余标记如 backend/ui 保留为标签).
+_TAG_EXCLUDED = _METADATA_MARKERS | set(_SEVERITY_LEVELS) | {"integration"}
+_UNCLASSIFIED = "未分类"
+_FALLBACK_DESCRIPTION = "ArchiveManagement 测试用例"
+# 本钩子写进函数对象的标题(键为 id(对象))。参数化用例共用同一个函数对象, 必须靠
+# 这张表区分"我们自己写的"(每个用例都要刷新)与"@allure.title 写的"(不覆盖)。
+_OUR_TITLES: dict[int, str] = {}
+# allure.dynamic 的函数没有类型标注, 统一按 Any 调用, 避免满屏 no-untyped-call 忽略.
+_ALLURE_DYNAMIC: Any = allure.dynamic
+# 同理: ``allure.label`` 是"标记装饰器"的工厂(返回 pytest mark), 也没有类型标注。
+_ALLURE_LABEL: Any = allure.label
+
+# pytest 把非 ASCII 的参数 id 用 ``unicode_escape`` 转义(中文变成 ``\u5e03\u5c14``,
+# 反斜杠变成 ``\\``), 报告标题要用可读文字, 所以展示前按同样的规则解回去。
+
+
+def _readable(value: str) -> str:
+    """把参数化 id 里的 ASCII 转义还原成可读文字(``\u5e03\u5c14`` -> ``布尔``).
+
+    只对纯 ASCII 取值解码: 非 ASCII 文字会被 ``unicode_escape`` 按 latin-1 重新解读
+    而变成乱码, 而本来就含中文的取值已经不需要还原。
+    """
+    if not value.isascii():
+        return value
+    try:
+        return value.encode("ascii").decode("unicode_escape")
+    except UnicodeDecodeError:  # 截断或未知的转义: 宁可不还原, 也不能报错
+        return value
+
+
+def _current_platform_label() -> str:
+    """返回当前平台的可读名称(Windows/Linux/macOS), 供报告区分多平台结果."""
+    return platform_label(current_platform())
+
+
+#: "这条用例跑在哪台机器上"的标签名 —— 由 :func:`_attach_environment_labels` 在**收集期**
+#: 写成标记, 而不是在夹具里用 ``allure.dynamic`` 写(理由见那个函数).
+_ENVIRONMENT_LABELS = ("env", "os")
+
+
+def _attach_environment_labels(item: pytest.Item) -> None:
+    """把平台事实(env / os)写成**收集期标记**, 让"被跳过"的用例也带得上.
+
+    为什么不能只靠夹具: ``pytest.mark.skip`` / ``skipif`` 由 pytest 在
+    ``pytest_runtest_setup`` 的**最前面**求值并抛出, 那之后**一个夹具都不跑** —— 而
+    :func:`_configure_allure` 是 autouse 夹具, 于是被跳过的用例一条标签都没有(实测: 只剩
+    allure-pytest 自己写的 framework/host/language/package/suite/tag/thread).
+    缺 ``env`` 的后果不是"少一个标签": 结果会落进 Allure 隐式的 ``default`` 环境 ——
+    报告里按平台筛选看不到它, 该平台的用例数也会比分片自报的少一条.
+
+    实测现场(2026-10-14 run 38594250358): ``tests/integration/test_gui_window_icon.py``
+    那条 ``skipif(sys.platform != "win32")`` 在 Linux/macOS 上被跳过 → 两边的"合并测试报告"
+    都判"报告生成时掉过数据"(2870 < 2871); 汇总报告里两份这种结果身份相同, 又被生成器
+    当成同一次尝试并掉(8837 个结果文件 vs 8836 条索引) → 自检不过 → 最终报告没上传.
+
+    标记由 allure-pytest 在 ``pytest_runtest_teardown`` 里统一读(``allure_labels(item)``),
+    而 teardown **对跳过的用例照样跑**, 所以这条路径不受夹具影响。
+    ``平台`` 参数没法这么搬(Allure 只有运行期的参数接口, 没有对应的标记), 仍留在夹具里:
+    被跳过的用例少一个参数不影响它出现在哪个环境。
+    """
+    platform = _current_platform_label()
+    for name in _ENVIRONMENT_LABELS:
+        item.add_marker(_ALLURE_LABEL(name, platform))
+
+
+def _title_of(item: pytest.Item) -> str:
+    """用例标题: 去掉 ``test_`` 前缀、下划线转空格、首字母大写, 并还原参数化 id 的转义."""
+    return _readable(item.name.removeprefix("test_").replace("_", " ").capitalize())
+
+
+def _description_of(item: pytest.Item) -> str:
+    """用例描述: 模块文档字符串 + 该用例验证的行为."""
+    module = getattr(item, "module", None)
+    return f"{inspect.getdoc(module) or _FALLBACK_DESCRIPTION}\n\n验证行为: {_title_of(item)}。"
+
+
+def _apply_display_name(item: pytest.Item, title: str) -> None:
+    """把可读标题写到用例函数上, 让 allure-pytest 自己用它命名.
+
+    ``allure.dynamic.title`` 存不住: allure-pytest 的 ``pytest_runtest_setup`` 在所有
+    fixture 跑完后会用 ``item.name`` 重新赋值(见 ``allure_pytest.utils.allure_name``),
+    所以标题必须落到它读取的属性 ``__allure_display_name__`` 上 —— 也就是
+    ``@allure.title`` 装饰器写的同一个属性。
+    """
+    obj = getattr(item, "obj", None)
+    if obj is None:
+        _ALLURE_DYNAMIC.title(title)
+        return
+    existing = getattr(obj, "__allure_display_name__", None)
+    if existing is not None and _OUR_TITLES.get(id(obj)) != existing:
+        return  # 用例自己用 @allure.title 指定了标题, 不覆盖
+    # allure-pytest 会把标题当格式化模板处理, 花括号需要转义才能原样显示.
+    template = title.replace("{", "{{").replace("}", "}}")
+    obj.__allure_display_name__ = template
+    _OUR_TITLES[id(obj)] = template
+
+
+def _restore_description(item: pytest.Item) -> None:
+    """函数没有文档字符串时补回描述。
+
+    allure-pytest 同样在 ``pytest_runtest_setup`` 收尾把描述换成
+    ``item.function.__doc__``(或 ``@allure.description`` 标记), 没有文档字符串就变成
+    空; 此时在用例收尾阶段把生成的描述补回去。
+    """
+    if getattr(getattr(item, "function", None), "__doc__", None):
+        return
+    if item.get_closest_marker("allure_description"):
+        return
+    _ALLURE_DYNAMIC.description(_description_of(item))
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """注册 --min-severity、分片参数与失败留证参数."""
+    parser.addoption(
+        "--min-severity",
+        action="store",
+        default=None,
+        choices=list(_SEVERITY_LEVELS),
+        help="只保留严重等级不低于该级别的测试(本地 CI 用 critical)",
+    )
+    # 分片: CI 把同一平台的用例拆到多个作业并行跑, 最后合并结果(见 tests/sharding.py)。
+    # 默认 1 片 = 与以前完全一样, 本地不需要关心。
+    parser.addoption(
+        "--shard-count",
+        type=int,
+        default=1,
+        metavar="N",
+        help="把用例均分成 N 片(默认 1 = 不分片)",
+    )
+    parser.addoption(
+        "--shard-index",
+        type=int,
+        default=0,
+        metavar="K",
+        help="本作业只跑第 K 片(0 基, 需与 --shard-count 一起用)",
+    )
+    # 失败现场留证(见 tests/crash_capture.py): 默认开启 —— 难以复现的问题只能在失败那一刻
+    # 留下来的东西里找; 失败本来就少见, 这点开销可忽略。
+    parser.addoption(
+        "--crash-dump-dir",
+        type=Path,
+        default=crash_capture.DUMP_DIRECTORY,
+        metavar="DIR",
+        help=f"失败现场 dump 的落盘目录(默认 {crash_capture.DUMP_DIRECTORY}); "
+        "dump 会作为附件挂进失败用例的 Allure 结果",
+    )
+    parser.addoption(
+        "--crash-dump-depth",
+        type=int,
+        default=crash_capture.DEFAULT_DEPTH,
+        metavar="N",
+        help=f"失败现场 dump 的递归深度(默认 {crash_capture.DEFAULT_DEPTH}; 0 = 不生成 dump)",
+    )
+    # 分片权重的数据采集(见 tests/durations.py): 全量跑一次刷新 tests/durations.json,
+    # sharding.cost_of 就能按每条用例的真实耗时装箱, 而不是目录经验单价。
+    parser.addoption(
+        "--record-durations",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="把每条用例的耗时(setup+call+teardown 之和, 秒)写成 JSON;"
+        " 全量跑一次即可刷新 tests/durations.json(分片权重的数据源)",
+    )
+
+
+def _resolve_severity(item: pytest.Item) -> str:
+    """解析用例严重等级: 显式标记优先, 否则按目录兜底."""
+    for level in _SEVERITY_LEVELS:
+        if item.get_closest_marker(level):
+            return level
+    parts = Path(str(item.fspath)).parts
+    if "security" in parts:
+        return "critical"
+    if "performance" in parts:
+        return "minor"
+    # 单元与集成测试兜底 normal: 核心模块必须自己声明 critical/blocker, 否则新模块
+    # 会静默落进(或错过)pre-commit 子集 —— 守卫用例保证每个模块都显式声明了等级。
+    return "normal"
+
+
+def _where(item: pytest.Item) -> str:
+    """定位串, 用于拼写错误提示."""
+    return f"{item.fspath}::{item.name}"
+
+
+def _label_value(
+    item: pytest.Item, name: str, allowed: tuple[str, ...] | None = None
+) -> str | None:
+    """取最近一层同名标记的取值(用例级覆盖模块级), 并校验闭集取值."""
+    marker = item.get_closest_marker(name)
+    if marker is None:
+        return None
+    if not marker.args:
+        raise pytest.UsageError(
+            f'{_where(item)}: {name} 标记缺少取值, 请写成 pytest.mark.{name}("...")'
+        )
+    value = str(marker.args[0])
+    if allowed is not None and value not in allowed:
+        raise pytest.UsageError(
+            f"{_where(item)}: 未知的 {name} {value!r}, 可用取值: {' / '.join(allowed)}"
+        )
+    return value
+
+
+def _default_layer(item: pytest.Item) -> str:
+    """未显式声明 layer 时的兜底: 目录名, 否则按 integration 标记, 再兜底 unit."""
+    parts = Path(str(item.fspath)).parts
+    for directory, layer in _DIRECTORY_LAYERS.items():
+        if directory in parts:
+            return layer
+    if item.get_closest_marker("integration"):
+        return "integration"
+    return "unit"
+
+
+def _validate_metadata(item: pytest.Item) -> None:
+    """收集期校验标签取值, 拼错时立即失败而不是静默多出分类."""
+    for name, allowed in _LABEL_ALLOWED.items():
+        _label_value(item, name, allowed)
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """附加严重等级, 校验 Allure 标签, 按 --min-severity 过滤, 再按分片取本片."""
+    minimum = config.getoption("--min-severity")
+    min_rank = _SEVERITY_RANK[minimum] if minimum is not None else None
+    kept: list[pytest.Item] = []
+    for item in items:
+        _validate_metadata(item)
+        _attach_environment_labels(item)
+        severity = _resolve_severity(item)
+        item.add_marker(getattr(pytest.mark, severity))
+
+        if min_rank is not None and _SEVERITY_RANK[severity] < min_rank:
+            continue
+        kept.append(item)
+
+    if min_rank is not None:
+        deselected = [item for item in items if item not in kept]
+        items[:] = kept
+        if deselected:
+            config.hook.pytest_deselected(items=deselected)
+
+    _apply_shard(config, items)
+    _cluster_shared_ui_sessions(items)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """会话一开始就把"硬崩溃也要留证"接上(见 ``crash_capture.enable_hard_crash_log``).
+
+    coredumpy 只覆盖"用例失败"这一层; 段错误/中止会直接杀掉进程, 那时唯一能留下的就是
+    faulthandler 的栈 —— 这里让它写进 ``crash-dumps/``, 由 CI 当 artifact 上传。
+
+    ``trylast`` 是必须的: pytest 自带的 faulthandler 插件也会调 ``faulthandler.enable()``
+    (不带 ``file`` = stderr)。同类钩子的调用顺序是**后注册的先跑**, 而它注册得比 conftest
+    早 —— 不标 ``trylast`` 的话我们反而先跑, 随后被它覆盖, 文件永远是空的(实测 2026-10-03
+    的 macOS 分片: 文件 0 字节, 而栈在 CI 日志里)。
+    """
+    depth = int(config.getoption("--crash-dump-depth"))
+    if depth <= 0:
+        return  # 显式关掉留证时不写文件
+    directory = Path(str(config.getoption("--crash-dump-dir")))
+    crash_capture.enable_hard_crash_log(directory)
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """会话真正开始前再抢一次 faulthandler 的输出(见 ``reassert_hard_crash_log``).
+
+    为什么不能只靠上面的 ``trylast``: 插件可以在 ``pytest_configure`` **之后**才注册
+    (``-p`` / 命令行插件), 那时它的钩子又会后跑一次。``pytest_sessionstart`` 跑在所有
+    ``pytest_configure`` 之后, 是唯一能保证"最后一次 enable 是我们"的位置。
+    """
+    crash_capture.reassert_hard_crash_log()
+
+
+# --record-durations 的累积器: nodeid -> 秒(setup/call/teardown 三段相加).
+# 无条件累加(每条用例三次字典操作, 开销可忽略), 是否落盘由会话结束时的选项决定.
+_DURATION_SAMPLES: dict[str, float] = {}
+
+# 后台调度线程的存量账(会话末守卫用, 见 :func:`_check_scheduler_leaks`): 每条用例进/出时量
+# 一次线程数, 只在"出去时比进来时多"记一笔 —— 会话末还有活着的线程时能有名字可点。
+_SCHEDULER_BEFORE: dict[str, int] = {}
+_SCHEDULER_SUSPECTS: list[tuple[str, int, int]] = []
+
+# 可疑用例最多留这么多条: 真出漏时常常是一批用例都留了线程, 全量列出来会把日志刷没。
+_MAX_SCHEDULER_SUSPECTS = 10
+
+
+def _note_scheduler_growth(report: pytest.TestReport) -> None:
+    """量这条用例进/出时的后台调度线程存量(判据在用例自己的收尾上, 见 :func:`_leak_message`).
+
+    逐条只做两件轻活: 记下这条用例开始时的存量、出去时再量一次 —— 只有**变多**的那些才会去
+    等(见 :func:`_surviving_scheduler_threads`), 干净用例零开销。
+    """
+    if report.when == "setup":
+        _SCHEDULER_BEFORE[report.nodeid] = gui_support.scheduler_thread_count()
+        return
+    if report.when != "teardown":
+        return
+    before = _SCHEDULER_BEFORE.pop(report.nodeid, None)
+    if before is None:  # setup 报告没到过(只用例头跑不了: 不影响判定)
+        return
+    after = gui_support.scheduler_thread_count()
+    if after > before:
+        _SCHEDULER_SUSPECTS.append((report.nodeid, before, after))
+        del _SCHEDULER_SUSPECTS[:-_MAX_SCHEDULER_SUSPECTS]
+
+
+def _surviving_scheduler_threads(nodeid: str) -> int | None:
+    """这条用例收尾后还多出来的调度线程数(收干净了返回 ``None``).
+
+    只在**看出变多**时才等: 产品的 ``shutdown`` 是异步的(``wait=False``), 收尾那一刻还数得到
+    线程是正常的(见 ``gui_support._wait_for_scheduler_threads_at_most``)。干净用例一次等都不等。
+    """
+    before = _SCHEDULER_BEFORE.get(nodeid)
+    if before is None:
+        return None
+    left = gui_support._wait_for_scheduler_threads_at_most(before, timeout=2.0)
+    return left - before if left > before else None
+
+
+def _leak_message(nodeid: str, extra: int) -> str:
+    """逐用例判红时给人看的一句话(含还活着的线程与最常见的两个出口)."""
+    return (
+        f"收尾后多出 {extra} 个活着的后台调度线程: "
+        + "、".join(gui_support._scheduler_threads())
+        + "。真后端 ``SqlArchiveService(...)`` 一建就起一个 APScheduler 线程, "
+        "而只有走真窗口的用例会被关窗路径释放 —— 替身窗口与只为造数据/造包而建的"
+        "后端要自己 ``shutdown()``(幂等); 带窗口的用例用 ``gui_support.close_apps`` 收。"
+    )
+
+
+def _check_scheduler_leaks(session: pytest.Session) -> None:
+    """会话末兜底: 这时还有活着跑掉的调度线程就点名、判红, 并**写进报告**.
+
+    为什么要有这一道(2026-10-16 run 38758273842): Windows 的 UI 段里
+    ``test_run_gui_reports_every_config_state`` 用**替身窗口**跑了三次 ``run_gui`` —— 替身的
+    ``mainloop`` 就地返回, 而真窗口那条路是"关窗时释放后台资源", 于是三个真实后端各留一个
+    APScheduler 线程。逐用例收尾的判据是**相对**的, 而且只对"自己建了窗口"的用例生效
+    (见 ``gui_support.close_apps``): 没有窗口可归因就不判 —— 这些线程于是活到会话末,
+    直到它们挂住别的东西(那轮 60s 超时的现场里就挂着它们)。
+
+    2026-10-16 的第二轮(质量作业 red、报告全绿): 这种会话级不变量**不属于任何一条用例**,
+    只在日志里喊一声、再改退出码, 报告里就一点痕迹都没有 ⇒ 这里额外写一条 broken 结论项
+    (见 ``gui_support.write_leak_result``)。逐用例那道(见 ``pytest_runtest_makereport``)
+    能覆盖的它不重复喊; 走到这里的是"归不到某一条用例头上"的残余。
+
+    判据是绝对的("会话末一个都不能有"): 会话走到这一步, 所有用例与所有共享 UI 会话都
+    已经收尾。(只有真泄漏才会等满 2s: 数到 0 立即返回。)
+    """
+    left = gui_support._wait_for_scheduler_threads_at_most(0, timeout=2.0)
+    if left == 0:
+        return
+    threads = gui_support._scheduler_threads()
+    suspects = "、".join(
+        f"{nodeid}({before}→{after})" for nodeid, before, after in _SCHEDULER_SUSPECTS
+    )
+    print(
+        f"[scheduler] 会话末还有 {left} 个活着的后台调度线程: {'; '.join(threads)}\n"
+        "[scheduler] 进出时存量变多的用例(最多 "
+        f"{_MAX_SCHEDULER_SUSPECTS} 条, 越靠后越近): {suspects or '无'}"
+    )
+    written = gui_support.write_leak_result(
+        session.config, suspects=_SCHEDULER_SUSPECTS, threads=threads
+    )
+    if written is not None:
+        print(f"[scheduler] 已写成一条 broken 结论项: {written.name}")
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """把每个阶段报告的耗时并进当前用例的累计(见 ``tests/durations.py``)."""
+    durations.accumulate(_DURATION_SAMPLES, report.nodeid, report.duration)
+    _note_scheduler_growth(report)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """会话末先查后台调度线程有没有漏, 再(按选项)把本会话的每条用例耗时落盘.
+
+    调度线程那道**即使已经红了也要查**: 漏线程往往就是别的东西挂住的根因, 那正是最需要
+    这份点名的时候。
+
+    耗时落盘: 空会话(``--collect-only``)不覆盖已有数据 —— 那份文件是全量跑出来的,
+    别被一次"什么都没跑"的调用清空。部分运行会**整体覆盖**属于既定行为 —— 记录的就是
+    "这次跑了什么"。
+    """
+    _check_scheduler_leaks(session)
+
+    path = session.config.getoption("--record-durations")
+    if path is None:
+        return
+    if not _DURATION_SAMPLES:
+        print(f"[durations] 本会话没有跑用例, 不覆盖 {path}")
+        return
+    durations.write(path, _DURATION_SAMPLES, recorded_at=datetime.now(UTC))
+    print(f"[durations] 已记录 {len(_DURATION_SAMPLES)} 条用例的耗时 -> {path}")
+
+
+# 共享一份 UI 会话的模块: 模块路径 → 池名(相同的池名 = 真的共用同一扇窗口与同一个
+# 后端, 见 tests/ui_sharing.py 的池说明)。分片时**同池的用例必须留在同一片** —— 拆开
+# 后每片各自重建一份共享窗口, 复用直接作废(而重建比不复用还贵), 所以 tests/sharding.py
+# 把它们当成一个不可拆开的装箱单元。
+# 池名与 tests/ui_sharing.py 的池键同源: 池是按**工厂函数身份**分的 —— 五个模块共用
+# ``ui_sharing.demo_app`` 这一份(窗口标题与热键禁用原因在那里是统一值; ``test_gui_shared_session``
+# 是验共享会话机制本身的模块, 它取的也是同一个池), 另外两个模块各有一个只服务自己那组
+# 用例的工厂(改过下拉选项 / 换过长文案后端, 污染不出去)。
+# 新增一个共享池模块时在这里登记; 守卫(tests/unit/test_sharding.py)会反过来要求
+# "真的在用共享会话的模块都登记了", 漏登记会让它悄悄退回"每片各建一份"。
+# 这份登记有三个消费者: 分片装箱(groups)、"用完即关"(ui_shared 夹具把它声明给
+# SharedUiRegistry.declare_users —— 池在最后一个用例结束时就地关闭, 不陪跑到
+# 会话末), 以及片内聚段(sharding.cluster_groups 把同池模块连成一段, 池窗不再隔着
+# 无关模块闲置挂着)。
+_SHARED_UI_SESSIONS: dict[str, str] = {
+    "tests/integration/test_gui_copy_quality.py": "copy-quality",
+    "tests/integration/test_gui_dropdown.py": "dropdown",
+    "tests/integration/test_gui_keyboard.py": "demo-app",
+    "tests/integration/test_gui_shared_session.py": "demo-app",
+    "tests/integration/test_gui_states.py": "demo-app",
+    "tests/integration/test_gui_styles.py": "demo-app",
+    "tests/integration/test_gui_tooltip.py": "demo-app",
+    "tests/integration/test_gui_window_icon.py": "demo-app",
+}
+
+
+def _shared_ui_groups(items: list[pytest.Item]) -> dict[str, str]:
+    """收集期算出"哪些用例必须同片"(nodeid → 池名).
+
+    只看**真的请求了共享会话**的用例: ``ui_shared`` 夹具在 fixturenames 的闭包里,
+    模块内不开窗的用例因此不会被拖进组。
+    """
+    groups: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, pytest.Function):  # 只有函数用例才请求夹具
+            continue
+        if "ui_shared" not in item.fixturenames:
+            continue
+        pool = _SHARED_UI_SESSIONS.get(item.nodeid.partition("::")[0])
+        if pool is not None:
+            groups[item.nodeid] = pool
+    return groups
+
+
+def _apply_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """按 ``--shard-count`` / ``--shard-index`` 只保留本片要跑的用例.
+
+    分片在**严重等级过滤之后**做: 本地 ``--min-severity=critical`` 选出来的子集也
+    能均分成几片跑, 与 CI 的全量分片互不影响。共享一份 UI 会话的用例整体装箱
+    (见 ``_shared_ui_groups``), 所以它们不会被拆到两片去。
+    """
+    count = int(config.getoption("--shard-count"))
+    index = int(config.getoption("--shard-index"))
+    if count < 1:
+        raise pytest.UsageError(f"--shard-count 至少为 1(当前 {count})")
+    if not 0 <= index < count:
+        raise pytest.UsageError(
+            f"--shard-index 必须在 0..{count - 1} 之间(当前 {index})"
+        )
+    if count == 1:
+        return
+    groups = _shared_ui_groups(items)
+    buckets = sharding.shard_plan(
+        [item.nodeid for item in items], count=count, groups=groups
+    )
+    mine = set(buckets[index])
+    total = sharding.load_of([item.nodeid for item in items])
+    planned = sharding.load_of(buckets[index])
+    print(
+        f"[shard {index + 1}/{count}] 本片 {len(mine)} 个用例, "
+        f"预计 {planned:.0f}s / 全量 {total:.0f}s"
+        + (f", 其中共享 UI 会话 {len(groups)} 条" if groups else "")
+    )
+    deselected = [item for item in items if item.nodeid not in mine]
+    items[:] = [item for item in items if item.nodeid in mine]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+
+
+def _cluster_shared_ui_sessions(items: list[pytest.Item]) -> None:
+    """同池的共享 UI 模块连成一段执行(纯逻辑见 ``sharding.cluster_groups``).
+
+    按文件名字母序, demo-app 池的 6 个模块之间隔着十几个每用例自建窗的模块 ——
+    池窗在这段空档里全程闲置挂着(2026-10 实测约 225s, 占它开着时间的 ~87%), 双片
+    并行时还平白多一份 GUI/合成层负载。聚成一段后, 池窗只在它那一段里存在, 与
+    "用完即关"正好衔接: 段尾即收。
+
+    放在分片**之后**: 池成员本就整组同片(``_apply_shard`` 的 ``groups``), 无论全量
+    还是分片视角, 聚出的相对顺序都一致。没有共享会话时(如只跑单元)是恒等重排,
+    一行打印都不出。
+    """
+    groups = _shared_ui_groups(items)
+    if not groups:
+        return
+    ordered = sharding.cluster_groups([item.nodeid for item in items], groups)
+    if ordered == [item.nodeid for item in items]:
+        return
+    by_nodeid = {item.nodeid: item for item in items}
+    items[:] = [by_nodeid[node_id] for node_id in ordered]
+    print(
+        "[order] 共享 UI 会话的同池模块已聚成一段执行: "
+        + ", ".join(sorted(set(groups.values())))
+    )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_timeout_set_timer(item: pytest.Item, settings: Any) -> bool | None:
+    """超时也要留下现场(见 ``tests/timeout_guard.py``).
+
+    ``tryfirst`` + 返回 ``None`` 表示"这次不接管": pytest-timeout 这个钩子是
+    ``firstresult``, 我们只在 ``thread`` 模式下接管(它超时后直接 ``os._exit(1)``,
+    覆盖率与失败现场都会丢), ``signal`` 模式照旧交给它自己实现。
+    """
+    return timeout_guard.set_timer(item, settings)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_timeout_cancel_timer(item: pytest.Item) -> bool:
+    """用例正常结束时撤掉上面那个计时器."""
+    return timeout_guard.cancel_timer(item)
+
+
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[Any]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """用例失败时把现场留进它的 Allure 结果(见 ``tests/crash_capture.py``).
+
+    - 钩子跑在**阶段报告生成时**, 也就是任何 teardown 夹具之前: 那时界面窗口还活着,
+      截图才拍得到现场(``tests/gui_support.py`` 的登记表由夹具在用例结束后清空);
+    - 只处理失败的报告; 每个用例只留一次现场(失败后 teardown 常跟着报第二次错);
+    - 留证自身出错也只是附件里的一句话, 绝不影响用例结果与退出码;
+    - teardown 阶段额外判一条**收尾纪律**: 这条用例有没有攒下活着的后台调度线程
+      (2026-10-16 起). 判红要落在这条用例自己的报告上, 报告里才点得到名字 —— 只在会话末
+      判的话, 红的是"这一次运行", 而报告里一条用例的痕迹都没有(见 ``_check_scheduler_leaks``)。
+    """
+    report = yield
+    if report.failed:
+        from gui_support import live_apps
+
+        crash_capture.attach_failure_evidence(
+            item,
+            call,
+            directory=item.config.getoption("--crash-dump-dir"),
+            depth=int(item.config.getoption("--crash-dump-depth")),
+            apps=live_apps(),
+        )
+    elif report.skipped:
+        # "跳过了"不等于"没事": GUI 守卫把建窗口期的任何 TclError 都写成跳过, 于是
+        # 一条永远不跑的用例在报告里只是一次 skip。只有已知环境问题才允许跳过, 其它
+        # 一律改成失败(见 tests/tk_guard.py)。
+        message = tk_guard.unknown_tk_skip_message(
+            tk_guard.skip_reason(report.longrepr)
+        )
+        if message is not None:
+            report.outcome = "failed"
+            report.longrepr = message
+    elif report.when == "teardown":
+        # 已经红了的用例不再补一刀(收尾夹具自己报的现场更具体, 比如"根没拆掉"),
+        # 所以放在 `attach_failure_evidence` 之后: 判上去的是**干净收尾之外的唯一错**。
+        extra = _surviving_scheduler_threads(report.nodeid)
+        if extra is not None:
+            report.outcome = "failed"
+            report.longrepr = _leak_message(report.nodeid, extra)
+    return report
+
+
+def _configure_allure(item: pytest.Item) -> None:
+    """把名称、描述、四层标签、平台、分类与严重等级写入 Allure 元数据."""
+    title = _title_of(item)
+
+    epic = _label_value(item, "epic", _EPICS) or _UNCLASSIFIED
+    feature = _label_value(item, "feature") or _UNCLASSIFIED
+    story = _label_value(item, "story") or title
+    layer = _label_value(item, "layer", _LAYERS) or _default_layer(item)
+    platform = _current_platform_label()
+
+    _apply_display_name(item, title)
+    _ALLURE_DYNAMIC.description(_description_of(item))
+    # epic/feature/story 驱动 "按产品级模块/功能模块/用户场景的稳定性分布" 控件.
+    _ALLURE_DYNAMIC.epic(epic)
+    _ALLURE_DYNAMIC.feature(feature)
+    _ALLURE_DYNAMIC.story(story)
+    # allure-pytest 没有 layer 装饰器, 只能写原始标签(Allure 3 "按层耗时" 直方图读它).
+    _ALLURE_DYNAMIC.label("layer", layer)
+    # 平台写成**参数**而不只是标签: Allure 用"用例全名 + 非 excluded 参数 + 标签"算重试
+    # 身份(retryHash), 少了参数, 三个平台的同名结果容易被并成"同一用例重试了多次"。
+    # ``env`` / ``os`` 两个标签**不在这里写**: 它们是"这条用例跑在哪台机器上"的事实,
+    # 写在夹具里会让被 skip 的用例丢掉它们(见到 :func:`_attach_environment_labels`),
+    # 于是结果落进 default 环境、从平台维度里消失。
+    _ALLURE_DYNAMIC.parameter("平台", platform)
+    # suite 三层与 layer/epic/feature 对齐, 作为只认 suite 标签的控件兜底;
+    # 平台加在 parentSuite 末尾, 合并报告的套件树里能一眼看出用例跑在哪台机器上.
+    _ALLURE_DYNAMIC.parent_suite(f"{_LAYER_SUITES.get(layer, layer)} · {platform}")
+    _ALLURE_DYNAMIC.suite(epic)
+    _ALLURE_DYNAMIC.sub_suite(feature)
+
+    tags = sorted({marker.name for marker in item.iter_markers()} - _TAG_EXCLUDED)
+    if tags:
+        _ALLURE_DYNAMIC.tag(*tags)
+
+    severity = _resolve_severity(item)
+    if severity != "no_severity":
+        _ALLURE_DYNAMIC.severity(_ALLURE_LEVELS[severity])
+
+
+@pytest.fixture(autouse=True)
+def _close_gui_apps() -> Iterator[None]:
+    """用例结束后销毁它创建的 GUI 窗口(``tests/gui_support.gui_app`` 建的).
+
+    放在根 conftest 而不是 ``tests/integration/conftest.py``: 两个同名 conftest 会让
+    mypy 报 `Duplicate module named "conftest"`(两个目录都不是包)。因此这个夹具对所有
+    用例都生效, 但单元测试不建窗口, 登记表始终是空的, 收尾是一次空循环。
+
+    时机与原来的 ``try/finally: app.destroy()`` 完全一致(通过/失败/报错都会走到),
+    于是三个 GUI 模块里 69 处收尾样板可以删掉, 销毁也变成报告里的夹具步骤。
+    """
+    yield
+    from gui_support import close_gui_apps
+
+    close_gui_apps()
+
+
+@pytest.fixture(scope="session")
+def ui_shared(request: pytest.FixtureRequest) -> Iterator[ui_sharing.SharedUiRegistry]:
+    """: 共享 UI 会话注册表(机制与纪律见 ``tests/ui_sharing.py``).
+
+    session 级: 池里的窗口只服务**它的用例** —— 每条用例前后由 ``test_scope`` 做
+    "对齐基线 / 识别漂移并还原(还原不过就重建整窗)"; 一个池的最后一个用例结束时
+    窗口就地关闭(收集期把"用例 → 池"声明给 ``declare_users``, 数据源就是
+    ``_SHARED_UI_SESSIONS``), 不再陪跑到会话末 —— 分片并行时每片挂着的闲置共享窗
+    由此从"最多三扇陪全程"降到"正在用的那扇"。会话末尾统一走
+    ``gui_support.close_apps`` 收尾, 拆不干净与逐用例收尾一样判红。不用它的
+    用例零开销: 注册表是空的, 收尾是空操作。
+    """
+    registry = ui_sharing.SharedUiRegistry()
+    registry.declare_users(_shared_ui_groups(list(request.session.items)))
+    yield registry
+    registry.close()
+
+
+@pytest.fixture(autouse=True)
+def _allure_metadata(request: pytest.FixtureRequest) -> Iterator[None]:
+    """在每个测试开始后写入 Allure 元数据, 结束时补回被 allure-pytest 清掉的描述。"""
+    _configure_allure(request.node)
+    yield
+    _restore_description(request.node)
+
+
+@pytest.fixture(autouse=True)
+def _default_locale() -> Iterator[None]:
+    """每个用例都从默认语言开始.
+
+    界面语言是 i18n 模块里的全局状态, 而语言设置会真的调用 ``set_locale``; 用例之间
+    必须隔离, 否则先跑语言用例的随机顺序会把后续用例的文案全变成英文。
+    """
+    set_locale(DEFAULT_LOCALE)
+    yield
+    set_locale(DEFAULT_LOCALE)
+
+
+class _RecordingHandler(logging.Handler):
+    """把审计日志采样到内存列表, 供用例断言。"""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@pytest.fixture
+def audit_log() -> Iterator[list[str]]:
+    """捕获 ``archive_management.audit`` 的日志行.
+
+    用户操作只写日志文件与内存, 不落数据库, 因此用例通过日志行断言
+    "操作是否被记录"; 夹具临时把审计日志器降到 DEBUG 并捕获全部行。
+    """
+    logger = logging.getLogger(AUDIT_LOGGER_NAME)
+    handler = _RecordingHandler()
+    previous_level = logger.level
+    previous_propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        yield handler.messages
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagate

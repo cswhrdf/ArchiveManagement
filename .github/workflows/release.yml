@@ -1,0 +1,212 @@
+name: Release Windows Package
+
+# 两个入口(口径见 docs/development.md 的「打包」「发布」两节):
+#   ① `push` 到 main —— 合入之后先定版(默认第 3 位加 1, 见 scripts/release_bump.py 与
+#      classify 作业), 再构建并发布 Release;
+#   ② `workflow_dispatch` —— 手动编任意分支/提交(dev 只有这一个入口), 不动版本号。
+# 构建本身在 .github/workflows/release-build.yml 里(只读, 一个作业): 这里只转调它, 再加一个
+# 专门管发布的作业 —— 于是"构建步骤只有一处定义"与"写权限只出现在这一份"同时成立。
+# **PR 打包门禁不在这里**(2026-10-17 起): 门禁是 ci.yml 的 `windows-package` 作业**直接**调
+# release-build.yml。两条理由: ① 跨工作流触发(`workflow_run`)产生的检查挂不到那个 PR 上, 永远
+# 进不了分支保护的必需检查, 所以编译必须发生在 PR 那次运行里; ② 一旦 PR 那次运行调到这份工作流,
+# 下面 `publish` 作业要的 `contents: write` 会让整份工作流判 "not valid"(嵌套权限是**逐作业静态
+# 校验**的, 运行期的 `if` 拦不住), 报错原文见 release-build.yml 的开头。
+on:
+  push:
+    branches: [main]
+    # 与 ci.yml 同一份"纯文档改动"忽略清单: 只改 md / docs / instructions 的合入既不跑 CI, 也不该出包。
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/instructions/**"
+      - ".github/prompts/**"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要构建的分支或提交,例如 dev"
+        required: false
+        default: main
+        type: string
+      checks:
+        description: "构建前的检查档位"
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - build-only
+      publish:
+        description: "构建完是否发布 GitHub Release"
+        required: false
+        default: false
+        type: boolean
+
+# 定版(classify)要读"最近发过的 tag"并可能推一个 bump 提交回 main: 两次合入紧挨着时,
+# 后一次必须排队等前一次把新 tag 写完再定版 —— 否则两次会算出同一个新版本号(第二次就只剩
+# publish 的"已发过"分支, 白构建一轮)。串行而不是取消: 排队的那轮也要发它自己的版本。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# 这个工作流自己没有 uv 命令(构建在被调用的那一份里), 留着这一行只为与 release-build.yml 口径一致
+# —— 守卫要求每个工作流顶层都关掉 `uv run` 的隐式 sync。
+env:
+  UV_NO_SYNC: "1"
+
+jobs:
+  classify:
+    # 合入 main 之后先定版: 默认把第 3 位加 1(手动预改版优先 + 自动 patch 兜底, 判定逻辑全在
+    # scripts/release_bump.py, 取舍见 docs/development.md「发布」节)。要发 0.1.0 / 1.0.0 这类
+    # "动前两位"的版本, 由人在 PR 里手改 packaging.py —— 那份 diff 经过评审; 定版作业看到
+    # "版本号已经变了"就按人写的发, 不再叠 patch。
+    name: 定版本号
+    runs-on: ubuntu-latest
+    outputs:
+      # tag 与构建共用的提交: patch 兜底发生时是 bump 提交, 否则是触发这次运行的提交。
+      ref: ${{ steps.ref.outputs.ref }}
+    # bump 提交要推回 main: 与 publish 一样按作业给写权限(顶层保持只读)。这份工作流没有
+    # workflow_call 入口, PR 门禁永远不会调它 —— 嵌套权限"逐作业静态校验"的老坑与此无关。
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          # 要全部历史与 tag 才找得到"最近发过的版本"; bump 提交也从这里长出来。
+          fetch-depth: 0
+
+      - name: Decide whether to bump the patch version
+        # 只有 push 档定版: 手动档编的是任意 ref, 不该顺手动 main 的版本号。
+        # 脚本只用标准库(scripts/release_bump.py), runner 自带的 python3 就够, 不装 uv 环境。
+        if: ${{ github.event_name == 'push' }}
+        id: bump
+        run: |
+          tags=$(git tag -l)
+          # tag 名不含空白, 故意不加引号按词拆开(tag 表为空时 --tags 落成空列表 = 首版直发)。
+          python3 scripts/release_bump.py \
+            --file src/archive_management/packaging.py \
+            --tags $tags \
+            --apply >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push the bump
+        if: ${{ github.event_name == 'push' && steps.bump.outputs.bump == 'patch' }}
+        env:
+          PREVIOUS: ${{ steps.bump.outputs.previous }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/archive_management/packaging.py
+          git commit -m "发布: 版本号 $PREVIOUS → $VERSION"
+          # 定版窗口里可能有别的合入先落了 main: 把 bump 提交 rebase 到最新 main 再推,
+          # 否则 non-fast-forward 被拒; 若那次合入也改了版本号, rebase 冲突会大声红掉。
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+          # GITHUB_TOKEN 推的提交不会再触发任何工作流(含本工作流), 天然无循环; 代价是
+          # 那一次 bump 提交不跑 CI —— 一行版本号改动, 门禁在合入前已跑过。
+
+      - name: Record the ref to build and tag
+        id: ref
+        run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    # 只转调, 自己没有步骤: 命令、依赖分组与 `UV_NO_SYNC` 都在被调用的那份里(那种"纯调用作业"
+    # 不装 Python 环境, 见 tests/unit/test_test_config.py 的 `_calls_another_workflow`)。
+    # checks 原样透传: push 档取不到 `inputs`(空串) —— 空串不等于 build-only, 所以照跑 full。
+    # ref 固定取 classify 传出的提交: patch 递增发生在它里面, 构建与 tag 都要指递增之后那个。
+    name: 构建 Windows 发布包
+    needs: [classify]
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ needs.classify.outputs.ref }}
+      checks: ${{ inputs.checks }}
+
+  publish:
+    # 发布只在"合入 main 之后"或"手动要求"时进行。被 ci.yml 调用那一档根本不存在(它调的是
+    # release-build.yml), 所以这里只判 push 与显式开关。
+    name: 发布 GitHub Release
+    needs: [classify, build]
+    if: ${{ inputs.publish == true || github.event_name == 'push' }}
+    # 只有 publish 与 classify 两个作业需要写权限(顶层仍是 `contents: read`); 构建那一份则完全
+    # 只读 —— 一份工作流里的写权限必须由**调用它的人**先给得起, 这也是构建与发布拆成两份的原因。
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+      LABEL: ${{ needs.build.outputs.label }}
+      RELEASE_TARGET: ${{ needs.classify.outputs.ref }}
+    steps:
+      - name: Download the build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ArchiveManagement-${{ needs.build.outputs.label }}-windows-x64
+          path: release
+
+      - name: Decide whether this version still needs a release
+        # 自动定版之后, "这个版本已经发过"只剩两种来路: 手动改版撞上已发的版本号, 或补跑同一个
+        # 提交 —— 都是**正常出口而不是失败**(记一条 notice)。判据是那个 tag/release 已经存在,
+        # 与"这一轮改了哪些文件"无关 —— 比路径过滤可靠(不必猜哪些文件算"该发版")。
+        id: decision
+        run: |
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::版本 $VERSION 已经发过一次 Release(v$VERSION 已存在), 本轮只构建、不重复发布。"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Delete the previous pre-releases
+        # 正式版一发布, dev 的快照就作废了: 仓库里同时挂着"最新正式版 + 更旧的 dev 快照",
+        # 用户只会下错包。删 Release 连 tag 一起删(四段 tag 不是历史, 正式版只认三段)。
+        if: ${{ steps.decision.outputs.publish == 'true' }}
+        run: |
+          set -eu
+          tags=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isPrerelease --jq '.[] | select(.isPrerelease) | .tagName')
+          for tag in $tags; do
+            echo "删除旧的预发布 $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done
+
+      - name: Create the release
+        if: ${{ steps.decision.outputs.publish == 'true' }}
+        # 两个参数不能省: ① `--repo` —— 这个作业没有 checkout, gh 无法从仓库推断出该操作哪一个;
+        # ② `--target` —— 不给它时 gh 会把新 tag 指向**默认分支的当前 HEAD**, 而我们发的必须是
+        # 定版传来的那个提交(patch 兜底时是 bump 提交, 不是触发这次运行的合并提交 —— tag 指的
+        # 提交里 packaging.py 必须已经是这个版本号)。
+        # 正文写死版本/提交/构建号, 不接 `--generate-notes`: 这一档要的是可复现的固定内容。
+        run: |
+          cat > release-notes.md <<EOF
+          Windows x64 打包产物: onedir 压缩包 + SHA256SUMS.txt + build-metadata.json。
+
+          - 版本: $VERSION(来自 src/archive_management/packaging.py)
+          - 提交: $RELEASE_TARGET
+          - 构建: $LABEL
+          EOF
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_TARGET" \
+            --title "ArchiveManagement v$VERSION" \
+            --notes-file release-notes.md \
+            release/*
+
+  wiki:
+    # 用户手册要标"本页内容随哪个版本更新", 而版本号只有发完版才知道 —— 所以它挂在发布之后, 只沿
+    # main 发出来的那个 tag 同步(2026-10-31 定: 手册不再跟着 push 走, dev 上改的东西不发版就不上线)。
+    # 为什么是"调"而不是"监听 release 事件": 这里的 `gh release create` 用的是 GITHUB_TOKEN, 它触发
+    # 的 release 事件不会再生成工作流运行(GitHub 的防环规则), 监听那条路根本没人叫得动。
+    name: 同步用户手册到 Wiki
+    needs: [classify, build, publish]
+    # publish 被跳过(手动档没开 publish 开关)时, 也就没有 tag 可同步。
+    if: ${{ needs.publish.result == 'success' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/wiki.yml
+    with:
+      tag: v${{ needs.build.outputs.version }}

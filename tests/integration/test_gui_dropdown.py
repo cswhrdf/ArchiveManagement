@@ -1,0 +1,464 @@
+"""下拉框弹出列表的端到端用例.
+
+用户 2026-10-02 的两条要求("限高 + 超出就出滚动条, 不要撑出软件界面"、"位于软件下方的
+下拉框默认向上")在这里按**量到的几何**验收: 真的把下拉打开, 再读浮层的位置/高度/有没有
+滚动条 —— 判据落在"它到底在哪"上, 而不是"代码里写了 flipped 这个分支"。
+
+现场约定(与其它 GUI 用例同): CI 上窗口的实际尺寸不由用例决定, 所以断言一律与**窗口自己**
+的矩形比(不写死屏幕坐标), 时间上则用"泵事件到不变量成立"而不是固定秒数。
+"""
+
+from __future__ import annotations
+
+import ctypes
+import sys
+import time
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+
+from gui_support import gui_app
+from ui_sharing import SharedUiRegistry
+
+try:
+    import customtkinter as ctk
+
+    import archive_management.ui.dropdown as dropdown_mod
+except Exception as exc:  # pragma: no cover - 取决于运行环境
+    pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
+
+from archive_management.services.hotkeys import (
+    GlobalHotkeyService,
+    UnavailableBackend,
+)
+from archive_management.ui.demo_backend import DemoArchiveService
+from archive_management.ui.dropdown import DROPDOWN_MAX_ROWS, active_dropdown
+from archive_management.ui.main_window import ArchiveApp
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.ui,
+    pytest.mark.normal,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("端到端界面流程"),
+    pytest.mark.story("下拉框弹出层"),
+    pytest.mark.layer("e2e"),
+]
+
+# 值多到必须出滚动条: 上限是 10 行, 给 30 个值, 上下都放不下整块。
+_MANY_VALUES = [f"选项 {index:02d}" for index in range(30)]
+
+# Win32 直查/外置置顶用的常量(只在 Windows 分支走到)。
+_GA_ROOT = 2
+_HWND_TOPMOST = -1
+_HWND_NOTOPMOST = -2
+_SWP_NOSIZE_NOMOVE = 0x0003
+
+
+def _build(backend: Any) -> ArchiveApp:
+    """建主窗口(热键服务用不可用后端, 免得测试环境真去抢全局快捷键)."""
+    return ArchiveApp(
+        backend,
+        title="下拉测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+
+
+def _pump(app: Any, seconds: float = 0.6) -> None:
+    """跑一会儿事件循环: 浮层的显示、焦点转移都是延后发生的."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.update_idletasks()
+        app.update()
+        time.sleep(0.02)
+
+
+def _shared_build() -> ArchiveApp:
+    """本模块的共享池工厂: 7 条用例共一份主窗口(下拉浮层的状态用例自己收场).
+
+    不并入全局 demo 池: 用例会把 ``_page_size_box`` 的 values/command 改成自己的
+    30 个选项与回调 —— 这不在共享池的状态面里, 单独一池让污染出不了本模块。
+    """
+    return _build(DemoArchiveService(delay=0))
+
+
+@pytest.fixture
+def app(ui_shared: SharedUiRegistry) -> Iterator[Any]:
+    """主窗口(共享会话: 用例间由池做快照-识别-还原)."""
+    with ui_shared.test_scope(_shared_build) as application:
+        _pump(application)
+        yield application
+
+
+def _open(combo: ctk.CTkComboBox, app: Any) -> dropdown_mod.DropdownPopup:
+    """打开下拉并返回浮层(用 CTk 自己的入口, 与点箭头走同一条路)."""
+    combo._open_dropdown_menu()
+    _pump(app)
+    popup = active_dropdown()
+    assert popup is not None, "下拉没打开"
+    return popup
+
+
+def _stack_order(app: Any) -> list[str]:
+    """全部顶层窗口的叠放次序(底→顶): "浮层在宿主之上"用它量成事实."""
+    return [str(w) for w in app.tk.call("wm", "stackorder", app)]
+
+
+def _win32_style_has_topmost(app: Any) -> bool:
+    """主窗口真实扩展样式里有没有 WS_EX_TOPMOST.
+
+    不碰 Tk 的 ``attributes`` 读数: 那次读会触发 Tk 拿缓存样式回写操作系统, 顺手把外部
+    置上的位抹掉(2026-10-30 探针实测) —— 读一次就毁证。
+    """
+    if sys.platform != "win32":  # mypy 收窄: windll 只在 Windows, 调用点已挡
+        return False
+    user32 = ctypes.windll.user32
+    user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.GetAncestor.restype = ctypes.c_void_p
+    root = user32.GetAncestor(ctypes.c_void_p(app.winfo_id()), _GA_ROOT)
+    assert root, "拿不到主窗口的真实句柄"
+    return bool(user32.GetWindowLongW(ctypes.c_void_p(root), -20) & 0x00000008)
+
+
+def _pin_window_from_outside(app: Any, after: int) -> None:
+    """用 Win32 的 ``SetWindowPos`` 模拟外部工具置顶/取消置顶(PowerToys 那条路).
+
+    之所以不写 ``app.attributes("-topmost", True)``: 那是 Tk 自己写的位, 外部置顶时它
+    **读不到**(2026-10-30 探针实测: 置顶后读数仍是 0) —— 判定必须越过 Tk 直查窗口样式,
+    这条路就是给它喂真凭据的。``after`` 传 -1(置顶)或 -2(取消置顶)。
+    """
+    if sys.platform != "win32":  # mypy 收窄: windll 只在 Windows, 调用点已挡
+        return
+    user32 = ctypes.windll.user32
+    user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.GetAncestor.restype = ctypes.c_void_p
+    user32.SetWindowPos.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint,
+    ]
+    user32.SetWindowPos.restype = ctypes.c_int
+    root = user32.GetAncestor(ctypes.c_void_p(app.winfo_id()), _GA_ROOT)
+    assert root, "拿不到主窗口的真实句柄"
+    user32.SetWindowPos(root, ctypes.c_void_p(after), 0, 0, 0, 0, _SWP_NOSIZE_NOMOVE)
+    _pump(app, 0.2)
+
+
+def test_a_long_dropdown_stops_at_the_cap_and_scrolls(app: Any) -> None:
+    """值很多时: 显示行数锁在上限、右侧给滚动条、整块不越出软件窗口.
+
+    改前 (原生 ``tk.Menu``): 30 个值会排成一列 30 行, 窗口矮的时候直接压到窗口外面。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    popup = _open(combo, app)
+    plan = popup.plan
+    assert plan is not None
+    assert plan.visible_rows == DROPDOWN_MAX_ROWS, "超过上限的部分应该交给滚动条"
+    assert plan.scrolls
+    assert popup.scrollbar is not None, "限高了就必须有滚动条, 否则看不到后面的值"
+    # **真的分到了位置**才算看得见: 2026-10-03 用户报"变成可滚动区域但看不到滚动条" ——
+    # 现场是滚动条挂错了父容器(与列表不同容器), 被列表的 expand 吃光后分到 0 高/0 宽。
+    bar = popup.scrollbar
+    assert isinstance(bar, ctk.CTkScrollbar), "要用 CTk 原生滚动条, 样式才对得上"
+    assert int(bar.winfo_height()) > 1, "滚动条分到的高度是 0(所以看不见)"
+    assert int(bar.winfo_width()) > 1, "滚动条分到的宽度是 0(所以看不见)"
+    assert bar.cget("button_color") != bar.cget("fg_color"), (
+        "滑块与底色同色 = 看不出滚动条"
+    )
+    window = popup.window
+    assert window is not None
+    # **附属窗口 + 不 topmost**: 用户 2026-10-03 反馈"点击别的软件, 别的窗口被盖住, 但浮窗
+    # 还是显示在最前方" —— topmost 是相对整个屏幕的, 浮层会盖在别的程序上面。改成宿主的
+    # 附属窗口(transient)之后, 别的程序被激活时浮层就随宿主一起沉下去。
+    #
+    # 这条断言**只在 Windows 上钉得住**: macOS 的无边框(override-redirect)窗口不管怎么写,
+    # ``-topmost`` 读出来都是 1(Tk 给这类窗口的平台默认值)。2026-10-03 与 10-04 两轮 CI 都
+    # 报在这一条上, 而"先 transient 再写掉"那个顺序已经在 HEAD 里了 —— 也就是说那个值在
+    # macOS 上关不掉, 那是 Tk 的实现细节, 不是我们能配的东西。所以 macOS 上钉的是**机制**
+    # (下面那句 transient 关系: 它会随宿主一起沉下去), Windows 上继续钉读数。
+    if sys.platform != "darwin":
+        assert not window.attributes("-topmost"), "浮层不该是 topmost(会盖住别的软件)"
+    assert str(window.transient()) == str(app), "浮层应当是宿主窗口的附属窗口"
+    app_top = int(app.winfo_rooty())
+    app_bottom = app_top + int(app.winfo_height())
+    top = int(window.winfo_rooty())
+    bottom = top + int(window.winfo_height())
+    assert top >= app_top - 1, "浮层跑到窗口上沿外面了"
+    assert bottom <= app_bottom + 1, "浮层跑到窗口下沿外面了"
+    height = int(window.winfo_height())
+    assert height <= plan.height + 4, "浮层比算出来的高度还高(限高没生效)"
+
+
+def test_the_popup_follows_a_force_pinned_main_window(app: Any) -> None:
+    """主窗口被强制置顶时, 浮层要跟着置顶 —— 否则被压在主窗口底下(2026-10-30 用户反馈).
+
+    Windows 的规则: 附属(owned)窗口在**自己**非置顶时, 永远排不进置顶宿主所在的层 ——
+    宿主一被置顶, ``wm stackorder`` 里浮层立刻翻到宿主之下(探针实测), 屏幕上就是"下拉框
+    不见了"。修法是浮层镜像宿主的置顶状态; 两条来源都钉: 应用内置顶(Tk 读得到)与外部
+    置顶(Tk 读不到, 只有 Win32 直查窗口样式认得出)。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    try:
+        # 来源一: 应用内把主窗口置顶(Tk 自己写的位, 读数立即生效)。
+        app.attributes("-topmost", True)
+        popup = _open(combo, app)
+        window = popup.window
+        assert window is not None
+        # 读数判据**只在 Windows 上钉得住**: X11 的 ``-topmost`` 对无边框(override-
+        # redirect)窗口是空操作(2026-10-31 Linux CI 实测: 写 True 读回仍是 0, 那
+        # 里连"置顶"这个 WM 概念都没有); macOS 则是无边框窗口**恒读 1**(见上面那条
+        # 长下拉用例的说明)。其它平台钉得住的用户可见事实是"浮层没被压到宿主之下"。
+        if sys.platform == "win32":
+            assert window.attributes("-topmost"), "宿主置顶了, 浮层没跟着置顶"
+        if sys.platform != "darwin":
+            order = _stack_order(app)
+            assert order.index(str(window)) > order.index(str(app)), (
+                "浮层被压在主窗口底下"
+            )
+        combo._dropdown_menu.close()
+        _pump(app)
+
+        if sys.platform == "win32":
+            # 来源二: 外部置顶(Tk 的读数不更新的那条路)。
+            _pin_window_from_outside(app, _HWND_TOPMOST)
+            try:
+                # 前置用**样式位**量, 不能读 Tk 的 -topmost: 那次读会让 Tk 拿缓存样式回写
+                # 操作系统, 把外部置上的位抹掉(2026-10-30 探针实测) —— 读一次就毁证。
+                assert _win32_style_has_topmost(app), "前置: 外部置顶没真的生效"
+                popup = _open(combo, app)
+                window = popup.window
+                assert window is not None
+                assert window.attributes("-topmost"), (
+                    "外部置顶没被认出来(不能只读 Tk 的缓存位)"
+                )
+                order = _stack_order(app)
+                assert order.index(str(window)) > order.index(str(app)), (
+                    "浮层被压在主窗口底下"
+                )
+                combo._dropdown_menu.close()
+                _pump(app)
+            finally:
+                _pin_window_from_outside(app, _HWND_NOTOPMOST)
+    finally:
+        app.attributes("-topmost", False)
+        dropdown_mod._close_active()
+        _pump(app)
+
+
+def _bottom_window() -> ctk.CTk:
+    """建一个自己的小窗口, 下拉框贴在**底部**(用来量"向上展开").
+
+    也走 :func:`gui_support.gui_app`: 它有"Tk 会话抖动"的重试与收尾登记, 自建
+    ``ctk.CTk()`` 撞上 ``init.tcl`` 那种抖动时只会直接报错。
+    """
+    window = ctk.CTk()
+    window.geometry("420x260")
+    combo = ctk.CTkComboBox(window, values=list(_MANY_VALUES))
+    combo.pack(side="bottom", padx=12, pady=(0, 8))
+    return window
+
+
+def _first_combo(window: Any) -> ctk.CTkComboBox:
+    """取窗口里唯一的那个下拉框(自建窗口只有一个)."""
+    for child in window.winfo_children():
+        if isinstance(child, ctk.CTkComboBox):
+            return child
+    raise AssertionError("窗口里没有下拉框")
+
+
+def test_a_dropdown_near_the_bottom_opens_upwards() -> None:
+    """位于软件下方的下拉框向上展开: 浮层的下沿落在控件上沿以上."""
+    app = gui_app(_bottom_window)
+    combo = _first_combo(app)
+    _pump(app)
+    popup = _open(combo, app)
+    plan = popup.plan
+    assert plan is not None
+    assert plan.flipped, "窗口下方放不下, 应该向上展开"
+    anchor_top = int(combo.winfo_rooty())
+    assert plan.top + plan.height <= anchor_top, "向上展开时不要盖住控件自己"
+    assert popup.scrollbar is not None
+
+
+def test_clicking_the_arrow_opens_the_dropdown(app: Any) -> None:
+    """点箭头真的能打开 —— 走**完整点击路径**.
+
+    出处(用户 2026-10-03): "下拉框点击完全无反应"。根因是打开浮层的那一次点击自己也会
+    冒泡到顶层窗口, 而浮层挂了"点窗口别处就收起" —— 当场挂绑定 = 刚开就被这次点击收起。
+    直接调 ``_open_dropdown_menu`` 量不到这条闭环(那一步没有点击事件), 所以这里按控件
+    自己的坐标点箭头, 让事件走一遍 canvas 的 tag 绑定与顶层窗口的绑定。
+
+    **起点必须显式摆正**: 共享池里的选择框会带着上一条用例留下的"下一次点击是收起"
+    (实测: 先让同一个选择框开着浮层, 再点箭头 —— 这一下会把浮层**收起**而不是打开, 断言就报
+     "点箭头没打开下拉"; 双片跑时正是这条报红, 单跑该模块 9 passed)。这条用例量的是"点箭头
+    能打开", 所以先把浮层关掉、把开关拨回"下一次点击是打开"。
+
+    坐标**量之前先确认那一格已经排好版**: ``winfo_width()`` 在控件还没落地时给出的是 1,
+    此时 ``width - 4`` 是个负数, 点下去什么都不会发生 —— 那会伪装成"点箭头没反应"。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    combo._dropdown_menu.close()
+    combo._close_on_next_click = False
+    canvas = combo._canvas
+    app.update_idletasks()
+    width = int(canvas.winfo_width())
+    assert width > 8, f"箭头那一格还没排好版, 量不出可点的地方(宽 {width})"
+    arrow_x = width - 4
+    arrow_y = int(canvas.winfo_height()) // 2
+    canvas.event_generate("<Button-1>", x=arrow_x, y=arrow_y)
+    _pump(app)
+    popup = active_dropdown()
+    assert popup is not None, "点箭头没打开下拉"
+    assert popup.plan is not None
+    combo._dropdown_menu.close()
+    _pump(app)
+
+
+def test_picking_a_row_writes_the_value_and_closes(app: Any) -> None:
+    """点一行 = 写进下拉框 + 触发 CTk 自己的回调 + 收起浮层."""
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    seen: list[str] = []
+    combo.configure(command=seen.append)
+    popup = _open(combo, app)
+    listbox = popup.listbox
+    assert listbox is not None
+    target = 2
+    box = listbox.bbox(target)
+    assert box, "第 3 行没被排出来"
+    # 点的是 Listbox 自己给出的行位置(量了再点): 行高由控件决定, 用例不去猜。
+    listbox.event_generate("<ButtonRelease-1>", y=int(box[1]) + 1)
+    _pump(app)
+    assert combo.get() == _MANY_VALUES[target]
+    assert seen == [_MANY_VALUES[target]], "选中值没有走到业务回调"
+    assert active_dropdown() is None, "选完应该收起浮层"
+
+
+def test_hiding_the_window_closes_the_dropdown(app: Any) -> None:
+    """宿主窗口最小化/隐藏时收起浮层.
+
+    出处(用户 2026-10-03): "不手动点击软件页面其他处将其关闭的情况下将软件最小化时这个浮窗
+    还会显示在原位置"。浮层是**独立**窗口, 不会跟着宿主一起消失, 所以盯宿主的 Unmap。
+
+    用例用 ``withdraw()`` 而不是 ``iconify()``: 两者的效果都是"宿主被 Unmap", 而无窗口
+    管理器的环境里 ``iconify`` 未必真的发出事件 —— 判据要能在这里站稳(Windows 上最小化
+    就是 Unmap, 见 ``_attach_outside`` 的说明)。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    popup = _open(combo, app)
+    window = popup.window
+    assert window is not None
+    app.withdraw()
+    _pump(app)
+    assert active_dropdown() is None, "宿主窗口隐藏了, 浮层还开着"
+    assert not window.winfo_exists(), "浮层窗口没销毁"
+    app.deiconify()
+    _pump(app)
+
+
+def test_moving_the_window_keeps_the_dropdown_glued_to_the_box(app: Any) -> None:
+    """宿主窗口挪动/改尺寸时浮层跟着控件走(别停在旧位置上盖着旁边的程序).
+
+    出处(用户 2026-10-03 的截图): 浮层停在打开时的屏幕坐标上, 窗口挪走之后它反而跑到窗口
+    外面、盖在别的程序上。判据是**位置**: 重排一轮之后浮层的左边缘仍与下拉框对齐。
+
+    这里不"收起"是刻意的: 布局期间宿主自己也会发 ``<Configure>``, 一收就会被误踢(实测
+    四条用例因此变成"下拉没打开")。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    popup = _open(combo, app)
+    window = popup.window
+    assert window is not None
+    app.geometry("1120x760")
+    _pump(app)
+    # 再**显式**发一次 <Configure>: CI 的桌面装不下 1120x760(macOS runner 只有 1024 宽),
+    # 窗口会被窗口管理器夹回原尺寸 ⇒ 尺寸没变就不会有 <Configure> ⇒ 重定位那条路径在那种
+    # 机器上压根不执行(2026-10-10 覆盖率报告: `_follow_anchor` 只在 macOS 上没被覆盖到)。
+    app.event_generate("<Configure>")
+    _pump(app)
+    assert active_dropdown() is popup, "窗口尺寸变化不该把浮层踢掉"
+    assert int(window.winfo_rootx()) == int(combo.winfo_rootx()), (
+        f"浮层没跟着控件走: 浮层 x={window.winfo_rootx()}, 控件 x={combo.winfo_rootx()}"
+    )
+    combo._dropdown_menu.close()
+    _pump(app)
+
+
+def test_clicking_elsewhere_closes_the_dropdown(app: Any) -> None:
+    """点窗口里别处就收起(与原生菜单一致), 且浮层随控件销毁一起走."""
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    popup = _open(combo, app)
+    window = popup.window
+    assert window is not None
+    app.event_generate("<Button-1>", x=4, y=4)
+    _pump(app)
+    assert active_dropdown() is None, "点别处没收起浮层"
+    assert not window.winfo_exists(), "浮层窗口没销毁"
+
+
+def test_a_plain_combobox_is_read_only(app: Any) -> None:
+    """库级默认口径: 没写 ``state`` 的选择框自己就是只读的 —— 调用点不需要记得做什么.
+
+    出处(用户 2026-10-13): "软件中所有的多选窗口其内容均可选择并删除, 这点非常容易造成
+    误会"。口径落在 :func:`archive_management.ui.widgets.apply_picker_defaults` 一处, 所以这里
+    直接建一个**裸控件**: 它必须已经只读(程序改写会被 Tk 静默忽略, 手删也留不下痕迹)。
+    明确写了 ``state="normal"`` 的例外(定时任务窗口的"输入即筛选")与 ``disabled`` 不受影响。
+
+    "默认值写在哪"也要能守住: 如果哪天有人把补丁改回"靠调用点自己写 readonly", 这条会红。
+    """
+    plain = ctk.CTkComboBox(app, values=["甲", "乙"])
+    typed = ctk.CTkComboBox(app, values=["甲", "乙"], state="normal")
+    locked = ctk.CTkComboBox(app, values=["甲", "乙"], state="disabled")
+    try:
+        assert str(plain._entry.cget("state")) == "readonly"
+        assert str(typed._entry.cget("state")) == "normal", "例外不能被一起改掉"
+        assert str(locked._entry.cget("state")) == "disabled"
+        # 建出来就显示列表第一项(实测), 而只读之后程序改写会被 Tk 静默忽略。
+        assert plain.get() == "甲"
+        plain._entry.insert(0, "丙")
+        assert plain.get() == "甲", "只读的选择框还能被程序改写"
+    finally:
+        for widget in (plain, typed, locked):
+            widget.destroy()
+
+
+def test_dragging_on_a_picker_selects_nothing_and_opens_the_list(app: Any) -> None:
+    """选择框里的文字**选不中**: 拖一下只会打开列表(用户 2026-10-13 追加的要求).
+
+    出处: "多选框的内容能否让其也不可选中"。``readonly`` 只挡住改写 —— 拖选、双击选词
+    Tk 照做, 屏幕上出现蓝底高亮, 看着就是"这里能改"。修法是在 ``<Button-1>`` 上把点击接到
+    "打开列表"(与点箭头同一条路)并 ``return "break"`` 吃掉它。
+
+    这里喂的是**拖选**(按下 → 拖动 → 松开): 没有那条接线时 ``selection_present()`` 会是 1
+    (改前实测), 接上之后必须还是 0, 而列表必须已经打开。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    entry = combo._entry
+    # 共享池里的选择框可能带着上一次用例留下的"下一次点击是收起"(浮层被拆掉时它的回调没跑,
+    # 实测 ``_close_on_next_click`` 还停在 True): 这条用例要量的是"点文字 = 打开列表",
+    # 所以先把开关拨回"关着"。
+    combo._dropdown_menu.close()
+    combo._close_on_next_click = False
+    end_x = max(4, int(entry.winfo_width()) - 2)
+    entry.event_generate("<Button-1>", x=3, y=3)
+    entry.event_generate("<B1-Motion>", x=end_x, y=3)
+    entry.event_generate("<ButtonRelease-1>", x=end_x, y=3)
+    _pump(app)
+
+    assert entry.selection_present() == 0, "选择框的文字被拖选出来了(看着像能改)"
+    popup = active_dropdown()
+    assert popup is not None, "点在文字上应该像点箭头一样打开列表"
+    combo._dropdown_menu.close()
+    _pump(app)

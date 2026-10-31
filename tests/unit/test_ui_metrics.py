@@ -1,0 +1,261 @@
+"""界面度量刻度的静态守卫: 页面不许再写刻度外的魔数.
+
+判据只有三条(读源码的 ast, 不启动界面):
+
+1. ``corner_radius`` 的值必须是 :data:`archive_management.ui.metrics.RADIUS_SCALE` 里的档位;
+2. ``CTkFont(size=...)`` 的值必须是 :data:`archive_management.ui.typography.FONT_SCALE` 里的档位;
+3. ``padx`` / ``pady`` 里的每个整数都必须是 :data:`metrics.SPACE_SCALE` 里的刻度.
+
+一个**具名常量**是允许的出口: 像"勾选行下面那行提示与复选框文字对齐"这种量出来的缩进
+(24 + 22 的方框宽)没法落在刻度上, 写成带注释的模块级常量即可被 grep 到、有理由可查。
+守卫拦的是"伸手就写的数字"。
+
+三条判据各自还有一条**兜底断言**: 扫到的站点数必须与登记的数字一致 —— 否则"0 处违规"
+可能只是扫描本身跑空了(刻度模块改名、glob 写错、kwarg 改名都会让守卫安静地失效)。
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+from archive_management.ui.metrics import RADIUS_NAMES, RADIUS_SCALE, SPACE_SCALE
+from archive_management.ui.typography import FONT_SCALE
+
+pytestmark = [
+    pytest.mark.ui,
+    pytest.mark.minor,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("视觉一致性"),
+    pytest.mark.story("度量刻度"),
+    pytest.mark.layer("unit"),
+]
+
+_UI_DIR = Path(__file__).resolve().parents[2] / "src" / "archive_management" / "ui"
+# 刻度自己的定义处: 这两个模块里的数字就是刻度本身, 不参与判据。
+_SCALE_MODULES = {"metrics.py", "typography.py"}
+_SPACE_KEYS = {"padx", "pady"}
+# 登记: 本轮(2026-09-27) 扫到的站点数, 用来证明判据不是在空转。
+# 圆角从 66 变 65 是第二轮把管理窗口那一处字面量改成了 ``RADIUS_MD`` 常量。
+# 模块数从 19 变 21 是新增的 ``contrast.py``(对比度算法)与 ``keyboard.py``
+# (键盘可用性): 两者都是纯逻辑, 不含间距/圆角/字号字面量, 所以三个站点数不变。
+# 模块数从 21 变 23 是新增的 ``tree_layout.py``(布局纯函数)与 ``tree_view.py``
+# (分支图画布): 两者同样一个间距/圆角/字号**字面量**都没有 —— 图的尺寸是
+# ``tree_layout`` 里那组具名常量(框宽/行高/间距), 字号走 ``typography.font``。
+# 模块数从 23 变 24 是 2026-10-02 新增的 ``dropdown.py``(下拉浮层: 限高 + 滚动条 +
+# 按位置决定上下): 里面的间距/宽度全是 ``DROPDOWN_*`` 具名常量(设计值, 用的时候才过
+# 缩放换算), 所以三个站点数一个都没变。
+# 模块数从 24 变 25 是 2026-10-11 新增的 ``window_icon.py``(窗口/任务栏图标: 换掉
+# CustomTkinter 那条"每个窗口建好 200ms 后贴它自己那颗图标"的私有方法): 它只碰 Tk 的
+# 图标 API(``iconbitmap`` / ``iconphoto``), 一个间距/圆角/字号字面量都没有, 所以三个
+# 站点数一个都没变。
+_EXPECTED_FILES = 26
+# 界面模块 25 → 26: 新增 topmost.py(强制置顶判定, 无控件创建, 站点数不变)
+# 圆角站点 66 → 67: 设置窗口新增的“备份校验方式”面板自带一个 ``corner_radius=10``
+# (与同窗口其他面板一致)。
+# 圆角站点 67 → 66: 批量导入卡片移除“合并到”目标下拉框(它自带一个 ``corner_radius``) ——
+# 同名那一款改由后端按原始名称自动确定(2026-10-20)。
+_EXPECTED_RADIUS_SITES = 66
+# 字号站点 169 → 168: 同上一处 —— 被删掉的那行提示自己也带一个 `CTkFont(size=11)`。
+# 字号站点 168 → 170: 设置窗口的外观面板新增"记住窗口大小与位置"开关与它下面那行说明
+# (2026-10-02), 各自带一个 `CTkFont(size=..)`。
+# 字号站点 174 → 173: 详情页只留左上角那一处游戏名(2026-10-03),
+# 概要卡那个 `_hero_name_font = CTkFont(size=20, ...)` 跟着删除。
+# 字号站点 173 → 178: 设置窗口新增"备份校验方式"面板(2026-10-04) —— 标题、说明、下拉框
+# (含下拉菜单字体)、状态说明, 加上面板标题本身的粗体, 共 5 处 `CTkFont(size=..)`。
+# 字号站点 174 → 176: 详情页新增两枚 CTkSwitch(页头"启用游戏"开关的粗体、任务卡
+# "定时备份"开关), 各带一个 `CTkFont(size=12)`(2026-10-20)。
+# 字号站点 176 → 174: 那两枚 CTkSwitch 换成"状态词 + 按钮"(2026-10-21) —— 开关自己的
+# `CTkFont(size=12)` 跟着没了; 换上的 `kit.label(size=12)` 与 `kit.button(...)` 不在调用方
+# 建字体(字体在 widgets 里统一定)。
+# 字号站点 174 → 168: 设置窗口移除六个面板的成段说明(2026-10-30, 文案归 docs/ui-notes.md)
+# —— 每条说明自带一个 `CTkFont(size=12)`; “记住窗口”开关下那行原位改成错误行,
+# 它的 `CTkFont(size=11)` 保留。
+# 字号站点 168 → 167: 外观面板的“当前主题”说明行收掉(2026-10-30) —— 按钮文案自己
+# 表达目标主题, 那行的 `CTkFont(size=11)` 跟着删。
+_EXPECTED_FONT_SITES = 167
+# 字号站点 178 → 174: 导入对话框移除“合并到”目标选择区(2026-10-20) —— 单包的目标
+# 小标题与锁定/解锁两行提示、批量卡片的目标下拉框字体, 共 4 处 `CTkFont(size=..)`
+# 跟着删除; 同名那一款改由后端按原始名称自动确定。
+# 间距站点 775 → 778: 给主窗口的左侧主体加了一个同格叠放的图画布容器,
+# 它的 ``grid(padx=8, pady=(0, 8))`` 与滚动容器那一处对齐(3 个整数都在刻度上)。
+# 间距站点 778 → 775: 编辑备份信息对话框删掉了"描述会显示在备份卡片上"那行提示
+# (分支图里没有卡片, 这句在默认视图里就是错的), 它自己那``padx=24``/``pady=(0, 12)``
+# 也随之消失; 描述框下面那条计数标签的 ``pady`` 从 ``(0, 10)`` 改成 ``(0, 20)``
+# 补上被删掉的那段留白, 整数个数不变。
+# 间距站点 775 → 774: ``_dialog_hint`` 的 ``padx=24`` 换成了具名常量 ``_DIALOG_HINT_PAD``
+# —— 对话框说明条的宽度改成跟着对话框实际给的宽度走, 左右内衬只留一个出处(见
+# ``widgets.track_wraplength``)。那个整数挪进了模块级常量, 不再算一个"站点", 正是本文件
+# 开头说的那个出口。
+# 间距站点 774 → 778: 设置窗口的外观面板新增"记住窗口大小与位置"开关与它下面那行说明
+# (2026-10-02 用户要求): 开关一次 ``padx``、说明一次 ``padx`` 与一次 ``pady=(2, 16)``,
+# 四个整数都在刻度上。
+# 间距站点 778 → 772: 海报卡片的三处 ``pady`` 提成了 ``_POSTER_COVER_PAD_Y`` /
+# ``_POSTER_META_PAD_Y`` / ``_POSTER_ACTIVITY_PAD_Y``(2026-10-02: 卡片高度改成按内容算,
+# 间距是算式的一部分, 不许在 grid 与算式两处各写一遍), 6 个整数挪进模块级常量, 不再算
+# "站点" —— 与本文件开头说的那个出口是同一条规矩。
+# 间距站点 772 → 774: 探测结果页新增"清空结果"按钮(2026-10-03), 它自己在动作行里占一格
+# (``grid(padx=(6, 0))``, 两个整数都在刻度上)。
+# 间距站点 774 → 798: 游戏设置窗口新增"自定义封面/图标"一节(2026-10-03)
+# —— 一节标题 + 每款图两种输入(名称/预览/状态 + 选择/恢复两颗按钮)的 ``padx``/``pady``,
+# 以及窗口改成"滚动正文 + 固定页脚"后新增的那几处留白。24 个整数都在刻度上。
+# 间距站点 798 → 797: 海报名称那一行的上间距挪到了封面的下边距(2026-10-04, 名称行改成
+# 钉 ``grid`` 行高)。那个方案在 X11 上量不出行高, 最终改成
+# "名称一律两行真文本", 于是名称自己的上间距回来了 —— 797 → 798。
+# 间距站点 798 → 796: 详情页只留左上角那一处游戏名(2026-10-03), 概要卡里
+# 那个 ``pady=(2, 0)`` 跟着去掉(它算两个站点: 元组里两个整数)。
+# 间距站点 796 → 807: 设置窗口新增“备份校验方式”面板(2026-10-04, 校验方式可选) ——
+# 面板自身的 ``pady=(10, 0)``、标题的 ``padx``/``pady=(16, 2)``、说明与状态说明各一个
+# ``padx``(状态说明还有 ``pady=(0, 16)``)、下拉框的 ``padx`` 与 ``pady``, 11 个整数都在刻度上。
+# 间距站点 807 → 795: 单包与批量导入对话框移除“合并到”目标选择区(单包的目标单选组、
+# 批量卡片的目标下拉框与它的标签/提示行) —— 同名那一款改由后端按原始名称自动确定,
+# 用户不再挑目标, 少掉的 12 个间距整数都在刻度上(2026-10-20)。
+# 间距站点 795 → 798: 详情页新增两枚 CTkSwitch(页头“启用游戏”开关 ``padx=(10, 0)``、
+# 任务卡“定时备份”开关 ``padx=16`` 与 ``pady=(6, 0)``, 共 5 个整数), 同时管理窗口
+# 移除“停用/启用”按钮(它的 ``pack padx=(0, 6)`` 少 2 个) —— 净增 3, 都在刻度上(2026-10-20)。
+# 间距站点 798 → 801: 两枚开关换成"状态词 + 按钮"(2026-10-21) —— 任务卡那行开关的
+# ``padx=16``/``pady=(6, 0)`` 没了(3 个), 页头换上状态词与按钮的 ``padx=(8, 6)``、
+# ``padx=(0, 6)`` 与任务卡按钮的 ``padx=(8, 16)``(6 个) —— 净增 3, 都在刻度上。
+# 间距站点 801 → 802: ``_card_heading`` 去掉两个已经没人传的参数(2026-10-21 同一次清理:
+# "目标游戏"选择区拿掉后 ``pack``/``first`` 再没人传) —— 原来那句
+# ``pady=(0 if first else 6, 0)`` 里的三元表达式**不算字面量**(只数到后面那个 0), 换成
+# 固定的 ``pady=(6, 0)`` 之后是两个整数, 于是多算 1 个站点。
+# 间距站点 802 → 798: 任务卡不再重复概要区的"下次运行"(2026-10-22) —— 那两行
+# (说明 ``padx=16`` 与值的 ``padx=16``/``pady=(2, 0)``)一起删掉, 4 个整数都在刻度上。
+# 间距站点 798 → 792: 设置窗口移除六个面板的成段说明(2026-10-30, 文案归
+# docs/ui-notes.md) —— 每条说明那句 grid 的 ``padx=16`` 跟着删; “记住窗口”开关下那行
+# 原位改成错误行, 它的 ``padx``/``pady`` 原样保留(站点数不变)。
+# 间距站点 792 → 799: 设置窗口精简空白 —— 五个右侧控件的 ``pady=16`` 收成 ``(6, 6)``
+# (每个 +1), “记住窗口”开关行补上自己的 ``pady=(0, 16)`` 撑住面板下边距(+2)。
+# 间距站点 799 → 796: 五条“当前状态”说明行收掉(2026-10-30) —— “当前主题”整行删除
+# (``padx=16`` + ``pady=(0, 6)`` 共 3 处); 语言/调试/启停那三行原位改成平时收起的
+# 错误行, ``padx``/``pady`` 站点数不变。
+_EXPECTED_SPACE_SITES = 796
+
+
+def _integers(node: ast.expr) -> list[int]:
+    """取出表达式里的整数字面量(含元组与一元负号)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return [node.value]
+    if isinstance(node, ast.Tuple):
+        found: list[int] = []
+        for element in node.elts:
+            found.extend(_integers(element))
+        return found
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return [-value for value in _integers(node.operand)]
+    return []
+
+
+def _ui_sources() -> list[Path]:
+    return sorted(
+        path for path in _UI_DIR.glob("*.py") if path.name not in _SCALE_MODULES
+    )
+
+
+def _space_offenders(path: Path, node: ast.Call) -> tuple[list[str], int]:
+    """这一次调用里的间距字面量: 越界的写清楚是谁, 顺便报站点数."""
+    found: list[str] = []
+    count = 0
+    for keyword in node.keywords:
+        if keyword.arg not in _SPACE_KEYS:
+            continue
+        values = _integers(keyword.value)
+        count += len(values)
+        found.extend(
+            f"{path.name}:{node.lineno} {keyword.arg}={value}"
+            for value in values
+            if value not in SPACE_SCALE
+        )
+    return found, count
+
+
+def _radius_offenders(path: Path, node: ast.Call) -> tuple[list[str], int]:
+    """这一次调用里的圆角字面量: 不在档位上的点名, 并给出该写哪个常量."""
+    found: list[str] = []
+    count = 0
+    for keyword in node.keywords:
+        if keyword.arg != "corner_radius":
+            continue
+        values = _integers(keyword.value)
+        count += len(values)
+        found.extend(
+            f"{path.name}:{node.lineno} corner_radius={value}"
+            f" (该写 {RADIUS_NAMES.get(value, 'RADIUS_*')})"
+            for value in values
+            if value not in RADIUS_SCALE
+        )
+    return found, count
+
+
+def _font_offenders(path: Path, node: ast.Call) -> tuple[list[str], int]:
+    """这一次调用里的字号字面量(只认 ``CTkFont(size=...)``)."""
+    if not ast.unparse(node.func).endswith("CTkFont"):
+        return [], 0
+    found: list[str] = []
+    count = 0
+    for keyword in node.keywords:
+        if keyword.arg != "size":
+            continue
+        values = _integers(keyword.value)
+        count += len(values)
+        found.extend(
+            f"{path.name}:{node.lineno} size={value}"
+            for value in values
+            if value not in FONT_SCALE
+        )
+    return found, count
+
+
+def _scan() -> tuple[list[str], list[str], list[str], int, int, int]:
+    """扫一遍界面源码, 返回 (间距违规, 圆角违规, 字号违规, 三个站点数)."""
+    offenders: tuple[list[str], list[str], list[str]] = ([], [], [])
+    sites = [0, 0, 0]
+    scans = (_space_offenders, _radius_offenders, _font_offenders)
+    for path in _ui_sources():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            for index, scan in enumerate(scans):
+                found, count = scan(path, node)
+                sites[index] += count
+                offenders[index].extend(found)
+    return offenders[0], offenders[1], offenders[2], sites[0], sites[1], sites[2]
+
+
+def test_scan_reaches_every_page() -> None:
+    """兜底: 扫描要真的扫到每个界面模块, 数字也要与登记的一致."""
+    files = _ui_sources()
+    _, _, _, space_sites, radius_sites, font_sites = _scan()
+    assert len(files) == _EXPECTED_FILES, [path.name for path in files]
+    assert space_sites == _EXPECTED_SPACE_SITES, "间距站点的数量变了, 判据跟着改"
+    assert radius_sites == _EXPECTED_RADIUS_SITES, "圆角站点的数量变了, 判据跟着改"
+    assert font_sites == _EXPECTED_FONT_SITES, "字号站点的数量变了, 判据跟着改"
+
+
+def test_spacing_values_are_on_the_scale() -> None:
+    """``padx`` / ``pady`` 只许用刻度上的值(0/2/4/6/8/10/12/16/20/24)."""
+    space_bad, _, _, _, _, _ = _scan()
+    assert space_bad == [], "这些间距没落在刻度上: " + ", ".join(space_bad)
+
+
+def test_corner_radius_is_one_of_the_tiers() -> None:
+    """``corner_radius`` 只许用四档圆角, 而且要在报错里说清该写哪一个."""
+    _, radius_bad, _, _, _, _ = _scan()
+    assert radius_bad == [], "这些圆角不在档位上: " + ", ".join(radius_bad)
+
+
+def test_font_sizes_are_on_the_ladder() -> None:
+    """字号只许用阶梯上的档位(见 ``typography.FONT_*``)."""
+    _, _, font_bad, _, _, _ = _scan()
+    assert font_bad == [], "这些字号不在阶梯上: " + ", ".join(font_bad)
+
+
+def test_scale_values_are_what_the_docs_claim() -> None:
+    """刻度本身也不许悄悄变长: 加一档等于把"少量刻度"变成"什么数都行"."""
+    assert SPACE_SCALE == (0, 2, 4, 6, 8, 10, 12, 16, 20, 24)
+    assert RADIUS_SCALE == (0, 4, 6, 8, 10)
+    assert FONT_SCALE == (10, 11, 12, 13, 15, 16, 20, 26, 28)
+    assert RADIUS_NAMES[RADIUS_SCALE[3]] == "RADIUS_MD"

@@ -1,3 +1,5 @@
+.vscode
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -31,6 +33,7 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!packaging/archive-management.spec
 
 # Installer logs
 pip-log.txt
@@ -42,14 +45,45 @@ htmlcov/
 .nox/
 .coverage
 .coverage.*
+.coverage-platform.rc
 .cache
 nosetests.xml
 coverage.xml
+coverage-report.json
 *.cover
 *.py.cover
 .hypothesis/
 .pytest_cache/
 cover/
+
+# Allure 报告与性能/安全结果(由 CI 生成并作为 artifact 上传)
+allure-results*/
+allure-report*/
+# 分片跑测试时的产物(每片一份结果目录与覆盖率数据, 见 docs/testing-ci.md)
+coverage-data-*/
+.allure/
+# 运行总账、覆盖率豁免清单与失败现场(CI 生成, 由 allurerc.mjs 的 globalAttachments 收进报告「全局附件」)
+allure-run-ledger.md
+allure-coverage-exclusions.md
+allure-failure-diagnostics.md
+allure-history-repair.md
+performance-results.json
+performance-results.csv
+security-results.json
+
+# 视觉回归的中间产物与候选基线(见 scripts/create_allure_visual.py):
+#   visual-work/                    本轮截图的临时落点(含演示数据应用的 root)
+#   visual-baselines-candidates/    本轮真实画面, 供下载后提交到 tests/visual-baselines/
+# **基线本身不在这里**: 它在 tests/visual-baselines/(入库), 否则 PR 里看不到界面改动。
+visual-work/
+visual-baselines-candidates/
+
+# 应用图标: **位图要入库**(app.svg 是唯一真相, app.ico / app-*.png / app-icon.stamp 是它的
+# 产物; 界面与打包直接读位图, CI 只用指纹核对 —— 见 docs/development.md 的「应用图标」)。
+# 这里只忽略探针的落点: `uv run python scripts/build_icon.py --force --out-dir icon-probe-out`
+# 会往这里写一份"不改仓库"的渲染结果, 供人眼与逐字节比对(2026-10-15 起图标只在本地更新: 那个
+# 只做 `workflow_dispatch` 的 `Icon probe` 工作流与发布作业里那条信息探针都删了)。
+icon-probe-out/
 
 # Translations
 *.mo
@@ -151,6 +185,8 @@ activemq-data/
 .env
 .envrc
 .venv
+# 视觉回归步骤使用的**第二份环境**
+.venv-visual
 env/
 venv/
 ENV/
@@ -216,3 +252,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local dev data created by demo GUI/CLI
+/dev-data/
+
+# allure
+/allure-report/
+/allure-results/
+# 失败现场 dump(coredumpy, 只在用例失败时生成; 见 tests/crash_capture.py)
+crash-dumps/
+# coredumpy 插件自己的默认目录(--enable-coredumpy 不带 --coredumpy-dir 时)
+coredumpy/

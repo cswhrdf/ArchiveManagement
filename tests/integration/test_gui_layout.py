@@ -1,0 +1,1517 @@
+"""界面布局回归测试(边框可见性 + 分区边距一致性).
+
+CustomTkinter 把 ``border_width`` 画在控件自身的 canvas 上, 而 grid/pack 的子
+控件也从控件最外一圈开始排布, 因此**贴边的子控件(尤其是列表最后一行文字)会用
+填充色盖住这条 1px 线**——表现出来就是右边框/下边框"消失"。本模块遍历真实窗口
+的控件树, 断言没有任何有边框的容器被贴边子控件盖住下边或右边。同时校验"游戏
+发现"与"游戏库"的内容内缩一致(两个分区的卡片边距不能有明显差异)。无图形环境
+自动跳过。
+
+两条测量约定(都是为了避开跨平台的假象, 别改回去):
+
+1. **测量前先等几何稳定**(``_settle_layout``): 窗口刚创建或刚切页面时, 父容器
+   尺寸已经变了、子控件还停在旧位置, 直接量会得到"子控件比父容器还宽"的假越界;
+2. **用屏幕绝对坐标比较**(``winfo_rootx/rooty``): "子控件 x/y 对父容器宽高"隐含
+   假设两者在同一坐标系里, 不同缩放/延迟下这个假设不成立(macOS 上尤其明显)。
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Iterator
+from dataclasses import replace
+from math import ceil
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from gui_support import build_with_retry, gui_app
+
+try:
+    import tkinter  # noqa: F401 - 校验 tkinter 可导入
+
+    import customtkinter as ctk
+except Exception as exc:  # pragma: no cover - 取决于运行环境
+    pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
+
+from archive_management.domain import HomeFilter, HomeLayout
+from archive_management.services.hotkeys import (
+    GlobalHotkeyService,
+    UnavailableBackend,
+)
+from archive_management.ui.demo_backend import DemoArchiveService
+from archive_management.ui.home_page import (
+    _COLUMNS,
+    _NAME_FALLBACK_WIDTH,
+    _POSTER_HEIGHT,
+    _POSTER_NAME_LINES,
+    _POSTER_TEXT_WIDTH,
+    _POSTER_WIDTH,
+    _REFIT_MAX_ATTEMPTS,
+)
+from archive_management.ui.main_window import (
+    _HEADER_NAME_LINES,
+    WINDOW_MIN_SIZE,
+    ArchiveApp,
+)
+from archive_management.ui.models import (
+    DiscoveryPage,
+    GameDetail,
+    GameSummary,
+    HomeBoard,
+    HomeSection,
+    poster_columns,
+)
+from archive_management.ui.textfit import fit_text
+from archive_management.ui.widgets import fit_label, measured_font, scaled_px
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.ui,
+    pytest.mark.minor,
+    pytest.mark.epic("界面框架"),
+    pytest.mark.feature("端到端界面流程"),
+    pytest.mark.story("控件边距与边框"),
+    pytest.mark.layer("e2e"),
+]
+
+_WINDOW_SIZE = "1360x820"
+
+#: "固定列块贴右"允许的缝隙上限: 最后一个单元格右边界与行右边界之差(内边距/省略号的量级)。
+_ROW_RIGHT_SLACK = 20
+
+#: 名称裁剪的两档**显式宽度**(逻辑像素, 与窗口无关): 窄档证实能裁、宽档证实能多显示。
+_NAME_WIDTHS = (180, 640)
+
+
+def _pump(app: ctk.CTk) -> None:
+    """把待处理事件跑完, 保证布局与绘制都已生效."""
+    for _ in range(6):
+        app.update_idletasks()
+        app.update()
+
+
+def _settle_layout(root: Any, *, timeout: float = 3.0) -> None:
+    """等到控件树的几何不再变化再量尺寸.
+
+    macOS 的窗口管理与 CustomTkinter 的延迟重绘会让"刚创建窗口/刚切换页面"时读到
+    上一轮的几何值(父容器尺寸已经变了、子控件还停在旧位置), 这时算出来的"贴边/越界"
+    是假的。做法是反复跑事件循环, 直到连续两次拓扑快照完全一致(并至少等一小段
+    时间, 避开刚映射时的瞬时一致)。
+    """
+    deadline = time.monotonic() + timeout
+    minimum = time.monotonic() + 0.15
+    previous: tuple[int, ...] | None = None
+    while time.monotonic() < deadline:
+        root.update_idletasks()
+        root.update()
+        current = tuple(
+            value
+            for widget in _walk(root)
+            if widget.winfo_ismapped()
+            for value in (
+                widget.winfo_rootx(),
+                widget.winfo_rooty(),
+                widget.winfo_width(),
+                widget.winfo_height(),
+            )
+        )
+        if current == previous and time.monotonic() >= minimum:
+            return
+        previous = current
+        time.sleep(0.02)
+
+
+def _new_app() -> ArchiveApp:
+    """用演示后端构造主窗口(界面元素最全)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = ArchiveApp(
+        DemoArchiveService(delay=0),
+        title="边框测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+def _wait_mapped(widget: Any, timeout: float = 2.0) -> bool:
+    """等到控件真正显示(顶层窗口由 CustomTkinter 延迟显示)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        widget.update_idletasks()
+        widget.update()
+        if widget.winfo_ismapped():
+            return True
+        time.sleep(0.01)
+    return bool(widget.winfo_ismapped())
+
+
+def _walk(widget: Any) -> Iterator[Any]:
+    """深度优先遍历控件树."""
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk(child)
+
+
+def _bordered_frames(root: Any) -> Iterator[ctk.CTkFrame]:
+    """遍历有边框且已显示的框架(滚动容器内部铺满 canvas, 不在检查范围内)."""
+    for widget in _walk(root):
+        if not isinstance(widget, ctk.CTkFrame):
+            continue
+        if isinstance(widget, ctk.CTkScrollableFrame):
+            continue
+        if not widget.winfo_ismapped():
+            continue
+        try:
+            border_width = int(widget.cget("border_width"))
+        except (ValueError, TypeError):  # pragma: no cover - 非数值边框
+            continue
+        if border_width > 0:
+            yield widget
+
+
+def _covering_children(frame: ctk.CTkFrame) -> list[str]:
+    """返回盖住框架下边/右边的子控件描述(空列表表示边框可见).
+
+    比较用**屏幕绝对坐标**(``winfo_rootx/rooty``), 不用"子控件 x/y 对父容器宽高":
+    后者假设父子上报值在同一坐标系里, 而不同缩放/延迟下两者可能不同源(macOS 上
+    尤其明显), 会量出"子控件比父容器还宽"这种假象。绝对坐标把两边放进同一坐标系。
+    """
+    right_edge = frame.winfo_rootx() + frame.winfo_width()
+    bottom_edge = frame.winfo_rooty() + frame.winfo_height()
+    covering: list[str] = []
+    for child in frame.winfo_children():
+        if not child.winfo_ismapped():
+            continue
+        child_bottom = child.winfo_rooty() + child.winfo_height()
+        child_right = child.winfo_rootx() + child.winfo_width()
+        edges: list[str] = []
+        # "超出 0px" = 子控件边缘正好落在描边上(原来的缺陷形态); 大于 0 则是越界.
+        if child_bottom >= bottom_edge:
+            edges.append(f"下边超出 {child_bottom - bottom_edge}px")
+        if child_right >= right_edge:
+            edges.append(f"右边超出 {child_right - right_edge}px")
+        if edges:
+            covering.append(
+                f"{'/'.join(edges)}: {child} "
+                f"{child.winfo_width()}x{child.winfo_height()} "
+                f"req={child.winfo_reqwidth()}x{child.winfo_reqheight()}"
+            )
+    return covering
+
+
+def _offenders(root: Any) -> list[str]:
+    """收集所有"边框被贴边子控件盖住"的框架描述(断言前先等布局稳定).
+
+    窗口被环境挤到比容器自己所需宽度还窄时(例如 macOS CI 的虚拟屏比设计宽度窄),
+    容器里的控件必然越界——那是"放不下", 不是布局缺陷; 这类容器由
+    ``test_home_widgets_fit_the_supported_minimum_window`` 从"最小宽度"上把关,
+    这里不再重复报。
+    """
+    _settle_layout(root)
+    found: list[str] = []
+    for frame in _bordered_frames(root):
+        if frame.winfo_width() < frame.winfo_reqwidth():
+            continue  # 环境过窄: 容器自己都放不下, 越界不说明布局有问题
+        covering = _covering_children(frame)
+        if covering:
+            found.append(
+                f"{frame} {frame.winfo_width()}x{frame.winfo_height()} "
+                f"req={frame.winfo_reqwidth()}: " + "; ".join(covering)
+            )
+    return found
+
+
+def _supported_content_width(app: ArchiveApp, current_width: int) -> int:
+    """按"支持的最小窗口"折算内容可用宽度(最小窗口宽 - 侧栏与页边距).
+
+    不能直接用当前内容宽度: macOS/小屏上的窗口管理器会把窗口压到比设计尺寸更窄,
+    那时"当前宽度"也跟着变小, 拿它当预算就永远看不出"控件堆得太宽"。侧栏与页边距
+    是固定的, 所以用 最小窗口宽 - (窗口宽 - 内容宽) 得到设计上保证能放下的宽度。
+
+    ``WINDOW_MIN_SIZE`` 是**逻辑**像素, 而 ``winfo_width/reqwidth`` 是**物理**像素:
+    预算先换成物理再跟请求宽度比, 否则 125% 的屏上会算出一个偏小 25% 的预算(实测
+    1200 逻辑被当成 1200 物理, 而卡片请求 1326)。
+    """
+    chrome = max(0, int(app.winfo_width()) - current_width)
+    return scaled_px(app, WINDOW_MIN_SIZE[0]) - chrome
+
+
+def test_home_widgets_fit_the_supported_minimum_window() -> None:
+    """主页各行/工具条的最小宽度必须放得进"支持的最小窗口".
+
+    这条用例与当前窗口大小无关: 只要某个容器的内容最小宽度超过"最小窗口下的可用
+    宽度", 它在小屏上就一定会越界(并盖住描边)。macOS CI 的虚拟屏比 1360 窄, 正好
+    暴露了筛选工具条堆得太宽——在那里报错太晚, 这里提前拦住。
+    """
+    app = gui_app(_new_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    budget = _supported_content_width(app, page._list_box.winfo_width())
+    too_wide = [
+        f"{frame} req={frame.winfo_reqwidth()}"
+        for frame in _bordered_frames(page.frame)
+        if frame.winfo_reqwidth() > budget
+    ]
+    detail = "; ".join(too_wide)
+    hint = f"下列容器的最小宽度超过支持的最小窗口下的可用宽度 {budget}px: {detail}"
+    assert not too_wide, hint
+
+
+def test_filter_controls_are_right_aligned_in_the_toolbar() -> None:
+    """回归: 筛选控件(平台/类型/搜索)要在右侧紧挨着排, 不能被拉成居中.
+
+    页签保持左对齐, 多余宽度由"页签与筛选控件之间的空白列"吸收。把多余宽度给筛选
+    控件所在的列(早先的写法)会让平台下拉在很宽的单元格里居中, 看着像没对齐。
+    """
+    app = gui_app(_new_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    bar = page._origin_box.master
+    origin = page._origin_box
+    category = page._category_box
+    search = page._search_entry.master
+    clear = page._clear_btn
+
+    def gap(left: Any, right: Any) -> int:
+        """两个控件之间的横向空隙(屏幕绝对坐标)."""
+        return int(right.winfo_rootx()) - (
+            int(left.winfo_rootx()) + int(left.winfo_width())
+        )
+
+    # 平台/类型/搜索紧挨着: 空隙就是各自的 padx(8 / 8 / 12), 不该被空白撑开.
+    assert abs(gap(origin, category) - 8) <= 2
+    assert abs(gap(category, search) - 8) <= 2
+    # 最右侧控件贴住工具条右边(只有 12px 内边距), 证明整行是右对齐收尾. 窗口被
+    # 环境挤到比工具条最小宽度还窄时(CI 虚拟屏), 内容整体右溢, 此时右边缘不再有
+    # 意义——"最小值放不放得下"由 test_home_widgets_fit_the_supported_minimum_window
+    # 在任意窗口尺寸下把关.
+    if bar.winfo_width() >= bar.winfo_reqwidth():
+        bar_right = int(bar.winfo_rootx()) + int(bar.winfo_width())
+        clear_right = int(clear.winfo_rootx()) + int(clear.winfo_width())
+        assert abs(bar_right - clear_right - 12) <= 3
+    # 页签仍在左侧, 与筛选控件之间留出被吸收的空白.
+    tabs_right = max(
+        int(tab.winfo_rootx()) + int(tab.winfo_width()) for tab in page._tabs.values()
+    )
+    assert tabs_right < int(origin.winfo_rootx())
+
+
+def test_library_and_discovery_borders_are_visible() -> None:
+    """主页(列表/海报)与游戏发现区的卡片四边框都必须可见."""
+    app = gui_app(_new_app)
+    page = app._home_page
+    _pump(app)
+    assert _offenders(app) == []
+
+    page._on_layout_change("海报")
+    _pump(app)
+    assert _offenders(page._list_box) == []
+
+    page._show_section(HomeSection.DISCOVERY)
+    _pump(app)
+    assert _offenders(page.frame) == []
+
+    page._discovery._show_page(DiscoveryPage.MONITORED)
+    _pump(app)
+    assert _offenders(page.frame) == []
+
+
+def _padding(value: object) -> tuple[int, int]:
+    """把 ``grid_info`` 的 padx/pady 归一成两元组(Tk 两侧相同时只回一个数)."""
+    parts = str(value).replace(",", " ").split()
+    first = int(parts[0])
+    return (first, int(parts[1]) if len(parts) > 1 else first)
+
+
+def test_poster_view_gives_the_games_area_equal_margins() -> None:
+    """海报模式收起表头后, 游戏区的四边边距要相同.
+
+    表头那一行塔成 0 高时游戏区会贴到面板上沿(上边距 0、其余三边 10px); 现在把上
+    边距补成 10 —— 既不保留那条表头空行, 也不让边距不一致。
+    """
+    app = gui_app(_new_app)
+    page = app._home_page
+    _pump(app)
+    assert page._head.winfo_ismapped()
+    list_pady = page._list_box.grid_info()["pady"]
+
+    page._on_layout_change("海报")
+    _pump(app)
+
+    assert not page._head.winfo_ismapped()
+    poster_info = page._list_box.grid_info()
+    poster_pady = _padding(poster_info["pady"])
+    # 判据是"四边边距相同"; 具体数值不能写死 10 —— CTk 会把 CTk 控件的 padx/pady
+    # 按窗口缩放换算(125% 的屏上 10 -> 12, 见 widgets.scaled_px 的同一套约定)。
+    expected = scaled_px(page._list_box, 10)
+    assert poster_pady == (expected, expected), f"上下边距不一致: {poster_pady}"
+    assert poster_pady[0] == _padding(poster_info["padx"])[0], (
+        f"上下与左右边距不一致: {poster_info}"
+    )
+    assert list_pady != poster_pady, "列表模式的上边距由表头提供, 不该被改到"
+
+
+def test_workspace_window_borders_are_visible() -> None:
+    """设置与定时任务窗口里的卡片四边框都必须可见."""
+    app = build_with_retry(_new_app)
+    try:
+        _pump(app)
+        for opener in (app._on_open_settings, app._on_open_schedules):
+            opener()
+            _pump(app)
+            window = app._active_window
+            assert window is not None
+            try:
+                # 窗口是延迟显示的顶层窗口: 没映射时控件树全是隐藏状态, 会假通过.
+                assert _wait_mapped(window._window)
+                assert list(_bordered_frames(window._window))
+                assert _offenders(window._window) == []
+            finally:
+                window.close()
+                _pump(app)
+    finally:
+        app.destroy()
+
+
+def _page_margin(page: Any, box: Any) -> int:
+    """滚动区**外框**相对页面容器的左内缩(页边距链, 与滚动条无关).
+
+    量滚动区控件本身会把"内容装不下时右侧立起的滚动条"算进来(画布因此窄十几
+    像素), 那条差值说明的是内容多少, 不是卡片有没有被往里挤。
+    """
+    outer = box._parent_frame
+    return int(outer.winfo_rootx()) - int(page.frame.winfo_rootx())
+
+
+def _card_insets(box: Any) -> tuple[int, int]:
+    """卡片相对滚动区**内容区**的左/右内缩(同样与滚动条无关)."""
+    first = box.winfo_children()[0]
+    left = int(first.winfo_rootx()) - int(box.winfo_rootx())
+    right = (
+        int(box.winfo_rootx())
+        + int(box.winfo_width())
+        - (int(first.winfo_rootx()) + int(first.winfo_width()))
+    )
+    return (left, right)
+
+
+def _game_name(page: Any, game_id: str) -> str:
+    """取主页当前列表里某款游戏的名称(``_board`` 可能为 None, 这里统一窄化)."""
+    board = page._board
+    assert board is not None
+    return str(next(item.name for item in board.games if item.game_id == game_id))
+
+
+def test_detail_page_and_manage_window_borders_are_visible() -> None:
+    """详情页与管理窗口的卡片四边框也必须可见."""
+    from archive_management.ui.manage_window import ManageGameWindow
+
+    app = build_with_retry(_new_app)
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        game_id = next(iter(page._rows))
+        name = _game_name(page, game_id)
+        app._open_game_detail(game_id)
+        _pump(app)
+        assert _offenders(app._content) == []
+
+        window = ManageGameWindow(
+            app,
+            backend=app.backend,
+            palette=app.p,
+            game_id=game_id,
+            name=name,
+            enabled=True,
+            backup_location=app.backend.task_status(game_id).target_label,
+            on_change=lambda: None,
+        )
+        try:
+            assert _wait_mapped(window._window)
+            # 管理窗口的卡片行本来就不带描边(靠底色区分), 这里只做守卫:
+            # 以后如果给它们加上了边框, 同样不能贴边盖住.
+            assert _offenders(window._window) == []
+        finally:
+            window.close()
+            _pump(app)
+    finally:
+        app.destroy()
+
+
+def test_the_manage_header_text_block_is_vertically_centered() -> None:
+    """页头里"游戏名 + 启停状态"这一块要居中: 标题上面的留白 == 状态行下面的留白.
+
+    出处(2026-10-02 用户反馈): "标记启停状态的文字没有上下居中, 而是在区域中居下" ——
+    那时标题上面留 16、状态行下面只留 4, 整块文字因此在页头里偏下(实测差 12 像素, 状态
+    那行看着贴在页头下沿)。判据用**两端留白相等**而不是写死像素: 标题换行成两行、字体
+    变大、换语言之后同样成立, "把某一端的 padding 加一点"这种糊法也骗不过去。
+    """
+    from archive_management.ui.manage_window import ManageGameWindow
+
+    app = build_with_retry(_new_app)
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        game_id = next(iter(page._rows))
+        window = ManageGameWindow(
+            app,
+            backend=app.backend,
+            palette=app.p,
+            game_id=game_id,
+            name=_game_name(page, game_id),
+            enabled=True,
+            backup_location=app.backend.task_status(game_id).target_label,
+            on_change=lambda: None,
+        )
+        try:
+            assert _wait_mapped(window._window)
+            _settle_layout(window._window)
+            header = window._title_label.master
+            above = int(window._title_label.winfo_y())
+            below = int(header.winfo_height()) - (
+                int(window._state_label.winfo_y())
+                + int(window._state_label.winfo_height())
+            )
+            hint = (
+                f"页头高 {header.winfo_height()}: 标题上面留 {above}px、状态行下面留 "
+                f"{below}px —— 两端留白要一样, 否则整块文字在页头里偏上或偏下"
+            )
+            assert abs(above - below) <= 2, hint
+        finally:
+            window.close()
+            _pump(app)
+    finally:
+        app.destroy()
+
+
+def test_discovery_uses_same_page_margin_as_library() -> None:
+    """回归: "游戏发现"的内容内缩不能比"游戏库"更宽(卡片不能往里挤).
+
+    两侧的页边距链是同一个(页面 24 + 卡片 10), 卡片相对滚动区内容区的内缩也必须
+    一样。**不要直接比滚动区控件本身的内缩**: 内容装不下时右侧会立起滚动条, 画布
+    因此窄一条滚动条, 那说的是内容多少而不是内缩。
+    """
+    app = gui_app(_new_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    library = page._list_box
+    library_margin = _page_margin(page, library)
+    library_card = _card_insets(library)
+
+    page._show_section(HomeSection.DISCOVERY)
+    _settle_layout(app)
+    assert _page_margin(page, page._discovery._cand_box) == library_margin
+    assert _card_insets(page._discovery._cand_box) == library_card
+
+    # 监控目录页未显示时其滚动区没有布局, 必须先切过去再量.
+    page._discovery._show_page(DiscoveryPage.MONITORED)
+    _settle_layout(app)
+    assert _page_margin(page, page._discovery._dirs_box) == library_margin
+    assert _card_insets(page._discovery._dirs_box) == library_card
+
+
+# ------------------------------------------------------------ 长名称不挤坏布局
+
+# 真实世界里出现过的长名称(60+ 字符, 中英混排; 标点用半角, 见仓库的行文约定).
+_LONG_NAME = (
+    "Kaiju Princess 2: Poochi Q ASMR - A Magic Ticket That Grants Any Desire - "
+    "超长的游戏名称示例"
+)
+# 再长 20 倍: 在任何字体度量下, 两行标题与单行列表都**不可能**放得下 —— 用来验证
+# "截断 + 省略号"与"变宽就多显示"。不能用 2 份: CI 的 Linux 镜像往往没有中文字体,
+# 汉字量出来很窄, 2 份名称会被完整显示(本地 Windows 有中文字体所以看不出来)。
+_HUGE_NAME = _LONG_NAME * 20
+
+
+class _LongNameService(DemoArchiveService):
+    """演示后端, 但把每款游戏都改成 ``name_text`` 指定的长名称.
+
+    名称撑破布局的几种形态都在同一个窗口里验证: 列表行的请求宽度被撑到容器之外
+    (与表头错位、滚动区横向溢出)、海报卡片里的名称被卡片裁掉、详情页标题把右侧
+    按钮挤出可视范围。
+
+    主页数据走 ``load_home``(进入页面)与 ``apply_home_filter``(切换筛选/展示),
+    侧栏与详情页分别走 ``list_games`` 与 ``get_detail`` —— 全部改名才能保证整窗
+    一致。
+    """
+
+    name_text: str = _LONG_NAME
+    # 只给其中一行加长状态列(标签多), 其它行保持短状态: 两边都看才比得出对齐.
+    tags: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        *,
+        delay: float = 0,
+        name_text: str = _LONG_NAME,
+        tags: tuple[str, ...] = (),
+    ) -> None:
+        """``delay`` 与演示后端一致, ``name_text`` 是要替换成的长名称."""
+        super().__init__(delay=delay)
+        self.name_text = name_text
+        self.tags = tags
+
+    def list_games(self) -> list[GameSummary]:
+        return [replace(game, name=self.name_text) for game in super().list_games()]
+
+    def get_detail(self, game_id: str) -> GameDetail:
+        return replace(super().get_detail(game_id), name=self.name_text)
+
+    def load_home(self) -> HomeBoard:
+        return self._rename(super().load_home())
+
+    def apply_home_filter(self, active: HomeFilter) -> HomeBoard:
+        return self._rename(super().apply_home_filter(active))
+
+    def _rename(self, board: HomeBoard) -> HomeBoard:
+        """把主页里的每款游戏都换成长名称(``games`` 是元组)."""
+        games = [replace(game, name=self.name_text) for game in board.games]
+        if self.tags and games:
+            # 只给最后一行加长状态: 一行长、其余短, 才比得出"长的有没有把列推歪".
+            games[-1] = replace(games[-1], tags=self.tags)
+        return replace(board, games=tuple(games))
+
+
+def _long_name_app(name: str = _LONG_NAME, tags: tuple[str, ...] = ()) -> ArchiveApp:
+    """构造使用长名称的主窗口(尺寸与其它布局用例一致)."""
+    app = ArchiveApp(
+        _LongNameService(delay=0, name_text=name, tags=tags),
+        title="长名称测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+# 一行的状态列要塞很多标签(用户实测: 标签多的那一行整块固定列比别的行左移 46px).
+_MANY_TAGS = ("测试1", "测试2", "测试3", "测试6")
+
+
+def test_a_long_state_column_does_not_push_the_fixed_columns() -> None:
+    """状态列内容再长也不许把固定列推歪: 列宽是硬的, 多了自己换行/省略.
+
+    出处(2026-10-02 用户实测截图): 列表里标签最多的那一行, 整块固定列比其它行(和表头)
+    左移 46px。根因是 ``_COLUMNS`` 的设计宽度(**逻辑**像素)被当成物理像素用, 而状态列的
+    ``wraplength`` 是 CTk 的**逻辑**像素(=物理 x1.25): 内容比列宽多 46px → 那一列被顶宽
+    46px → 整块被往左推。
+
+    判据与长名称那条同一套(``_place`` 连**宽度**一起比, 所以"状态列变宽"也跑不掉): 要求
+    每一行的每个固定列都与表头落在同一个 (屏幕 x, 宽度) 上。
+
+    **它咬的是高 DPI 现场**: 100% 缩放下物理=逻辑, 改前改后的行为本来就一样(CI 因此一直
+    绿); 本机 125% 下改前必红 —— 咬合验证的做法是把 ``home_page`` 的改动单独撤掉,
+    那一行的固定列会跟表头差 46px、状态列宽也超出设计值。
+    """
+    app = gui_app(_long_name_app, tags=_MANY_TAGS)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+
+    places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
+    assert places, "列表没建好"
+    assert len(places) > 1, "需要至少两行才能比较行间对齐"
+    for index, row_place in enumerate(places):
+        assert row_place == header, (
+            f"第 {index + 1} 行的固定列与表头不一致(状态列一长就把它推歪了): "
+            f"{row_place} != {header}"
+        )
+    assert name_aligned, "名称列头与名称文本不在同一个 x 上"
+
+
+def _visible_text(widget: Any) -> str:
+    """取控件上**实际显示**的文本.
+
+    CTkLabel 把文字画在自己的 canvas 上, 内部的 tkinter Label 没有文本, 因此
+    ``cget("text")`` 取到的是空串 —— 这里读它保存文本的属性。
+    """
+    return str(getattr(widget, "_text", ""))
+
+
+class _StubNameLabel:
+    """只具备看门狗所需两个接口的假名称标签(``_text`` 与 ``winfo_width``).
+
+    用于伪造"布局停在上一次窄宽度"这种回归形态: 用真窗口做不到确定性 —— 后台重裁
+    会在不同平台上以不同时机把文本改回去。
+    """
+
+    def __init__(self, text: str, width: int) -> None:
+        """记录"当前显示的文本"与"当前宽度"."""
+        self._text = text
+        self._width = width
+
+    def winfo_width(self) -> int:
+        """返回当前宽度(看门狗据此算出应有的裁剪结果)."""
+        return self._width
+
+
+def _pumped(app: Any, seconds: float = 0.4) -> None:
+    """尺寸稳定后再多跑一会儿事件循环: 名称重裁是延后 60ms 的任务."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.update_idletasks()
+        app.update()
+        time.sleep(0.02)
+
+
+class _FakeFont:
+    """替身字体: 每个字符 10px, 于是裁剪结果可以手算(与 ``test_textfit`` 同思路)."""
+
+    def measure(self, text: str) -> int:
+        """字符数乘 10."""
+        return len(text) * 10
+
+
+def _resize(app: ArchiveApp, width: int) -> int:
+    """把窗口调到 ``width``, 返回**实际**宽度(窗口管理器可能把它压回屏幕内)."""
+    app.geometry(f"{width}x820")
+    _settle_layout(app)
+    _pumped(app)
+    return int(app.winfo_width())
+
+
+def _fit_row_at(page: Any, game_id: str, width: int) -> Any:
+    """让那一行名称**按给定宽度**重裁一次, 返回该行的部件(与窗口宽度无关).
+
+    走的是实现自己那条路(``HomePage._fit_row_name`` → ``fit_label``): 用例只换预算,
+    不另写一套裁剪算术。
+    """
+    parts = page._row_parts[game_id]
+    page._fit_row_name(parts, width)
+    return parts
+
+
+def _fit_title_at(app: Any, width: int) -> None:
+    """按给定宽度裁一次详情页标题(实现用的那个 ``fit_label``, 这里只换预算)."""
+    fit_label(
+        app._title_label,
+        app._detail_name,
+        app._title_font,
+        width,
+        max_lines=_HEADER_NAME_LINES,
+    )
+
+
+def _wait_until_the_name_fits(
+    app: Any, page: Any, game_id: str, full: str, *, timeout: float = 3.0
+) -> Any:
+    """等到名称按**当前宽度**裁好, 返回那一行的部件(超时报错并给出实际显示).
+
+    名称重裁有两个"延迟源", 都不能用固定时长的泵事件去赌: 行会因为异步加载落地而**重建**
+    (重建后先回到兜底宽度的短文本), 重裁本身也是延后 60ms 的任务。CI 上真实挂过 ——
+    Linux 上异步数据到得晚, 断言正好落在"新行刚建好、重裁任务还没跑"的那一瞬间, 报出来
+    的字数与宽度对不上(现场 dump 里 `_sync_job` 还挂着、`_refit_attempts` 才 1)。
+
+    所以这里等的是**不变量本身**(显示文本 == 该宽度下的 `fit_text` 结果), 而不是"跑够
+    多少秒"; 行可能被重建, 所以每次都重新取一遍部件。
+    """
+    deadline = time.monotonic() + timeout
+    shown = ""
+    while time.monotonic() < deadline:
+        app.update_idletasks()
+        app.update()
+        parts = page._row_parts.get(game_id)
+        if parts is not None:
+            # 期望值与实现同源: 可用宽度走 ``HomePage._name_available``(从滚动区视口推算,
+            # 不是名称标签的实测宽度 —— 后者会被裁剪结果反过来影响), 字体过
+            # ``measured_font``(CTk 控件渲染的是缩放后的字体)。看门狗那条用例喂的是替身
+            # 页面(没有这个辅助方法), 那种情况下退回标签自己的宽度。
+            font = measured_font(page._name_font, parts.label)
+            read_width = getattr(page, "_name_available", None)
+            width = (
+                read_width(parts)
+                if callable(read_width)
+                else int(parts.label.winfo_width())
+            )
+            shown = _visible_text(parts.label)
+            if width > 1 and shown == fit_text(full, font, width):
+                return parts
+        time.sleep(0.02)
+    pytest.fail(f"名称一直没按当前宽度裁好: 显示 {shown[:40]!r}")
+
+
+def _assert_lines(label: Any, limit: int) -> None:
+    """名称的显示行数不能超过 ``limit``, 且请求宽度不能超过它分到的那一格."""
+    text = _visible_text(label)
+    lines = text.count("\n") + 1
+    assert lines <= limit, f"名称折了 {lines} 行(上限 {limit}): {text[:40]!r}"
+    assert label.winfo_reqwidth() <= label.winfo_width(), "名称比可用宽度还宽"
+
+
+def _assert_name_fills(label: Any, full: str, font: Any) -> None:
+    """被截断的名称必须按**当前宽度**裁到"再加一个字符就放不下".
+
+    两道检查, 缺一不可:
+
+    1. 显示文本必须**等于**同一宽度下 :func:`fit_text` 的结果 —— 布局若停在上一次的
+       窄宽度上(真正要防的回归: 窗口变宽了, 名称还是旧的短文本), 这里就不一样。
+       这条比对的是**文本**而不是像素, 因此与字体是否缺字形无关。
+    2. 剩下的像素缝隙有上限 —— 省略号要占自己的宽度, 切点落在空格上时还会被
+       ``rstrip`` 掉, 所以上界是"两个字符宽"而不是"一个字符宽"。
+
+    第二道原来写的是 ``slack <= font.measure("测")``, CI 上因此误报(不是布局出错):
+    Windows runner 上缝隙 14px > 13px; Linux 镜像没有中文字体, ``measure("测")``
+    直接是 0 —— 容忍度退化成 0, 缝隙 3px 也算失败。
+
+    预算与实现同源(``name_fit_budget``): 可用宽度再扣掉一条滚动条余量, 所以这里的
+    "该裁到哪"跟着实现走, 不在用例里另写一个数。
+    """
+    shown = _visible_text(label)
+    if len(shown) >= len(full) or not shown.endswith("…"):
+        return
+    # 字体与实现同源: ``fit_label`` 按**渲染字号**量文字(CTk 控件渲染的就是缩放后的字体),
+    # 拿未缩放的 ``CTkFont.measure`` 比会在高 DPI 下差 1.25 倍。
+    font = measured_font(font, label)
+    width = label.winfo_width()
+    expected = fit_text(full, font, width)
+    stale = (
+        f"名称不是按当前宽度 {width}px 裁的: 显示 {len(shown)} 字, "
+        f"应为 {len(expected)} 字(布局可能停在上一次的宽度上)"
+    )
+    assert shown == expected, stale
+    # 缺中文字体时 measure("测") 是 0, 用 "W" 兜底; 连字体库都没有时所有字形都量成 0,
+    # 像素上限就没意义了(真正的判定交给上面那条文本比对), 给个 8px 地板免得退化成 0。
+    unit = max(font.measure("测"), font.measure("W"), 8)
+    slack = width - font.measure(shown)
+    budget = unit * 2 + 1
+    hint = f"名称没有吃满 {width}px: 还空着 {slack}px(上限 {budget}px)"
+    assert slack <= budget, hint
+
+
+def _fixed_cell_block(block: Any) -> list[Any] | None:
+    """取"固定列块"里的单元格(表头与数据行结构相同, 只有它带 len(_COLUMNS) 个格子)."""
+    for child in block.winfo_children():
+        cells = child.winfo_children()
+        if len(cells) == len(_COLUMNS):
+            return sorted(cells, key=lambda cell: int(cell.grid_info()["column"]))
+    return None
+
+
+def _fixed_cells(block: Any) -> list[Any]:
+    """同 :func:`_fixed_cell_block`, 但找不到时直接失败(让诊断信息指到这一层)."""
+    cells = _fixed_cell_block(block)
+    if cells is None:
+        raise AssertionError("没有找到固定列块")
+    return cells
+
+
+def _place(cell: Any) -> tuple[int, int]:
+    """单元格在屏幕上的水平位置与宽度: 跨越不同父控件比较列对齐时用它."""
+    return (cell.winfo_rootx(), cell.winfo_width())
+
+
+def _live_row(page: Any, game_id: str | None = None) -> Any:
+    """取一行**此刻还活着**的行控件(不给 ``game_id`` 就是第一行).
+
+    行会在异步数据(封面/译名)落地时被整页重渲染: ``HomePage.refresh_artwork`` →
+    ``_render_games`` 先 ``destroy`` 旧行再重建 ``_rows``/``_row_parts``。所以"等一会儿再量"的
+    用例必须**在量的那一刻重新取**; 拿着等待之前抓到的引用去调 ``winfo_*`` 只会得到
+    ``_tkinter.TclError: bad window path name``(2026-10-01 Windows 分片 0 实测) —— 那句报错
+    与"布局对不对"毫无关系, 只会把排查带偏。
+    """
+    row = (
+        page._rows.get(game_id)
+        if game_id is not None
+        else next(iter(page._rows.values()), None)
+    )
+    assert row is not None, "演示数据应当有游戏"
+    assert row.winfo_exists(), (
+        "行控件已被重渲染销毁: 请在等待之后重新取行, 而不是用旧引用"
+    )
+    return row
+
+
+def _alignment_places(
+    page: Any,
+) -> tuple[list[list[tuple[int, int]]], list[tuple[int, int]], bool]:
+    """量出(各行固定列位置, 表头固定列位置, 名称列是否也对齐); 结构没建好时给空表."""
+    places: list[list[tuple[int, int]]] = []
+    for row in page._rows.values():
+        cells = _fixed_cell_block(row)
+        if cells is None:
+            return [], [], False
+        places.append([_place(cell) for cell in cells])
+    head = _fixed_cell_block(page._head)
+    if head is None:
+        return [], [], False
+    parts = next(iter(page._row_parts.values()), None)
+    name_aligned = parts is not None and (
+        page._head_name.winfo_rootx() == parts.name_block.winfo_rootx()
+    )
+    return places, [_place(cell) for cell in head], name_aligned
+
+
+def _wait_for_the_columns_to_line_up(
+    app: ArchiveApp, page: Any, *, timeout: float = 3.0
+) -> tuple[list[list[tuple[int, int]]], list[tuple[int, int]], bool]:
+    """等到"各行 + 表头 + 名称列"都落在同一条竖线上, 返回最后一轮的读数.
+
+    表头对齐是 ``after(60ms)`` 的任务, 而且**要跑两轮才收敛**(第一轮按实测差值改内边距,
+    第二轮复核后归零): 用例里流逝的墙钟时间很短, CI 上可能还没轮到 —— 实测 Windows runner
+    上就是"六列整体差同一个 16px"(正好一个滚动条宽度)。等不变量成立比"先睡一会儿再断言"
+    可靠: 它既容忍慢机器, 又真的能在不收敛时报错(与 ``_wait_until_the_name_fits`` 同一套做法)。
+    """
+    deadline = time.monotonic() + timeout
+    places, header, name_aligned = _alignment_places(page)
+    while time.monotonic() < deadline:
+        _pump(app)
+        places, header, name_aligned = _alignment_places(page)
+        lined_up = (
+            bool(places)
+            and header == places[0]
+            and all(place == places[0] for place in places)
+        )
+        if lined_up and name_aligned:
+            return places, header, name_aligned
+        time.sleep(0.02)
+    return places, header, name_aligned
+
+
+def _wait_for_the_fixed_block_to_hug_the_right(
+    app: Any, page: Any, *, timeout: float = 3.0
+) -> int:
+    """等到"最后一列贴住行右边界"成立, 返回实测缝隙(超时给最后一轮的读数).
+
+    贴右是 ``_sync_list_layout``(延后 60ms)算出来的, 而**行本身可能刚被重渲染重建过** ——
+    重建会把它重置回兜底值。与 :func:`_wait_for_the_columns_to_line_up` 同一条理由: 等不变量
+    成立, 别赌时长; 并且每一轮都 :func:`_live_row` 重新取行, 不拿等待之前抓到的引用。
+    """
+    deadline = time.monotonic() + timeout
+    gap: int = -1
+    while time.monotonic() < deadline:
+        _pump(app)
+        row = _live_row(page)
+        row_right = row.winfo_rootx() + row.winfo_width()
+        last = _fixed_cells(row)[-1]
+        gap = row_right - (last.winfo_rootx() + last.winfo_width())
+        if 0 <= gap <= _ROW_RIGHT_SLACK:
+            return gap
+        time.sleep(0.02)
+    return gap
+
+
+def test_long_game_name_does_not_widen_the_list_rows() -> None:
+    """名称是唯一可变长的一列: 长名称不能推走固定列, 也不能把行撑宽 or 推挤对齐.
+
+    预算用 ``_supported_content_width`` 折算到"支持的最小窗口", 因此这条断言与
+    当前窗口大小无关(小屏上窗口被窗口管理器压小时同样成立)。
+    """
+    app = gui_app(_long_name_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+
+    budget = _supported_content_width(app, page._list_box.winfo_width())
+    assert page._rows, "演示数据应当有游戏"
+    # 固定列块本身必须放得进"最小窗口"的内容区, 否则名称在最小窗口下没有位置.
+    block = next(iter(page._row_parts.values())).columns.winfo_width()
+    too_wide = f"固定列块 {block}px 放不进最小窗口的内容区({budget}px)"
+    assert block <= budget, too_wide
+
+    parts = next(iter(page._row_parts.values()))
+    shown = _visible_text(parts.label)
+    assert shown.endswith("…"), f"名称应当截断显示: {shown!r}"
+    assert len(shown) < len(parts.full_name), "截断后的名称必须比原名短"
+
+    # 各行的固定列必须落在同一个 (屏幕) x 上: 名称长的行不能把后面的列右推;
+    # 表头与数据行也要在同一条竖线上(表头在卡片里, 宽度原本不同)。
+    places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
+    misaligned = f"各行列位置不一致: {places}"
+    assert all(place == places[0] for place in places), misaligned
+    assert header == places[0], f"表头与数据行没有对齐: {header} != {places[0]}"
+    # 名称列头与名称文本也落在同一个 x 上.
+    assert name_aligned, "名称列头与名称文本不在同一个 x 上"
+
+    # 固定列块**贴靠右侧**: 最后一列的右边界离行的右边界只差一个内边距.
+    # 这里**不能**用上面那份"行"的快照: 等待期间行可能已经被重渲染销毁(见 :func:`_live_row`),
+    # 而且贴右是延后任务算出来的 —— 所以等不变量成立, 并且每一轮都重新取行。
+    gap = _wait_for_the_fixed_block_to_hug_the_right(app, page)
+    assert 0 <= gap <= _ROW_RIGHT_SLACK, f"固定列块没有贴右: 右侧还空着 {gap}px"
+
+
+def _crowded_app() -> ArchiveApp:
+    """构造"列表一定装不下"的主窗口(把演示数据复制很多行, 见 :class:`_CrowdedService`)."""
+    app = ArchiveApp(
+        _CrowdedService(delay=0, name_text=_LONG_NAME),
+        title="长名称测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+# 行数要多到"任何窗口高度都装不下": 滚动条是按"内容装不下"显示的, 而它在哪台机器上出现
+# 取决于字体度量(CI 的行更高) —— 用例自己把行数堆上去, 才不靠那点运气.
+_CROWDED_REPEATS = 8
+
+
+class _CrowdedService(_LongNameService):
+    """演示数据复制 ``_CROWDED_REPEATS`` 份(每份一行, game_id 加后缀区分).
+
+    只加行数, 不动布局参数: 守卫要踩的是"滚动条出现 ⇒ 内层画布变窄"那条路。
+    """
+
+    def _rename(self, board: HomeBoard) -> HomeBoard:
+        """在父类的改名基础上把行数堆起来(``games`` 是元组)."""
+        crowded = super()._rename(board)
+        copies = [
+            replace(game, game_id=f"{game.game_id}-{copy}")
+            for copy in range(_CROWDED_REPEATS)
+            for game in crowded.games
+        ]
+        return replace(crowded, games=tuple(copies))
+
+
+def test_the_header_follows_the_scrollbar_in_the_smallest_window() -> None:
+    """最小窗口下列表需要滚动 ⇒ 滚动条出现, 表头必须跟着重排.
+
+    出处(2026-10-05 CI, Windows): ``test_long_game_name_does_not_widen_the_list_rows``
+    在 Windows runner 上永久差 22px —— **六列整体差同一个值, 就是滚动条宽度**(旧滚动条
+    是 16px, 现场注释里记过同样的症状)。根因: 滚动条是"内容装不下"时才显示的, 它出现
+    只改**内层画布**的宽度, 而帧本身(与滚动条同在一个 grid 里)宽度不变 ⇒ 没有 Configure
+    事件 ⇒ 已经算好的表头内边距不会跟着改。本机窗口更高、根本不显示滚动条, 所以只在 CI 红。
+
+    反方向(**收起** ⇒ 行变宽 22px)另有 2026-10-06 CI Windows 的一次现场: 那次是"对齐的
+    轮数用光"把表头冻在旧内边距上, 机制与咬合在
+    ``tests/unit/test_ui_table_alignment.py``(纯替身, 不赌启动时序)。
+
+    判据分两段, 缺一不可: **先确认滚动条真的显示了**(否则这条守卫会静默地什么也没验 ——
+    见 gui-tests 指令里的"别让证据静默消失"), 再要求对齐不变量成立。
+    """
+    app = gui_app(_crowded_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    # CI 的窗口被窗口管理器压到最小尺寸; 这里主动设成同一尺寸(逻辑像素, 与 geometry 一致).
+    app.geometry(f"{WINDOW_MIN_SIZE[0]}x{WINDOW_MIN_SIZE[1]}")
+    _settle_layout(app)
+
+    assert _wait_for_the_scrollbar(app, page), (
+        "这么长的列表应当需要滚动条(这条守卫要踩的就是'滚动条出现改画布宽度'那条路)"
+    )
+    # 滚动条出现之后**不再有任何帧级 Configure**, 表头只能靠自己跟上.
+    places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
+    assert places, "列表没建好"
+    assert header == places[0], f"表头没有跟着滚动条重排: {header} != {places[0]}"
+    assert name_aligned, "名称列头与名称文本不在同一个 x 上"
+    gap = _wait_for_the_fixed_block_to_hug_the_right(app, page)
+    assert 0 <= gap <= _ROW_RIGHT_SLACK, f"固定列块没有贴右: 右侧还空着 {gap}px"
+
+
+def _list_scrollbar(parent: Any) -> Any:
+    """列表的滚动条控件(CustomTkinter 把它挂在滚动区上, 名叫 ``_scrollbar``)."""
+    return getattr(parent._list_box, "_scrollbar", None)
+
+
+def _wait_for_the_scrollbar(app: Any, page: Any, *, timeout: float = 3.0) -> bool:
+    """等到列表的滚动条**真的显示出来**, 返回是否等到.
+
+    显示与否由 ``sync_scrollbar`` 按内容是否装得下决定, 是延后的(见 ``auto_scrollbar``):
+    同步的 ``winfo_ismapped()`` 读到的可能还是上一轮的结论。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _pump(app)
+        scrollbar = _list_scrollbar(page)
+        if scrollbar is not None and scrollbar.winfo_ismapped():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_a_row_reference_goes_stale_after_a_rerender() -> None:
+    """行在重渲染后失效 —— 用例必须重新取(这条钉住"TclError 为什么会出现在这里").
+
+    2026-10-01 Windows 分片 0 的真实失败: 用例在"等各列对齐"期间赶上一次重渲染(异步封面/
+    译名落地 → ``refresh_artwork`` → ``_render_games``), 而它是拿**等待之前**抓到的行去量
+    ``winfo_rootx()`` 的, 于是报出与布局无关的 ``bad window path name``。这条用例把那个
+    时序手工演一遍, 保证 :func:`_live_row` 取到的是新行, 而且报错能照着做。
+    """
+    app = gui_app(_long_name_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    stale = _live_row(page)
+
+    page._render_games()  # 异步数据落地时走的就是这条重建路径
+
+    assert not stale.winfo_exists(), "重渲染本来就该销毁旧行(失效引用的来源)"
+    assert _live_row(page) is not stale, (
+        "助手必须在重渲染之后重新取行, 而不是复用旧引用"
+    )
+    # 万一有人又把失效控件交给助手, 报的必须是"请重新取行", 而不是 TclError.
+    with pytest.raises(AssertionError, match="已被重渲染销毁"):
+        _live_row(SimpleNamespace(_rows={"g": stale}))
+
+
+def test_name_fits_again_after_a_full_rerender() -> None:
+    """整页重建后名称仍会按当前宽度裁好(重建先把文本打回兜底宽度那一版).
+
+    CI 上 Linux 的真实失败形态就发生在这个窗口里: 异步数据到得晚, 行刚重建、重裁还没轮到,
+    断言紧接着就来了(现场 dump 里任务还挂着)。这里重建一次, 然后**只泵事件**、不手动调
+    重裁, 要求名称自己恢复 —— 产品侧除了延后任务, 标签自己也会在量到宽度时立刻裁一次
+    (见 ``HomePage._on_name_resize``)。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    game_id = next(iter(page._row_parts))
+    _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+
+    page._render_games()
+
+    parts = _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+
+    _assert_name_fills(parts.label, _HUGE_NAME, page._name_font)
+
+
+def test_the_stale_fit_wait_reports_a_stale_name() -> None:
+    """自检助手本身要有效: 名称一直没按当前宽度裁好时必须报错, 不能静静地报到超时为止.
+
+    它现在是名称断言的第一道门(先等不变量成立), 一旦退化成“总是通过”, 长名称回归就
+    再也拦不住了 —— 所以用假页面/假标签伪造一次真实回归形态。
+    """
+    width = 300
+    stale = _StubNameLabel(
+        fit_text(_HUGE_NAME, _FakeFont(), _NAME_FALLBACK_WIDTH), width
+    )
+    page = SimpleNamespace(
+        _row_parts={"g": SimpleNamespace(label=stale)}, _name_font=_FakeFont()
+    )
+    app = SimpleNamespace(update_idletasks=lambda: None, update=lambda: None)
+
+    with pytest.raises(pytest.fail.Exception, match="一直没按当前宽度裁好"):
+        _wait_until_the_name_fits(app, page, "g", _HUGE_NAME, timeout=0.2)
+
+
+def test_long_game_name_wraps_inside_the_poster_card() -> None:
+    """海报卡片里的名称最多折两行并截断, 且卡片尺寸不变、内容不越出卡片."""
+    app = gui_app(_long_name_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    page._on_layout_change(HomeLayout.POSTER.label)
+    _settle_layout(app)
+    assert page._rows, "演示数据应当有游戏"
+
+    for card in page._rows.values():
+        # 卡片宽度由常量固定(长名称不能把它撑宽); 高度则是**按内容算**的(封面 + 两行名
+        # + 元信息 + 最近活动), 只保证不低于设计值 —— 里面每一样都随
+        # "界面字号"变, 写死高度在字号调大后会被内容顶出下边框。常量是**逻辑**像素
+        # (CTk 写 width/height 时会乘窗口缩放), 而 winfo_req* 是**物理**像素。
+        assert abs(card.winfo_reqwidth() - scaled_px(card, _POSTER_WIDTH)) <= 1, (
+            "卡片宽度由常量固定, 长名称不应该把它撑大"
+        )
+        assert card.winfo_reqheight() >= scaled_px(card, _POSTER_HEIGHT) - 1, (
+            "卡片高度不该比设计值还矮"
+        )
+        label = next(
+            grand
+            for child in card.winfo_children()
+            if isinstance(child, ctk.CTkFrame)
+            for grand in child.winfo_children()
+            if _visible_text(grand).startswith(_LONG_NAME[:5])
+        )
+        # 名称在**固定高度的名称块**里(见 home_page.poster_name_block_height), 所以
+        # “落在卡片内”要比块的位置 —— 标签自己的 y 是相对块的。
+        block = label.master
+        text = _visible_text(label)
+        assert text.count("\n") + 1 <= _POSTER_NAME_LINES, f"名称超过两行: {text!r}"
+        assert "…" in text, f"两行放不下时应当截断: {text!r}"
+        # 名称的 wraplength 是逻辑的 ``_POSTER_TEXT_WIDTH``(CTk 自己乘缩放), 所以
+        # 请求宽度要跟换算后的物理值比。
+        assert label.winfo_reqwidth() <= scaled_px(label, _POSTER_TEXT_WIDTH)
+        # 名称必须落在卡片内: 越界就会盖住卡片下边框(或直接看不到).
+        bottom = block.winfo_y() + block.winfo_height()
+        card_bottom = scaled_px(label, _POSTER_HEIGHT)
+        overflow = f"名称块溢出卡片: {bottom} > {card_bottom}"
+        assert bottom <= card_bottom, overflow
+        # 反过来也要成立: 名称块的固定高度得真的装得下两行文本(矮了就会把第二行压掉).
+        assert label.winfo_reqheight() <= block.winfo_height() + 1, (
+            f"名称块装不下两行文本: 文本要 {label.winfo_reqheight()}px, "
+            f"块高 {block.winfo_height()}px"
+        )
+
+
+def test_poster_rows_line_up_for_one_and_two_line_names() -> None:
+    """海报卡片里“元信息 / 最近活动”那一行的位置**不随名称行数变**, 而且都在卡片内.
+
+    出处(用户 2026-10-02): "海报模式下当游戏名称为两行时和一行时最下方的最近活动时间
+    显示位置不同, 导致整个游戏的下边框被盖住了"。
+
+    做法是让**名称块的高度固定为两行**(``home_page.poster_name_block_height`` 按字体行距算,
+    不量控件也不看文本里有几个换行), 卡片高度再按内容算。为什么不靠“让文本永远占两行”:
+    尾随空行算不算一行**由平台定** —— Linux(X11) 上不算, 于是 2026-10-04 的 Linux CI 里
+    一行名 28px、两行名 39px、下面两行跟着差 11px(同样的代码 Windows/macOS 绿)。所以这里
+    量的是**名称块的高度**: 它一旦又变成“随文本行数变”, 报出来的就是这条, 而不是下游
+    “元信息那一行差 11px”。
+    """
+
+    def measure(app: ArchiveApp) -> tuple[int, int, int, int, int]:
+        """(卡片高, 名称块高, 元信息 y, 最近活动 y, 最近活动底) —— 相对卡片左上的坐标系."""
+        assert _wait_mapped(app)
+        page = app._home_page
+        page._on_layout_change(HomeLayout.POSTER.label)
+        _settle_layout(app)
+        card = _live_row(page)
+        # 名称块是卡片的**第二个** frame(第一个是封面); 下面两行是卡片的直接子标签。
+        frames = [
+            child for child in card.winfo_children() if isinstance(child, ctk.CTkFrame)
+        ]
+        block = frames[1]
+        labels = [
+            child for child in card.winfo_children() if isinstance(child, ctk.CTkLabel)
+        ]
+        badge, activity = labels[-2], labels[-1]
+        return (
+            int(card.winfo_height()),
+            int(block.winfo_height()),
+            int(badge.winfo_y()),
+            int(activity.winfo_y()),
+            int(activity.winfo_y()) + int(activity.winfo_height()),
+        )
+
+    short = gui_app(_new_app)  # 演示数据的名称都是一行
+    try:
+        one_line = measure(short)
+    finally:
+        short.destroy()
+    long = gui_app(_long_name_app)  # 每款都换成两行的长名称
+    try:
+        two_lines = measure(long)
+    finally:
+        long.destroy()
+
+    hint = f"一行名 {one_line} 与两行名 {two_lines} 的行位置不一致"
+    # 卡片**总高**允许 2px 的差: 名称那一行的最小高度是按"两行"量出来的, 而一行/两行名在
+    # 度量上仍可能差一点(实测 Windows 上 460 与 462; Linux 上曾是一行名矮 11px —— 那才是
+    # 用户看得见的"两行名把最近活动顶出卡片"那个 bug)。位置与下一行的高度才是硬指标。
+    assert abs(one_line[0] - two_lines[0]) <= 2, f"卡片高度应该一样: {hint}"
+    assert len({one_line[1], two_lines[1]}) == 1, f"名称块高度应该一样: {hint}"
+    assert abs(one_line[2] - two_lines[2]) <= 2, f"元信息那一行: {hint}"
+    assert abs(one_line[3] - two_lines[3]) <= 2, f"最近活动那一行: {hint}"
+    # 最近活动不许越出卡片(越界就会盖住下边框).
+    assert one_line[4] <= one_line[0], f"一行名时越界: {one_line}"
+    assert two_lines[4] <= two_lines[0], f"两行名时越界: {two_lines}"
+
+
+# 高 DPI 现场的强制缩放: 本机是 125%、CI 是 100% —— 把缩放强设成 1.25 让这条判据在**任何**
+# 机器上都真的跑得到(2026-10-02 的几起"只有高 DPI 才出现"的 bug 就是这么漏过 CI 的).
+_FORCED_DPI_SCALE = 1.25
+
+
+def test_high_dpi_keeps_the_status_column_to_two_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """把窗口缩放强设成 125% 再量列表: 状态列仍是两行、文字不超列宽、固定列仍对齐.
+
+    为什么单开一条: ``CTkFont.measure()`` 量的是**未缩放**的字号, 而 CTk 控件渲染的是按窗口
+    缩放现场换算出来的字体(实测 125%: ``CTkFont(size=12)`` 量 231px, 控件里真正用的
+    ``Roboto -15`` 量同一条 288px)。于是"拿量出来的宽度裁文字"在 100% 的机器上永远正确,
+    只有高 DPI 才暴露 —— 标签一多就折成三行, 或者文字比控件还宽被硬裁。修法是量文字时过
+    `widgets.measured_font`; 这条把缩放钉成 1.25 再跑一遍同样的不变量。
+    """
+    monkeypatch.setattr(
+        ctk.ScalingTracker, "get_window_scaling", lambda _window: _FORCED_DPI_SCALE
+    )
+    monkeypatch.setattr(
+        ctk.ScalingTracker, "get_widget_scaling", lambda _window: _FORCED_DPI_SCALE
+    )
+    app = gui_app(_long_name_app, tags=_MANY_TAGS)
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        _settle_layout(app)
+        row = _live_row(page)
+        status = _fixed_cells(row)[-1]
+        room = int(status.winfo_width())
+        assert room > 1, "状态列还没布局"
+
+        lines = _visible_text(status).split("\n")
+        assert len(lines) <= 2, f"状态列最多两行: {lines!r}"
+        for line in lines:
+            # 行宽要按**渲染**字号算(控件的字体被 CTk 缩放过了).
+            rendered = measured_font(page._value_font, status).measure(line)
+            assert rendered <= room, f"这一行比列宽还宽: {rendered} > {room} | {line!r}"
+
+        clipped = [
+            _visible_text(label)
+            for label in _walk(row)
+            if isinstance(label, ctk.CTkLabel)
+            and label.winfo_ismapped()
+            and label.winfo_reqwidth() > label.winfo_width()
+        ]
+        assert not clipped, f"有文字被硬裁(高 DPI 下应当先折行/补省略号): {clipped}"
+
+        places, header, name_aligned = _wait_for_the_columns_to_line_up(app, page)
+        assert places, "列表没建好"
+        assert header == places[0], f"表头与数据行没对齐: {header} != {places[0]}"
+        assert all(place == places[0] for place in places), (
+            f"各行列位置不一致: {places}"
+        )
+        assert name_aligned, "名称列头与名称文本不在同一个 x 上"
+    finally:
+        app.destroy()
+
+
+def test_dropdown_boxes_draw_their_right_border() -> None:
+    """下拉框的整圈边框都要画出来: 右侧那半段不许被箭头区底色盖掉.
+
+    出处(用户 2026-10-02): "所有的下拉框右侧边框均被下拉符号盖住了, 我希望将这个符号
+    包裹进边框中"。CTk 画的是"左右分段边框", 画完又把 ``border_parts_right`` 改成了
+    箭头区底色(看着就没有右边框), 所以补丁(见 ``ui.rendering.apply_combo_border_fix``)
+    在每次绘制后把它描回边框色 —— 这里直接读画布上的颜色来 pin 住这条。
+    """
+    app = gui_app(_new_app)
+    try:
+        assert _wait_mapped(app)
+        page = app._home_page
+        _settle_layout(app)
+        combos = [
+            page._origin_box,
+            page._category_box,
+            page._page_size_box,
+        ]
+        for combo in combos:
+            combo._draw()
+        app.update_idletasks()
+        for combo in combos:
+            expected = combo._apply_appearance_mode(combo._border_color)
+            canvas = combo._canvas
+            drawn = canvas.itemcget("border_parts_right", "fill")
+            assert drawn == expected, (
+                f"下拉框右侧边框被盖住了: 实测 {drawn!r}, 应当是边框色 {expected!r}"
+            )
+            # 箭头仍画在箭头区上(底色不变), 所以它落在边框**里面**。
+            arrow = canvas.itemcget("inner_parts_right", "fill")
+            assert arrow == combo._apply_appearance_mode(combo._button_color)
+    finally:
+        app.destroy()
+
+
+def test_long_game_name_is_capped_in_the_detail_header() -> None:
+    """详情页的名称最多两行(超出补省略号), 不能无限折行把下面的内容推下去.
+
+    名称只印左上角那一处(概要卡里不再重复, 用户 2026-10-03), 所以只量头部标题.
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    page._open(next(iter(page._rows)))
+    _settle_layout(app)
+
+    title = app._title_label
+    text = _visible_text(title)
+    assert text.startswith(_LONG_NAME[:5]), "至少要能看出是哪款游戏"
+    assert text != _HUGE_NAME, "超长名称不应原样显示"
+    assert text.endswith("…"), f"放不下就该补省略号: {text!r}"
+    _assert_lines(title, _HEADER_NAME_LINES)
+    # 右侧按钮不能被名称挤出表头.
+    export = app._export_btn
+    export_edge = export.winfo_rootx() + export.winfo_width()
+    header_edge = title.master.winfo_rootx() + title.master.winfo_width()
+    assert export_edge <= header_edge + 1, "名称把右侧按钮挤出了表头"
+
+
+def test_names_follow_the_window_width() -> None:
+    """名称按可用宽度动态裁剪: 可用宽度更大就多显示几个字(列表与详情页都算).
+
+    **不靠把真窗口拉宽**(2026-10-03 改): 这条用例原来要求一个 1900px 宽的窗口, 而 CI 的
+    Windows/macOS runner 桌面只有约 1024 —— 窗口管理器一定把它压回去, 于是只能 skip
+    (报告里那两条 `Names follow the window width` 的 skip 就是它), 等于这条判据在 CI 上
+    **不存在**。现在改成给裁剪函数喂两个**显式宽度**: 与窗口无关、每个平台都真跑, 而且
+    测的仍是应用自己的那条路(``_fit_row_name`` / ``fit_label``)。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    game_id = next(iter(page._row_parts))
+    # 名称重裁是延后的任务, 行还可能被异步加载重建 —— 等不变量成立再断言(见助手说明)。
+    parts = _wait_until_the_name_fits(app, page, game_id, _HUGE_NAME)
+    _assert_name_fills(parts.label, _HUGE_NAME, page._name_font)
+
+    narrow, wide = _NAME_WIDTHS
+    parts = _fit_row_at(page, game_id, narrow)
+    narrow_chars = len(_visible_text(parts.label))
+    parts = _fit_row_at(page, game_id, wide)
+    wide_chars = len(_visible_text(parts.label))
+    assert wide_chars > narrow_chars, (
+        f"列表名称没有随可用宽度变多: {narrow}px→{narrow_chars} 字, "
+        f"{wide}px→{wide_chars} 字"
+    )
+    # 宽的那一档必须**真的按这个宽度**裁(而不是停在窄档的结果): 与同一宽度下的
+    # ``fit_text`` 逐字相等, 而且仍然带省略号(名字比 640px 长得多)。
+    font = measured_font(page._name_font, parts.label)
+    shown = _visible_text(parts.label)
+    assert shown == fit_text(_HUGE_NAME, font, wide), "宽档的裁剪结果不对"
+    assert shown.endswith("…"), (
+        f"这么长的名称在 {wide}px 下仍应带省略号: {shown[:20]!r}"
+    )
+
+    # 详情页标题同理: 同一张标签喂两个宽度。
+    page._open(game_id)
+    _settle_layout(app)
+    _pumped(app)
+    title = app._title_label
+    _fit_title_at(app, narrow)
+    title_narrow = len(_visible_text(title))
+    _fit_title_at(app, wide)
+    title_wide = len(_visible_text(title))
+    assert title_wide > title_narrow, (
+        f"详情标题没有随可用宽度变多: {narrow}px→{title_narrow} 字, "
+        f"{wide}px→{title_wide} 字"
+    )
+    _assert_lines(title, _HEADER_NAME_LINES)
+
+
+def test_the_fill_invariant_catches_a_stale_fit() -> None:
+    """自检: 名称若按"更窄 60px"的宽度裁过(窗口变宽但没重裁), 不变量必须报错.
+
+    看门狗自己也会失灵: 上一版的容忍度写成"一个字符宽", 在 CI 的字体度量下恒不成立,
+    天天误报; 改完之后又得确认它**没有**变成永远通过 —— 这条用例伪造一次真实的回归
+    形态(布局停在上一次的窄宽度上), 要求 :func:`_assert_name_fills` 抛错。
+
+    用假标签伪造而不是改真窗口: 真实窗口上改完文本再泵事件循环, 后台重裁会在不同
+    平台上以不同时机把它改回去(实测 Linux/macOS 上就不会报错), 自检因此时灵时不灵。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    _pumped(app)
+
+    width = int(next(iter(page._row_parts.values())).label.winfo_width())
+    stale = _StubNameLabel(fit_text(_HUGE_NAME, page._name_font, width - 60), width)
+
+    with pytest.raises(AssertionError, match="不是按当前宽度"):
+        _assert_name_fills(stale, _HUGE_NAME, page._name_font)
+
+
+def test_row_names_retry_until_the_width_is_known(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """宽度还没量出来时按"下一轮再来"处理, 而不是跳过(重试且有上限).
+
+    各平台的布局时序不同: 首次同步时行内标签可能还没被布局(``winfo_width()`` 是 1),
+    而之后不再有尺寸变化事件 —— 老实现直接跳过, 名称就永远停在兜底宽度的短文本上。
+    """
+    app = gui_app(_long_name_app, _HUGE_NAME)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    parts = next(iter(page._row_parts.values()))
+    scheduled: list[str] = []
+    monkeypatch.setattr(page, "_schedule_list_sync", lambda: scheduled.append("sync"))
+    monkeypatch.setattr(parts.label, "winfo_width", lambda: 1)
+
+    page._refit_row_names()
+
+    assert scheduled == ["sync"], "宽度未知时应当安排下一轮重试"
+    # 重试有上限: 一直量不出宽度也不会无限排任务.
+    page._refit_attempts = _REFIT_MAX_ATTEMPTS
+    page._refit_row_names()
+    assert scheduled == ["sync"]
+
+
+class _PosterStartService(DemoArchiveService):
+    """启动时读到的偏好就是海报模式(相当于 home_state 里存着海报)."""
+
+    def load_home(self) -> HomeBoard:
+        return self._poster(super().load_home())
+
+    def apply_home_filter(self, active: HomeFilter) -> HomeBoard:
+        return self._poster(super().apply_home_filter(active))
+
+    @staticmethod
+    def _poster(board: HomeBoard) -> HomeBoard:
+        return replace(board, filter=replace(board.filter, layout=HomeLayout.POSTER))
+
+
+def _poster_start_app() -> ArchiveApp:
+    """构造"启动首屏即海报模式"的主窗口."""
+    app = ArchiveApp(
+        _PosterStartService(delay=0),
+        title="海报首屏测试",
+        hotkeys=GlobalHotkeyService(backend=UnavailableBackend("测试环境禁用")),
+    )
+    app.geometry(_WINDOW_SIZE)
+    return app
+
+
+def test_poster_layout_is_reflowed_after_the_first_render() -> None:
+    """启动首屏就是海报模式时, 卡片要按**真实宽度**排布.
+
+    首屏渲染发生在控件尺寸测量出来之前(此时 ``winfo_width()`` 只有 1), 列数会被
+    算得很小 —— 4 款游戏于是排成两行; 首帧完成后必须按真实宽度重排一次。
+    """
+    app = gui_app(_poster_start_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    _settle_layout(app)
+    assert page._rows, "演示数据应当有游戏"
+
+    columns = poster_columns(page._list_box.winfo_width())
+    stale = f"列数没有按真实宽度重算: {page._poster_columns} != {columns}"
+    assert page._poster_columns == columns, stale
+    placed = sorted({int(card.grid_info()["row"]) for card in page._rows.values()})
+    expected = list(range(ceil(len(page._rows) / columns)))
+    assert placed == expected, f"卡片行列不对: {placed} != {expected}"
+
+
+def _descendants(widget: Any) -> list[Any]:
+    """递归收集控件树里的全部子孙控件."""
+    found: list[Any] = []
+    for child in widget.winfo_children():
+        found.append(child)
+        found.extend(_descendants(child))
+    return found
+
+
+def _poster_marks(card: Any) -> list[Any]:
+    """海报卡片里的状态标记(封面左下角的启用绿点, 显示文本就是一个圆点)."""
+    return [
+        child
+        for child in _descendants(card)
+        if isinstance(child, ctk.CTkLabel) and str(child.cget("text")) == "●"
+    ]
+
+
+def test_poster_shows_a_green_dot_only_for_the_enabled_game() -> None:
+    """海报模式: 只有启用的那一款在封面左下角有绿点, 停用状态不加任何标记.
+
+    停用是常态(新建游戏默认停用), 所以"没有标记"必须是**真的没有那个控件** ——
+    否则一屏海报会挂满灰点, 看起来像整页都在报状态。
+    """
+    app = gui_app(_poster_start_app)
+    assert _wait_mapped(app)
+    page = app._home_page
+    # 演示后端种子里三款游戏都是启用的, 这里先停用一款当作对照。
+    app.backend.set_game_enabled("endless-space", False)
+    page.reload()
+    _settle_layout(app)
+    assert set(page._rows) == {"outer-wilds", "shanhai", "endless-space"}
+
+    marks = {game_id: _poster_marks(card) for game_id, card in page._rows.items()}
+
+    assert marks["endless-space"] == [], "停用的游戏不该有任何状态标记"
+    for game_id, dots in marks.items():
+        if game_id == "endless-space":
+            continue
+        assert len(dots) == 1, f"{game_id} 应当正好一个启用标记: {dots}"
+        dot = dots[0]
+        assert dot.cget("text_color") == page._palette.success, "启用标记要是绿色的"
+        assert dot.grid_info()["sticky"] == "sw", "启用标记要贴在封面左下角"
+
+
+# 删掉的那条用例: "海报标记的底衬只在真封面图上加"(2026-09-25)。
+# 它需要真的建一张封面图, 而建窗口这一步在 CI 上稳定抛
+# `TclError: image "pyimage1" does not exist` —— 于是两个平台都以
+# "tk 环境不可用" 跳过, 一年也跑不到一次(还不让任何东西变红)。规则本身已抽成
+# `ui.home_page.poster_backing` 并由不建窗口的单测钉住
+# (tests/unit/test_ui_widgets.py::test_poster_backing_uses_the_panel_colour_only_over_a_real_cover);
+# 标记的位置与颜色仍由上面那条"无封面"的用例覆盖。

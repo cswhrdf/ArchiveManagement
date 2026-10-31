@@ -1,0 +1,124 @@
+name: wiki
+
+# 把仓库里的 wiki/ 目录同步到 GitHub Wiki（远端 `<owner>/<repo>.wiki.git`）。
+#
+# 前置条件（只需做一次，必须先在网页上做，否则 Git 上根本没有这个远端）：
+#   1. 仓库 Settings → Features，勾选 Wikis；
+#   2. 在 Wiki 里随便保存一页（例如 Home）—— GitHub 是在"第一次保存页面"时才创建
+#      `<repo>.wiki` 仓库的，之前 clone 会失败。
+#
+# **只在发版时同步（2026-10-31 起）**：手册要给用户看"这一页是哪个版本带上的"，而版本号是合并
+# 之后由 release.yml 的 classify 定出来的 —— 所以要等那一轮**真发出 Release**，由 release.yml
+# 的 `wiki` 作业调这一份（`workflow_call`）。两条来由：
+#   * 不再监听 `push`：dev 上改手册会立刻上线，而那时谁也不知道自己会进哪个版本；
+#   * 也**不能**监听 `release` 事件：`gh release create` 用的是 GITHUB_TOKEN，它触发的 release
+#     事件不会再生成工作流运行（GitHub 的防环规则，只有 `workflow_dispatch` /
+#     `repository_dispatch` 例外）—— 那条路根本没人叫得动，只能由发布作业直接调。
+# 纯文档的合入不发版（release.yml 的 paths-ignore 覆盖 `**/*.md`），因此那份手册改动会在**下一个**
+# 代码版本里一起上线，并被标上那个版本号 —— 这正是"哪个版本带上了它"的准确含义。
+#
+# 同步是**镜像语义**：先清掉 Wiki 里的页面文件再整体复制，因此改名与删除也会同步过去。
+# 页面上的版本标注由 scripts/stamp_wiki_versions.py 现算，不写回仓库里的 wiki/（手册保持干净，
+# 评审时不看噪音），所以"标哪一版"永远只由 git 历史决定。
+#
+# 为什么用 git 直推而不是别的办法：Wiki 本身就是个 git 仓库，只有这一条官方支持的写入路径；
+# 内容以仓库里的 wiki/ 为准（可评审、可回退、和代码同一个 PR），Wiki 只作为渲染前端。
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "要同步的版本 tag(如 v0.0.2)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要同步的版本 tag(如 v0.0.2)"
+        required: true
+        type: string
+
+# 连续发布时旧的一轮没人看，却和新的一轮一样贵（这里只有一次 clone + push）。
+concurrency:
+  group: wiki-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  # 要同步的那个版本: 发布作业传进来, 手动档由触发者填。
+  TAG: ${{ inputs.tag }}
+  # Wiki 页脚/侧边栏里的仓库链接统一由这一个变量算出，避免把 owner/repo 写死在文档里。
+  REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+  WIKI_REMOTE: ${{ github.server_url }}/${{ github.repository }}.wiki.git
+
+jobs:
+  publish:
+    name: Publish wiki pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the released tag
+        uses: actions/checkout@v7
+        with:
+          # 标注要沿完整历史找"这一页最后一次改动是哪个 tag 带上来的"。
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Refuse tags that main never shipped
+        # 手动档可以指任意 tag: 从 dev 手动发出去的那一档不在 main 的历史里, 它的版本号对
+        # 用户没有意义 —— 同步上去只会让手册标一个"正式版根本没有"的版本。
+        id: main_only
+        run: |
+          set -eu
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if git merge-base --is-ancestor "${TAG}^{commit}" origin/main; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG 不在 main 的历史里(手动从 dev 发布的档), 本次不同步 Wiki。"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clone the wiki repository
+        if: ${{ steps.main_only.outputs.ok == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          remote="${WIKI_REMOTE/https:\/\//https://x-access-token:${GITHUB_TOKEN}@}"
+          if ! git clone --depth 1 "$remote" wiki-target; then
+            echo "::error::无法克隆 <repo>.wiki.git —— 请先启用 Wikis 功能并在 Wiki 界面保存过至少一页（说明见 .github/workflows/wiki.yml 顶部）。"
+            exit 1
+          fi
+
+      - name: Stamp each page with the version that brought it
+        if: ${{ steps.main_only.outputs.ok == 'true' }}
+        # 只用标准库 + git: runner 自带的 python3 就够, 不装 uv 环境。
+        run: python3 scripts/stamp_wiki_versions.py --out wiki-stamped
+
+      - name: Mirror wiki/ into the wiki repository
+        if: ${{ steps.main_only.outputs.ok == 'true' }}
+        run: |
+          set -eu
+          # 镜像语义: 先删掉旧页面再整体复制, 因此改名/删除都会同步(只增不减会留下僵尸页面)。
+          find wiki-target -maxdepth 1 -name '*.md' -delete
+          cp wiki-stamped/*.md wiki-target/
+          # 侧边栏等页面里的 {{REPO_URL}} 占位符替换成真实仓库地址。
+          sed -i "s|{{REPO_URL}}|${REPO_URL}|g" wiki-target/*.md
+          ls -1 wiki-target
+
+      - name: Push when something changed
+        if: ${{ steps.main_only.outputs.ok == 'true' }}
+        run: |
+          set -eu
+          cd wiki-target
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki 已是最新内容, 无需推送。"
+            exit 0
+          fi
+          git commit -m "docs(wiki): 同步 wiki/ (${TAG})"
+          git push

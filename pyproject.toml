@@ -1,0 +1,342 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "archive-management"
+dynamic = ["version"]
+dependencies = [
+    "apscheduler~=3.11.3",
+    "customtkinter~=6.0.0",
+    "httpx~=0.28.1",
+    "pillow~=13.0",
+    "platformdirs~=4.12.1",
+    "psutil~=7.2.2",
+    "pydantic~=2.13.5",
+    "pynput~=1.8.2",
+    "send2trash~=2.1.0",
+]
+requires-python = ">=3.12"
+authors = [
+    { name = "晓航", email = "52796446+cswhrdf@users.noreply.github.com" },
+]
+description = "用于分支、备份、恢复和导出游戏存档的桌面工具"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+
+[dependency-groups]
+# 开发依赖按**作业**拆组: CI 里每个作业只装自己需要的那一组(见 .github/workflows/ci.yml 的
+# `uv sync --locked --no-default-groups --group <组>`), 免得每个作业实例都下一次 bandit /
+# pip-audit / pyinstaller —— 一趟 CI 有十几个实例, 这类重复下载是最容易省掉的固定开销。
+#
+# 哪一组装给谁, 由作业真正执行的命令决定:
+#   test     —— 跑 pytest(单元/集成/性能/安全)并采集 Allure 结果与失败现场
+#   coverage —— 只有报告作业需要(合并各片数据、判覆盖率门槛); 它不跑用例, 所以不装 pytest
+#   quality  —— 代码质量门禁(ruff / 格式 / 宿主平台 mypy)、对比度第三方算尺与本地提交钩子
+#   analysis —— 静态分析与依赖检查(由 create_allure_quality.py --group analysis 逐项调用)
+#   visual   —— 界面视觉回归(感知哈希 + SSIM, 由 create_allure_visual.py 调用)
+#   package  —— PyInstaller 打包(只有 release 工作流需要)
+#
+# visual 单独一组而不是塞进 quality: 它要 numpy/scipy/networkx/imageio/tifffile 一整串
+# (scikit-image 的依赖树), 而 quality 组是每个平台每个分片都会装的 —— 混在一起等于让
+# 6 个分片实例重复下载这套东西。它只在 Ubuntu 的质量作业里跑一次。
+# 本地 `uv sync` 仍然**全部装上**(默认组在 [tool.uv] 的 default-groups 里), 所以下面的
+# 分组不会改变本地开发与提交钩子的用法。
+test = [
+    "pytest>=9",
+    "pytest-cov>=7",
+    "pytest-timeout>=2.4.0",
+    "allure-pytest>=2.16",
+    "coredumpy>=0.5.0",
+]
+
+coverage = ["coverage>=7.16.2"]
+
+quality = [
+    "ruff>=0.16",
+    "mypy>=2.3",
+    "pre-commit>=4",
+]
+
+analysis = [
+    "bandit[toml]>=1.9.4",
+    "pip-audit>=2.10.1",
+    "radon>=6.0.1",
+    "xenon>=0.9.3",
+    "deptry>=0.25.1",
+]
+
+visual = [
+    # 感知哈希(pHash/dHash 一类的汉明距离)与结构相似度(SSIM)各司其职:
+    # imagehash 对"整体长相变了没有"敏感, scikit-image 的 SSIM 给出细粒度相似度。
+    "imagehash>=4.3.2",
+    "scikit-image>=0.26",
+]
+
+package = ["pyinstaller>=6"]
+
+[project.urls]
+Homepage = "https://github.com/cswhrdf/ArchiveManagement"
+Documentation = "https://github.com/cswhrdf/ArchiveManagement/wiki"
+Repository = "https://github.com/cswhrdf/ArchiveManagement"
+BugTracker = "https://github.com/cswhrdf/ArchiveManagement/issues"
+Changelog = "https://github.com/cswhrdf/ArchiveManagement/releases"
+
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/archive_management"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/archive_management"]
+
+[tool.hatch.version]
+path = "src/archive_management/packaging.py"
+
+[tool.uv]
+# **装成可编辑包**(不发布到 PyPI): `uv sync` 会往 .venv 里放一个指向 `src` 的 `.pth`
+# (几十字节)与一份 dist-info, **源码不进 site-packages**, 所以改代码不需要重装; 于是
+# `python -m archive_management` 与直接调用 `.venv` 里的解释器都能在**任意目录**运行,
+# 不再需要 `PYTHONPATH` 或仓库根的 `.env`(旧方案已删)。
+#
+# CI **不需要**装它: 用例靠 pytest 的 `pythonpath = ["src", "tests"]` 导入源码, 静态检查靠
+# `mypy_path`, 所以每处 `uv sync` 都带 `--no-install-project` —— 不构建、也不必下载构建后端
+# (hatchling), 每个作业的额外开销为零; 只有质量作业装一次并跑一次 CLI 冒烟, 用来钉住
+# "可编辑安装真的可用"(见 .github/workflows/ci.yml 与 docs/testing-ci.md)。
+#
+# 另: 版本是动态的(`dynamic = ["version"]` + `[tool.hatch.version]` 读
+# `src/archive_management/packaging.py`), 所以**首次** `uv lock` / `uv sync` 需联网取 hatchling。
+package = true
+
+# 本地 `uv sync` / `uv run` 默认把**所有**开发依赖装上 —— 与拆分依赖组之前的行为完全一致,
+# 所以本地能直接 `uv run pytest` / `uv run ruff` / `uv run pyinstaller`。
+# 只有 CI 会显式跳过默认组(`--no-default-groups --group <组>`), 让每个作业少下几十 MB。
+default-groups = ["test", "coverage", "quality", "analysis", "visual", "package"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src", "tests"]
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ANN",
+    "B",
+    "C90",
+    "D",
+    "DTZ",
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "G",
+    "I",
+    "LOG",
+    "N",
+    "PERF",
+    "PTH",
+    "PT",
+    "RET",
+    "RUF",
+    "S",
+    "SIM",
+    "T20",
+    "UP",
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里允许用 print 做临时调试输出(例如在失败前打印现场).
+"tests/**/*.py" = [
+    "D",
+    "ANN",
+    "S101",
+    "PT011",
+    "T201",
+]
+# 命令行入口与独立脚本的职责就是向终端打印结果, 因此放行 T201.
+# GUI 与用例层不得使用 print: 前者走日志, 后者用接口返回值/回调表达结果.
+"src/archive_management/app.py" = ["T201"]
+"scripts/**/*.py" = ["T201"]
+# 注册表读取协议必须沿用 winreg 的原生方法名(OpenKey/EnumValue/EnumKey),
+# 否则无法和真实模块对齐; 仅此模块放行命名规则.
+"src/archive_management/services/platform_scan.py" = ["N802"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["archive_management"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+# 格式化统一交给 `ruff format`(已替代 Black): 下面的取值就是 **Black 稳定版的默认风格**,
+# 不要随意改动 —— 否则缩进/引号/尾随逗号会立刻与 Black 风格分叉。
+# preview = false 也是刻意为之: preview 的排布规则偏离 Black 稳定版。
+# 另注: `skip-magic-trailing-comma = false` 表示"尊重魔法尾随逗号"(与 Black 相同) ——
+# 多行容器里写了尾随逗号就会保持展开, 不会因为放得下被折叠成一行。
+preview = false
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+skip-magic-trailing-comma = false
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict = true
+no_implicit_optional = false
+allow_redefinition = false
+ignore_missing_imports = true
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src:$MYPY_CONFIG_FILE_DIR/tests"
+# tests 各层目录(unit/performance/security)的 conftest 与根目录 tests/conftest.py 同名,
+# mypy 的模块发现会把它们判成 "Duplicate module"; 这些文件是纯 fixture 装配(由 pytest
+# 在收集期加载), 类型问题由 ruff 与运行期用例兜底, 故只对子目录 conftest 豁免检查.
+# ui-review/ 是一次性的本地评审脚本(自述"不参与质量门禁", 也未被 git 跟踪): 目录递归
+# 发现(如本地跑 `mypy .`)会把它扫进来, 这里一并排除 —— files 里没有它, CI 的正式
+# 检查范围不受影响.
+exclude = "(tests[/\\\\].+[/\\\\]conftest\\.py$|ui-review[/\\\\])"
+
+[[tool.mypy.overrides]]
+# CustomTkinter 缺少完整类型标注, 主窗口按需放宽对 Any 基类的限制
+module = ["archive_management.ui.main_window"]
+disallow_subclassing_any = false
+
+[tool.bandit]
+# Bandit 只看源码里的**危险模式**(exec/eval、弱随机、subprocess、临时文件、硬编码口令等);
+# 用例里满是 assert 与故意构造的脏数据, 扫它们只会制造噪音, 因此只扫 src。
+exclude_dirs = ["tests", "scripts", "packaging", "build", "dist", ".venv", "dev-data"]
+# 说明: 运行期行为由 tests/security(见 docs/testing.md)覆盖, 两者互补 ——
+# Bandit 拦"写法危险", 安全用例拦"行为可被利用"。
+
+[tool.deptry]
+# 项目虽然装成了可编辑包(见 [tool.uv]), 但 CI 的静态分析作业带 `--no-install-project`,
+# 依赖是按"仓库源码"而不是"已安装的发行版"解析的; 不声明下面这行, deptry 会把
+# archive_management 判成"传递依赖"(DEP003), 一报就是 197 条。tests 下的共享辅助模块
+# (pythonpath = tests)同样属于"自己家的代码"。
+known_first_party = [
+  "allure_catalog",
+  "archive_management",
+  "button_support",
+  "ci_workflow",
+  "conftest",
+  "crash_capture",
+  "durations",
+  "gui_support",
+  "helpers",
+  "report_support",
+  "reporting",
+  "sharding",
+  "sql_support",
+  "timeout_guard",
+  "tk_guard",
+  "ui_sharing",
+]
+# scikit-image 的模块名是 skimage 而不是包名直译的 scikit_image: 拿不到该包的
+# 安装元数据时(本地没装 visual 组 —— CI 的静态分析作业装了, 见 uv sync 那行
+# `--group visual`), deptry 只能猜映射, 猜错就把 scripts/create_allure_visual.py
+# 里的合法 import 误报成 DEP001。写死映射后两边都不再依赖环境。
+package_module_name_map = { "scikit-image" = "skimage" }
+# 拆分/新增 tests 下的共享辅助模块时**必须同步登记上面这份清单** —— 忘了的话 deptry
+# 会把它当"未声明依赖"(DEP001, 一处 import 一条), 本地提交钩子当场拦下(2026-10-07:
+# button/report/sql_support 三组就是这样被拦住的)。
+exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-results"]
+
+[tool.deptry.per_rule_ignores]
+# 测试用例按设计导入开发依赖 —— pytest 与 allure-pytest 就是开发工具本身,
+# 出现在 tests/ 里是正常的(DEP004 默认只在"运行时代码"里才该报警);
+# coredumpy 同理: 它只在用例失败时留现场(见 tests/crash_capture.py);
+# coverage 是 CI 里直接调用的工具(合并/报告覆盖率), 用例也用它验证"跨平台合并"这件事。
+# imagehash / skimage: 同理, 它们是视觉回归的算尺(声明在 visual 组), 只被
+# scripts/create_allure_visual.py 使用, 不在 src 里出现。
+# pytest_timeout: 超时留证的接管点(见 tests/timeout_guard.py)—— 我们调它的钩子
+# (`is_debugging` / `dump_stacks`), 而不是只把它当插件用。
+DEP004 = [
+  "pytest",
+  "allure",
+  "allure_pytest",
+  "coredumpy",
+  "coverage",
+  "imagehash",
+  "skimage",
+  "pytest_timeout",
+]
+# `allure` 与 `allure_commons` 这两个模块由 allure-pytest 带进来, 测试里直接用它记
+# 附件(含 AttachmentType 类型标注)属正常用法。
+# numpy 同理: 它由 scikit-image 带进来(不在 [project].dependencies 里), 而视觉回归要把
+# 截图转成 ndarray 才能交给 structural_similarity —— PIL 的 Image 没有 .shape, 传不进去。
+# 刻意不把 numpy 写进依赖清单: 它是这套算尺的实现细节, 跟着 scikit-image 的版本走才对。
+DEP003 = ["allure", "allure_commons", "numpy"]
+# numpy 的 DEP001 同理豁免: 没装 visual 组的环境里 deptry 关联不到"由 scikit-image
+# 带进来"这层传递关系, 会把它当"未声明"误报(装了 visual 组时不会; 见上面的映射注释)。
+# 它本来就不在 [project].dependencies 里, deptry 不是、也不该是 numpy 的门禁。
+DEP001 = ["numpy"]
+
+
+[tool.pytest.ini_options]
+# 默认只跑单元与集成测试: 性能与安全测试只在 CI 执行,
+# 需要显式指定目录(`pytest tests/performance`)或标记(`pytest -m performance`).
+testpaths = ["tests/unit", "tests/integration"]
+# src 供被测包导入; tests 供跨模块共享的测试辅助模块(tests/helpers.py)导入.
+pythonpath = ["src", "tests"]
+# 每个用例都有最长执行时间: 卡住的用例会被计时器打断并打印各线程堆栈,
+# 避免整套测试长时间不结束. 个别慢用例可用 @pytest.mark.timeout(N) 覆盖.
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+    "--timeout=60",
+    "--timeout-method=thread",
+]
+markers = [
+    "backend: tests for an application backend implementation",
+    "blocker: safety and data-integrity guard tests (run by local pre-commit)",
+    "cli: tests for command-line entry points",
+    "config: tests for configuration parsing and persistence",
+    "critical: core business logic tests (run by local pre-commit)",
+    "database: tests for database access and persistence",
+    "dialogs: tests for dialog behavior",
+    "discovery: tests for game or save-location discovery",
+    "domain: tests for domain models and validation",
+    "epic: Allure product-level module label (see tests/conftest.py._EPICS)",
+    "feature: Allure functional module label",
+    "i18n: tests for localization behavior",
+    "integration: tests that use the filesystem or other infrastructure",
+    "layer: Allure test layer label (unit/integration/e2e)",
+    "minor: presentation and helper-feature tests (CI only)",
+    "no_severity: tests without an assigned severity",
+    "normal: standard functional and interaction tests (CI only)",
+    "package: tests for package imports and metadata",
+    "paths: tests for filesystem path handling",
+    "performance: benchmark and scale tests (CI only, excluded locally)",
+    "repository: tests for repository operations",
+    "security: security and hostile-input tests (CI only, excluded locally)",
+    "smoke: smoke tests for startup or package availability",
+    "steam: tests for Steam data integration",
+    "story: Allure user-scenario label",
+    "trivial: negligible-impact tests, e.g. palette values or report summaries (CI only)",
+    "ui: tests for user-interface behavior",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/archive_management"]
+# 记录**相对工作目录**的文件名: 报告作业在 Ubuntu 上合并各平台的分片数据(见
+# docs/testing-ci.md 第 6 节说明), 绝对路径在另一台机器上无法还原。相对文件名让 Windows 与
+# Linux 记下的名字都形如 `src/archive_management/app.py`, `coverage combine` 再把它
+# 归一到当前仓库根下的真实文件 —— 覆盖率数字与平台无关, 只有"哪台机器产的"不同。
+relative_files = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+show_missing = true
+skip_covered = true
+# 覆盖率门槛: 低于该值则 pytest 失败(在 source 中排除入口与平台分支后逐步上调).
+fail_under = 100
