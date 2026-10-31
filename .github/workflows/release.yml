@@ -108,6 +108,14 @@ jobs:
           git push origin HEAD:main
           # GITHUB_TOKEN 推的提交不会再触发任何工作流(含本工作流), 天然无循环; 代价是
           # 那一次 bump 提交不跑 CI —— 一行版本号改动, 门禁在合入前已跑过。
+          #
+          # dev 在合并那一刻被 GitHub 自动删掉了, `ensure-dev.yml` 重建出来的那份指向**合并
+          # 提交**(它跑在 bump 之前)。不补这一句, dev 就永远比 main 少这一行版本号, 下一次
+          # `dev -> main` 的 PR 会把它"改回去"(版本号倒退, 下一次定版就会撞上已存在的 tag)。
+          # 所以这里把 dev 快进到同一个提交: 只是直线上的 FF; dev 已被别人动过(非 FF)时
+          # push 会被拒 —— 那是有意的, 只记一条 notice, 绝不覆盖别人的工作。
+          git push origin HEAD:refs/heads/dev \
+            || echo "::notice::dev 不是可快进的祖先(或被改动过), 跳过同步; 下次 main 推进时 ensure-dev 会重建它"
 
       - name: Record the ref to build and tag
         id: ref

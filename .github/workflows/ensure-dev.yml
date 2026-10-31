@@ -1,0 +1,57 @@
+name: Ensure dev branch
+
+# 仓库设置里开着"合并后自动删除来源分支" —— `dev -> main` 的 PR 一合入, `dev` 就没了。
+# 这个工作流只做一件事: **main 每前进一格, 如果 `dev` 不存在就按 main 的当前提交重建**。
+#
+# 为什么单独一份, 而不是挂在已经有写权限的那两条上:
+#   * `ci.yml` 顶层是只读的(PR 那次运行会执行 PR 里的代码), 不能为它开写权限;
+#   * `release.yml` 的 push 档有 `paths-ignore`(纯文档合入不跑) —— 而**纯文档合入一样会
+#     把 dev 删掉**, 挂在那里就会出现"改个文档就再没有 dev 分支"的静默缺口;
+#   * 单独一份还能在十几秒内跑完, 不必排在那条十几分钟的构建后面。
+#
+# 一条纪律: **只在 dev 缺失时创建, 绝不移动或重置已存在的 dev**。别的机器上可能正有人在
+# 这条分支上干活, 顺手"对齐到 main"就是把人家的提交推没了。
+#
+# 与 `release.yml` 的分工: 这个工作流在合并那一刻创建出来的 dev 指向**合并提交**, 而
+# `classify` 随后还会往 main 推一个版本号 bump 提交 —— 那一步会顺手把 dev 快进到同一个提交
+# (见 release.yml 的 "Commit and push the bump")。少了那一快进, dev 会永远比 main 少一行
+# 版本号, 下一次 `dev -> main` 的 PR 就会把它"改回去"(版本号倒退)。
+
+on:
+  push:
+    branches: [main]
+    # **故意不写 `paths-ignore`**: 纯文档合入不会跑 CI 与发布, 但它同样会删掉 dev —— 正是
+    # 最需要这条兜底的场合。
+  workflow_dispatch:
+
+# 连着两次合并时两条都跑也无所谓(纯读 + 幂等), 但留一条就够。
+concurrency:
+  group: ensure-dev
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ensure:
+    name: 重建 dev
+    runs-on: ubuntu-latest
+    # 写权限只给这个作业(与 release.yml 的发布作业同一个模式: 顶层保持只读)。
+    permissions:
+      contents: write
+    steps:
+      - name: Create dev when it is missing
+        # 只用 gh(REST API): 不需要 checkout, 也就不必把仓库再拉一遍。
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if gh api "repos/$GITHUB_REPOSITORY/branches/dev" >/dev/null 2>&1; then
+            echo "dev 还在: 什么都不做(不移动、不重置别人的开发分支)。"
+            exit 0
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/heads/dev" \
+            -f sha="$SHA" >/dev/null
+          echo "::notice::dev 不存在(合并时被自动删除了), 已按 main 的 $SHA 重建。"

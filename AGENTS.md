@@ -80,7 +80,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - **风格**：裸 `assert` + 能定位问题的失败消息（太长就把消息存进变量，保持单行）；环境用 `tmp_path`、替身用 `monkeypatch`（仓库里不用 `unittest.mock`）；用例自带数据，不依赖执行顺序。
 - **别绕过门禁**：不许用无原因的 `pytest.skip` 静默掉用例（Tk 环境问题只认白名单症状）、不许放宽 `fail_under` 或复杂度阈值、不许用"既有问题"当借口跳过检查。CI 红了你认为既有问题，在 PR 里写明。
 - **UI 守卫族**（改界面前先知道它们在守什么）：`tests/unit/test_ui_metrics.py`（间距/圆角/字号刻度与站点总数）、`test_ui_contrast.py`（对比度三档阈值）、`test_ui_input_border.py`（输入控件边界色）、`test_gui_styles.py`（语义色与危险动作）、`test_gui_layout.py`（对齐/边框/长文本）、`test_gui_states.py`（忙碌与可用性）、`test_gui_copy_quality.py`（文案截断与空状态）。
-- **CI 工作流**：`.github/workflows/ci.yml`（PR/push 全量 + 被 nightly 调用的 `workflow_call` 入口）、`nightly.yml`、`release-build.yml`（只读构建，被门禁与发布档共用）、`release.yml`（合入 `main` 后发 Release）、`wiki.yml`。改工作流前读 [.github/instructions/github-actions-pitfalls.instructions.md](.github/instructions/github-actions-pitfalls.instructions.md)，改报告链路前读 [allure-reporting](.github/instructions/allure-reporting.instructions.md)（"改哪一处必须同步改哪几处"）。
+- **CI 工作流**：`.github/workflows/ci.yml`（PR 与 push 都跑全量）、`release-build.yml`（只读构建，被门禁与两条发布档共用）、`release.yml`（合入 `main` 后发 Release + 同步手册）、`dev-release.yml`（dev 的**手动**快照档，带 `Pre-release` 标签）、`ensure-dev.yml`（`dev` 在 PR 合入时被自动删除后补回来）、`co-author-attribution.yml`（PR 摘要与署名）、`wiki.yml`（被 `release.yml` 调用）。改工作流前读 [.github/instructions/github-actions-pitfalls.instructions.md](.github/instructions/github-actions-pitfalls.instructions.md)，改报告链路前读 [allure-reporting](.github/instructions/allure-reporting.instructions.md)（"改哪一处必须同步改哪几处"）。
 
 ## 8. 文档导航
 
