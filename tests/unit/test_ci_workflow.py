@@ -1323,6 +1323,54 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     assert "const MAX_PATHS" in workflow, "每类路径同样要封顶(见上一条)"
 
 
+def test_the_dev_branch_is_recreated_without_touching_an_existing_one() -> None:
+    """合并时 `dev` 被自动删除 → main 每前进一格就补一个; 但**只补不挪**.
+
+    背景(用户 2026-10-31): 仓库设置开着"合并后删除来源分支", 而 `dev` 正是 PR 的来源分支 ——
+    `dev -> main` 一合入, 开发分支当场消失, 只能手工重建。
+
+    落点是一份**独立工作流**而不是挂在现成的两条上, 三条理由都要钉住:
+    ① `ci.yml` 顶层只读(PR 那次运行会执行 PR 里的代码), 不能为它开写权限;
+    ② `release.yml` 的 push 档带 `paths-ignore`, **纯文档合入不跑** —— 而那种合入同样会删掉
+       dev, 挂在那里就会留下"改个文档就再没有 dev"的静默缺口, 所以这份工作流**不许**有
+       `paths-ignore`;
+    ③ 与 `release.yml` 的分工: 它重建的是**合并提交**, bump 提交由 classify 快进过去
+       (`test_the_release_workflow_bumps_the_patch_version_by_default` 钉着那一句)。
+
+    最后一条是安全红线: 只看"在不在", **绝不移动/重置已存在的 dev** —— 别的机器上可能正
+    有人在上面干活。
+    """
+    path = _REPO_ROOT / ".github" / "workflows" / "ensure-dev.yml"
+    assert path.is_file(), "缺少 .github/workflows/ensure-dev.yml"
+    text = path.read_text(encoding="utf-8")
+    # 只看真正生效的行: 这份工作流的注释里就写着"**故意不写 paths-ignore**", 不剥注释的话
+    # 那条反向断言会被它自己喂红(2026-10-31 实测踩到, 同一类坑这个仓库已经记录过多次)。
+    head = _without_comments(text.split("\njobs:", 1)[0])
+
+    assert re.search(r"^  push:\n    branches: \[main\]$", head, re.MULTILINE), (
+        "只在 main 前进时补分支"
+    )
+    assert "paths-ignore" not in head, (
+        "纯文档合入同样会删掉 dev: 这份工作流不许按路径过滤"
+    )
+    assert "workflow_dispatch:" in head, "要留手动入口(dev 被手工删掉时能补)"
+    assert re.search(r"^permissions:\n  contents: read$", head, re.MULTILINE), (
+        "顶层保持只读, 写权限只给重建那个作业"
+    )
+
+    ensure = _without_comments(ci_workflow.job_block(text, "ensure"))
+    assert re.search(
+        r"^    permissions:\n      contents: write$", ensure, re.MULTILINE
+    ), "创建分支需要写权限, 且只给这个作业"
+    assert "repos/$GITHUB_REPOSITORY/branches/dev" in ensure, (
+        "先探测 dev 在不在 —— 存在时什么都不做"
+    )
+    assert "git/refs" in ensure, "只在缺失时创建(git refs 的 POST)"
+    for forbidden in ("-X PATCH", "-X DELETE", "--force", "force=true"):
+        hint = f"绝不许用 {forbidden}: dev 上可能正有别人没推完的提交"
+        assert forbidden not in ensure, hint
+
+
 def test_the_release_workflow_only_publishes_from_main() -> None:
     """release.yml 两个入口的口径: push 到 main(发布) / 手动; 构建交给只读的 release-build.yml.
 
@@ -1523,6 +1571,13 @@ def test_the_release_workflow_bumps_the_patch_version_by_default() -> None:
         "定版窗口里有新合入时, bump 提交要先 rebase 到最新 main 再推(否则 non-FF 被拒)"
     )
     assert "git push origin HEAD:main" in push_step
+
+    # dev 在合并那一刻被自动删掉了, ensure-dev 重建出来的那份指向**合并提交**(它跑在 bump
+    # 之前)。不同步的话 dev 永远比 main 少这一行版本号, 下一次 `dev -> main` 的 PR 会把它
+    # "改回去" —— 版本号倒退, 下一次定版就会撞上已存在的 tag。
+    assert "HEAD:refs/heads/dev" in push_step, (
+        "bump 之后要把 dev 快进到同一个提交(非 FF 时只记 notice, 不覆盖别人的工作)"
+    )
 
     build = ci_workflow.job_block(text, "build")
     assert ci_workflow.needs_of(text, "build") == {"classify"}, (
