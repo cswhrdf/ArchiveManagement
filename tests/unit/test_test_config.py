@@ -79,6 +79,9 @@ _UV_FREE_JOBS: set[str] = {
     "packaging-gate",
     "publish",
     "classify",
+    # 2026-11-01: ci.yml 的 `release-hint`(PR 阶段的发版提示) —— 与 classify 同一理由:
+    # release_bump.py / release_hint.py 只用标准库, 装一套 uv 环境是纯开销。
+    "release-hint",
     # 2026-10-31: dev 快照档的两个作业(只跑 gh / git / runner 自带的 python3 —— 版本号与
     # CI 前置都是脚本算的, 装一套 uv 环境反而是纯开销)。
     "prepare",

@@ -3,8 +3,8 @@
 为什么要有这个脚本(2026-10-31 定): 版本信息由**发起者在 PR 里手写**(模板的「本次变更」),
 CI 不再自动汇总 —— 自动摘要只能说"改了几个文件", 而发布页要说的是"用户这一版会看到什么"。
 发布作业在合入 `main` 之后回头找那个 PR: 用**合入提交**(`github.sha`)去问
-``repos/{owner}/{repo}/commits/{sha}/pulls``, **不能**用它要发布的 ``--target`` —— 自动定版
-时那个是 bump 提交, 与 PR 没有关联(squash 合入只把合并提交挂在 PR 上)。
+``repos/{owner}/{repo}/commits/{sha}/pulls``, **不能**用它要发布的 ``--target`` —— 手动档可以是
+任意 ref, 那边不一定关联着某个 PR(而 squash 合入只把合并提交挂在 PR 上)。
 
 只用标准库: 发布作业不装项目依赖(与 ``scripts/create_allure_summary.py`` 同一条理由)。
 

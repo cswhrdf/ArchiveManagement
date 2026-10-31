@@ -1,6 +1,6 @@
-r"""合入 main 之后决定"这一次发什么版本号", 默认把第 3 位加 1.
+r"""算出"这一次该发什么版本号", 并告诉调用方版本号是否已经动过.
 
-发布口径是"手动预改版优先 + 自动 patch 兜底"(取舍见 docs/development.md「发布」节):
+发布口径是"人在 PR 里定档"(2026-11-01 起, 取舍见 docs/development.md「发布」节):
 
 - 版本号的**单一真相**仍是 ``src/archive_management/packaging.py`` 的 ``__version__``
   (三段语义版本), 发布 tag 清一色 ``v<版本号>``;
@@ -8,25 +8,26 @@ r"""合入 main 之后决定"这一次发什么版本号", 默认把第 3 位加
   diff 经过评审; **故意不让脚本从改动量里猜前两位**: semver 段位是对用户的沟通契约
   (5 行可以是破坏性的 schema 变更, 5000 行重构可以用户无感), 任何按行数/文件数的启发式
   都会两头误判, 误判的代价由用户承担;
-- PR 里没改版本号时, 合入 main 之后由 release.yml 的定版作业(classify)调本脚本, 在
-  第 3 位上加 1(如 0.0.1 -> 0.0.2), 把这个 bump 提交推回 main, 再构建并发布。
+- **本脚本不写文件**(2026-11-01): `main` 开了分支保护, 任何"合入之后再改 main"的做法都会
+  被拒, 于是定版前移到 **PR 阶段** —— 本脚本只算"建议的下一版号", 由 CI 在 PR 上提醒人改;
+  合入之后 release.yml 只读地再复查一遍。
 
 三条判定(输入 = 当前 ``__version__`` 与"最近发过的版本", 即 ``v`` 前缀 tag 里语义
 版本最大的一个):
 
 - 从没发过(仓库还没有 ``v*.*.*`` 形态的 tag): 首版直发当前版本号, 不递增;
 - 最近发过的 != 当前: 人在 PR 里改过版本号, 按人写的发;
-- 最近发过的 == 当前: 自动 patch 递增(``--apply`` 时把 ``packaging.py`` 就地改掉)。
+- 最近发过的 == 当前: **版本号还没动** —— 给出建议的下一版号(第 3 位加 1),
+  ``reason=needs-bump``, 由人在 PR 里改。
 
-用法(release.yml 的 classify 作业; 本脚本只用标准库, runner 自带的 python3 就够,
-不装 uv 环境)::
+用法(PR 的提示作业; 本脚本只用标准库, runner 自带的 python3 就够, 不装 uv 环境)::
 
     tags=$(git tag -l)
     python3 scripts/release_bump.py \
-        --file src/archive_management/packaging.py --tags $tags --apply
+        --file src/archive_management/packaging.py --tags $tags
 
-stdout 只写"键=值"行(整段被工作流收进 ``$GITHUB_OUTPUT``): ``bump``(none|patch)、
-``version``(本轮要发布的版本号)、``previous``、``reason``(first-release|manual|patch);
+stdout 只写"键=值"行(整段被工作流收进 ``$GITHUB_OUTPUT``): ``bump``(none|needs-bump)、
+``version``(建议的下一版号)、``previous``、``reason``(first-release|manual|needs-bump);
 给人看的说明走 stderr 的 ``::notice::``/``::error::``, 不会混进输出参数。
 """
 
@@ -51,7 +52,7 @@ class Decision:
     """定版结论: bump 说明"要不要递增", version 是本轮要发布的版本号."""
 
     bump: str
-    """none(按当前版本号发) | patch(第 3 位加 1)."""
+    """none(按当前版本号发) | needs-bump(版本号还没动, 下面的 version 是建议值)."""
 
     version: str
     """本轮要发布的版本号(发布 tag 用它)."""
@@ -60,7 +61,7 @@ class Decision:
     """做决定时的当前版本号(bump 提交的说明文字用它)."""
 
     reason: str
-    """first-release | manual(人在 PR 里改过) | patch(自动兜底)."""
+    """first-release | manual(人在 PR 里改过) | needs-bump(需要人在 PR 里定档)."""
 
 
 def parse_version(text: str) -> str | None:
@@ -113,40 +114,18 @@ def read_current_version(path: Path) -> str:
 
 
 def decide(current: str, latest: str | None) -> Decision:
-    """按"首版直发 / 人已定档 / 自动 patch 兜底"三档给出定版结论."""
+    """按"首版直发 / 人已定档 / 还没动版本号"三档给出结论(不写文件)."""
     if latest is None:
         return Decision("none", current, current, "first-release")
     if latest != current:
         return Decision("none", current, current, "manual")
-    return Decision("patch", bump_patch(current), current, "patch")
-
-
-def apply_bump(path: Path, previous: str, next_version: str) -> None:
-    """把 packaging.py 里的版本号就地替换成 next_version(只动那一行引号里的值).
-
-    三道前置检查都在写盘**之前**: 文件里恰好一处 ``__version__``、当前值与
-    ``previous`` 一致、新值确实更大 —— 写错了应当红在这一步, 而不是构建期。
-    """
-    if _as_tuple(next_version) <= _as_tuple(previous):
-        raise ValueError(f"新版本 {next_version} 必须大于 {previous}, 拒绝平级/降级")
-    text = path.read_text(encoding="utf-8")
-    matches = VERSION_PATTERN.findall(text)
-    if len(matches) != 1:
-        raise ValueError(
-            f"{path} 里应有恰好一处 __version__, 实际找到 {len(matches)} 处"
-        )
-    if matches[0] != previous:
-        raise ValueError(f"文件里的版本是 {matches[0]}, 与要替换的 {previous} 不一致")
-    path.write_text(
-        VERSION_PATTERN.sub(f'__version__ = "{next_version}"', text, count=1),
-        encoding="utf-8",
-    )
+    return Decision("needs-bump", bump_patch(current), current, "needs-bump")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """定版入口: 判定, 按需写回, 把结论以"键=值"行打到 stdout."""
+    """入口: 判定并以"键=值"行把结论打到 stdout(**不写任何文件**)."""
     parser = argparse.ArgumentParser(
-        description="决定本轮发布的版本号(默认第 3 位加 1)."
+        description="算出本轮该发的版本号, 并说明版本号是否已经动过(不写文件)."
     )
     parser.add_argument(
         "--file",
@@ -160,23 +139,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=(),
         help="git tag -l 的全部输出(从中挑 v*.*.* 里语义最大的)",
     )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="判定为 patch 时把递增结果就地写回 --file",
-    )
     args = parser.parse_args(argv)
 
     try:
         current = read_current_version(args.file)
         decision = decide(current, latest_released(args.tags))
-        if args.apply and decision.bump == "patch":
-            apply_bump(args.file, decision.previous, decision.version)
-            print(
-                f"::notice::版本号 {decision.previous} -> {decision.version}"
-                "(自动 patch 递增).",
-                file=sys.stderr,
-            )
     except (OSError, ValueError) as exc:
         print(f"::error::定版失败: {exc}", file=sys.stderr)
         return 1

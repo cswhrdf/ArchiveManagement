@@ -102,6 +102,62 @@ jobs:
           fi
           echo "No code-impacting changes; heavy CI jobs were skipped, but the required status is still green."
 
+  release-hint:
+    # 定版前移到 PR(2026-11-01): main 有分支保护, 合入之后谁都推不进去 —— 包括 bot, 所以
+    # "合入后自动加一位"的做法会被拒。版本号只好由**人在 PR 里**改, 而"忘了改"的表现是
+    # **安静地不发新版**(Release 页什么都不多), 谁也不知道为什么。这个作业就在 PR 上说一句:
+    # 当前号是多少、想发版就改成哪个、不改会怎样。
+    # **它不判红**: 版本号没动不是错误, 那是"这次不发版"的正常选择。
+    name: 发版提示
+    needs: [changes]
+    if: >-
+      ${{ needs.changes.outputs.should_run == 'true'
+          && github.event_name == 'pull_request'
+          && github.base_ref == 'main'
+          && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    # 读仓库 + 写 PR 评论; fork 的 PR 拿不到写权限, 所以上面那道 if 直接把它挡掉。
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          # 要全部 tag 才找得到"最近发过的版本"(与 release.yml 的 classify 同一个理由)。
+          fetch-depth: 0
+
+      - name: Decide whether the version already moved
+        id: bump
+        shell: bash
+        # 脚本只用标准库(release_bump.py), runner 自带的 python3 就够, 不装 uv 环境。
+        run: |
+          tags=$(git tag -l)
+          python3 scripts/release_bump.py \
+            --file src/archive_management/packaging.py \
+            --tags $tags >> "$GITHUB_OUTPUT"
+
+      - name: Leave or refresh the version hint
+        # 只在 needs-bump 时留: 首版与"人已经改过"都不打扰。
+        if: ${{ steps.bump.outputs.reason == 'needs-bump' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          CURRENT: ${{ steps.bump.outputs.previous }}
+          NEXT: ${{ steps.bump.outputs.version }}
+        run: |
+          python3 scripts/release_hint.py --current "$CURRENT" --next "$NEXT" --out hint.md
+          # 已有就原地改(按 marker 找): 每次 push 新加一条的话, 一个 PR 会攒出七八条同样的提示。
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.body | contains("release-hint")) | .id' | head -n 1)
+          jq -Rs '{body: .}' hint.md > payload.json
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" --input payload.json
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --input payload.json
+          fi
+
   quality:
     name: 质量检查、静态分析、性能基准与视觉回归 (ubuntu-latest)
     needs: [changes]

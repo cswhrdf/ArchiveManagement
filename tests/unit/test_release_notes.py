@@ -5,7 +5,7 @@
 
 ① ``scripts/release_notes.py`` 的取文口径(标题起、下一个二级标题止、剥 HTML 注释);
 ② ``release.yml`` 真的调它, 而且用的是**合入提交**(``github.sha``)去找 PR —— 用
-   ``RELEASE_TARGET`` 会找不到: 自动定版时那是 bot 推的 bump 提交, 与 PR 没有关联。
+   ``RELEASE_TARGET`` 会找不到: 那是手动档可以任意填的 ref, 不一定关联着某个 PR。
 """
 
 from __future__ import annotations
@@ -176,7 +176,7 @@ def test_the_release_workflow_reads_the_notes_from_the_merged_pull_request() -> 
     hint = "发布说明取自 PR: 工作流要调 scripts/release_notes.py"
     assert "scripts/release_notes.py" in code, hint
 
-    hint = "找 PR 要用合入提交(github.sha): RELEASE_TARGET 在自动定版时是 bump 提交, 与 PR 无关"
+    hint = "找 PR 要用合入提交(github.sha): RELEASE_TARGET 在手动档可以是任意 ref, 与 PR 无关"
     assert "commits/$GITHUB_SHA/pulls" in code, hint
     assert "commits/$RELEASE_TARGET/pulls" not in code, hint
 
