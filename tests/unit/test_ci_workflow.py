@@ -1702,6 +1702,45 @@ def test_workflows_that_run_pytest_on_windows_force_utf8_stdio() -> None:
     )
 
 
+def test_the_release_build_judges_coverage_under_this_platform_config() -> None:
+    """发布档的覆盖率门禁必须按平台口径判 —— 不许裸跑 `pytest --cov`.
+
+    2026-10-31 实测(`release.yml` 首次跑 full 档那一轮): 2998 条用例全绿, 覆盖率却报
+    **99.94% < fail_under=100**, 缺的是 `platform_scan.py:162-163`(winreg)、
+    `single_instance.py:164/296-297/310-311`(msvcrt/fcntl)与 `topmost.py:41-42`(Tk 读回)——
+    全部打着 `# platform: linux macos`, 在 Windows 上本来就不该计入。pyproject 的
+    `[tool.coverage.report]` 是**三平台并集**的基线(合并口径就是它的含义), 拿它直接判单平台
+    的覆盖率, 那些行永远是缺口。
+
+    `ci.yml` 的覆盖率作业与本地 `scripts/run_tests_local.py --coverage` 都先让
+    `scripts/coverage_platform.py` 按平台写一份配置再判门槛, 只有发布档漏了。这条钉住它,
+    连同"每一步的退出码都要自己拦"一起 —— pwsh 只认最后一条命令的退出码, 用例红了会被后面
+    的 report 盖成假绿。
+    """
+    workflow = _REPO_ROOT / ".github" / "workflows" / "release-build.yml"
+    body = _without_comments(workflow.read_text(encoding="utf-8"))
+
+    hint = (
+        "release-build.yml 不许裸跑 `pytest --cov`: pyproject 的覆盖率配置是三平台并集的"
+        " 基线, 拿它判单平台会把别平台的专属行记成缺口(2026-10-31 实测 99.94%)"
+    )
+    assert re.search(r"\bpytest\b[^\n]*--cov", body) is None, hint
+
+    hint = "发布档要先按平台写覆盖率配置(coverage_platform.py write)"
+    assert "scripts/coverage_platform.py write .coverage-platform.rc" in body, hint
+
+    hint = (
+        "用例要在平台配置下采数 —— conftest 里设的 COVERAGE_RCFILE 对 pytest-cov 不生效"
+    )
+    assert "coverage run --rcfile=.coverage-platform.rc -m pytest" in body, hint
+
+    hint = "门槛判定也要用同一份平台配置(它从 pyproject 派生 fail_under)"
+    assert "coverage report -m --rcfile=.coverage-platform.rc" in body, hint
+
+    hint = "pwsh 只认最后一条命令的退出码: 用例红了会被后面的 report 盖成假绿"
+    assert body.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") >= 2, hint
+
+
 def test_the_packaging_gate_always_reports_a_conclusion() -> None:
     """必需检查必须是"总会报结论"的作业 —— 被跳过的必需检查会永久停在 pending.
 
