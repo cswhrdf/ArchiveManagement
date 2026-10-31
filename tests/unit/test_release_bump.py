@@ -1,5 +1,5 @@
 """
-发布定版脚本: 三档判定、tag 挑选与排序、patch 写回的安全性、main 的输出契约、与 release-build.yml 的版本抽取一致。
+发布定版脚本: 三档判定、tag 挑选与排序、"不写文件"这条纪律、main 的输出契约、与 release-build.yml 的版本抽取一致。
 """
 
 from __future__ import annotations
@@ -51,14 +51,18 @@ def test_a_manually_bumped_version_wins() -> None:
     assert decision.reason == "manual"
 
 
-def test_an_unchanged_version_gets_the_patch_bump() -> None:
-    """默认档: 版本没手动改就第 3 位加 1(0.0.9 -> 0.0.10, 不受字典序影响)."""
+def test_an_unchanged_version_needs_a_human_bump() -> None:
+    """版本号没动时不自己动手: 给出建议的下一版号(0.0.9 -> 0.0.10, 不受字典序影响).
+
+    2026-11-01 起 `main` 有分支保护, 合入之后谁都推不进去 —— 所以"自动加一位"改成了
+    "在 PR 上提醒人加", 脚本只负责把建议号算出来。
+    """
     script = _load_script("release_bump")
     decision = script.decide("0.0.9", "0.0.9")
-    assert decision.bump == "patch"
-    assert decision.version == "0.0.10"
+    assert decision.bump == "needs-bump", "不再有 patch 档: 脚本不写文件"
+    assert decision.version == "0.0.10", "version 是**建议**值, 由人写进 PR"
     assert decision.previous == "0.0.9"
-    assert decision.reason == "patch"
+    assert decision.reason == "needs-bump"
 
 
 def test_the_latest_release_is_picked_numerically_among_v_tags() -> None:
@@ -90,47 +94,6 @@ def test_both_version_extractions_agree_on_the_real_file() -> None:
     assert script.read_current_version(_packaging_py()) == declared
 
 
-def test_applying_the_bump_touches_only_the_version_line(tmp_path: Path) -> None:
-    """写回只动 __version__ 那一行, 文件其余内容逐字保留."""
-    script = _load_script("release_bump")
-    path = tmp_path / "packaging.py"
-    path.write_text(
-        'APP_NAME = "ArchiveManagement"\n\n__version__ = "0.0.1"\n',
-        encoding="utf-8",
-    )
-    original = path.read_text(encoding="utf-8")
-
-    script.apply_bump(path, "0.0.1", "0.0.2")
-
-    updated = path.read_text(encoding="utf-8")
-    assert '__version__ = "0.0.2"' in updated
-    assert updated.replace('__version__ = "0.0.2"', '__version__ = "0.0.1"') == original
-
-
-def test_applying_refuses_broken_or_downgrading_writes(tmp_path: Path) -> None:
-    """写盘前的三道检查: 恰好一处 __version__、当前值一致、新值更大."""
-    script = _load_script("release_bump")
-    path = tmp_path / "packaging.py"
-    _write_packaging(path, "0.0.1")
-
-    with pytest.raises(ValueError, match=r"0\.0\.1"):
-        script.apply_bump(path, "0.0.1", "0.0.1")
-    with pytest.raises(ValueError, match=r"0\.0\.0"):
-        script.apply_bump(path, "0.0.1", "0.0.0")
-
-    path.write_text('__version__ = "0.0.1"\n__version__ = "0.0.1"\n', encoding="utf-8")
-    with pytest.raises(ValueError, match="2 处"):
-        script.apply_bump(path, "0.0.1", "0.0.2")
-
-    path.write_text("APP_NAME = 1\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="0 处"):
-        script.apply_bump(path, "0.0.1", "0.0.2")
-
-    _write_packaging(path, "0.0.1")
-    with pytest.raises(ValueError, match="不一致"):
-        script.apply_bump(path, "0.0.9", "0.1.0")
-
-
 def test_reading_current_version_rejects_bad_shapes(tmp_path: Path) -> None:
     """读版本号时多判一道形态: 恰好一处 + 三段数字, 不带病往下走."""
     script = _load_script("release_bump")
@@ -145,33 +108,25 @@ def test_reading_current_version_rejects_bad_shapes(tmp_path: Path) -> None:
         script.read_current_version(path)
 
 
-def test_main_writes_the_outputs_and_applies_only_for_patch(
+def test_main_writes_the_outputs_and_never_touches_the_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """main 的契约: stdout 只写键=值行; --apply 只在 patch 档写文件."""
+    """main 的契约: stdout 只写键=值行; **任何情况下都不写文件**(定版在 PR 里做)."""
     script = _load_script("release_bump")
     path = tmp_path / "packaging.py"
     _write_packaging(path, "0.0.1")
+    original = path.read_text(encoding="utf-8")
 
-    code = script.main(["--file", str(path), "--tags", "v0.0.1", "--apply"])
+    assert script.main(["--file", str(path), "--tags", "v0.0.1"]) == 0
 
-    assert code == 0
-    assert path.read_text(encoding="utf-8").count('__version__ = "0.0.2"') == 1
     lines = capsys.readouterr().out.splitlines()
-    assert "bump=patch" in lines
-    assert "version=0.0.2" in lines
+    assert "bump=needs-bump" in lines, "版本号没动: 输出建议档而不是自己加"
+    assert "version=0.0.2" in lines, "建议的下一版号"
     assert "previous=0.0.1" in lines
-    assert "reason=patch" in lines
-
-    # 人已定档(manual): --apply 也不许碰文件。
-    _write_packaging(path, "0.1.0")
-    assert script.main(["--file", str(path), "--tags", "v0.0.1", "--apply"]) == 0
-    assert '__version__ = "0.1.0"' in path.read_text(encoding="utf-8")
-
-    # patch 档但不带 --apply: 只判定, 不写文件(dry-run)。
-    _write_packaging(path, "0.1.0")
-    script.main(["--file", str(path), "--tags", "v0.1.0"])
-    assert '__version__ = "0.1.0"' in path.read_text(encoding="utf-8")
+    assert "reason=needs-bump" in lines
+    assert path.read_text(encoding="utf-8") == original, (
+        "这个脚本不许改文件: 合入之后改 main 会被分支保护拒掉"
+    )
 
 
 def test_main_reports_failures_without_a_traceback(

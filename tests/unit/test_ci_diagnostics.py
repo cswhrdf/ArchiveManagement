@@ -50,6 +50,9 @@ _GATE_ONLY_JOBS = {
     "required-check",
     "windows-package",
     "packaging-gate",
+    # 2026-11-01: `release-hint` 只在 PR 上跑脚本 + 留一条评论, 不跑用例、不产 Allure
+    # 结果/覆盖率 —— 没有"兜底现场"可收。
+    "release-hint",
 }
 
 
