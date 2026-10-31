@@ -51,7 +51,8 @@ _SPACE_KEYS = {"padx", "pady"}
 # CustomTkinter 那条"每个窗口建好 200ms 后贴它自己那颗图标"的私有方法): 它只碰 Tk 的
 # 图标 API(``iconbitmap`` / ``iconphoto``), 一个间距/圆角/字号字面量都没有, 所以三个
 # 站点数一个都没变。
-_EXPECTED_FILES = 25
+_EXPECTED_FILES = 26
+# 界面模块 25 → 26: 新增 topmost.py(强制置顶判定, 无控件创建, 站点数不变)
 # 圆角站点 66 → 67: 设置窗口新增的“备份校验方式”面板自带一个 ``corner_radius=10``
 # (与同窗口其他面板一致)。
 # 圆角站点 67 → 66: 批量导入卡片移除“合并到”目标下拉框(它自带一个 ``corner_radius``) ——

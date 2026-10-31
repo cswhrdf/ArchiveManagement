@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -504,3 +505,175 @@ def test_the_combo_fix_is_applied_only_once(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch.setattr(DropdownMenu, name, getattr(DropdownMenu, name))
     assert dropdown.apply_combo_dropdown_fix() is True
     assert dropdown.apply_combo_dropdown_fix() is False
+
+
+# --------------------------------------------------------- 行高测量: 两档请求高度相等
+
+
+class _FakeWindow:
+    """浮层窗口的替身: 只记下 topmost 的写入值, 其余什么都不做."""
+
+    def __init__(self) -> None:
+        self.topmost: bool | None = None
+
+    def overrideredirect(self, _flag: bool) -> None:
+        """无边框(浮层不是普通窗口)."""
+
+    def transient(self, _host: object) -> None:
+        """挂成宿主的附属窗口."""
+
+    def attributes(self, _name: str, value: bool) -> None:
+        """记下 topmost 写了什么(判据: 要跟随宿主)."""
+        self.topmost = value
+
+    def update_idletasks(self) -> None:
+        """布局冲刷: 替身里没什么要冲的."""
+
+    def bind(self, sequence: str, _handler: object, add: str = "") -> str:
+        """记一条绑定并交回 id."""
+        return f"win-{sequence}"
+
+
+class _FakeFrame:
+    """列表的父容器替身."""
+
+    def pack(self, **_options: object) -> None:
+        """铺满."""
+
+
+class _MeasuredListbox:
+    """列表替身: 两档请求高度由用例给, 其余只记账."""
+
+    def __init__(self, *, one_row: int, two_rows: int) -> None:
+        self.heights = {1: one_row, 2: two_rows}
+        self.height = 1
+        self.inserted: list[str] = []
+
+    def pack(self, **_options: object) -> None:
+        """铺满."""
+
+    def insert(self, _index: str, value: str) -> None:
+        """收下候选项."""
+        self.inserted.append(value)
+
+    def configure(self, *, height: int) -> None:
+        """两档请求高度就是靠改它量出来的."""
+        self.height = height
+
+    def winfo_reqheight(self) -> int:
+        """按当前 height 报请求高度."""
+        return self.heights[self.height]
+
+    def bind(self, sequence: str, _handler: object, add: str = "") -> str:
+        """记一条绑定并交回 id."""
+        return f"box-{sequence}"
+
+
+class _FakeAnchor:
+    """锚点的替身: ``_build`` 只问它的顶层窗口."""
+
+    def __init__(self, host: object) -> None:
+        self.host = host
+
+    def winfo_toplevel(self) -> object:
+        """浮层要挂成它的附属窗口."""
+        return self.host
+
+
+def test_build_keeps_the_font_estimate_when_both_request_heights_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两档请求高度量不出差值时**保住字号估的行高**, 而不是把 0 当成一行.
+
+    真 Tk 里有一行内容时 ``height=2`` 一定更高, 所以这条路只有控件异常/内容为空时
+    才会走到 —— 而一旦采纳 ``measured = 0``, 后面所有"压到几行"的除法都会崩。
+    判据就是那个估值没被 0 覆盖。
+    """
+    popup = _popup(values=["a"])
+    popup.anchor = cast(Any, _FakeAnchor(_FakeWindow()))
+    popup.font = cast(Any, "TkDefaultFont")
+    popup.row_height = 14
+    listbox = _MeasuredListbox(one_row=15, two_rows=15)
+    fake_tk = SimpleNamespace(
+        Toplevel=lambda _master: _FakeWindow(),
+        Frame=lambda _master, **_options: _FakeFrame(),
+        Listbox=lambda _master, **_options: listbox,
+        TclError=tk.TclError,
+    )
+    # 只换 dropdown 模块里的 tk 引用: 真 tkinter 一个属性都不动(同一进程里还有 GUI 用例).
+    monkeypatch.setattr(dropdown, "tk", fake_tk)
+    monkeypatch.setattr(dropdown, "host_is_pinned", lambda _host: False)
+
+    assert popup._build() is True
+    assert popup.row_height == 14, "量不出差值时不该把行高改成 0"
+    assert listbox.inserted == ["a"], "候选项要真的写进列表"
+
+
+# --------------------------------------------------------- 选中项与首屏
+
+
+class _AnchorWithValue:
+    """带 ``get()`` 的锚点替身(``_mark_current`` 靠它取当前值)."""
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def get(self) -> str:
+        """CTk 下拉读当前值就这一个入口."""
+        return self.value
+
+
+class _ScrollRecordingListbox:
+    """``_mark_current`` 要的那三个动作: 选中 / 高亮 / 滚到哪."""
+
+    def __init__(self) -> None:
+        self.selected: list[int] = []
+        self.activated: list[int] = []
+        self.scrolls: list[float] = []
+
+    def selection_set(self, index: int) -> None:
+        """标成选中."""
+        self.selected.append(index)
+
+    def activate(self, index: int) -> None:
+        """高亮到那一行(键盘回车据此提交)."""
+        self.activated.append(index)
+
+    def yview_moveto(self, fraction: float) -> None:
+        """记下滚到哪(0 = 最上沿)."""
+        self.scrolls.append(fraction)
+
+
+def test_a_selection_below_the_first_screen_scrolls_to_the_top() -> None:
+    """选中项在首屏之外时把它顶到视野**上沿**(而不是只保证贴住底边).
+
+    用户 2026-10-30: "选了靠下的选项后, 下拉框自动向下滚动遮住了第一个选项" ——
+    ``see()`` 是最小滚动, 会把握手处的几行滚出视野; Windows 原生下拉是"以选中项为
+    第一行往下排", 这里对齐它。
+    """
+    popup = _popup(values=["a", "b", "c", "d"])
+    box = _ScrollRecordingListbox()
+    popup.listbox = box
+    popup.anchor = _AnchorWithValue("d")
+    popup.plan = cast(Any, SimpleNamespace(visible_rows=3))
+
+    popup._mark_current()
+
+    assert box.selected == [3], "当前值是第 4 行"
+    assert box.activated == [3], "高亮要跟着走"
+    assert box.scrolls == [0.75], "3/4: 把第 4 行滚到上沿"
+    assert box.scrolls[0] > 0, "要往下滚, 不是钉在最上"
+
+
+def test_a_selection_inside_the_first_screen_pins_the_view_to_the_top() -> None:
+    """首屏装得下时视图钉回最上(估高的旧几何会留下半行偏移)."""
+    popup = _popup(values=["a", "b", "c", "d"])
+    box = _ScrollRecordingListbox()
+    popup.listbox = box
+    popup.anchor = _AnchorWithValue("b")
+    popup.plan = cast(Any, SimpleNamespace(visible_rows=4))
+
+    popup._mark_current()
+
+    assert box.selected == [1]
+    assert box.scrolls == [0.0], "装得下就不要滚"

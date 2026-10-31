@@ -310,10 +310,11 @@ class _FakeWindow(_FakeWidget):
         self.visible = True
         self.calls.append("deiconify()")
 
-    def attributes(self, name: str, value: float) -> None:
-        """记录不透明度(不支持的平台由用例抛 TclError 模拟)."""
-        self.alpha = value
+    def attributes(self, name: str, value: float | bool) -> None:
+        """记录窗口属性写入(-alpha 是透明度, -topmost 是跟随宿主置顶, 2026-10-30 起)."""
         self.calls.append(f"{name}={value}")
+        if name == "-alpha":
+            self.alpha = value
 
     def winfo_ismapped(self) -> bool:
         return self.visible
@@ -374,6 +375,8 @@ class _FakeParent(_FakeWidget):
         self.textbox_value = ""
         # wait_window 内先执行的钩子: 用于模拟用户先改选项再确认.
         self.on_wait: Callable[[], None] | None = None
+        # 宿主的置顶读数(对话框收尾要镜像它; 用例拨成 True 可以量"跟随置顶"那条路).
+        self.pinned = False
 
     def winfo_rootx(self) -> int:
         return 100
@@ -386,6 +389,14 @@ class _FakeParent(_FakeWidget):
 
     def winfo_height(self) -> int:
         return 600
+
+    def attributes(self, name: str, _value: Any = None) -> Any:
+        """假窗口属性: 只回答置顶读数(对话框收尾要镜像宿主的置顶状态)."""
+        return self.pinned if name == "-topmost" else None
+
+    def winfo_id(self) -> int:
+        """无效句柄: Windows 上直查窗口样式的路径拿到它要安静地按"未置顶"处理."""
+        return 0
 
     def wait_window(self, _window: Any) -> None:
         self.wait_called = True
@@ -553,6 +564,33 @@ def test_every_dialog_button_row_in_the_source_is_centered() -> None:
     )
 
 
+def test_present_follows_a_pinned_parent(
+    harness: _FakeParent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """宿主被强制置顶时, 对话框要跟着置顶(2026-10-30, 与下拉浮层同一个缺陷的对话框面).
+
+    Windows 的规则: 附属窗口**自己**非置顶时永远排不进置顶宿主那一层 —— 而模态框还抓着
+    输入, 压在宿主底下时整个软件看着像死机。这里只钉**接线**(判定结果要写进 -topmost):
+    判定本身(``host_is_pinned``)由 test_ui_topmost 与 test_gui_dropdown 的端到端一节钉 ——
+    假窗口没有真句柄, Windows 上直查样式的路在替身上走不出 True。
+    """
+    monkeypatch.setattr(dialogs, "host_is_pinned", lambda _parent: True)
+    modal = _FakeWindow()
+    dialogs._present(harness, modal, modal=True)
+    assert "-topmost=True" in modal.calls, "宿主置顶了, 对话框没跟着置顶"
+
+
+def test_present_keeps_unpinned_dialogs_off_other_apps(harness: _FakeParent) -> None:
+    """宿主没置顶时不能借机置顶: 弹窗盖住别的软件是 2026-10-03 就修掉的问题.
+
+    这条不替换判定(走真 ``host_is_pinned``): 假窗口拿到的答案只能是"未置顶"(Tk 读数为
+    False / Windows 上无效句柄安静退化), 正是要守的常态。
+    """
+    modal = _FakeWindow()
+    dialogs._present(harness, modal, modal=True)
+    assert "-topmost=False" in modal.calls, "没置顶也置顶, 会盖住别的软件"
+
+
 def test_confirm_ok_returns_true(harness: _FakeParent) -> None:
     harness.click_text = tr("dialog.confirm")
     result = dialogs.confirm_dialog(harness, DARK, title="删除", message="确定删除?")
@@ -607,8 +645,12 @@ def test_centering_survives_a_platform_without_window_transparency(
     """平台不支持 ``-alpha``(无合成器的 Linux)时退化成"估个位置再微调", 不能报错."""
     harness.click_text = tr("dialog.confirm")
 
-    def no_alpha(_self: Any, _name: str, _value: float) -> None:
-        raise tk.TclError("wm attributes -alpha not supported")
+    def no_alpha(self: Any, name: str, _value: float) -> None:
+        # 只模拟"-alpha 不支持"(无合成器的 X11): -topmost 是另一个属性, 平台不支持透明度
+        # 也照样能写它 —— 2026-10-30 起 _present 还会写 -topmost, 不能被这个替身误伤。
+        # 非 -alpha 的写入静默吞掉(不能回调真身: monkeypatch 换的就是类属性, 回去即递归)。
+        if name == "-alpha":
+            raise tk.TclError("wm attributes -alpha not supported")
 
     monkeypatch.setattr(_FakeWindow, "attributes", no_alpha)
 

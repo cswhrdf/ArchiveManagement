@@ -43,6 +43,7 @@ from customtkinter.windows.widgets.core_widget_classes import DropdownMenu
 
 from archive_management.ui.keyboard import palette_for
 from archive_management.ui.palette import Palette
+from archive_management.ui.topmost import host_is_pinned
 
 # 弹出层最多显示几行(设计值): 再多就一直撑长, 顶出软件界面。
 DROPDOWN_MAX_ROWS = 10
@@ -220,11 +221,15 @@ class DropdownPopup:
     def _build(self) -> bool:
         """建出浮层窗口与列表(锚点已销毁时返回 False).
 
-        **附属窗口 + 不用 topmost**: 用户 2026-10-03 实测"点击别的软件, 别的窗口被盖住,
+        **附属窗口 + topmost 跟随宿主**: 用户 2026-10-03 实测"点击别的软件, 别的窗口被盖住,
         但浮窗还是显示在最前方" —— topmost 是相对**整个屏幕**的, 它会让浮层盖在别的程序
         上面。改成 :meth:`tk.Toplevel.transient` 之后浮层是宿主窗口的**附属窗口**(Windows
         上的 owner): 始终在自己的宿主之上, 但别的程序被激活时就随着宿主一起沉下去 ——
         同时最小化宿主时它会跟着隐藏, 不用额外收拾。
+
+        宿主被**强制置顶**时浮层还要跟着置顶(用户 2026-10-30: "窗口强制置顶后下拉框看不
+        到了"): Windows 上宿主进了置顶层后, 非置顶的附属窗口反而排到宿主之下 —— 跟着置
+        顶才回得来; 而它也盖不到别人, 宿主压着一切。
 
         这也回答了"能不能和原生组件结合": 原生下拉是 ``tk.Menu``, 而 Tk 菜单没有"最大
         高度"这个选项(见本模块开头), 所以选了"让浮层成为宿主窗口的附属窗口"这条路。
@@ -234,10 +239,18 @@ class DropdownPopup:
             window = tk.Toplevel(self.anchor)
             window.overrideredirect(True)
             window.transient(host)
-            # 显式关掉 topmost(**写在 ``transient`` 之后**: 它会让 Tk 在 macOS 上把这个
+            # topmost **跟随宿主**(写在 ``transient`` 之后: 它会让 Tk 在 macOS 上把这个
             # 窗口重新置于父窗口之上)。
             #
-            # 实测 2026-10-03 / 10-04 两轮 CI: **macOS 上这句写不掉** —— 无边框
+            # - 宿主没被置顶 → False(2026-10-03 的要求: topmost 相对整个屏幕, 浮层不该盖住
+            #   别的软件);
+            # - 宿主被强制置顶 → True(2026-10-30 用户反馈"窗口强制置顶后下拉框看不见"):
+            #   Windows 上宿主一进置顶层, 非置顶的附属窗口反而排到宿主**底下**, 浮层被主
+            #   窗口整块盖住; 跟着置顶才回得来。置顶状态不能只读 Tk 的 ``-topmost`` ——
+            #   外部工具置顶时那是写不进也读不到的缓存位(见 :mod:`topmost` 的说明), 所以
+            #   判定交给 :func:`host_is_pinned`。
+            #
+            # 实测 2026-10-03 / 10-04 两轮 CI: **macOS 上 False 这支写不掉** —— 无边框
             # (override-redirect) 窗口的 ``-topmost`` 无论先写后写、写几次, 读出来都是 1
             # (Windows 上同样的代码读出来是 0)。那是 Tk 给这类窗口的平台默认值, 不要
             # 再试"换个顺序"或"重写一遍": 两个顺序都已经在 CI 上验过了。
@@ -245,7 +258,7 @@ class DropdownPopup:
             # 隐藏/最小化时它跟着消失, 也不会随别的前台程序一起跑到最上层。所以用例里
             # "不盖住别的软件"那条只在 Windows 上钉读数(见 test_gui_dropdown 的说明),
             # macOS 上钉的是附属关系。
-            window.attributes("-topmost", False)
+            window.attributes("-topmost", host_is_pinned(host))
             frame = tk.Frame(
                 window,
                 background=self.palette.panel,

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 import time
 from collections.abc import Iterator
@@ -47,6 +48,12 @@ pytestmark = [
 
 # 值多到必须出滚动条: 上限是 10 行, 给 30 个值, 上下都放不下整块。
 _MANY_VALUES = [f"选项 {index:02d}" for index in range(30)]
+
+# Win32 直查/外置置顶用的常量(只在 Windows 分支走到)。
+_GA_ROOT = 2
+_HWND_TOPMOST = -1
+_HWND_NOTOPMOST = -2
+_SWP_NOSIZE_NOMOVE = 0x0003
 
 
 def _build(backend: Any) -> ArchiveApp:
@@ -93,6 +100,51 @@ def _open(combo: ctk.CTkComboBox, app: Any) -> dropdown_mod.DropdownPopup:
     return popup
 
 
+def _stack_order(app: Any) -> list[str]:
+    """全部顶层窗口的叠放次序(底→顶): "浮层在宿主之上"用它量成事实."""
+    return [str(w) for w in app.tk.call("wm", "stackorder", app)]
+
+
+def _win32_style_has_topmost(app: Any) -> bool:
+    """主窗口真实扩展样式里有没有 WS_EX_TOPMOST.
+
+    不碰 Tk 的 ``attributes`` 读数: 那次读会触发 Tk 拿缓存样式回写操作系统, 顺手把外部
+    置上的位抹掉(2026-10-30 探针实测) —— 读一次就毁证。
+    """
+    user32 = ctypes.windll.user32
+    user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.GetAncestor.restype = ctypes.c_void_p
+    root = user32.GetAncestor(ctypes.c_void_p(app.winfo_id()), _GA_ROOT)
+    assert root, "拿不到主窗口的真实句柄"
+    return bool(user32.GetWindowLongW(ctypes.c_void_p(root), -20) & 0x00000008)
+
+
+def _pin_window_from_outside(app: Any, after: int) -> None:
+    """用 Win32 的 ``SetWindowPos`` 模拟外部工具置顶/取消置顶(PowerToys 那条路).
+
+    之所以不写 ``app.attributes("-topmost", True)``: 那是 Tk 自己写的位, 外部置顶时它
+    **读不到**(2026-10-30 探针实测: 置顶后读数仍是 0) —— 判定必须越过 Tk 直查窗口样式,
+    这条路就是给它喂真凭据的。``after`` 传 -1(置顶)或 -2(取消置顶)。
+    """
+    user32 = ctypes.windll.user32
+    user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.GetAncestor.restype = ctypes.c_void_p
+    user32.SetWindowPos.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint,
+    ]
+    user32.SetWindowPos.restype = ctypes.c_int
+    root = user32.GetAncestor(ctypes.c_void_p(app.winfo_id()), _GA_ROOT)
+    assert root, "拿不到主窗口的真实句柄"
+    user32.SetWindowPos(root, ctypes.c_void_p(after), 0, 0, 0, 0, _SWP_NOSIZE_NOMOVE)
+    _pump(app, 0.2)
+
+
 def test_a_long_dropdown_stops_at_the_cap_and_scrolls(app: Any) -> None:
     """值很多时: 显示行数锁在上限、右侧给滚动条、整块不越出软件窗口.
 
@@ -137,6 +189,59 @@ def test_a_long_dropdown_stops_at_the_cap_and_scrolls(app: Any) -> None:
     assert bottom <= app_bottom + 1, "浮层跑到窗口下沿外面了"
     height = int(window.winfo_height())
     assert height <= plan.height + 4, "浮层比算出来的高度还高(限高没生效)"
+
+
+def test_the_popup_follows_a_force_pinned_main_window(app: Any) -> None:
+    """主窗口被强制置顶时, 浮层要跟着置顶 —— 否则被压在主窗口底下(2026-10-30 用户反馈).
+
+    Windows 的规则: 附属(owned)窗口在**自己**非置顶时, 永远排不进置顶宿主所在的层 ——
+    宿主一被置顶, ``wm stackorder`` 里浮层立刻翻到宿主之下(探针实测), 屏幕上就是"下拉框
+    不见了"。修法是浮层镜像宿主的置顶状态; 两条来源都钉: 应用内置顶(Tk 读得到)与外部
+    置顶(Tk 读不到, 只有 Win32 直查窗口样式认得出)。
+    """
+    combo = app._home_page._page_size_box
+    combo.configure(values=list(_MANY_VALUES))
+    try:
+        # 来源一: 应用内把主窗口置顶(Tk 自己写的位, 读数立即生效)。
+        app.attributes("-topmost", True)
+        popup = _open(combo, app)
+        window = popup.window
+        assert window is not None
+        if sys.platform != "darwin":
+            assert window.attributes("-topmost"), "宿主置顶了, 浮层没跟着置顶"
+        if sys.platform == "win32":
+            order = _stack_order(app)
+            assert order.index(str(window)) > order.index(str(app)), (
+                "浮层被压在主窗口底下"
+            )
+        combo._dropdown_menu.close()
+        _pump(app)
+
+        if sys.platform == "win32":
+            # 来源二: 外部置顶(Tk 的读数不更新的那条路)。
+            _pin_window_from_outside(app, _HWND_TOPMOST)
+            try:
+                # 前置用**样式位**量, 不能读 Tk 的 -topmost: 那次读会让 Tk 拿缓存样式回写
+                # 操作系统, 把外部置上的位抹掉(2026-10-30 探针实测) —— 读一次就毁证。
+                assert _win32_style_has_topmost(app), "前置: 外部置顶没真的生效"
+                popup = _open(combo, app)
+                window = popup.window
+                assert window is not None
+                assert window.attributes("-topmost"), (
+                    "外部置顶没被认出来(不能只读 Tk 的缓存位)"
+                )
+                order = _stack_order(app)
+                assert order.index(str(window)) > order.index(str(app)), (
+                    "浮层被压在主窗口底下"
+                )
+                combo._dropdown_menu.close()
+                _pump(app)
+            finally:
+                _pin_window_from_outside(app, _HWND_NOTOPMOST)
+    finally:
+        app.attributes("-topmost", False)
+        dropdown_mod._close_active()
+        _pump(app)
 
 
 def _bottom_window() -> ctk.CTk:

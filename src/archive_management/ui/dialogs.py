@@ -35,6 +35,7 @@ from archive_management.ui.models import (
     filter_export_options,
 )
 from archive_management.ui.palette import Palette
+from archive_management.ui.topmost import host_is_pinned
 from archive_management.ui.widgets import (
     auto_scrollbar,
     paint_button_disabled,
@@ -293,6 +294,11 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
         # 尺寸, 屏幕再矮也不该把它们压矮(见 test_gui_sizes 的"工作窗口只守硬线")。
         _clamp_to_comfort_line(window)
     window.withdraw()
+    # 宿主被强制置顶时跟着置顶(2026-10-30 用户报"窗口强制置顶后下拉框看不见"; 对话框同病:
+    # 非置顶的附属窗口排在置顶宿主之下, 而模态框还抓着输入 —— 压在底下时整个软件看着像
+    # 死机)。没置顶时维持 False(2026-10-03 的规矩: 弹窗不得盖住别的软件)。
+    # 写在 withdraw 之后: 调用流水断言"第一件事是先藏起来"(test_dialogs)守着这条顺序。
+    window.attributes("-topmost", host_is_pinned(parent))
     window.update_idletasks()
     window.geometry("+0+0")
     window.update_idletasks()
