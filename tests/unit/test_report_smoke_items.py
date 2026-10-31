@@ -37,8 +37,8 @@ def test_smoke_reports_carry_the_full_verdicts(tmp_path: Path) -> None:
     smoke = _load_script("smoke_packaged")
     artifacts = [
         {
-            "label": "onedir",
-            "exe": "dist/ArchiveManagement/ArchiveManagement.exe",
+            "label": "onefile",
+            "exe": "dist/ArchiveManagement.exe",
             "checks": [
                 {
                     "key": "version",
@@ -67,14 +67,14 @@ def test_smoke_reports_carry_the_full_verdicts(tmp_path: Path) -> None:
 
 
 def _fake_report(path: Path) -> None:
-    """造一份两判据(一过一红)的冒烟结论 —— onedir 一份产物(onefile 已于 2026-10-28 停产)."""
+    """造一份两判据(一过一红)的冒烟结论 —— 发布产物是一份单文件 exe(onefile)."""
     path.write_text(
         json.dumps(
             {
                 "platform": "Windows",
                 "artifacts": [
                     {
-                        "label": "onedir",
+                        "label": "onefile",
                         "checks": [
                             {
                                 "key": "version",
@@ -122,11 +122,11 @@ def test_smoke_results_record_pass_and_fail(
         )
     }
     assert set(by_identity) == {
-        "archive-management.smoke.onedir.version",
-        "archive-management.smoke.onedir.doctor",
+        "archive-management.smoke.onefile.version",
+        "archive-management.smoke.onefile.doctor",
     }, "每条判据一个结果项, 身份由产物标识 + 判据标识拼成"
-    passed = by_identity["archive-management.smoke.onedir.version"]
-    failed = by_identity["archive-management.smoke.onedir.doctor"]
+    passed = by_identity["archive-management.smoke.onefile.version"]
+    failed = by_identity["archive-management.smoke.onefile.doctor"]
     assert passed["status"] == "passed"
     assert failed["status"] == "failed", "失败也要照写 —— 报告要看得见哪条没过"
     assert "root 下缺 logs" in failed["statusDetails"]["message"]

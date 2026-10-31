@@ -72,8 +72,8 @@ jobs:
       - name: Stamp the snapshot version into the source
         # 预发布的第 4 位是**派生**量(scripts/dev_snapshot_version.py 按 git 历史算), 它不进 git ——
         # dev 上的 packaging.py 必须保持三段, 那是正式版本的单一真相(release_bump.py 按三段判档)。
-        # 所以只在这次构建的工作区里就地改这一行: 于是产物的 `--version`、`doctor` 与
-        # build-metadata.json 报的是同一个快照号, 而不是一个连预发布都看不出来的基础版本。
+        # 所以只在这次构建的工作区里就地改这一行: 于是产物的 `--version` 与 `doctor` 报的是
+        # 同一个快照号, 而不是一个连预发布都看不出来的基础版本。
         # **只配 build-only**: full 档会跑用例, 而用例里有一批"packaging.py 是三段"的断言 ——
         # 那个红是故意的, 这里提前一步说清楚。
         if: ${{ inputs.version_override != '' }}
@@ -181,13 +181,14 @@ jobs:
         # 见 docs/development.md)。
         run: uv run python scripts/build_icon.py --check
 
-      - name: Build the onedir package
-        # 2026-10-28 起 onefile 停产(发布决定), 只构建 onedir —— 见 spec 末尾的说明。
+      - name: Build the onefile package
+        # 产物是单个 `dist/ArchiveManagement.exe`(2026-10-31 起回到 onefile, 见 spec 末尾的
+        # 说明): 发布页只挂这一个文件, 用户下载双击就能用。
         run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
       # 产物冒烟: 「能编」与「产物能起」是两件事 —— 跑不起来的包不该被上传成"看起来能发"的样子。
       # 判据 = 退出码 + 侧效应(临时 root 下真的出现 config/data/logs、日志里出现"界面启动"),
-      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × onedir(无参数
+      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × 那一份单文件产物(无参数
       # 启动 / --version / doctor / gui --smoke / 单实例闸门), 全部限时, 超时在脚本里按
       # CI runner 的最坏情况给足。门禁档与发布档共用这一步; 位置由守卫
       # test_the_build_smokes_the_packages_it_produced 钉住(构建之后、打 release/ 之前)。
@@ -217,29 +218,14 @@ jobs:
           path: allure-results-smoke-windows/
           if-no-files-found: ignore
 
-      - name: Prepare build files
+      - name: Prepare the release file
+        # 发布页只挂**一个文件**, 名字就是产物名(2026-10-31 定): 早先这里是 zip + SHA256SUMS.txt
+        # + build-metadata.json, 它们服务的是“要校验和、要构建元数据”的人 —— 而在下载页上只是
+        # 让用户多点两下、还得先解压一次才能用。单文件 exe 直接拷过去即可。
         shell: pwsh
-        env:
-          BUILD_LABEL: ${{ steps.build.outputs.label }}
-          BUILD_VERSION: ${{ steps.build.outputs.version }}
-          BUILD_REF: ${{ steps.build.outputs.ref }}
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path dist/ArchiveManagement/* -DestinationPath "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.zip"
-          $files = Get-ChildItem release -File
-          $hashes = foreach ($file in $files) {
-            $hash = Get-FileHash $file.FullName -Algorithm SHA256
-            "$($hash.Hash.ToLowerInvariant())  $($file.Name)"
-          }
-          $hashes | Set-Content release/SHA256SUMS.txt -Encoding ascii
-          @{
-            application = "ArchiveManagement"
-            version = $env:BUILD_VERSION
-            ref = $env:BUILD_REF
-            platform = "windows-x64"
-            commit = "${{ github.sha }}"
-            built_at = (Get-Date).ToUniversalTime().ToString("o")
-          } | ConvertTo-Json | Set-Content release/build-metadata.json -Encoding utf8
+          Copy-Item dist/ArchiveManagement.exe release/ArchiveManagement.exe
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7

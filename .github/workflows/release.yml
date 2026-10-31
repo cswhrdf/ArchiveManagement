@@ -147,9 +147,15 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.build.outputs.version }}
-      LABEL: ${{ needs.build.outputs.label }}
       RELEASE_TARGET: ${{ needs.classify.outputs.ref }}
     steps:
+      - name: Check out repository
+        # 只为了 scripts/release_notes.py: 不 checkout 的话 `gh release create` 也能跑, 但“从 PR
+        # 里取变更说明”这一步要读仓库里的脚本。浅克隆就够(它不碰历史)。
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
       - name: Download the build artifacts
         uses: actions/download-artifact@v7
         with:
@@ -182,21 +188,26 @@ jobs:
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           done
 
+      - name: Compose the release notes from the pull request
+        # 版本说明**由发起者在 PR 里手写**(模板的「本次变更」一节), CI 不再自动汇总(2026-10-31 定)。
+        # 找 PR 用合入提交(`github.sha`), **不是** `RELEASE_TARGET`: 自动定版时后者是 bump 提交,
+        # 与 PR 没有关联 —— squash 合入只把合并提交挂在那个 PR 上。手动档没有 PR, 脚本会回退成
+        # 一句说明(不写版本/提交号, 那些在 Release 标题与页面上已经有了)。
+        if: ${{ steps.decision.outputs.publish == 'true' }}
+        run: |
+          set -eu
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" > pulls.json
+          python3 scripts/release_notes.py --pulls pulls.json --out release-notes.md
+
       - name: Create the release
         if: ${{ steps.decision.outputs.publish == 'true' }}
-        # 两个参数不能省: ① `--repo` —— 这个作业没有 checkout, gh 无法从仓库推断出该操作哪一个;
-        # ② `--target` —— 不给它时 gh 会把新 tag 指向**默认分支的当前 HEAD**, 而我们发的必须是
-        # 定版传来的那个提交(patch 兜底时是 bump 提交, 不是触发这次运行的合并提交 —— tag 指的
-        # 提交里 packaging.py 必须已经是这个版本号)。
-        # 正文写死版本/提交/构建号, 不接 `--generate-notes`: 这一档要的是可复现的固定内容。
+        # 两个参数不能省: ① `--repo` —— gh 无法从工作区推断出该操作哪一个仓库; ② `--target` ——
+        # 不给它时 gh 会把新 tag 指向**默认分支的当前 HEAD**, 而我们发的必须是定版传来的那个提交
+        # (patch 兜底时是 bump 提交, 不是触发这次运行的合并提交 —— tag 指的提交里 packaging.py
+        # 必须已经是这个版本号)。
+        # 正文取上一步写好的 release-notes.md: 发布页只挂产物与用户写的说明, 不附校验和与构建
+        # 元数据(2026-10-31 定)。
         run: |
-          cat > release-notes.md <<EOF
-          Windows x64 打包产物: onedir 压缩包 + SHA256SUMS.txt + build-metadata.json。
-
-          - 版本: $VERSION(来自 src/archive_management/packaging.py)
-          - 提交: $RELEASE_TARGET
-          - 构建: $LABEL
-          EOF
           gh release create "v$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$RELEASE_TARGET" \

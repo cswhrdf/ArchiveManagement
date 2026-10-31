@@ -1,6 +1,6 @@
 r"""打包版与开发版的逐屏比对(本机工具, 不进 CI 门禁).
 
-用法(仓库根目录, onedir 产物先本地构建好)::
+用法(仓库根目录, 单文件产物先本地构建好)::
 
     uv run python scripts/capture_packaged.py still      # L1 同窗连拍(抓取链路自检)
     uv run python scripts/capture_packaged.py restart    # L2 开发版重启双拍(跨进程噪声)
@@ -416,7 +416,7 @@ def cmd_restart(out: Path) -> int:
 def cmd_compare(out: Path, exe: Path) -> int:
     """L3: 三对画面成对抓拍 dev/exe, 借门禁算尺逐对比对."""
     if not exe.is_file():
-        print(f"找不到打包产物: {exe}(先按 docs/development.md 本地构建 onedir)。")
+        print(f"找不到打包产物: {exe}(先按 docs/development.md 本地构建)。")
         return 2
     rows: list[tuple[str, str, str, str]] = []
     for spec in SCREENS:

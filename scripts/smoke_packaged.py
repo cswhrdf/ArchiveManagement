@@ -1,7 +1,7 @@
 r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.yml 的 build 作业调用).
 
 判据 = 退出码 + 侧效应, **不读 stdout**: 窗口化产物(console=False)没有控制台, "它真的
-干活了"的证据只能取进程行为与落盘结果。每份产物(onedir, 2026-10-28 起 onefile 停产)五条:
+干活了"的证据只能取进程行为与落盘结果。发布产物是**一份单文件 exe**(onefile), 五条判据:
 
 ① 无参数启动: 打包版的默认命令是 ``gui``(``app.default_command``), 双击就该开窗口。
    系统目录整体重定向进临时沙箱(platformdirs 自带的 ``WIN_PD_OVERRIDE_*`` 覆盖,
@@ -22,7 +22,7 @@ stdout/stderr 写成文件, 超时或非零退出把这两份与 ``--root`` 下�
 ``--report`` 把逐条判据落成 JSON(失败也写), 由 ``scripts/create_allure_smoke.py`` 转成
 Allure 结果项并入 CI 的汇总报告 —— 退出码管门禁, 报告管"哪一条没过"。用法::
 
-    uv run python scripts/smoke_packaged.py     # dist/ 下自动找 onedir 产物
+    uv run python scripts/smoke_packaged.py     # dist/ArchiveManagement.exe
     uv run python scripts/smoke_packaged.py --report smoke-report.json
 """
 
@@ -62,12 +62,12 @@ _SECOND_INSTANCE_TIMEOUT_SECONDS = 60.0
 #: 确认"窗口开着"前的静置(秒): 日志落地后再等一眼, 排除"刚写完启动日志就退了"。
 _ALIVE_SETTLE_SECONDS = 1.0
 #: 冷启动上限(秒): Popen 到"界面启动"落地。本机实测(2026-10-24, Windows x64 / 不压 UPX,
-#: 同一条判据连跑 3 轮) onedir **0.5 s**(onefile 停产前对照 2.0 s, 留档) —— 0.5 s 是探测
-#: 的粒度(Popen 之后一轮就看到了), 所以 onedir 那个数是"不超过 0.5 s"。上限按 CI runner
-#: 的最坏情况留 10~20 倍余量: 真超了就是依赖出问题了(又往包里塞大件), 不是抖动; 它不是
-#: 性能基准 —— "启动→窗口→关窗"的总时长是另一件事(1.70 s, 见 docs/development.md)。
-#: 注意探测是 0.5 s 一轮, 量到的数最多比真实值大一轮。
-_COLD_START_LIMITS_SECONDS = {"onedir": 10.0}
+#: 同一条判据连跑 3 轮) **onefile 2.0 s**(对照 onedir 0.5 s) —— onefile 多出来的是把整份包
+#: 解到 %TEMP%\_MEIxxxx 的开销; 2026-10-31 起发布产物回到 onefile(见 spec 末尾的说明)。
+#: 上限按 CI runner 的最坏情况留 10 倍余量: 真超了就是依赖出问题了(又往包里塞大件), 不是
+#: 抖动; 它不是性能基准 —— "启动→窗口→关窗"的总时长是另一件事(onefile 3.6 s, 见
+#: docs/development.md)。注意探测是 0.5 s 一轮, 量到的数最多比真实值大一轮。
+_COLD_START_LIMITS_SECONDS = {"onefile": 20.0}
 
 
 def cold_start_problem(label: str, elapsed: float) -> str | None:
@@ -441,10 +441,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="产物冒烟: 编出来的包必须真的能跑(判据 = 退出码 + 侧效应)"
     )
     parser.add_argument(
-        "--onedir",
+        "--exe",
         type=Path,
-        default=Path("dist/ArchiveManagement/ArchiveManagement.exe"),
-        help="onedir 产物的 exe(默认按 pyinstaller 的输出位置找)",
+        default=Path("dist/ArchiveManagement.exe"),
+        help="单文件产物的 exe(默认按 pyinstaller 的输出位置找)",
     )
     parser.add_argument(
         "--report",
@@ -457,7 +457,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("产物冒烟只在 Windows 上做(打包产物是 Windows 的)。")
         return 2
     artifacts: list[tuple[str, Path]] = [
-        ("onedir", args.onedir),
+        ("onefile", args.exe),
     ]
     missing = [str(path) for _, path in artifacts if not path.is_file()]
     if missing:
