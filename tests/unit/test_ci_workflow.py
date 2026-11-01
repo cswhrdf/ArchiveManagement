@@ -1597,8 +1597,9 @@ def test_manual_republish_refuses_a_version_that_is_already_released() -> None:
     ② 判据是 **`gh release view`**(用户删的就是 Release), 存在就 `exit 1` 并给出"怎么删"的命令;
     ③ 版本号取 `packaging.py` 的**当前值**(`release_bump.py` 输出里的 `previous`), 不是它给的
        "建议下一版号" —— 重发的是仓库里现在写的这个版本;
-    ④ 只在手动档且勾了 `publish` 时检查(纯构建不该被"已发过"拦住); tag 还在时只提醒(重建的
-       Release 会复用那个 tag), 不阻断。
+    ④ 只在手动档且勾了 `publish` 时检查(纯构建不该被"已发过"拦住); **tag 存在也要拦** ——
+       发布过的 Release 会把 tag 锁成不可变, 重建同版本会 422(2026-11-01 实测), 那种情况只能
+       换版本号。
     """
     text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
     classify = _without_comments(ci_workflow.job_block(text, "classify"))
@@ -1617,13 +1618,39 @@ def test_manual_republish_refuses_a_version_that_is_already_released() -> None:
     assert "previous" in step, "版本号取 packaging.py 的当前值, 不是建议的下一版号"
     assert "release_bump.py" in step, "版本号仍从那一行读(与构建期同一份抽取)"
 
-    assert "tag v$version 已存在" in step, (
-        "只删了 Release 时 tag 还在: 重建会复用那个 tag, 要提醒但别阻断"
+    assert step.count("exit 1") >= 2, "Release 存在与 tag 存在都要当场拦住"
+    assert "v$version^{commit}" in step, (
+        "还要查 tag: 发布过的 Release 会把 tag 锁成不可变, 重建同版本会 422(2026-11-01 实测)"
     )
+    assert "不可变" in step, "失败信息要说清'为什么这个版本号不能再用了'"
 
     assert ci_workflow.needs_of(text, "build") == {"classify"}, (
         "检查在 classify 里, 才轮得到'先检查再编译'"
     )
+
+
+def test_the_publish_gate_skips_a_version_whose_tag_is_already_taken() -> None:
+    """tag 在、Release 不在 = 这个版本号已作废: 不要再往 create 走(必然 422).
+
+    2026-11-01 实测: 删掉旧的 `v0.0.1` Release 之后, `gh release create v0.0.1` 报
+    `422 pre_receive: tag_name was used by an immutable release` +
+    `Cannot create ref due to creations being restricted` —— 发布过的 Release 会把它的 tag
+    锁成不可变。push 档撞上这种情况不该红整轮(那只是"这个版本号作废"), 而是跳过发布并说清
+    该做什么; 真正该红的是"人明确要求发这个版本"的手动档(classify 里那条)。
+    """
+    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    publish = _without_comments(ci_workflow.job_block(text, "publish"))
+    decision = publish.split(
+        "- name: Decide whether this version still needs a release", 1
+    )[1].split("- name:", 1)[0]
+
+    assert "gh release view" in decision, "Release 已存在 → 不发(这条一直在)"
+    assert "git/ref/tags/v$VERSION" in decision, (
+        "tag 已存在也要拦: 重建同版本必然 422(不可变 Release 锁住了 tag 名)"
+    )
+    assert decision.count("publish=false") >= 2, "两种情况都要关掉发布"
+    assert "::warning::" in decision, "跳过要说清原因与下一步(把版本号往上加一位)"
+    assert "exit 1" not in decision, "这是正常出口, 不该把整轮弄红"
 
 
 def test_pull_requests_into_main_get_a_version_bump_hint() -> None:

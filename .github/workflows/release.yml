@@ -116,11 +116,17 @@ jobs:
             echo "::error::v$version 已经发过 Release。要重发请先在 Releases 页面删掉它, 或跑 gh release delete v$version --cleanup-tag, 再回来触发这一档。"
             exit 1
           fi
-          echo "::notice::v$version 目前没有 Release, 继续按当前仓库的版本编译并发布。"
-          # 只删了 Release(或 tag 还在)时提醒一句: 重建的 Release 会**复用那个 tag**。
+          # **tag 也不能复用**(2026-11-01 实测): Release 一旦发布过, 它那条 tag 就被 GitHub 锁成
+          # "不可变 Release 用过的名字" —— 删掉 Release 之后重建同一版本会以
+          #   422 pre_receive: tag_name was used by an immutable release
+          #   Cannot create ref due to creations being restricted
+          # 收场。所以这里必须先查 tag: 只要 tag 还在, 这个版本号就已经作废,
+          # 正确做法是改 packaging.py 换一个版本号, 而不是删 Release 重发。
           if existing=$(git rev-parse --verify --quiet "v$version^{commit}"); then
-            echo "::warning::tag v$version 已存在, 指向 $existing —— 重建的 Release 会复用它。若那次发包的产物是坏的, 先删 tag 再触发。"
+            echo "::error::tag v$version 已经存在(指向 $existing), 这个版本号不能再用: 发布过的 Release 会把它的 tag 锁成不可变, 重建同版本会 422。要发新版本, 请把 packaging.py 的 __version__ 往上加一位。"
+            exit 1
           fi
+          echo "::notice::v$version 既没有 Release 也没有 tag, 继续按当前仓库的版本编译并发布。"
 
       - name: Record the ref to build and tag
         id: ref
@@ -186,6 +192,15 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # **tag 还在、Release 不在**: 这个版本号已经作废(2026-11-01 实测) —— 发布过的 Release
+          # 会把它的 tag 锁成不可变, 重建同一版本会以
+          #   422 pre_receive: tag_name was used by an immutable release
+          # 收场。让它走到 create 只会把整轮弄红, 这里直接跳过并说清楚该做什么。
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::warning::tag v$VERSION 已存在但没有对应的 Release —— 这个版本号不能再用(发布过的 Release 会把 tag 锁成不可变), 本轮只构建。要发版请把 packaging.py 的 __version__ 往上加一位。"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
       - name: Delete the previous pre-releases
@@ -216,10 +231,12 @@ jobs:
         if: ${{ steps.decision.outputs.publish == 'true' }}
         # 两个参数不能省: ① `--repo` —— gh 无法从工作区推断出该操作哪一个仓库; ② `--target` ——
         # 不给它时 gh 会把新 tag 指向**默认分支的当前 HEAD**, 而我们发的必须是定版传来的那个提交
-        # (patch 兜底时是 bump 提交, 不是触发这次运行的合并提交 —— tag 指的提交里 packaging.py
-        # 必须已经是这个版本号)。
+        # (tag 指的提交里 packaging.py 必须已经是这个版本号)。
         # 正文取上一步写好的 release-notes.md: 发布页只挂产物与用户写的说明, 不附校验和与构建
         # 元数据(2026-10-31 定)。
+        # **同一个版本不能发第二次**(2026-11-01 实测): 发布过的 Release 会把它的 tag 锁成不可变,
+        # 重建同版本会 422(tag_name was used by an immutable release)。上面 decision 已经把
+        # "tag 还在"的情况挡掉了; 真要重发只能换版本号 —— 这是 GitHub 的规则, 不是流程选择。
         run: |
           gh release create "v$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
