@@ -1,15 +1,20 @@
-name: Build Windows Package
+name: Build Packages
 
-# **只读的构建工作流**: 这里只做"编出产物 + 上传 artifact", 一个写权限都没有。两个调用方(口径见
+# **只读的构建工作流**: 这里只做"编出产物 + 上传 artifact", 一个写权限都没有。Windows 与
+# Linux 两个作业并行(`build` / `build-linux`), 一次调用两份产物都出来。三个调用方(口径见
 # docs/development.md 的「打包」「发布」两节):
-#   ① `ci.yml` 的 `windows-package` 作业 —— "合入 main 的 PR 且 CI 全绿"时的打包门禁;
-#   ② `release.yml` 的 `build` 作业 —— 合入 main 之后发布, 或手动编任意分支/提交。
+#   ① `ci.yml` 的 `package` 作业 —— "合入 main 的 PR 且 CI 全绿"时的打包门禁;
+#   ② `release.yml` 的 `build` 作业 —— 合入 main 之后发布, 或手动编任意分支/提交;
+#   ③ `dev-release.yml` 的 `build` 作业 —— dev 的手动预发布快照。
 # **为什么构建与发布必须是两份工作流**(2026-10-17 实测, 不是设计洁癖): GitHub 对嵌套工作流的权限
 # 是**逐作业静态校验**的 —— 被调用的那份里只要有一个作业声明 `contents: write`, 而调用方(PR 那次
 # 运行, 顶层 `contents: read`)给不出写权限, 整份工作流就判 "not valid", 报错原文是
 # `The nested job 'publish' is requesting 'contents: write', but is only allowed 'contents: read'`;
 # 它发生在**解析阶段**, 连一个 job 都不会启动(与运行期的 `if: publish == false` 无关)。所以发布那一档
 # 留在 release.yml(只有它需要写权限), 门禁调这一份只读的。
+# **为什么一份 Linux 产物就够、不按发行版出包**(2026-11-01 定): 兼容边界只有两件事 —— glibc
+# 地板(由构建机决定, 见 build-linux 的 runs-on 注释)与运行期的 X11 客户端库/fontconfig(凡有桌面
+# 就有)。`.deb`/`.rpm`/AppImage 只是分发格式增量; Alpine(musl) 要另一整套构建, 不在本期范围。
 on:
   workflow_call:
     inputs:
@@ -35,6 +40,9 @@ on:
       label:
         description: "产物名里的构建标签(<ref>-build-<本次构建号>)"
         value: ${{ jobs.build.outputs.label }}
+      linux_label:
+        description: "Linux 作业自己算出的构建标签(公式与 Windows 那份一致, 两作业并行所以各算各的)"
+        value: ${{ jobs.build-linux.outputs.label }}
 
 permissions:
   contents: read
@@ -231,4 +239,164 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ArchiveManagement-${{ steps.build.outputs.label }}-windows-x64
+          path: release/
+
+  build-linux:
+    # 与上面的 build 并行编 Linux 包: 同一份 spec、同一套判据, 差异全在工作流这一层 ——
+    # 系统依赖(Xvfb/字体/发行版 Tk)、冒烟要包一层 xvfb-run、产物打成 tar.gz。
+    # **不跑构建前检查**(ruff/mypy/用例/图标核对都不在): 门禁档(`checks: build-only`)本来就
+    # 不跑; 发布档的 full 检查由上面的 Windows 作业代跑 —— 同一个提交, 静态检查与全量用例
+    # 在哪个 runner 上跑结论都一样, 而 ci.yml 的三平台矩阵里 Ubuntu 每轮都跑过全套, 在这里
+    # 再跑一遍只是双倍计费。图标指纹核对留在 Windows 作业: 位图入库两平台共用, 那边红得早。
+    name: 构建 Linux 发布包
+    # **钉 ubuntu-24.04, 不是 ubuntu-latest**: 发行版 `_tkinter` 的 ABI 必须与冻结的解释器
+    # (uv 装的 CPython 3.12)同小版本 —— 24.04 的系统 Python 是 3.12; 更老的 22.04 是 3.10
+    # (装不上), ubuntu-latest 将来漂到 26.04 又会变版本, 配方会静默失效。顺带定下 glibc
+    # 地板 2.39(Ubuntu 24.04+ / Debian 13+ / Fedora 40+ / Arch / openSUSE 15.6+); 想降到
+    # Debian 12 / Ubuntu 22.04 得换一条给老发行版供 3.12+Xft-Tk 的路(如 deadsnakes), 留作
+    # 后续工作 —— 见 spec 末尾的兼容性口径。
+    runs-on: ubuntu-24.04
+    outputs:
+      label: ${{ steps.build.outputs.label }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # 与 Windows 作业同一个 ref 口径: 被调用时 github.sha 是调用方的提交。
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Stamp the snapshot version into the source
+        # 与 Windows 作业同一个理由: 预发布的第 4 位是派生量, 只写进本次构建的工作区,
+        # 两个平台的产物报同一个快照号。
+        if: ${{ inputs.version_override != '' }}
+        shell: bash
+        env:
+          SNAPSHOT_VERSION: ${{ inputs.version_override }}
+          CHECKS: ${{ inputs.checks }}
+        run: |
+          if [ "$CHECKS" != 'build-only' ]; then
+            echo "::error::version_override 只能配 checks: build-only(预发布档的前提是 CI 已经把这个提交跑绿了)"
+            exit 1
+          fi
+          sed -i -E 's/__version__[[:space:]]*=[[:space:]]*"[^"]+"/__version__ = "'"$SNAPSHOT_VERSION"'"/' src/archive_management/packaging.py
+          grep -q '__version__ = "'"$SNAPSHOT_VERSION"'"' src/archive_management/packaging.py || {
+            echo "::error::src/archive_management/packaging.py 里没有可替换的 __version__"
+            exit 1
+          }
+          echo "快照版本号已写入: $SNAPSHOT_VERSION"
+
+      - name: Resolve build metadata
+        # 与 Windows 作业**同一份公式**: 两个作业并行, 不能去 needs 那边的 output(串行就要
+        # 白等 Windows 的整段构建)。ref 与 run_number 对同一轮调用是同一个值, 两边算出的
+        # label 必然一致; 守卫(tests/unit/test_ci_workflow.py)把两份公式钉在一起。
+        id: build
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          DEFAULT_REF: ${{ github.ref_name }}
+        run: |
+          if [ -n "$INPUT_REF" ]; then ref="$INPUT_REF"
+          elif [ -n "$HEAD_REF" ]; then ref="$HEAD_REF"
+          else ref="$DEFAULT_REF"; fi
+          version=$(grep -oP '__version__\s*=\s*"\K[^"]+' src/archive_management/packaging.py | head -n1)
+          if [ -z "$version" ]; then
+            echo "::error::Could not find __version__ in packaging.py"
+            exit 1
+          fi
+          safe_ref=$(printf '%s' "$ref" | sed -E 's/[^A-Za-z0-9._-]/-/g')
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "label=$safe_ref-build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Xvfb, a CJK font, and the distro Tk 8.6
+        # 与 ci.yml 视觉回归作业同一个配方(完整实测记录在那边的注释里, 这里只留打包视角):
+        # ① GUI 冒烟要一个显示(xvfb-run), fonts-noto-cjk 让汉字有字形可量;
+        # ② **打包必须换发行版的 Tk**: uv 托管的 CPython(python-build-standalone)自带的
+        #    Tcl/Tk 在 X11 上只走核心位图字体, 符号表里没有 fontconfig/FreeType —— 直接
+        #    打包的话, 产物"能起"但界面是中文却一个汉字都画不出来(冒烟只看日志与退出码,
+        #    拦不住这种"能起但没法用")。发行版 python3-tk 的 _tkinter 链发行版 libtk8.6
+        #    (Xft/fontconfig), 与冻结的解释器同小版本 ABI 兼容 —— 把它放到 PYTHONPATH 最
+        #    前面, PyInstaller 分析到的就是它, 连同发行版 libtk8.6/libtcl8.6 一起冻结进包;
+        #    用户机器上只要有任何桌面字体, 汉字就由 fontconfig 解析。
+        shell: bash
+        run: |
+          # 已装即跳过 apt(与 ci.yml 同一个理由: apt-get update 是每轮必付的网络敞口)。
+          installed=0
+          for pkg in xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6; do
+            dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' && installed=$((installed + 1))
+          done
+          if [ "$installed" -eq 5 ]; then
+            echo "xvfb / CJK 字体 / 发行版 Tk 8.6 已在机上, 跳过 apt"
+          else
+            # The hosted runner may have a stale Google Chrome index. It is unrelated to Xvfb
+            # and can make apt-get update fail with a Hash Sum mismatch.
+            while IFS= read -r -d '' source; do
+              if grep -q 'dl.google.com/linux/chrome' "$source"; then
+                sudo mv "$source" "${source}.disabled"
+              fi
+            done < <(find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -print0)
+            sudo apt-get update
+            sudo apt-get install -y xvfb fonts-noto-cjk python3-tk tcl8.6 tk8.6
+          fi
+          # 发行版 _tkinter 留一份: 构建步把它放到 PYTHONPATH 最前面(与 ci.yml 视觉回归同手法)。
+          mkdir -p "$RUNNER_TEMP/tk-xft"
+          cp "$(python3 -c 'import _tkinter; print(_tkinter.__file__)')" "$RUNNER_TEMP/tk-xft/"
+          python3 -c "import _tkinter, tkinter; print('发行版 Tk:', _tkinter.__file__, tkinter.TkVersion)"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # 只装 package 组: 这个作业不跑检查不跑用例(见作业开头的注释), 而冒烟与结论脚本
+        # (smoke_packaged.py / create_allure_smoke.py)都只用标准库。
+        run: uv sync --locked --no-default-groups --group package --no-install-project
+
+      - name: Build the onefile package
+        # PYTHONPATH 换发行版 _tkinter(来路见 apt 那步); TCL_LIBRARY/TK_LIBRARY 帮
+        # PyInstaller 找到发行版摊在 /usr/share/tcltk 的 Tcl/Tk 脚本库(Debian 系布局,
+        # 不在二进制旁边) —— 少了它们, 冻结产物会以 "Can't find a usable tk.tcl" 起不来。
+        env:
+          PYTHONPATH: ${{ runner.temp }}/tk-xft
+          TCL_LIBRARY: /usr/share/tcltk/tcl8.6
+          TK_LIBRARY: /usr/share/tcltk/tk8.6
+        run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
+
+      # 以下四步与 Windows 作业同一个骨架, 差异只有: 冒烟包在 xvfb-run 里、结论目录/产物名
+      # 的平台段是 linux。位置约束同样由守卫 test_the_build_smokes_the_packages_it_produced 钉住。
+      - name: Smoke test the built packages
+        # **不**带 PYTHONPATH/TCL_LIBRARY: 冒的是冻结后的产物, 环境必须与用户机器一致 ——
+        # 包里的 Tk 就该是刚冻进去的那份。默认屏幕尺寸够用: 冒烟只看日志与退出码, 不做
+        # 像素比对(不需要视觉回归那种加大屏幕)。
+        run: xvfb-run -a uv run python scripts/smoke_packaged.py --report smoke-report.json
+
+      - name: Write smoke results into Allure
+        if: always()
+        run: uv run python scripts/create_allure_smoke.py --report smoke-report.json --results-dir allure-results-smoke-linux
+
+      - name: Upload smoke Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results-smoke-linux
+          path: allure-results-smoke-linux/
+          if-no-files-found: ignore
+
+      - name: Prepare the release file
+        # tar.gz 而不是裸二进制: 浏览器下载裸文件会丢可执行位, tar 保留权限(Windows 作业没有
+        # 这个问题, 所以那边是直接拷)。解出来就是单个可执行文件, 与 Windows 的"下载即用"对齐。
+        run: |
+          mkdir -p release
+          tar -czf release/ArchiveManagement-linux-x64.tar.gz -C dist ArchiveManagement
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ArchiveManagement-${{ steps.build.outputs.label }}-linux-x64
           path: release/

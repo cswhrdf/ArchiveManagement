@@ -1,13 +1,14 @@
-name: Release Windows Package
+name: Release Packages
 
 # 两个入口(口径见 docs/development.md 的「打包」「发布」两节):
 #   ① `push` 到 main —— 合入之后构建并发布 Release。**版本号由人在 PR 里改**(2026-11-01 起:
 #      main 开了分支保护, 谁都推不进去 —— 包括 bot, 所以定版前移到 PR 阶段, 由 ci.yml 的
 #      `release-hint` 作业提醒), `classify` 只读地复查"这次合入到底有没有动版本号";
 #   ② `workflow_dispatch` —— 手动编任意分支/提交(dev 只有这一个入口), 不动版本号。
-# 构建本身在 .github/workflows/release-build.yml 里(只读, 一个作业): 这里只转调它, 再加一个
+# 构建本身在 .github/workflows/release-build.yml 里(只读, Windows 与 Linux 两个作业并行,
+# 2026-11-01 起一次调用两份产物都出来): 这里只转调它, 再加一个
 # 专门管发布的作业 —— 于是"构建步骤只有一处定义"与"写权限只出现在这一份"同时成立。
-# **PR 打包门禁不在这里**(2026-10-17 起): 门禁是 ci.yml 的 `windows-package` 作业**直接**调
+# **PR 打包门禁不在这里**(2026-10-17 起): 门禁是 ci.yml 的 `package` 作业**直接**调
 # release-build.yml。两条理由: ① 跨工作流触发(`workflow_run`)产生的检查挂不到那个 PR 上, 永远
 # 进不了分支保护的必需检查, 所以编译必须发生在 PR 那次运行里; ② 一旦 PR 那次运行调到这份工作流,
 # 下面 `publish` 作业要的 `contents: write` 会让整份工作流判 "not valid"(嵌套权限是**逐作业静态
@@ -138,7 +139,7 @@ jobs:
     # checks 原样透传: push 档取不到 `inputs`(空串) —— 空串不等于 build-only, 所以照跑 full。
     # ref 取 classify 传出的提交: 定版前移到 PR 之后它就是触发这次运行的提交, 但构建与 tag 仍
     # 共用同一处出口(手动档要能改)。
-    name: 构建 Windows 发布包
+    name: 构建发布包 (Windows 与 Linux)
     needs: [classify]
     uses: ./.github/workflows/release-build.yml
     with:
@@ -172,6 +173,15 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: ArchiveManagement-${{ needs.build.outputs.label }}-windows-x64
+          path: release
+
+      - name: Download the Linux build artifacts
+        # 发布页挂两份(2026-11-01 起): Windows 的 exe 与 Linux 的 tar.gz, 两个下载步各下各的
+        # —— 产物名不同, 不能用 pattern 一把收(那会把两份摊进同一层目录)。Linux 的 label 是
+        # build-linux 作业自己算的(公式一致, 两作业并行), 与 Windows 那份必然相同。
+        uses: actions/download-artifact@v7
+        with:
+          name: ArchiveManagement-${{ needs.build.outputs.linux_label }}-linux-x64
           path: release
 
       - name: Say why this commit publishes nothing

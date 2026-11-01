@@ -12,7 +12,7 @@
 | 存档位置推断（仅 Steam）               | ✅ 云同步清单                              | ✅ 云同步清单                           | ✅ 云同步清单                            |
 | 封面与图标（仅 Steam）                 | ✅ CDN 封面 + 本机官方图标                 | ✅ CDN 封面 + 本机官方图标              | ✅ CDN 封面 + 本机官方图标               |
 | 监控目录                               | ✅ 人工实测                                | ✅                                      | ✅                                       |
-| PyInstaller 打包                       | ✅ 单文件 exe（已构建并量过体积/启动时间） | ⏳ 未纳入                               | ⏳ 未纳入                                |
+| PyInstaller 打包                       | ✅ 单文件 exe（已构建并量过体积/启动时间） | ✅ CI（构建 + 冒烟，glibc ≥ 2.39）      | ⏳ 未纳入                                |
 
 平台相关实现集中在 `services/platforms.py`（平台识别）、`services/platform_scan.py`（按平台选择探测来源）、`services/hotkeys.py`（默认组合键与权限检测）。`uv run python -m archive_management doctor` 会先打印当前平台与注册表探测是否可用。
 
@@ -59,7 +59,7 @@
 
 - **CI 跑全量**：`pytest` / `pytest-report` / `security` 三个矩阵都按平台展开（三个平台各 3 片），所以"单元 + 集成 + 安全" 在每个平台都是真的执行过的结论，报告里按环境分开呈现。macOS 于 2026-09-30 恢复，**首次运行待观察**。
 - **人工实测（本机 Windows，2026-09-30）**：真 `pynput` 后端注册两个默认全局快捷键（都 `registered=True`）；回收站删除后能在 `$Recycle.Bin` 里找到那个文件且内容逐字节一致（不存在时抛 `StorageError`，不会静默成功、也不会回退成永久删除）；`dangerous_target_reason` 在真盘上逐条验过（盘符根 / 用户主目录 / 受保护目录三种形态都拒，`protect_subpaths=False` 时"安装目录内的存档"放行）；界面评审时抓了 29 张截图并**逐张人眼过** （含受最近改动影响的列表对齐与批量导入弹窗）。
-- **未验证并写明原因**：打包产物（单文件 exe）的视觉一致性 —— 需要发布流水线，而当前构建（`release-build.yml`）只做 Windows、macOS 的 `.app` 未纳入；截图脚本是导入源码跑的，对打包版跑要另写 "启动 exe + 按窗口句柄抓图"的入口（`crash_capture.grab_png(window=hwnd)` 已具备这条能力）。
+- **未验证并写明原因**：打包产物（Windows exe / Linux 可执行文件）的视觉一致性 —— 需要发布流水线；构建（`release-build.yml`，2026-11-01 起 Windows + Linux）带的产物冒烟只看日志与退出码、不做像素比对，macOS 的 `.app` 未纳入；截图脚本是导入源码跑的，对打包版跑要另写 "启动 exe + 按窗口句柄抓图"的入口（`crash_capture.grab_png(window=hwnd)` 已具备这条能力）。
 
 ## macOS 注意事项
 
@@ -71,4 +71,5 @@
 ## Linux 注意事项
 
 - **图形界面与全局快捷键都需要图形环境**（图形显示服务）：桌面与装有桌面环境的机器自带，没有显示器的服务器或 CI 需要先提供虚拟显示，例如 `xvfb-run -a uv run pytest`。
+- **打包版（2026-11-01 起）**：发布物是 `ArchiveManagement-linux-x64.tar.gz`，tar 保可执行位（浏览器下载裸二进制会把 +x 丢掉），解出来是单个可执行文件、`./ArchiveManagement` 直接运行。**兼容口径：一份 x64 产物、不按发行版分包** —— 在 Ubuntu 24.04 上构建，所以要求 **glibc ≥ 2.39**（Ubuntu 24.04+/Debian 13+/Fedora 40+/Arch/现役 openSUSE 都满足；更老的发行版要另建老基线构建机，属后续工作）；`.deb`/`.rpm`/AppImage 只是分发格式增量，Alpine（musl）要另一整套构建、不在支持范围。运行期依赖 X11 客户端库与 fontconfig（凡有桌面就有；走 Xft/fontconfig 的 Tk 已连同中文字体渲染链冻结进包，来自发行版的 `python3-tk`/`libtk8.6`，见 `release-build.yml` 的 `build-linux` 作业）。
 - 纯 Wayland 会话下，全局按键监听是否可用取决于合成器（必要时需要 `uinput` 权限），因此可能无法全局生效；X11 会话不受此限制。

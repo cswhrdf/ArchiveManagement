@@ -5,7 +5,7 @@
 
 **要发版就在本 PR 里改版本号**：把 `src/archive_management/packaging.py` 的 `__version__` 往上加一位（如 `0.0.2` → `0.0.3`，大版本自己定）；不改的话合入后只构建、不新建 Release（`main` 有分支保护，合入之后谁都改不了它）。忘了改时 `release-hint` 会在这个 PR 下留一条提示。
 
-门禁：**PR 与 push 都跑全量**（三平台分片用例 + 静态检查 + 安全用例；2026-10-14 起不再按改动路径挑层）。**每一轮都出覆盖率判定与完整 Allure 报告**。所以覆盖率结论看那一轮报告里的「Coverage report」条目（或按 CONTRIBUTING 第四节在本机跑那两步）。**合入 `main` 的 PR 还要过打包门禁**（`CI required packaging status`：等 CI 的结论都出来之后，用这个 PR 的合并预览提交构建 Windows 产物并跑产物冒烟）—— 它比别的检查晚一步。 -->
+门禁：**PR 与 push 都跑全量**（三平台分片用例 + 静态检查 + 安全用例；2026-10-14 起不再按改动路径挑层）。**每一轮都出覆盖率判定与完整 Allure 报告**。所以覆盖率结论看那一轮报告里的「Coverage report」条目（或按 CONTRIBUTING 第四节在本机跑那两步）。**合入 `main` 的 PR 还要过打包门禁**（`CI required packaging status`：等 CI 的结论都出来之后，用这个 PR 的合并预览提交构建 Windows 与 Linux 两份产物并跑产物冒烟）—— 它比别的检查晚一步。 -->
 
 ## 本次变更
 
@@ -15,6 +15,17 @@
 不要写提交号、文件清单、内部实现细节（那些在 Commits / Files changed 标签页里已经有）。
 
 取文规则只认 `## 本次变更` 这个二级标题：从这一行开始，到**下一个二级标题**为止。
+
+发布说明的**末尾带上下载指引**（直接抄下面这段、把 `vX.Y.Z` 换成本次版本号；它回答的是"我这个系统该下哪个包"。链接写当版地址而不是 latest 直链——latest 会随下一个版本漂移，而这段说明描述的是当前版本）：
+
+### 下载
+
+| 系统 | 下载 |
+| --- | --- |
+| Windows 10 / 11（64 位） | [ArchiveManagement.exe](https://github.com/cswhrdf/ArchiveManagement/releases/download/vX.Y.Z/ArchiveManagement.exe) |
+| Linux x64（Ubuntu 24.04+ / Debian 13+ / Fedora 40+ / Arch / openSUSE，glibc ≥ 2.39，需桌面环境） | [ArchiveManagement-linux-x64.tar.gz](https://github.com/cswhrdf/ArchiveManagement/releases/download/vX.Y.Z/ArchiveManagement-linux-x64.tar.gz) |
+
+macOS 暂未提供安装包。Windows 双击即可运行；Linux 解压后在终端执行 `./ArchiveManagement`。
 -->
 
 （写这一版改了什么）

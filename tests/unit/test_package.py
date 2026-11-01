@@ -151,15 +151,24 @@ def test_the_spec_builds_a_single_file_exe() -> None:
 
 
 def test_the_smoke_script_and_the_workflow_follow_the_spec_names() -> None:
-    """产物名是一处改、三处跟: spec 的 name= → 冒烟脚本默认路径 → 发布作业拷的文件."""
+    """产物名是一处改、多处跟: spec 的 name= → 冒烟脚本的产物名表 → 两个构建作业拷的文件."""
     exe_name, _ = _build_names()
-    smoke = (_ROOT / "scripts" / "smoke_packaged.py").read_text(encoding="utf-8")
+    smoke = _load_smoke_module()
+    # 表驱动(2026-11-01 起两平台): Windows 带后缀、Linux 不带, 键就是平台闸门放行的清单。
+    expected_products = {"win32": f"{exe_name}.exe", "linux": exe_name}
+    hint = (
+        "spec 的 name= 与冒烟脚本的产物名表必须一致(改了 spec 就同步 PRODUCT_FILENAMES)"
+    )
+    assert expected_products == smoke.PRODUCT_FILENAMES, hint
+    hint = "报告平台显示名与产物名表共用同一份平台清单, 两边键集合必须一致"
+    assert set(smoke.REPORT_PLATFORMS) == set(smoke.PRODUCT_FILENAMES), hint
     workflow = (_ROOT / ".github" / "workflows" / "release-build.yml").read_text(
         encoding="utf-8"
     )
-    hint = "改了 spec 的产物名就要同步冒烟脚本与 release-build.yml 的路径"
-    assert f"dist/{exe_name}.exe" in smoke, hint
     assert f"release/{exe_name}.exe" in workflow, hint
+    assert f"-C dist {exe_name}" in workflow, (
+        "Linux 作业打进 tar 的就是 spec 的那个产物名"
+    )
     assert f"dist/{exe_name}/" not in workflow, "发布作业不再收 onedir 目录"
 
 
@@ -232,7 +241,10 @@ def test_the_checks_that_kill_a_process_keep_its_temp_writes_local(
     env = smoke._temp_env({"KEEP": "1"}, temp_dir)
     assert env["KEEP"] == "1", "别把父进程环境整份丢掉"
     assert env["TEMP"] == str(temp_dir), "TEMP 必须指进工作目录"
-    assert env["TMP"] == str(temp_dir), "TMP 也要指过去(两套变量都得盖住)"
+    assert env["TMP"] == str(temp_dir), "TMP 也要指过去(Windows 认两套拼写)"
+    assert env["TMPDIR"] == str(temp_dir), (
+        "TMPDIR 也要指过去(Linux 上 onefile 解到 $TMPDIR 下的 _MEI 目录)"
+    )
     assert temp_dir.is_dir(), "指过去的目录要先建出来"
     for name in (
         "check_no_args",
@@ -295,3 +307,69 @@ def test_a_timed_out_command_reports_where_it_stopped(
     assert "备份根" in message, f"子进程输出要进消息: {message}"
     assert "Traceback: boom" in message, f"stderr 也要进消息: {message}"
     assert "应用   : 存档管理工具" in message, f"应用日志末尾也要进消息: {message}"
+
+
+def test_the_sandbox_redirection_covers_both_platforms() -> None:
+    """无参数启动的沙箱重定向按平台给: 两边各自"盖住 platformdirs 解析的全部入口".
+
+    Windows 用 platformdirs 自带的 ``WIN_PD_OVERRIDE_*``; Linux 没有 testing 覆盖, 改盖
+    XDG 约定本身 —— platformdirs 在 Linux 上把 config/data/cache/state 四个目录全按
+    ``XDG_*_HOME`` 解析, 少盖一个, 无参数启动就会把日志/数据库写进真实用户目录(冒烟在
+    CI 的 runner 上跑, 那等于污染构建机; 本地跑等于污染开发者自己的家目录)。
+    """
+    smoke = _load_smoke_module()
+    overrides = smoke._SANDBOX_OVERRIDES
+    assert set(overrides) == {"win32", "linux"}, (
+        "沙箱重定向要按平台给(两平台的打包产物都进 CI), 键与 PRODUCT_FILENAMES 一致"
+    )
+    assert overrides["win32"] == (
+        "WIN_PD_OVERRIDE_APPDATA",
+        "WIN_PD_OVERRIDE_LOCAL_APPDATA",
+    ), "Windows: 两个系统目录覆盖都要盖住(只盖一个会漏一半)"
+    assert overrides["linux"] == (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ), "Linux: platformdirs 走的四个 XDG 入口一个不能少(日志在 state 里)"
+
+
+def test_the_kill_tree_uses_the_platform_native_mechanism() -> None:
+    """杀进程树按平台用各自的机制: Windows 的 taskkill 到不了 Linux, killpg 也要有人起会话.
+
+    POSIX 侧是一对: 子进程由 ``start_new_session`` 起进**独立会话**(组 id = 自己的 pid),
+    ``_kill_tree`` 才能 ``killpg`` 一次带走整组 —— 少了会话那一半, killpg 要么杀错组(把
+    冒烟自己连同 runner 的进程一起带走), 要么 ProcessLookupError 空转。
+    """
+    source = _smoke_source()
+    body = _function_body("_kill_tree")
+    assert "taskkill" in body, "Windows 侧按进程树杀靠 taskkill /T /F"
+    assert "killpg" in body, "POSIX 侧杀整组靠 killpg(单杀父进程会留子进程活口)"
+    # 会话那一半: 起进程的两个入口都要带 start_new_session=_NEW_SESSION(常量在 POSIX 上开)。
+    assert '_NEW_SESSION = sys.platform != "win32"' in source, (
+        "POSIX 上要把子进程起进独立会话, 常量按平台翻转"
+    )
+    for name in ("_launch", "_run_timed"):
+        assert "start_new_session=_NEW_SESSION" in _function_body(name), (
+            f"{name} 起产物进程必须带 start_new_session(killpg 的前提)"
+        )
+
+
+def test_the_platform_gate_and_the_display_warning_are_wired() -> None:
+    """平台闸门放行 PRODUCT_FILENAMES 里的平台; Linux 无显示时先提醒再照跑.
+
+    闸门按表放行而不是写死 ``win32``: 将来加 macOS 打包时只改表, 闸门跟着走。无显示的
+    提醒只该在 Linux 侧出现, 且 DISPLAY 与 WAYLAND_DISPLAY 任一在就算"有显示"(Wayland
+    会话里 Tk 走 XWayland, 只有 DISPLAY 时同样能跑)。
+    """
+    body = _function_body("main")
+    assert "sys.platform not in PRODUCT_FILENAMES" in body, (
+        "平台闸门要按产物名表放行(不在表里的平台没有产物可冒)"
+    )
+    assert "_warn_about_missing_display()" in body, "闸门之后要接无显示的提醒"
+    warning = _function_body("_warn_about_missing_display")
+    assert 'sys.platform != "linux"' in warning, (
+        "提醒只属于 Linux(Windows/macOS 不适用)"
+    )
+    assert "DISPLAY" in warning, "X11 会话认 DISPLAY"
+    assert "WAYLAND_DISPLAY" in warning, "Wayland 会话常只有 WAYLAND_DISPLAY 在"

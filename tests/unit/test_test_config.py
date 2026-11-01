@@ -70,7 +70,7 @@ _CI_ONLY_SUITES = ("performance", "security")
 # 2026-10-17 又添一个: release.yml 的 `publish`(只下产物 + `gh release`, 同样不装 Python 环境)。
 # 2026-10-30 再添一个: release.yml 的 `classify`(定版)—— scripts/release_bump.py 只用
 # 标准库, runner 自带的 python3 + git 就够, 装一套 uv 环境反而引入 sync 开销。
-# 打包门禁那个 `windows-package` 不在这里登记 —— 它是**纯转调作业**(只有一条 `uses:`、自己没有
+# 打包门禁那个 `package` 不在这里登记 —— 它是**纯转调作业**(只有一条 `uses:`、自己没有
 # 步骤), 由 :func:`_calls_another_workflow` 自动豁免; 真正装环境、跑命令的是它调用的
 # release-build.yml(那份工作流照旧走完整的分组检查)。
 _UV_FREE_JOBS: set[str] = {
@@ -286,7 +286,7 @@ def _without_comments(text: str) -> str:
 def _calls_another_workflow(job_body: str) -> bool:
     """作业是否只是**转调**另一份工作流(``uses: ./.github/workflows/*.yml``), 自己没有步骤.
 
-    这类作业(如 `ci.yml` 的 `windows-package`、`release.yml` 的 `build`)一行命令都不跑: 命令、
+    这类作业(如 `ci.yml` 的 `package`、`release.yml` 的 `build`)一行命令都不跑: 命令、
     依赖分组与 `UV_NO_SYNC` 全在被调用的那一份工作流里 —— 那份自己也在这个循环里, 所以这里跳过
     不算放水。反向自查也在这一处: 转调作业里不许出现 `steps:` 或 `run:`(GitHub 同样不允许两者共存)。
     """

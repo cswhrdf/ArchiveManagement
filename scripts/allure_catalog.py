@@ -177,11 +177,11 @@ CATALOG: tuple[Producer, ...] = (
         scope=PER_PLATFORM,
         artifact="allure-results-smoke-<os>",
         script="scripts/create_allure_smoke.py",
-        job="windows-package",
+        job="package",
         match=MATCH_PREFIX,
         detail=(
-            "打包后的产物冒烟(发布产物的五条判据, 每条一个结果项)"
-            "—— 目前仅 Windows; 且只在打包真的跑了的运行里适用(条件期望, 见 expected_items)"
+            "打包后的产物冒烟(发布产物的五条判据, 每条一个结果项, Windows 与 Linux 各一份)"
+            "—— 且只在打包真的跑了的运行里适用(条件期望, 见 expected_items)"
         ),
     ),
     Producer(
@@ -376,8 +376,8 @@ def expected_items(
     有 —— 打包门禁只在合入 main 的 PR 上执行, 把它当无条件期望会让其余每一轮(push 到 dev、
     测试红了被跳过的 PR)都报一条假缺失, 而假警报看多了就没人当回事(见
     ``tests/unit/test_report_manifest.py`` 里 security 那次的记录)。CI 由汇总作业按
-    ``needs.windows-package.result`` 传入(打包成功/失败都要求数, 被跳过则传空), 不适用时
-    这一族整族不出现。平台清单在这里单点收着: 将来冒烟扩到别的平台, 只改 CI 那一处取值与
+    ``needs.package.result`` 传入(打包成功/失败都要求数, 被跳过则传空), 不适用时
+    这一族整族不出现。平台清单在这里单点收着: 冒烟的平台清单改了, 只改 CI 那一处取值与
     ``Producer.artifact`` 的写法, 不动这张表的骨架。
 
     行序就是清单序(`CATALOG`), 一族结论连着出现; 质量检查逐项展开 —— 在

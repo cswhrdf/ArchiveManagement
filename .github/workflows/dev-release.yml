@@ -133,6 +133,14 @@ jobs:
           name: ArchiveManagement-${{ needs.build.outputs.label }}-windows-x64
           path: release
 
+      - name: Download the Linux build artifacts
+        # 预发布页同样挂两份(2026-11-01 起, 与正式版一个口径): Windows 的 exe + Linux 的
+        # tar.gz。Linux 的 label 由 build-linux 作业自己算出(公式与 Windows 一致, 两作业并行)。
+        uses: actions/download-artifact@v7
+        with:
+          name: ArchiveManagement-${{ needs.build.outputs.linux_label }}-linux-x64
+          path: release
+
       - name: Delete the previous pre-releases
         # 预发布只留最新一份。`--cleanup-tag` 连 tag 一起删: 四段 tag 不是历史(正式版只认三段),
         # 留着只会让 `git tag -l` 变脏, 而且这些包本来就随时会被下一份替换。

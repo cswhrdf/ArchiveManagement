@@ -351,7 +351,7 @@ def test_every_expected_conclusion_names_a_live_script_and_an_upstream_job() -> 
     def uploads_artifacts(job_name: str, jobs: dict[str, str]) -> bool:
         """这个作业(或它转调的本地工作流)真的在传产物吗.
 
-        纯转调作业(``uses: ./.github/workflows/*.yml``, 如打包门禁的 ``windows-package``)
+        纯转调作业(``uses: ./.github/workflows/*.yml``, 如打包门禁的 ``package``)
         自己没有步骤, 上传发生在被调的那份里 —— 顺着 ``uses:`` 找过去再看, 否则清单里登记
         它就会永远误报"不上传任何产物"。
         """
@@ -467,13 +467,14 @@ def test_smoke_expectation_follows_the_declared_platforms() -> None:
         "没传 smoke 平台时这一族不该出现 —— 门禁没跑的运行报缺失就是假警报"
     )
 
-    items = catalog.expected_items(platforms, scripts, ("Windows",))
+    items = catalog.expected_items(platforms, scripts, ("Windows", "Linux"))
     smoke = [item for item in items if item.producer.key == "smoke"]
     assert [(item.identity, item.environment) for item in smoke] == [
-        ("archive-management.smoke.", "Windows")
-    ], "传了才要求, 且按传入的平台展开(冒烟将来扩平台时改的就是这份清单)"
+        ("archive-management.smoke.", "Windows"),
+        ("archive-management.smoke.", "Linux"),
+    ], "传了才要求, 且按传入的平台展开(冒烟的平台清单改了就同步这份期望)"
     # 传了冒烟平台, 别的族不受影响(条件只作用于这一族)。
-    assert len(items) == len(absent) + 1
+    assert len(items) == len(absent) + 2
 
 
 def test_missing_conclusions_are_loud_in_the_ledger_and_as_broken_items(

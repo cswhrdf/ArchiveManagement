@@ -1,11 +1,14 @@
-r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.yml 的 build 作业调用).
+r"""产物冒烟: 编出来的包必须真的能跑(进 CI, 由 release-build.yml 的 build / build-linux 作业调用).
 
 判据 = 退出码 + 侧效应, **不读 stdout**: 窗口化产物(console=False)没有控制台, "它真的
-干活了"的证据只能取进程行为与落盘结果。发布产物是**一份单文件 exe**(onefile), 五条判据:
+干活了"的证据只能取进程行为与落盘结果。发布产物是**一份单文件可执行**(onefile; Windows
+上是 ``ArchiveManagement.exe``, Linux 上是无后缀的 ``ArchiveManagement``), 五条判据:
 
 ① 无参数启动: 打包版的默认命令是 ``gui``(``app.default_command``), 双击就该开窗口。
-   系统目录整体重定向进临时沙箱(platformdirs 自带的 ``WIN_PD_OVERRIDE_*`` 覆盖,
-   两个变量都指到同一处), 判据 = 沙箱日志里出现"界面启动"且进程仍活着(窗口开着),
+   系统目录整体重定向进临时沙箱(**按平台**: Windows 用 platformdirs 自带的
+   ``WIN_PD_OVERRIDE_*`` 覆盖, Linux 盖住四个 ``XDG_*_HOME`` —— platformdirs 在 Linux 上
+   全按 XDG 约定解析, 四个都指到同一处等于整体沙箱), 判据 = 沙箱日志里出现"界面启动"
+   且进程仍活着(窗口开着),
    **顺手量冷启动耗时**(Popen → 日志落地)并卡上限(``_COLD_START_LIMITS_SECONDS``),
    看完杀整棵树 —— 全程不碰真实的应用目录;
 ② ``--version``: 退出码 0;
@@ -22,8 +25,14 @@ stdout/stderr 写成文件, 超时或非零退出把这两份与 ``--root`` 下�
 ``--report`` 把逐条判据落成 JSON(失败也写), 由 ``scripts/create_allure_smoke.py`` 转成
 Allure 结果项并入 CI 的汇总报告 —— 退出码管门禁, 报告管"哪一条没过"。用法::
 
-    uv run python scripts/smoke_packaged.py     # dist/ArchiveManagement.exe
+    uv run python scripts/smoke_packaged.py     # Windows: dist/ArchiveManagement.exe
+    uv run python scripts/smoke_packaged.py     # Linux:   dist/ArchiveManagement
     uv run python scripts/smoke_packaged.py --report smoke-report.json
+
+Linux 上跑 GUI 两条判据需要图形显示: 有桌面环境的机器直接可用, 无显示的环境(服务器/
+CI)用 ``xvfb-run -a`` 把本脚本整个包起来 —— release-build.yml 的 build-linux 作业就是
+这么做的; 没有显示时脚本会先打一行 ``::warning::`` 再照跑(GUI 判据会红, 现场里有 Tk
+的报错)。macOS 打包未纳入, 平台闸门只放行 Windows 与 Linux。
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -46,8 +56,25 @@ from typing import IO
 _GUI_STARTED_MARK = "界面启动"
 #: 日志文件名(``--root`` 下落 ``logs/<它>``; 无参数启动落在沙箱里, 用 rglob 找)。
 _LOG_NAME = "archive-management.log"
-#: platformdirs 的系统目录覆盖(把 CSIDL_APPDATA / CSIDL_LOCAL_APPDATA 都指进沙箱)。
-_SANDBOX_OVERRIDES = ("WIN_PD_OVERRIDE_APPDATA", "WIN_PD_OVERRIDE_LOCAL_APPDATA")
+#: 各平台"把系统目录整体指进沙箱"的环境变量。Windows 用 platformdirs 自带的
+#: ``WIN_PD_OVERRIDE_*`` 覆盖(两个都指到同一处); Linux 没有 testing 覆盖, 改用 XDG
+#: 约定本身 —— platformdirs 在 Linux 上把 config/data/cache/log(=state)四个目录全按
+#: ``XDG_*_HOME`` 解析, 四个都盖住等于整体沙箱(值必须给**绝对路径**, platformdirs 见
+#: 到相对路径会退回用户主目录 —— 沙箱路径来自 tempfile, 天然绝对)。
+_SANDBOX_OVERRIDES: dict[str, tuple[str, ...]] = {
+    "win32": ("WIN_PD_OVERRIDE_APPDATA", "WIN_PD_OVERRIDE_LOCAL_APPDATA"),
+    "linux": ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"),
+}
+#: 各平台的产物文件名(同一份 spec, PyInstaller 在 Windows 上给 .exe、Linux 上不加后缀;
+#: 键与 :data:`REPORT_PLATFORMS` 一致 —— 将来加平台两处一起动)。macOS 打包未纳入, 不在表里。
+PRODUCT_FILENAMES: dict[str, str] = {
+    "win32": "ArchiveManagement.exe",
+    "linux": "ArchiveManagement",
+}
+#: POSIX 上把子进程起在**独立会话**里(setsid), 超时/收尾用 killpg 一次带走整组 ——
+#: Windows 上 False(``start_new_session`` 是 POSIX 专属参数, Windows 忽略它, 显式 False
+#: 免得读代码的人以为 Windows 也开了新会话)。
+_NEW_SESSION = sys.platform != "win32"
 #: 第二个实例的退出码(``services.single_instance.ALREADY_RUNNING_EXIT``, 与 argparse
 #: 的 2、GUI 起不来的 2 区分开)。
 _ALREADY_RUNNING_EXIT = 3
@@ -81,9 +108,13 @@ def cold_start_problem(label: str, elapsed: float) -> str | None:
 #: 一条判据的结论: (过没过, 给人看的一句话)。
 Verdict = tuple[bool, str]
 
-#: 冒烟结论落盘时的平台显示名(与报告环境的取名一致, 见 ``create_allure_smoke.py``)。
-#: 脚本只在 Windows 上做冒烟(产物是 Windows 的), 所以是一个字面量而不是现场探测。
-REPORT_PLATFORM = "Windows"
+#: 冒烟结论落盘时的平台显示名(与报告环境的取名一致, 见 ``create_allure_smoke.py`` 与
+#: allurerc.mjs 的 environments —— 写错会让结论落进隐式 default 环境, 报告自检判不完整)。
+#: 按当前平台从表里取, 不做现场探测: 产物是在哪个平台上编的, 冒烟就跑在那个平台上。
+#: macOS 打包未纳入: 表里没有它, ``REPORT_PLATFORM`` 在 darwin 上取到空串 —— 但平台闸门
+#: (:func:`main`)在那之前就把 macOS 拦下了, 空串只会出现在"被加载进测试"的场合。
+REPORT_PLATFORMS: dict[str, str] = {"win32": "Windows", "linux": "Linux"}
+REPORT_PLATFORM = REPORT_PLATFORMS.get(sys.platform, "")
 
 #: 每条判据的固定标识 + 显示名。标识进 Allure 结论项的 ``fullName``(由
 #: ``scripts/create_allure_smoke.py`` 拼接), **改标识会断掉报告里的历史趋势** —— 显示名
@@ -116,15 +147,26 @@ def _utf8_console() -> None:
 
 
 def _kill_tree(pid: int) -> None:
-    """杀整棵进程树(单杀父进程会留子进程活口: 应用自己也可能再拉进程)."""
-    taskkill = shutil.which("taskkill")
-    if taskkill is None:  # pragma: no cover - 系统里没有 taskkill 才走
+    """杀整棵进程树(单杀父进程会留子进程活口: 应用自己也可能再拉进程).
+
+    Windows 用 ``taskkill /T /F``(系统自带, 按进程树杀); POSIX 用 ``killpg`` —— 子进程由
+    :func:`_launch` / :func:`_run_timed` 起在**独立会话**里(``start_new_session``), 所以
+    组 id 就是它自己的 pid, 一次 ``killpg`` 带走它和它拉出来的所有进程。进程组里有人
+    先退了(比如 --smoke 自己到点)会让 getpgid/killpg 抛 ProcessLookupError —— 收尾路径
+    上吞掉它, 进程没了本来就是目的达成。
+    """
+    if sys.platform == "win32":  # platform: windows - taskkill 按进程树杀
+        taskkill = shutil.which("taskkill")
+        if taskkill is None:  # pragma: no cover - 系统里没有 taskkill 才走
+            return
+        subprocess.run(  # noqa: S603 - taskkill 是 Windows 自带, 参数只有本进程的 pid
+            [taskkill, "/T", "/F", "/PID", str(pid)],
+            capture_output=True,
+            check=False,
+        )
         return
-    subprocess.run(  # noqa: S603 - taskkill 是 Windows 自带, 参数只有本进程的 pid
-        [taskkill, "/T", "/F", "/PID", str(pid)],
-        capture_output=True,
-        check=False,
-    )
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(os.getpgid(pid), signal.SIGKILL)  # platform: linux - killpg 杀整组
 
 
 def _read_log(path: Path) -> str:
@@ -136,25 +178,27 @@ def _read_log(path: Path) -> str:
 
 
 def _sandbox_env(sandbox: Path) -> dict[str, str]:
-    """子进程环境: 两个系统目录覆盖都指进沙箱, 无参数启动写不进真实目录."""
+    """子进程环境: 当前平台的系统目录覆盖都指进沙箱, 无参数启动写不进真实目录."""
     env = os.environ.copy()
-    for name in _SANDBOX_OVERRIDES:
+    for name in _SANDBOX_OVERRIDES.get(sys.platform, ()):
         env[name] = str(sandbox)
     return env
 
 
 def _temp_env(base: dict[str, str] | None, temp_dir: Path) -> dict[str, str]:
-    r"""把子进程的 TEMP/TMP 指进本次工作目录.
+    r"""把子进程的 TEMP/TMP/TMPDIR 都指进本次工作目录.
 
     子进程在本次判据里写的任何临时文件都随 ``shutil.rmtree(workspace)`` 一起清掉, 不去
-    撑用户的 %TEMP%。这条纪律是 onefile 时代落下的(2026-10-24, J-7②: onefile 解包到
+    撑用户的临时目录。这条纪律是 onefile 时代落下的(2026-10-24, J-7②: onefile 解包到
     ``%TEMP%\_MEIxxxx``, 被杀留 ~75 MB 残渣; 2026-10-26 ③ doctor 超时被杀又留一个
     ``_MEI000004cc2``) —— onefile 已于 2026-10-28 停产, 但"冒烟起过的进程, 临时文件归
     冒烟自己收"仍然成立, 所以**每一条起产物的判据**都继续走这里。
+    三套拼写一起盖: Windows 认 ``TEMP``/``TMP``, Linux 上 onefile 解到 ``$TMPDIR`` 下的
+    ``_MEIxxxx`` —— 少盖一个平台就有一边的残渣堵不住。
     """
     env = dict(os.environ) if base is None else dict(base)
     temp_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("TEMP", "TMP"):
+    for name in ("TEMP", "TMP", "TMPDIR"):
         env[name] = str(temp_dir)
     return env
 
@@ -162,12 +206,16 @@ def _temp_env(base: dict[str, str] | None, temp_dir: Path) -> dict[str, str]:
 def _launch(
     exe: Path, args: Sequence[str], env: dict[str, str] | None = None
 ) -> subprocess.Popen[bytes]:
-    """起一个产物进程(stdout/stderr 丢弃: 窗口化产物没有可读的控制台)."""
+    """起一个产物进程(stdout/stderr 丢弃: 窗口化产物没有可读的控制台).
+
+    POSIX 上带 ``start_new_session``(见 :data:`_NEW_SESSION`): 超时/收尾靠 killpg 杀整组。
+    """
     return subprocess.Popen(  # noqa: S603 - exe 是本地刚构建的产物, 参数写死在本文件里
         [str(exe), *args],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=_NEW_SESSION,
     )
 
 
@@ -227,6 +275,7 @@ def _run_timed(
             env=env,
             stdout=captured[0] if captured else subprocess.DEVNULL,
             stderr=captured[1] if captured else subprocess.DEVNULL,
+            start_new_session=_NEW_SESSION,
         )
         try:
             return proc.wait(timeout=timeout)
@@ -434,6 +483,27 @@ def write_report(path: Path, artifacts: list[dict[str, object]]) -> None:
     )
 
 
+def _default_product() -> Path:
+    """当前平台的产物默认路径(dist/ 下, spec 的 name= 两边一致、后缀由平台决定)."""
+    return Path("dist") / PRODUCT_FILENAMES[sys.platform]
+
+
+def _warn_about_missing_display() -> None:
+    """Linux 上没有图形显示时先打一行提醒(GUI 两条判据必红, 提前把原因说清).
+
+    照跑而不是提前退: 判据会红, 而失败现场里有 Tk 的 ``no display`` 报错 —— 现场比这里
+    的一行字更有用; 但不提醒的话, "为什么 GUI 判据全红"得翻到现场末尾才知道。
+    """
+    if sys.platform != "linux":  # platform: windows macos - 只有 Linux 侧需要这条提醒
+        return
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return
+    print(
+        "::warning::当前没有图形显示(DISPLAY 与 WAYLAND_DISPLAY 都为空) —— GUI 两条判据"
+        "会起不来; 无显示的环境(服务器/CI)请用 `xvfb-run -a` 把本脚本整个包起来。"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """入口: 找产物 → 逐份跑五条判据 → 逐条打印 → 有红就退 1."""
     _utf8_console()
@@ -443,8 +513,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--exe",
         type=Path,
-        default=Path("dist/ArchiveManagement.exe"),
-        help="单文件产物的 exe(默认按 pyinstaller 的输出位置找)",
+        default=None,
+        help="单文件产物的路径(默认按 pyinstaller 的输出位置与当前平台找: "
+        "dist/ArchiveManagement.exe 或 dist/ArchiveManagement)",
     )
     parser.add_argument(
         "--report",
@@ -453,11 +524,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="把逐条判据的结论写成这份 JSON(给 create_allure_smoke.py 转成 Allure 结果)",
     )
     args = parser.parse_args(argv)
-    if sys.platform != "win32":
-        print("产物冒烟只在 Windows 上做(打包产物是 Windows 的)。")
+    if sys.platform not in PRODUCT_FILENAMES:
+        # macOS 打包未纳入: 闸门挡在解析之后, 让"为什么不能跑"带上 --help 的路径。
+        print("产物冒烟只在 Windows 与 Linux 上做(当前平台还没有打包产物)。")
         return 2
+    _warn_about_missing_display()
     artifacts: list[tuple[str, Path]] = [
-        ("onefile", args.exe),
+        ("onefile", args.exe or _default_product()),
     ]
     missing = [str(path) for _, path in artifacts if not path.is_file()]
     if missing:

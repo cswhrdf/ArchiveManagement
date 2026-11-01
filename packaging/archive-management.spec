@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files
 
@@ -10,16 +11,29 @@ resource_root = source_root / "archive_management" / "resources"
 datas = collect_data_files("customtkinter")
 datas.append((str(resource_root), "archive_management/resources"))
 
+# 平台开关: 同一份 spec 服务 Windows 与 Linux(2026-11-01 起), 差异只落在这两处 ——
+# 图标资源与隐藏导入。产物名两边一致(dist/ArchiveManagement.exe / dist/ArchiveManagement),
+# 所以冒烟脚本与工作流只需要按平台拼后缀。
+is_windows = sys.platform == "win32"
+
 # 应用图标(写进 exe 的 PE 资源, 也就是资源管理器/任务栏那个图标)。位图是
 # ``resources/app.svg`` 的产物, 由 ``uv run python scripts/build_icon.py`` 生成并入库;
 # 缺了就当场失败 —— 少一个图标不会让构建报错, 只会让发布包默默地顶着默认图标,
-# 而“默默地少点什么”正是这里要拦的。
+# 而“默默地少点什么”正是这里要拦的。**只拦 Windows**: PE 资源是 Windows 独有的概念,
+# Linux 上 PyInstaller 的 ``icon=`` 是空操作, 产物的窗口/任务栏图标由运行时的
+# ``iconphoto`` + ``app-256.png`` 负责(见 ui/window_icon.py), 与这里的 .ico 无关。
 icon_file = resource_root / "app.ico"
-if not icon_file.is_file():
+if is_windows and not icon_file.is_file():
     raise SystemExit(
         "缺少打包图标 resources/app.ico: 先运行 "
         "`uv run python scripts/build_icon.py` 重画(SVG 是唯一真相)"
     )
+
+# fcntl(POSIX 的文件锁)在 services/single_instance.py 里经 ``importlib.import_module``
+# 动态导入。PyInstaller 的静态分析对字面量 import_module 大多能认, Windows 上 msvcrt
+# 就是这么被打进去的(单实例冒烟一直绿); 但 fcntl 这条只有 Linux 构建才走得到, 而本仓库
+# 没有 Linux 上的本地构建可以当场验证 —— 显式列出来, 不赌它。
+hidden_imports: list[str] = [] if is_windows else ["fcntl"]
 
 a = Analysis(
     [str(source_root / "archive_management" / "__main__.py")],
@@ -27,7 +41,8 @@ a = Analysis(
     binaries=[],
     datas=datas,
     # Pillow 由 PyInstaller 自带的 hook 收集(``CTkImage`` 需要 ``PIL.ImageTk``), 无需手工列举条目.
-    hiddenimports=[],
+    # ``fcntl`` 的来路见上面的 hidden_imports。
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -54,7 +69,25 @@ pyz = PYZ(a.pure)
 # (scripts/smoke_packaged.py 的 `_temp_env`), 所以 CI 不会往 runner 的 %TEMP% 里攒东西。
 #
 # onefile 的 EXE 要**把 binaries 与 datas 一起收进来**(不带 `exclude_binaries`), 单文件因此
-# 自带解释器与资源; 发布产物名就是这里的 `name=`: dist/ArchiveManagement.exe。
+# 自带解释器与资源; 发布产物名就是这里的 `name=`: Windows 上 dist/ArchiveManagement.exe,
+# Linux 上 dist/ArchiveManagement(PyInstaller 不加后缀)。
+#
+# Linux 侧的兼容性口径(2026-11-01 起 CI 也编 Linux):
+#   * **glibc 地板由构建机决定** —— 解释器(uv 托管的 python-build-standalone)与 PyInstaller
+#     引导程序都是 manylinux 出品(地板 2.17), 真正抬地板的是构建期从系统解析进包的库;
+#     所以 CI 把 Linux 构建钉在 ubuntu-24.04(glibc 2.39): 发行版 ``_tkinter`` 的 ABI 还必须
+#     与冻结解释器同小版本(24.04 的系统 Python 正是 3.12, 换镜像=换配方), 一份产物覆盖
+#     Ubuntu 24.04+ / Debian 13+ / Fedora 40+ / Arch / 现役 openSUSE。Alpine(musl)需要
+#     另一整套构建; 更老的发行版要另建老基线构建机再测, 都不在本期范围。
+#   * **冻进包的 Tk 必须是发行版那份**(走 Xft/fontconfig 的 libtk8.6): uv 托管 CPython
+#     自带的 Tcl/Tk 在 X11 只走核心位图字体、画不出汉字, 完整配方(发行版 ``_tkinter`` 拷上
+#     PYTHONPATH 最前 + ``TCL_LIBRARY``/``TK_LIBRARY`` 指向 /usr/share/tcltk)在
+#     release-build.yml 的 ``build-linux`` 作业里, 守卫是 test_ci_workflow 的
+#     ``test_the_linux_package_bundles_a_tk_that_can_render_cjk``。
+#   * **X11 客户端库与 fontconfig 不进包**(PyInstaller 视它们为系统库): 运行机器只要有桌面
+#     环境就有它们; Tk 在 Wayland 会话下走 XWayland, 同样能起。
+#   * 产物不装进系统、无桌面集成(.desktop/.deb/.rpm/AppImage 都是后续的分发格式增量, 不是
+#     "每个发行版一个包")。
 EXE(
     pyz,
     a.scripts,
@@ -69,5 +102,5 @@ EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
-    icon=str(icon_file),
+    icon=str(icon_file) if is_windows else None,
 )

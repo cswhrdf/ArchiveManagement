@@ -8,10 +8,10 @@ r"""把产物冒烟的逐条判据写进 Allure.
 
 与 :mod:`create_allure_quality` 同一套做法(执行方在 ``smoke_packaged.py``, 这里只做转换):
 
-- ``env`` 标签写**平台显示名**(取自报告 JSON, 目前只有 ``Windows``): 冒烟结论跟着那个平台
-  的用例走, 落进仓库根 ``allurerc.mjs`` 里声明的 ``Windows`` 环境 —— 写错或漏写会被
-  ``scripts/verify_allure_report.py`` 与清单核对判成"结果不完整"(2026-10-14 的坑: 汇总项
-  落进隐式 ``default`` 环境, 按平台对数时找不到);
+- ``env`` 标签写**平台显示名**(取自报告 JSON —— smoke_packaged.py 按当前平台落
+  ``Windows`` / ``Linux``): 冒烟结论跟着那个平台的用例走, 落进仓库根 ``allurerc.mjs`` 里
+  声明的对应环境 —— 写错或漏写会被 ``scripts/verify_allure_report.py`` 与清单核对判成
+  "结果不完整"(2026-10-14 的坑: 汇总项落进隐式 ``default`` 环境, 按平台对数时找不到);
 - 身份(``fullName``)由"产物标识 + 判据标识"拼成(``archive-management.smoke.<产物>.<判据>``),
   两个取值都来自 ``smoke_packaged.py`` 落的 JSON —— 改判据的显示名不断历史, 改标识会断
   (趋势里变成新条目, 旧的接不上);
@@ -19,13 +19,13 @@ r"""把产物冒烟的逐条判据写进 Allure.
   步挂 ``if: always()`` 让失败详情也进报告 —— 门禁本身的成败仍由 ``smoke_packaged.py``
   的退出码与打包门禁作业(``packaging-gate``)负责, 这里不重复判。
 
-结果目录名固定为 ``allure-results-smoke-windows``: 匹配汇总作业的 ``pattern:
-allure-results-*``(一份 pattern 自动收走), 但**不**匹配每平台报告作业的
-``allure-results-<os>-*`` —— 那边多收一份只会把冒烟结论错并进单平台的报告。将来冒烟扩到
-别的平台时按平台各起一份结果目录(名字里的平台段跟着改), 平台清单收在
+结果目录名按平台各一份(``allure-results-smoke-windows`` / ``allure-results-smoke-linux``):
+匹配汇总作业的 ``pattern: allure-results-*``(一份 pattern 自动收走), 但**不**匹配每平台
+报告作业的 ``allure-results-<os>-*`` —— 那边多收一份只会把冒烟结论错并进单平台的报告。
+平台段跟着调用方(release-build.yml 的 build / build-linux 作业)走, 平台清单收在
 ``scripts/allure_catalog.py`` 一处, 不要散在工作流里。
 
-用法(CI, ``release-build.yml`` 的 build 作业, 冒烟步之后)::
+用法(CI, ``release-build.yml`` 的 build / build-linux 作业, 冒烟步之后; 目录名是两平台各传各的)::
 
     uv run python scripts/create_allure_smoke.py \
         --report smoke-report.json --results-dir allure-results-smoke-windows

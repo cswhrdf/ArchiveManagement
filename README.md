@@ -21,6 +21,19 @@
 - **一个窗口就够了**：打包版同时只允许开一个界面进程 —— 两个进程各持同一个数据库、备份目录与全局快捷键注册会互相踩（表现为"点了没反应"这类没有报错的怪事），所以**第二次启动不会开新窗，而是把已经开着的那个窗口叫到前台**（退出码 3）；开发/用例不受这条限制，诊断用的逃生门见 [docs/development.md](docs/development.md)。
 - **库空了回主页**：删掉库里最后一款游戏后自动回到游戏主页（详情页是围绕某一款游戏建的，游戏没了就不该把这一页留在屏幕上），主页会显示"还没有游戏"并给出「去游戏发现」。
 
+## 下载安装
+
+发布包是免安装的单文件程序，覆盖以下系统。链接始终指向**最新正式版**的对应文件（也可到[发布页](https://github.com/cswhrdf/ArchiveManagement/releases/latest)查看全部版本与各版的下载指引）：
+
+| 系统                                   | 版本要求                                                                 | 下载                                                                                                                                           |
+| -------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows                                | Windows 10 / 11（64 位）                                                  | [ArchiveManagement.exe](https://github.com/cswhrdf/ArchiveManagement/releases/latest/download/ArchiveManagement.exe)                             |
+| Linux（x64，需桌面环境）               | Ubuntu 24.04+ / Debian 13+ / Fedora 40+ / Arch / openSUSE 等（glibc ≥ 2.39） | [ArchiveManagement-linux-x64.tar.gz](https://github.com/cswhrdf/ArchiveManagement/releases/latest/download/ArchiveManagement-linux-x64.tar.gz) |
+| macOS                                  | —                                                                        | 暂未提供安装包，可从源码运行（见下方快速开始）                                                                                                   |
+
+- Windows 下载后双击即可运行，不需要解压；Linux 下载后先解压（`tar -xzf ArchiveManagement-linux-x64.tar.gz`），在终端执行 `./ArchiveManagement` 启动。
+- 更老的 Linux 发行版（如 Ubuntu 22.04 / Debian 12）不在当前支持范围——构建基线决定了 glibc 地板，口径与各发行版覆盖见 [docs/platforms.md](docs/platforms.md)。
+
 ## 快速开始
 
 要求：Python >= 3.12 与 uv。

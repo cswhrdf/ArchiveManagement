@@ -21,7 +21,7 @@ description: '本仓库 Allure 报告体系的用法与不变式: 配置的唯�
 | `create_allure_visual.py`（quality 作业）                                    | `allure-results-visual`                                                                                                                       | 汇总作业               |
 | 性能基准 / 安全用例（quality / security 作业）                               | `allure-results-performance` / `allure-results-security-<os>`                                                                                 | 汇总作业               |
 | `create_allure_coverage.py`（`pytest-report`，逐平台）                       | `allure-results-coverage-<平台显示名>`                                                                                                        | 汇总作业               |
-| `create_allure_smoke.py`（打包作业，2026-10-27 起）                         | `allure-results-smoke-windows`（逐条判据，**条件期望**：只在打包真的跑了的运行里要求）                                                       | 汇总作业               |
+| `create_allure_smoke.py`（打包作业的两个构建作业，2026-10-27 起；2026-11-01 起两平台） | `allure-results-smoke-windows` / `allure-results-smoke-linux`（逐条判据，**条件期望**：只在打包真的跑了的运行里按平台要求）                                                   | 汇总作业               |
 | `merge_allure_results.py`（`pytest-report`）                                 | 合并后的 `allure-results` + `allure-manifest.json` → 产物 `allure-resources-<镜像名>`（只含历史 + 清单）与 `allure-report-<镜像名>`（tar.gz） | 人；下一轮取历史       |
 | `allure-summary`                                                             | `allure-resources-final`（`.allure/history.jsonl`）+ `allure-report-final`（单个 tar.gz）                                                     | 人                     |
 
@@ -98,7 +98,7 @@ pytestmark = [
 - **归属靠 `env` 标签**：`create_allure_coverage.py` 的平台由 `--platform` 给出（主机的 `platform.system()` 会把三平台结论全标成 Linux）。守卫 `test_coverage_item_platform_comes_from_the_flag`。
 - **脚本产物不许带 `framework=pytest`**：那是 allure-pytest 给真实用例写的标签，质量门用它区分"用例"与"汇总项"。守卫 `test_quality_gate_asks_every_platform_for_real_tests`（断言四个 `create_allure_*` 里不出现 `"framework"`）。
 - **产物冒烟的结论项产在打包作业里**（`create_allure_smoke.py`）：执行方是 `smoke_packaged.py`（它落 `smoke-report.json`，失败也写），writer 只做转换——`env` 标签取报告 JSON 里的平台显示名、身份由"产物标识 + 判据标识"拼成（改显示名不断历史、改标识断趋势）、退出码恒 0（门禁是 `smoke_packaged.py` 的退出码）。守卫 `tests/unit/test_report_smoke_items.py`。
-- **每条结论都要有人负责**：`scripts/allure_catalog.py` 逐族列出"应该有哪一条结论、由哪个上游作业产生、由哪条规则判定"，并在运行总账的「证据核对」里逐项标"已收到 / 缺失"，缺失项另写一条 `broken` 并打 `::warning::`。**加一条结论就要同时加进清单**，双向同步由 `test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions` 钉住。例外有两族：按需一族（作业崩溃现场）不进"应有"；冒烟一族是**条件期望**（`expected_items` 的 `smoke_platforms`，CI 按 `needs.windows-package.result` 传值），不适用时整族不出现、不报假缺失——守卫 `test_smoke_expectation_follows_the_declared_platforms`。
+- **每条结论都要有人负责**：`scripts/allure_catalog.py` 逐族列出"应该有哪一条结论、由哪个上游作业产生、由哪条规则判定"，并在运行总账的「证据核对」里逐项标"已收到 / 缺失"，缺失项另写一条 `broken` 并打 `::warning::`。**加一条结论就要同时加进清单**，双向同步由 `test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions` 钉住。例外有两族：按需一族（作业崩溃现场）不进"应有"；冒烟一族是**条件期望**（`expected_items` 的 `smoke_platforms`，CI 按 `needs.package.result` 传值），不适用时整族不出现、不报假缺失——守卫 `test_smoke_expectation_follows_the_declared_platforms`。
 
 ## 6. 附件与体积：能挂，但不能把报告拖死
 

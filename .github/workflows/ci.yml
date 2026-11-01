@@ -783,10 +783,12 @@ jobs:
           path: job-diagnostics/
           if-no-files-found: error
 
-  windows-package:
+  package:
     # 打包门禁: **合入 main 的 PR** 在 CI 的检查都过了之后, 才拿这个 PR 的合并预览提交去构建。
     # 「用例绿」与「能编 + 产物能起」是两件事 —— 后者只有真跑一次 PyInstaller 才知道, 而它最容易
     # 悄悄坏(资源没进包、spec 少一行、隐藏导入失效), 等到发布那一刻才发现就晚了。
+    # 一次调用出**两个平台**(2026-11-01 起, 作业也从 windows-package 改名 package):
+    # release-build.yml 里 Windows 与 Linux 两个作业并行, 这边一个 `uses:` 等两份都绿。
     # 为什么用 `uses:` 调 release-build.yml 而不在这里抄一遍构建步骤: 构建只有一处定义, 门禁这条路
     # 与发布那条路(release.yml 的 build 作业调的也是同一份)跑的是同一份步骤, 不会各自漂移。
     # **调的是"只读的构建"那一份, 不是 release.yml**(2026-10-17 实测): 嵌套工作流的权限是**逐作业
@@ -803,7 +805,7 @@ jobs:
     # 汇总报告。报告链的红(覆盖率门槛、原生质量门)由它们自己的必需检查兜住, 不再挡打包的墙钟;
     # 而这里的前置(quality/pytest/security)红了 => 本作业被跳过(default needs 语义) =>
     # packaging-gate 判红, 合入照样被拦。
-    name: 打包 Windows 产物 (仅合入 main 的 PR)
+    name: 打包 Windows 与 Linux 产物 (仅合入 main 的 PR)
     needs: [changes, quality, pytest, security]
     if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && needs.changes.outputs.should_run == 'true' }}
     uses: ./.github/workflows/release-build.yml
@@ -817,9 +819,10 @@ jobs:
     # 给分支保护用的**必需检查**: 恒有一份结论(跳过也是结论), 所以它不会停在 pending。
     # 三种情况: ① 纯文档改动 ⇒ 不需要编译, 绿; ② 不是合入 main 的 PR ⇒ 不在这条门禁范围内, 绿;
     # ③ 合入 main 的 PR ⇒ 上面那个作业必须真的成功(被跳过也算不成功 —— 那意味着前置检查红了,
-    # 那时本来就该拦住合入)。
+    # 那时本来就该拦住合入)。`package` 一次调 release-build.yml 建两个平台, 它的结果就是
+    # "Windows 与 Linux 都编出来且产物冒烟通过"。
     name: CI required packaging status
-    needs: [changes, windows-package]
+    needs: [changes, package]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -829,7 +832,7 @@ jobs:
           SHOULD_RUN: ${{ needs.changes.outputs.should_run }}
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-          PACKAGE_RESULT: ${{ needs.windows-package.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           if [ "$SHOULD_RUN" != "true" ]; then
             echo "纯文档改动: 本轮不需要编译, 打包门禁按通过计。"
@@ -1346,7 +1349,7 @@ jobs:
     # 站点发布用的 pages / id-token 权限、github-pages 环境与三个发布步骤一并删除,
     # 报告的可达性交给 `allure-report-final` 产物。
     name: Allure 汇总报告
-    needs: [changes, quality, pytest-report, security, windows-package]
+    needs: [changes, quality, pytest-report, security, package]
     # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
     if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
     runs-on: ubuntu-latest
@@ -1356,8 +1359,9 @@ jobs:
     # 平台专属检查、静态分析与性能基准现在都跑在 pytest 的片 0 与 quality 作业里, 所以清单里
     # 不再有 quality-platform / analysis / performance: 它们要出的产物都由这两个作业上传,
     # 等它们跑完即可。
-    # windows-package(2026-10-27 重排): 打包作业里的构建后冒烟会上传
-    # `allure-results-smoke-windows`, 靠下面的 `pattern: allure-results-*` 一并收进汇总报告
+    # package(2026-10-27 重排, 2026-11-01 起一次建两平台): 打包作业里的构建后冒烟会上传
+    # `allure-results-smoke-windows` 与 `allure-results-smoke-linux`, 靠下面的
+    # `pattern: allure-results-*` 一并收进汇总报告
     # —— 不等它就会在它传完之前去下载, 报告静默少一节。被跳过的 need 不拦 `always()` 作业:
     # 测试红 / 非门禁路径 / 纯文档的轮次里它就是 skipped, 汇总照常出报告, 冒烟那一族按
     # 条件期望处理(见后面调 create_allure_summary.py 的那一步)。
@@ -1601,12 +1605,14 @@ jobs:
         # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
         # `--expect-smoke-platforms` 是**条件期望**(2026-10-27): 产物冒烟只在"打包真的跑了"的
         # 运行里才应该有 —— 打包门禁只在合入 main 的 PR 上执行, 无条件要求会让 push 到 dev、
-        # 测试红了被跳过的 PR 每轮都报一条假缺失。取值由 needs.windows-package.result 推出:
+        # 测试红了被跳过的 PR 每轮都报一条假缺失。取值由 needs.package.result 推出:
         # success / failure 都要求数(失败=冒烟红或构建红, 两种都该在报告里看得见缺了什么),
-        # skipped / cancelled(前置红了、不是这条路径、纯文档)传空 = 不适用。
+        # skipped / cancelled(前置红了、不是这条路径、纯文档)传空 = 不适用。平台清单
+        # Windows,Linux 与 release-build.yml 两个作业各自的结论目录一一对应 —— 冒烟在哪个
+        # 平台上跑了, 那个平台就该有数(写漏一个, 报告按缺失点名; 写多一个, 永远报假缺失)。
         if: always()
         env:
-          SMOKE_EXPECTED: ${{ (needs.windows-package.result == 'success' || needs.windows-package.result == 'failure') && 'Windows' || '' }}
+          SMOKE_EXPECTED: ${{ (needs.package.result == 'success' || needs.package.result == 'failure') && 'Windows,Linux' || '' }}
         shell: bash
         run: |
           mkdir -p allure-results

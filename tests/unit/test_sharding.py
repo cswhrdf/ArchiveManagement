@@ -338,16 +338,17 @@ def test_ci_merges_shard_results_with_the_script() -> None:
     # 平台专属检查/静态分析/性能基准都并在 pytest 与 quality 里, 所以清单里没有它们的名字。
     # `changes` 是那个轻量路径过滤作业: 它决定这轮要不要跑重量级作业(见
     # test_ci_cancels_superseded_runs_and_skips_docs_only_pushes)。
-    # `windows-package`(2026-10-27 重排): 打包作业里的构建后冒烟会上传
-    # allure-results-smoke-windows, 由汇总的 `pattern: allure-results-*` 收走 —— 方向翻转后
-    # 是"报告等打包", 打包不再等报告。它是条件启动的(仅合入 main 的 PR), 被跳过时靠汇总作业
-    # 的 always() 语义照常出报告, 不适用则不适用(冒烟的条件期望, 见 create_allure_summary.py)。
+    # `package`(2026-10-27 重排, 2026-11-01 起一次调 release-build.yml 建两平台): 打包作业里
+    # 的构建后冒烟会上传 allure-results-smoke-windows 与 allure-results-smoke-linux, 由汇总的
+    # `pattern: allure-results-*` 收走 —— 方向翻转后是"报告等打包", 打包不再等报告。它是条件
+    # 启动的(仅合入 main 的 PR), 被跳过时靠汇总作业的 always() 语义照常出报告, 不适用则不适用
+    # (冒烟的条件期望, 见 create_allure_summary.py)。
     assert ci_workflow.needs_of(text, "allure-summary") == {
         "changes",
         "quality",
         "pytest-report",
         "security",
-        "windows-package",
+        "package",
     }, "公共检查与性能基准在 quality 里, 所以不需要单独的作业名"
 
 
