@@ -330,3 +330,41 @@ def test_archive_packages_every_file(
     assert packed == on_disk
     assert f"{len(on_disk)} 个条目" in output
     assert "SHA256:" in output
+
+
+def test_content_problems_still_package_the_report(
+    layout: _Layout, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """内容性问题(缺平台用例)不拦打包: 那种报告才是最需要有人打开看的(2026-11-01 定)."""
+    exit_code = verifier.main(
+        [
+            str(layout.report),
+            "--results",
+            str(layout.results),
+            "--archive",
+            "--expect-platforms",
+            "Solaris",
+        ]
+    )
+    captured = capsys.readouterr()
+    archive = layout.report.parent / f"{layout.report.name}.tar.gz"
+
+    assert exit_code == 1, "内容性问题照样把门禁判红(退出码不变, 只是不再拦打包)"
+    assert archive.is_file(), "打得开的报告必须照常打包: 上传与 Pages 发布都靠这份归档"
+    assert "已打包" in captured.out
+    assert "报告资源不完整" in captured.err
+
+
+def test_unopenable_report_is_never_packaged(
+    layout: _Layout, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """结构烂到打不开的报告不打包: 上传与发布靠"归档在不在"自然跳过."""
+    shutil.rmtree(layout.report / "data" / "test-results")
+
+    exit_code = verifier.main(
+        [str(layout.report), "--results", str(layout.results), "--archive"]
+    )
+    archive = layout.report.parent / f"{layout.report.name}.tar.gz"
+
+    assert exit_code == 1
+    assert not archive.exists(), "打不开的报告不许打包 —— 发布闸门的边界就在这"

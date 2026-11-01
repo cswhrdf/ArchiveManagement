@@ -64,7 +64,8 @@ _DEFAULT_SUITES = ("tests/unit", "tests/integration")
 # 只在 CI 执行的测试类别: 目录名与 -m 标记名一致.
 _CI_ONLY_SUITES = ("performance", "security")
 # 不碰 uv 的作业(它们只用 runner 自带的工具与官方 action: 下产物、路径过滤、上传)。
-# 2026-10-06: 报告不再发布 Pages, 但 PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
+# 2026-10-06: 报告一度不再发布 Pages(2026-11-01 恢复, 见下面的 `publish-report`), 同日
+# PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
 # `dorny/paths-filter`、`required-check` 只 `echo` 一行, 都不需要 Python 环境, 所以
 # 按这条登记; 列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
 # 2026-10-17 又添一个: release.yml 的 `publish`(只下产物 + `gh release`, 同样不装 Python 环境)。
@@ -82,6 +83,9 @@ _UV_FREE_JOBS: set[str] = {
     # 2026-11-01: ci.yml 的 `release-hint`(PR 阶段的发版提示) —— 与 classify 同一理由:
     # release_bump.py / release_hint.py 只用标准库, 装一套 uv 环境是纯开销。
     "release-hint",
+    # 2026-11-01: ci.yml 的 `publish-report`(报告发布到 GitHub Pages) —— 只下产物、解包、
+    # 两个官方 action, 一行 Python 都不跑, 装一套 uv 环境是纯开销。
+    "publish-report",
     # 2026-10-31: dev 快照档的两个作业(只跑 gh / git / runner 自带的 python3 —— 版本号与
     # CI 前置都是脚本算的, 装一套 uv 环境反而是纯开销)。
     "prepare",

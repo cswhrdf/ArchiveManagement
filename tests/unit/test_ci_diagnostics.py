@@ -53,6 +53,9 @@ _GATE_ONLY_JOBS = {
     # 2026-11-01: `release-hint` 只在 PR 上跑脚本 + 留一条评论, 不跑用例、不产 Allure
     # 结果/覆盖率 —— 没有"兜底现场"可收。
     "release-hint",
+    # 2026-11-01: `publish-report` 只下产物、解包、部署 Pages —— 不跑用例、不产 Allure
+    # 结果; 部署失败的证据就是那几步的作业日志与 Pages 部署状态, 没有第二份现场可收。
+    "publish-report",
 }
 
 

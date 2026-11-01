@@ -33,8 +33,14 @@ pytestmark = [
 ]
 
 
-def test_ci_publishes_only_verified_report() -> None:
-    """CI 必须先自检报告再发布, 并且发布单个 zip(整目录被静默丢掉的情况不会再出现)."""
+def test_ci_publishes_only_openable_report() -> None:
+    """CI 上传/发布报告的闸门是"打得开"(入口/详情齐全), 而不是"自检全通过".
+
+    打包闸门在脚本里(``--archive`` 只看结构层), CI 侧两份上传与 Pages 发布跟着
+    "归档在不在"走: 内容性失败(缺平台用例、清单对不上)轮次的报告照样上传发布 ——
+    报告正是用来看"哪里缺了/哪里红了"的, 拦下来反而拿不到证据(2026-11-01 定).
+    发布单个归档(整目录被静默丢掉的情况不会再出现).
+    """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     # 只看命令行: 注释里也会指路到这个脚本(例如说明 zip 里的目录结构), 那是文档而不是门禁。
     code = "\n".join(
@@ -43,7 +49,6 @@ def test_ci_publishes_only_verified_report() -> None:
     verifications = code.count("scripts/verify_allure_report.py")
 
     assert verifications >= 3, "两个作业的结构自检 + 汇总作业的平台用例检查"
-    # 发布 zip 的前提是**出 zip 的那次自检**通过: 两个作业各一份。
     commands = [
         line.strip()
         for line in code.splitlines()
@@ -52,11 +57,20 @@ def test_ci_publishes_only_verified_report() -> None:
     assert len(commands) == verifications, "自检点数量与命令数量对不上"
     archive_checks = [command for command in commands if "--archive" in command]
     assert len(archive_checks) == 2, "pytest 与汇总作业各出一份归档报告"
-    # 挂在"出 zip 的那次自检通过"上的地方就是两份 `Upload ... Allure report`
-    # (2026-10-06 移除 Pages 发布后少了"解开发布"那一步)。
-    # 只数命令行(注释里也会引这句话当说明), 所以先把注释剥掉再数。
-    gated = code.count("steps.verify-report.outcome == 'success'")
-    assert gated == len(archive_checks), f"自检与归档挂钩的地方对不上: {gated}"
+    # 上传不再挂"自检通过"(2026-11-01 改口径): 打包闸门在脚本里("打得开"才打包),
+    # 上传跟着归档走 —— 内容性失败的轮次照样有报告可下, 那才是最需要看的证据;
+    # "打不开"的报告脚本根本不打包, if-no-files-found: ignore 会让上传自然跳过。
+    assert "steps.verify-report.outcome == 'success'" not in code, (
+        "上传不该再挂自检结论(挂的是归档在不在)"
+    )
+    for upload_name in ("Upload Allure report", "Upload final Allure report"):
+        marker = f"name: {upload_name}"
+        start = code.index(marker)
+        end = code.find("- name:", start)
+        block = code[start:] if end == -1 else code[start:end]
+        assert "if: always() && !cancelled()" in block, (
+            f"{upload_name} 要“归档在就传”: 依赖作业红/自检内容性失败都不拦上传"
+        )
     assert workflow.count("path: allure-report.tar.gz") == len(archive_checks)
     assert "path: allure-report/" not in workflow, "报告目录不再直接发布"
     # 平台用例检查: pytest 作业的报告传矩阵里的平台(报告作业固定跑在 Ubuntu 上,
@@ -924,40 +938,76 @@ def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
         assert "!cancelled()" in condition, f"{job} 在整轮被取消后仍会启动"
 
 
-def test_the_pages_deploy_is_gone_and_the_report_is_an_artifact() -> None:
-    """报告只作为 `allure-report-final` 产物存在: 不再发布到 GitHub Pages(2026-10-06).
+def test_the_push_runs_publish_the_report_to_pages() -> None:
+    """push 轮把"打得开"的汇总报告发布到 GitHub Pages; PR 轮不发布(2026-11-01 恢复).
 
-    删干净比"留一半"重要 —— 站点发布涉及三处彼此耦合的配置, 漏一处就会留下把没通过自检的
-    报告发出去的路径, 或者让 forks 上的 PR 拿到一条恒红的检查:
-    ① 三个发布步骤(`Unpack the report for Pages` / `Upload the report as a Pages artifact` /
-       `Deploy to GitHub Pages`)都不在了;
-    ② `pages: write` / `id-token: write` 权限与 `github-pages` 环境一起删掉 —— 顶层只给
-       `contents: read` / `actions: read`, 作业级权限**覆盖**顶层, 所以这里要显式写回
-       `contents: read`(漏了它 checkout 直接失败)与 `actions: read`(取本轮产物);
-    ③ 报告仍要作为产物上传(自检通过后才上传), 想浏览的人下它。
+    发布闸门是"归档在不在"(自检脚本判"打得开"才打包), 不是"自检全通过": 门禁判红、
+    缺平台用例这类"记录的内容"失败不拦发布 —— 那种轮次的报告才是最该能打开看的.
+    2026-10-06 移除站点发布时的教训: 发布涉及三处彼此耦合的配置, 漏一处就会把
+    打不开的报告发出去, 或让 fork 上的 PR 拿到一条恒红的检查。恢复时发布放进独立
+    小作业 ``publish-report``(不 checkout、不跑仓库脚本 —— 权限才敢给到 pages),
+    三处都在这里钉住:
+    ① 条件(只 push 轮、归档在才发、被取消的轮次不部署);
+    ② 权限与站点独占(pages/id-token 覆盖式补齐, 作业级并发组互斥 dev 与 main 两路);
+    ③ 发布链四步齐备 —— 任何一步缺失都是"站点不更新"这种没有任何用例会红的静默故障。
     """
     workflow = ci_workflow.workflow_text()
-    job = ci_workflow.job_block(workflow, "allure-summary")
-    # 只看真正生效的行: 注释里正拿 "github-pages" 当反面说明(与本仓库其它守卫同一个口径
+    assert "publish-report" in ci_workflow.jobs(workflow), (
+        "发布要有自己的小作业(权限最小化), 而不是塞回汇总作业"
+    )
+    condition = ci_workflow.job_condition(workflow, "publish-report")
+    assert "always()" in condition, (
+        "依赖作业「红」(门禁结论)不拦发布 —— 失败轮的报告最该能看"
+    )
+    assert "!cancelled()" in condition, "被取消的轮次不要再启动部署"
+    assert "github.event_name == 'push'" in condition, (
+        "PR 轮不发布: fork 的 PR 拿不到 pages:write, 不排除就是一条恒红的检查"
+    )
+    assert "needs.allure-summary.outputs.report_archived == 'true'" in condition, (
+        "只发“归档在”(= 自检判过打得开)的报告 —— 闸门在结构层, 不在内容层"
+    )
+
+    job = ci_workflow.job_block(workflow, "publish-report")
+    # 只看真正生效的行: 注释里正拿 "github-pages" 当说明(与本仓库其它守卫同一个口径
     # —— 注释是文档, 不是配置)。
     code = "\n".join(
         line for line in job.splitlines() if not line.strip().startswith("#")
     )
     header = code.split("steps:", 1)[0]
-
-    for gone in (
-        "Deploy to GitHub Pages",
-        "Unpack the report for Pages",
-        "actions/upload-pages-artifact",
-        "actions/deploy-pages",
-    ):
-        assert gone not in code, f"发布已经移除, 不该还留着 {gone}"
-    assert "pages: write" not in header, "发布用的权限要一起删掉"
-    assert "id-token: write" not in header, "发布用的 OIDC 权限要一起删掉"
-    assert "github-pages" not in code, "发布用的 environment 也要一起删掉"
-    assert "environment:" not in header, (
-        "站点用的 environment 只能挂作业级, 删发布就该一起删"
+    for granted in ("pages: write", "id-token: write", "actions: read"):
+        assert granted in header, (
+            f"发布要 {granted}(作业级权限是覆盖语义: 缺了就是拿不到)"
+        )
+    assert "group: pages" in header, (
+        "站点是全局独占: dev 与 main 的部署要靠作业级并发组互斥(顶层按 ref 分组拦不住)"
     )
+    assert "github-pages" in header, "deploy-pages 要挂 github-pages 环境"
+    for step in (
+        "Download the final Allure report",
+        "Unpack the report for Pages",
+        "Upload the report as a Pages artifact",
+        "Deploy to GitHub Pages",
+    ):
+        assert f"name: {step}" in job, f"发布链缺了 {step}"
+    assert "actions/upload-pages-artifact@" in code, "Pages 产物要用官方 action 打"
+    assert "actions/deploy-pages@" in code, "部署要用官方 action(OIDC 换写权限)"
+    assert "name: allure-report-final" in code, "发布的就是汇总作业上传的那份产物"
+    assert "actions/checkout" not in code, "这个作业不碰仓库代码, 权限才敢给到 pages"
+
+    # 汇总侧: 发布闸门的事实来源是"归档在不在" —— archive-present 清点 tar.gz 文件
+    # 本身(upload 步骤的 outcome 对 0 文件也是 success, 骗不得), 报告本体仍照常
+    # 生成、自检、上传 —— 产物是第一公民, 站点只是它的一个镜像。
+    summary = ci_workflow.job_block(workflow, "allure-summary")
+    summary_code = "\n".join(
+        line for line in summary.splitlines() if not line.strip().startswith("#")
+    )
+    assert "report_archived: ${{ steps.archive-present.outputs.present }}" in (
+        summary_code
+    ), "汇总作业要把“归档在不在”透传成 output, 发布作业才知道有没有能部署的报告"
+    assert (
+        'echo "present=$([ -f allure-report.tar.gz ] && echo true || echo false)"'
+        in (summary_code)
+    ), "archive-present 要清点归档文件本身, 而不是转述 upload 的结论"
 
     assert ci_workflow.needs_of(workflow, "allure-summary") == {
         "changes",
@@ -969,12 +1019,14 @@ def test_the_pages_deploy_is_gone_and_the_report_is_an_artifact() -> None:
         "汇总要等齐三批产物(报告还没传完就开始合并会静默少一部分), 也要等打包 —— "
         "构建后冒烟的结论产物由它上传, 不等就会拿到半份"
     )
-    assert "Generate final Allure report" in code, "汇总本身还在这里"
-    assert "name: allure-report-final" in code, "报告仍要作为产物上传"
-    assert "allure-report.tar.gz" in code, "上传的是自检通过后打好的那个归档"
-    assert "steps.verify-report.outcome == 'success'" in code, "没通过自检的报告不上传"
-    assert "contents: read" in header, "作业级权限是覆盖: 漏了它 checkout 会失败"
-    assert "actions: read" in header, "取本轮的产物要它"
+    assert "Generate final Allure report" in summary_code, "汇总本身还在这里"
+    assert "name: allure-report-final" in summary_code, "报告仍要作为产物上传"
+    assert "allure-report.tar.gz" in summary_code, "上传的是自检打过包的那个归档"
+    assert "Verify final Allure report" in summary_code, (
+        "自检还在原地: 打不打包由它判(“打得开”才打包), 退出码照旧管门禁"
+    )
+    assert "contents: read" in summary_code, "作业级权限是覆盖: 漏了它 checkout 会失败"
+    assert "actions: read" in summary_code, "取本轮的产物要它"
 
 
 def test_report_artifacts_do_not_duplicate_the_whole_result_set() -> None:

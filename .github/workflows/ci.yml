@@ -28,7 +28,7 @@ on:
 # 实例; 纯文档改动那一轮更少 —— 被跳过的作业不占 runner)。
 # 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。
 # 注意 `always()` 的语义是“即使被取消也返回 true”: 取消后就不该再启动的作业要用
-# `always() && !cancelled()` 表达(见 pytest-report / allure-summary 的作业条件),
+# `always() && !cancelled()` 表达(见 pytest-report / allure-summary / publish-report 的作业条件),
 # 否则被取代的那一轮照样会把报告合并、生成、上传跑一遍。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -1229,8 +1229,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Allure report
-        # 自检不通过时不上传报告: 宁可让作业红着, 也不要把"打不开详情"的报告发出去。
-        if: always() && steps.verify-report.outcome == 'success'
+        # 归档在就传: 自检脚本"打不开"(入口/详情缺失)时根本不打包, 这里自然跳过;
+        # 内容性失败(缺平台用例、清单对不上)照样传 —— 报告正是用来看"哪里缺了"的,
+        # 拦下来反而拿不到证据(2026-11-01 起与 Pages 发布同一口径)。
+        if: always() && !cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-${{ matrix.os }}
@@ -1345,14 +1347,20 @@ jobs:
           if-no-files-found: error
 
   allure-summary:
-    # 只生成一份汇总报告并作为 artifact 上传（2026-10-06 起不再发布到 GitHub Pages）:
-    # 站点发布用的 pages / id-token 权限、github-pages 环境与三个发布步骤一并删除,
-    # 报告的可达性交给 `allure-report-final` 产物。
+    # 汇总一份报告作为 `allure-report-final` 产物上传, 并把"报告归档在不在"透传出去 ——
+    # push 轮由末尾的 `publish-report` 作业把这份产物发布到 GitHub Pages(2026-11-01 恢复;
+    # 2026-10-06 曾整体移除站点发布, 恢复时没有塞回本作业: pages/id-token 权限只给那个
+    # 不 checkout、不跑仓库脚本的小作业, fork PR 也碰不到发布路径)。
     name: Allure 汇总报告
     needs: [changes, quality, pytest-report, security, package]
     # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
     if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    # `report_archived` 只回答"报告归档打出来没有"(自检脚本判"打得开"才会打包), 不回答
+    # "自检过没过": 内容性失败(缺平台用例、门禁判红)轮次的报告照样上传、照样发布 ——
+    # 失败轮的报告恰恰是最该能打开看的(2026-11-01 起发布闸门是"打得开"而非"全通过")。
+    outputs:
+      report_archived: ${{ steps.archive-present.outputs.present }}
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
     # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure
     # 结果的作业"一致(tests/unit/test_sharding.py 会核对)。
@@ -1692,16 +1700,26 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload final Allure report
-        # 报告不再发布到 GitHub Pages(2026-10-06): 想浏览时下载这份 `allure-report-final` 产物
-        # (单个 tar.gz, `archive: false` 不再多套一层 zip)。自检不通过时不上传: 宁可让作业红着,
-        # 也不给出"打不开详情"的报告。
-        if: always() && steps.verify-report.outcome == 'success'
+        # 报告作为 `allure-report-final` 产物上传(单个 tar.gz, `archive: false` 不再多套一层
+        # zip); push 轮的站点发布由 `publish-report` 作业下载这一份去部署。归档在就传:
+        # 自检脚本"打不开"时根本不打包(这里自然跳过), 内容性失败照样传 —— 失败轮的报告
+        # 恰恰是最该能打开看的(与 pytest-report 那份同一口径)。
+        if: always() && !cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-final
           path: allure-report.tar.gz
           archive: false # 不打包，直接上传原始文件
           if-no-files-found: ignore
+
+      - name: Record whether the report archive exists
+        # 发布闸门的事实来源: 归档文件在(= 自检判过"打得开"并打了包)才算有能发布的报告。
+        # 不用 upload 步骤的 outcome —— 归档不在时 upload-artifact 对 0 文件照样 success
+        # (if-no-files-found: ignore), 会把发布作业骗进一次注定红的下载。
+        id: archive-present
+        if: always() && !cancelled()
+        shell: bash
+        run: echo "present=$([ -f allure-report.tar.gz ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Collect failure diagnostics
         id: diagnostics
@@ -1743,3 +1761,60 @@ jobs:
         run: |
           echo "::error::质量门未通过 或 有平台没有合并进用例结果 —— 见上面的逐平台条数与报告首页「全局附件」的运行总账"
           exit 1
+
+  publish-report:
+    # 把这一轮的汇总报告发布到 GitHub Pages(2026-11-01 恢复; 2026-10-06 曾随"报告只作
+    # artifact"的整改一起移除)。独立成小作业而不是塞回 `allure-summary`, 三条理由:
+    # ① 权限最小化 —— pages / id-token 只给这个"不 checkout、不跑仓库脚本、只用官方
+    #    action"的作业, 汇总作业(装着 uv 与 npm 环境)保持只读;
+    # ② fork PR 拿不到 pages:write(PR 事件的 GITHUB_TOKEN 会被降级), 条件里排除掉
+    #    pull_request, 否则 fork 上的每轮 PR 会多一条恒红的检查;
+    # ③ 站点是全局独占资源 —— 顶层 concurrency 按 ref 分组拦不住 dev 与 main 同时部署,
+    #    作业级并发组把两路串起来并取消旧的, 站点永远停在"最新完成的那一轮"。
+    name: 发布报告到 Pages
+    needs: [allure-summary]
+    # 两个闸门: 只 push 轮发布; `report_archived` 为 true(自检判"打得开"并打了包)才部署。
+    # 除此之外不看任何结论 —— 门禁判红、缺平台用例这类"记录的内容"失败不拦发布:
+    # 那种轮次的报告才是最该能打开看的(2026-11-01 定的口径)。
+    if: always() && !cancelled() && github.event_name == 'push' && needs.allure-summary.outputs.report_archived == 'true'
+    runs-on: ubuntu-latest
+    # 作业级权限是覆盖语义: 这里不 checkout, 但下载本轮产物要 actions: read。
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download the final Allure report
+        # 汇总作业上传的那份单个 tar.gz(闸门在作业条件里: 归档不在整个作业都不会启动);
+        # 下不来就是上传侧出了问题 —— 响亮失败, 不部署半份或旧份。
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-report-final
+          path: report-archive
+          if-no-files-found: error
+
+      - name: Unpack the report for Pages
+        # tar 里就是整站: 解到干净的 site/ 作为站点根, 后面 upload-pages-artifact 上传的
+        # 就是这个目录。
+        shell: bash
+        run: |
+          mkdir -p site
+          tar -xzf report-archive/allure-report.tar.gz -C site
+
+      - name: Upload the report as a Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        # 前提(只能手动设置一次): 仓库 Settings → Pages 的 Source 选 "GitHub Actions"。
+        # deploy-pages 走 OIDC(id-token)换站点写权限 —— 上面权限里那一条的由来。
+        id: deployment
+        uses: actions/deploy-pages@v5
