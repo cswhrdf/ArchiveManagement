@@ -413,11 +413,11 @@ def test_run_ledger_has_every_section_and_flags_missing_artifacts(
         encoding="utf-8",
     )
     # 冒烟结论项(由打包作业里的 create_allure_smoke.py 写成): 两条判据, 一条红 ——
-    # 总账的"构建后冒烟"一节要按平台数得出来, 而不是装作通过。(onefile 已于 2026-10-28
-    # 停产, 结论项只来自 onedir 那组。)
+    # 总账的"构建后冒烟"一节要按平台数得出来, 而不是装作通过。(发布产物是一份单文件 exe,
+    # 结论项只来自 onefile 那组。)
     for slug, check, passed in (
-        ("smoke-onedir-version", "onedir.version", True),
-        ("smoke-onedir-doctor", "onedir.doctor", False),
+        ("smoke-onefile-version", "onefile.version", True),
+        ("smoke-onefile-doctor", "onefile.doctor", False),
     ):
         (results / f"{slug}-result.json").write_text(
             json.dumps(
@@ -1302,25 +1302,29 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     assert "不要手工编辑" in template
     assert "最终提交说明" in template
 
-    # 变更摘要那一块(2026-10-31 加): 改动文件只能从 API 拿(这个作业没有 checkout, 也不该 checkout
-    # PR 的代码)。两段自动区块必须**一次写完** —— 分两次 update 会互相覆盖(读写竞态), 而两边都
-    # 监听 synchronize/edited 时还会互相把对方叫起来。
-    assert "github.rest.pulls.listFiles" in workflow, (
-        "摘要要写到 PR 的改动文件, 只能用 API 取(作业里没有 checkout)"
+    # 「本次变更」自 2026-10-31 起**由发起者手写**, CI 不再汇总 —— 它要成为 GitHub Release 的说明,
+    # 而自动摘要只能说"改了几个文件"。所以这里做**反向**断言: 摘要那一段不许再回到工作流, 模板里
+    # 也不许再出现"自动生成"或那对 marker(否则 release_notes.py 会把 marker 一起写进发布页)。
+    hint = "变更摘要已改成手写(2026-10-31): 工作流不许再改写 PR 描述里的这一节"
+    assert "change-summary" not in workflow, hint
+    assert "github.rest.pulls.listFiles" not in workflow, hint
+    assert "## 本次变更" in template, "模板要留这一节, 发布页说明就是从这里取的"
+    assert "自动生成" not in template, hint
+
+    # 缺一格 marker **不判红**(2026-11-01 实测): 摘要那格从模板里删掉之后, 旧版工作流在 main 上
+    # 仍然要求它, 于是每个按新模板开的 PR 都被判"缺少 summary 区标记" —— 红的是检查本身。现在
+    # 缺了只记 notice 跳过; 真正该红的是"开始标记重复 / 结束标记在开始之前"(描述被写坏了)。
+    skip_hint = (
+        "缺 marker 只该跳过、不该判红: 这一节在模板里是可选的(摘要那格已删), "
+        "旧描述也可能只有一部分"
     )
-    assert "change-summary:start" in workflow
-    assert "change-summary:end" in workflow
-    # 全角括号正是被测模板里的写法(RUF001 对 .py 里的全角标点有意见)。
-    assert "## 本次变更（自动生成）" in template  # noqa: RUF001
-    assert "change-summary:start" in template
-    assert "change-summary:end" in template
+    assert "这一格跳过" in workflow, skip_hint
+    assert "格式不对" in workflow, "重复或顺序颠倒才是真坏了, 那种要判红"
+    assert "PR 描述缺少" not in workflow, "旧的'缺失即判红'文案不该回来"
+
     assert workflow.count("github.rest.pulls.update") == 1, (
-        "两段自动区块必须一次写完: 分两次 update 会互相覆盖"
+        "署名那一格必须一次写完: 分两次 update 会互相覆盖"
     )
-    assert "const MAX_COMMITS" in workflow, (
-        "摘要要封顶: dev 那条 PR 攒了几十个提交, 一股脑铺开会让 PR 描述长到没法读"
-    )
-    assert "const MAX_PATHS" in workflow, "每类路径同样要封顶(见上一条)"
 
 
 def test_the_dev_branch_is_recreated_without_touching_an_existing_one() -> None:
@@ -1410,7 +1414,7 @@ def test_the_release_workflow_only_publishes_from_main() -> None:
     assert re.search(
         r"^    permissions:\n      contents: write$", publish, re.MULTILINE
     ), "写权限只给发布链的作业(这里), 不许外溢"
-    # "这个版本已经发过"是**正常出口**(自动定版之后只剩手动改版撞车/补跑同一提交两种来路),
+    # "这个版本已经发过"是**正常出口**(定版前移到 PR 之后只剩"忘了改版本号"/补跑同一提交两种来路),
     # 判据是那个 tag 已经存在。
     assert "gh release view" in publish
     assert 'echo "publish=false" >> "$GITHUB_OUTPUT"' in publish
@@ -1516,76 +1520,171 @@ def test_the_dev_snapshot_workflow_requires_ci_and_publishes_a_pre_release() -> 
     ), "顺序反了等于删不掉刚发的那个"
 
 
-def test_the_release_workflow_bumps_the_patch_version_by_default() -> None:
-    """合入 main 之后自动定版: 默认第 3 位加 1, 大版本靠 PR 里手改 packaging.py 声明.
+def test_the_release_workflow_never_pushes_to_main() -> None:
+    """定版前移到 PR(2026-11-01): 合入 main 之后**不许**再往 main 推任何东西.
 
-    为什么不让脚本从改动量里猜前两位: semver 段位是对用户的沟通契约(5 行可以是破坏性的
-    schema 变更, 5000 行重构可以用户无感), 任何按行数/文件数的启发式都会两头误判 —— 所以
-    "人声明 + 脚本兜底", 判定逻辑收在 scripts/release_bump.py(另有它自己的守卫), 这里钉住
-    工作流一侧的接线:
+    分支保护禁止一切直接推送(包括 `github-actions[bot]`), 所以"合入之后自动加一位"必然
+    以 `protected branch` 收场。改法是把定版前移到 PR 阶段(人在 PR 里改 `packaging.py`,
+    `ci.yml` 的 `release-hint` 作业负责提醒), `release.yml` 的 `classify` 只读地复查。
 
-    ① 定版作业先跑, 构建拿它传出的提交(patch 递增发生在它里面), tag 也指它 —— 否则
-       "构建的还是旧版本号";
-    ② bump 提交用 GITHUB_TOKEN 推回 main(那次 push 不会再触发任何工作流, 天然无循环),
-       推之前要 rebase 到最新 main: 定版窗口里可能有别的合入先落地, 不 rebase 就是
-       non-fast-forward 被拒;
-    ③ 手动档(workflow_dispatch)绝不改版本号: 它编的是任意 ref;
-    ④ 两轮紧挨着必须串行(concurrency): 否则第二次定版读到旧 tag, 算出同一个新版本号。
+    这条守卫钉住五件事:
+    ① classify 没有写权限; ② 整份工作流里没有 `HEAD:main` / dev 的推送(含"把 dev 快进到
+       bump 提交"那句 —— 没有 bump 提交了); ③ 判定步不许带 `--apply`(脚本不写文件);
+    ④ 手动档仍不判版本号; ⑤ 版本号没动时发布作业要**出声**, 不能安静地什么都不发。
     """
     text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
     head = text.split("\njobs:", 1)[0]
 
-    assert "concurrency:" in head, "定版要串行: 后一轮必须等前一轮把新 tag 写完"
+    assert "concurrency:" in head, "两轮紧挨着必须串行: 否则会读到旧 tag"
     assert "cancel-in-progress: false" in head, (
         "排队的那轮也要发它自己的版本, 不能被取消"
     )
 
-    classify = ci_workflow.job_block(text, "classify")
-    assert re.search(
-        r"^    permissions:\n      contents: write$", classify, re.MULTILINE
-    ), "bump 提交要推回 main, 写权限按作业给(顶层保持只读)"
-    assert "fetch-depth: 0" in classify, "要全部 tag 才找得到'最近发过的版本'"
-
-    bump_step = classify.split("- name: Decide whether to bump the patch version", 1)[
-        1
-    ].split("- name:", 1)[0]
-    assert "python3 scripts/release_bump.py" in bump_step, (
-        "定版脚本只用标准库, runner 自带的 python3 就够(换成 uv 就得装环境, 别改)"
+    classify_code = _without_comments(ci_workflow.job_block(text, "classify"))
+    assert "contents: write" not in classify_code, (
+        "classify 只读: 它不能再往 main 推东西(分支保护会拒, 整条发布链就红在这里)"
     )
-    assert "--apply" in bump_step, "定版步要在判定为 patch 时把递增写回文件"
-    gated = re.search(r"^        if: (.+)$", bump_step, re.MULTILINE)
-    assert gated is not None, "定版步要有自己的条件(只有 push 档定版)"
+    assert "git push" not in classify_code, "不许推 main, 也不许顺手推 dev"
+    assert "HEAD:main" not in classify_code
+    assert "HEAD:refs/heads/dev" not in classify_code, (
+        "没有 bump 提交要同步, dev 的快进没有意义"
+    )
+
+    text_all = _without_comments(text)
+    assert "HEAD:main" not in text_all, "整份工作流都不许往 main 推"
+    assert "HEAD:refs/heads/dev" not in text_all
+
+    check_step = text.split(
+        "- name: Decide which version this commit would release", 1
+    )[1].split("- name:", 1)[0]
+    assert "python3 scripts/release_bump.py" in check_step, (
+        "判定脚本只用标准库, runner 自带的 python3 就够(换成 uv 就得装环境, 别改)"
+    )
+    assert "--apply" not in check_step, (
+        "脚本不再写文件: --apply 会把 checkout 出来的源码改掉, 而合入之后没人能提交它"
+    )
+    gated = re.search(r"^        if: (.+)$", check_step, re.MULTILINE)
+    assert gated is not None, "判定步要有自己的条件(只有 push 档判)"
     assert "github.event_name == 'push'" in gated.group(1), (
-        "手动档编的是任意 ref, 不许顺手动 main 的版本号"
+        "手动档编的是任意 ref, 版本号与它无关"
     )
 
-    push_step = classify.split("- name: Commit and push the bump", 1)[1].split(
-        "- name:", 1
-    )[0]
-    assert "steps.bump.outputs.bump == 'patch'" in push_step, (
-        "只有判定为 patch 才提交: 首版直发与手动定档都不该产生 bump 提交"
+    publish_code = _without_comments(ci_workflow.job_block(text, "publish"))
+    assert "needs.classify.outputs.reason == 'needs-bump'" in publish_code, (
+        "版本号没动时要出声: 发布页安静地不动, 没人知道为什么"
     )
-    assert "github.event_name == 'push'" in push_step
-    assert "github-actions[bot]" in push_step, "bump 提交是 bot 的, 别用人的身份"
-    assert "git rebase origin/main" in push_step, (
-        "定版窗口里有新合入时, bump 提交要先 rebase 到最新 main 再推(否则 non-FF 被拒)"
-    )
-    assert "git push origin HEAD:main" in push_step
-
-    # dev 在合并那一刻被自动删掉了, ensure-dev 重建出来的那份指向**合并提交**(它跑在 bump
-    # 之前)。不同步的话 dev 永远比 main 少这一行版本号, 下一次 `dev -> main` 的 PR 会把它
-    # "改回去" —— 版本号倒退, 下一次定版就会撞上已存在的 tag。
-    assert "HEAD:refs/heads/dev" in push_step, (
-        "bump 之后要把 dev 快进到同一个提交(非 FF 时只记 notice, 不覆盖别人的工作)"
+    assert "::warning::" in publish_code, (
+        "这是一条 warning 而不是失败(不发版是正常出口)"
     )
 
     build = ci_workflow.job_block(text, "build")
     assert ci_workflow.needs_of(text, "build") == {"classify"}, (
-        "构建必须等定版完成: 它拿的 ref 是定版传出的"
+        "构建仍要等 classify 复查完"
     )
     assert "ref: ${{ needs.classify.outputs.ref }}" in build, (
-        "构建与 tag 都要指递增之后的那个提交"
+        "构建与 tag 共用同一个提交出口"
     )
+
+
+def test_manual_republish_refuses_a_version_that_is_already_released() -> None:
+    """手动重发这一档要先确认"这个版本没在 Releases 里" —— 它的用途就是补一次发坏的包.
+
+    手动档(`workflow_dispatch` + `publish`)存在的理由很具体: 某次发包出了问题, 人手动把那个
+    Release 删掉之后, 走 push 那条路发不出同一个版本。所以它必须:
+
+    ① **先检查再编译** —— 检查写在 `classify`(build 依赖它)里, 不是写在 `publish` 里, 否则先白编
+       一轮才告诉你"这个版本已经发过";
+    ② 判据是 **`gh release view`**(用户删的就是 Release), 存在就 `exit 1` 并给出"怎么删"的命令;
+    ③ 版本号取 `packaging.py` 的**当前值**(`release_bump.py` 输出里的 `previous`), 不是它给的
+       "建议下一版号" —— 重发的是仓库里现在写的这个版本;
+    ④ 只在手动档且勾了 `publish` 时检查(纯构建不该被"已发过"拦住); **tag 存在也要拦** ——
+       发布过的 Release 会把 tag 锁成不可变, 重建同版本会 422(2026-11-01 实测), 那种情况只能
+       换版本号。
+    """
+    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    classify = _without_comments(ci_workflow.job_block(text, "classify"))
+
+    name = "- name: Refuse to republish a version that is already released"
+    assert name in classify, "手动重发缺前置检查: 会把已经发过的版本再发一遍"
+    step = classify.split(name, 1)[1].split("- name:", 1)[0]
+
+    assert "gh release view" in step, "判据是 Release 是否存在(用户删的就是它)"
+    assert "exit 1" in step, "已经发过就要当场拦住 —— 编译都不用开始"
+    assert "--cleanup-tag" in step, "失败信息要给出'怎么删', 否则人还得去查文档"
+
+    assert "workflow_dispatch" in step, "只在手动档检查"
+    assert "inputs.publish" in step, "只构建不发版时不该被'已发过'拦住"
+
+    assert "previous" in step, "版本号取 packaging.py 的当前值, 不是建议的下一版号"
+    assert "release_bump.py" in step, "版本号仍从那一行读(与构建期同一份抽取)"
+
+    assert step.count("exit 1") >= 2, "Release 存在与 tag 存在都要当场拦住"
+    assert "v$version^{commit}" in step, (
+        "还要查 tag: 发布过的 Release 会把 tag 锁成不可变, 重建同版本会 422(2026-11-01 实测)"
+    )
+    assert "不可变" in step, "失败信息要说清'为什么这个版本号不能再用了'"
+
+    assert ci_workflow.needs_of(text, "build") == {"classify"}, (
+        "检查在 classify 里, 才轮得到'先检查再编译'"
+    )
+
+
+def test_the_publish_gate_skips_a_version_whose_tag_is_already_taken() -> None:
+    """tag 在、Release 不在 = 这个版本号已作废: 不要再往 create 走(必然 422).
+
+    2026-11-01 实测: 删掉旧的 `v0.0.1` Release 之后, `gh release create v0.0.1` 报
+    `422 pre_receive: tag_name was used by an immutable release` +
+    `Cannot create ref due to creations being restricted` —— 发布过的 Release 会把它的 tag
+    锁成不可变。push 档撞上这种情况不该红整轮(那只是"这个版本号作废"), 而是跳过发布并说清
+    该做什么; 真正该红的是"人明确要求发这个版本"的手动档(classify 里那条)。
+    """
+    text = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    publish = _without_comments(ci_workflow.job_block(text, "publish"))
+    decision = publish.split(
+        "- name: Decide whether this version still needs a release", 1
+    )[1].split("- name:", 1)[0]
+
+    assert "gh release view" in decision, "Release 已存在 → 不发(这条一直在)"
+    assert "git/ref/tags/v$VERSION" in decision, (
+        "tag 已存在也要拦: 重建同版本必然 422(不可变 Release 锁住了 tag 名)"
+    )
+    assert decision.count("publish=false") >= 2, "两种情况都要关掉发布"
+    assert "::warning::" in decision, "跳过要说清原因与下一步(把版本号往上加一位)"
+    assert "exit 1" not in decision, "这是正常出口, 不该把整轮弄红"
+
+
+def test_pull_requests_into_main_get_a_version_bump_hint() -> None:
+    """合入 main 的 PR 会被提醒"该定版本号了" —— 且这条提示不是门禁.
+
+    定版前移到 PR 之后, "忘了改版本号"的表现是**安静地不发新版**。所以 `ci.yml` 里有一个
+    轻量作业在 PR 上留一句(当前号 / 建议号 / 不改会怎样), 并按 marker 原地更新 —— 否则每次
+    push 都会新加一条, 一个 PR 攒出七八条。
+    """
+    block = _without_comments(
+        ci_workflow.job_block(ci_workflow.workflow_text(), "release-hint")
+    )
+
+    hint = "这个作业要读 tag 且能写 PR 评论"
+    assert "contents: read" in block, hint
+    assert "pull-requests: write" in block, "留评论需要写权限"
+
+    assert "needs.changes.outputs.should_run == 'true'" in block, (
+        "纯文档改动不跑 CI, 也不会触发发布: 不需要提示"
+    )
+    assert "github.event_name == 'pull_request'" in block
+    assert "github.base_ref == 'main'" in block, "只对合入 main 的 PR 提示"
+    assert "head.repo.full_name == github.repository" in block, (
+        "fork 的 PR 拿不到写权限: 直接跳过, 别让它因 403 变红"
+    )
+
+    assert "scripts/release_bump.py" in block, "用同一份判定脚本算出建议号"
+    assert "scripts/release_hint.py" in block, "正文由脚本生成(可单测)"
+    assert "needs-bump" in block, "只在版本号还没动时留"
+    assert "PATCH" in block, "已有评论要原地更新, 不能每次 push 新加一条"
+
+    forbid = "提示不是门禁: 版本号没动是'这次不发版', 不该让 PR 变红"
+    assert "exit 1" not in block, forbid
+    assert "::error::" not in block, forbid
 
 
 def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
@@ -1702,6 +1801,45 @@ def test_workflows_that_run_pytest_on_windows_force_utf8_stdio() -> None:
     )
 
 
+def test_the_release_build_judges_coverage_under_this_platform_config() -> None:
+    """发布档的覆盖率门禁必须按平台口径判 —— 不许裸跑 `pytest --cov`.
+
+    2026-10-31 实测(`release.yml` 首次跑 full 档那一轮): 2998 条用例全绿, 覆盖率却报
+    **99.94% < fail_under=100**, 缺的是 `platform_scan.py:162-163`(winreg)、
+    `single_instance.py:164/296-297/310-311`(msvcrt/fcntl)与 `topmost.py:41-42`(Tk 读回)——
+    全部打着 `# platform: linux macos`, 在 Windows 上本来就不该计入。pyproject 的
+    `[tool.coverage.report]` 是**三平台并集**的基线(合并口径就是它的含义), 拿它直接判单平台
+    的覆盖率, 那些行永远是缺口。
+
+    `ci.yml` 的覆盖率作业与本地 `scripts/run_tests_local.py --coverage` 都先让
+    `scripts/coverage_platform.py` 按平台写一份配置再判门槛, 只有发布档漏了。这条钉住它,
+    连同"每一步的退出码都要自己拦"一起 —— pwsh 只认最后一条命令的退出码, 用例红了会被后面
+    的 report 盖成假绿。
+    """
+    workflow = _REPO_ROOT / ".github" / "workflows" / "release-build.yml"
+    body = _without_comments(workflow.read_text(encoding="utf-8"))
+
+    hint = (
+        "release-build.yml 不许裸跑 `pytest --cov`: pyproject 的覆盖率配置是三平台并集的"
+        " 基线, 拿它判单平台会把别平台的专属行记成缺口(2026-10-31 实测 99.94%)"
+    )
+    assert re.search(r"\bpytest\b[^\n]*--cov", body) is None, hint
+
+    hint = "发布档要先按平台写覆盖率配置(coverage_platform.py write)"
+    assert "scripts/coverage_platform.py write .coverage-platform.rc" in body, hint
+
+    hint = (
+        "用例要在平台配置下采数 —— conftest 里设的 COVERAGE_RCFILE 对 pytest-cov 不生效"
+    )
+    assert "coverage run --rcfile=.coverage-platform.rc -m pytest" in body, hint
+
+    hint = "门槛判定也要用同一份平台配置(它从 pyproject 派生 fail_under)"
+    assert "coverage report -m --rcfile=.coverage-platform.rc" in body, hint
+
+    hint = "pwsh 只认最后一条命令的退出码: 用例红了会被后面的 report 盖成假绿"
+    assert body.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") >= 2, hint
+
+
 def test_the_packaging_gate_always_reports_a_conclusion() -> None:
     """必需检查必须是"总会报结论"的作业 —— 被跳过的必需检查会永久停在 pending.
 
@@ -1727,8 +1865,8 @@ def test_the_packaging_gate_always_reports_a_conclusion() -> None:
 def test_the_build_smokes_the_packages_it_produced() -> None:
     """构建之后必须先冒烟再上传: 「能编」与「产物能起」是两件事.
 
-    顺序本身就是不变式: 冒烟必须在 ``Build the onedir package`` 之后(那时才有
-    产物可冒)、在 ``Prepare build files`` 之前(跑不起来的包不该被打包上传成"看起来能发"
+    顺序本身就是不变式: 冒烟必须在 ``Build the onefile package`` 之后(那时才有
+    产物可冒)、在 ``Prepare the release file`` 之前(跑不起来的包不该被打包上传成"看起来能发"
     的样子)。判据是退出码 + 侧效应, 全在 ``scripts/smoke_packaged.py`` 里(工作流只负责
     调用); 门禁档(ci.yml 的 windows-package)与发布档(release.yml)共用这一步, 两个入口
     同时被它覆盖。
@@ -1737,11 +1875,11 @@ def test_the_build_smokes_the_packages_it_produced() -> None:
     smoke = "- name: Smoke test the built packages"
     assert smoke in build, "构建作业里必须有产物冒烟这一步"
     smoke_at = build.index(smoke)
-    assert smoke_at > build.index("Build the onedir package"), (
+    assert smoke_at > build.index("Build the onefile package"), (
         "冒烟必须在构建之后(不然没有产物可冒)"
     )
-    assert smoke_at < build.index("Prepare build files"), (
-        "冒烟必须在打 release/ 之前(跑不起来的包不上传)"
+    assert smoke_at < build.index("Prepare the release file"), (
+        "冒烟必须在拷 release/ 之前(跑不起来的包不上传)"
     )
     step = build.split(smoke, 1)[1].split("- name:", 1)[0]
     assert "scripts/smoke_packaged.py" in step, "判据只在脚本里一处定义, 工作流只调用"
@@ -1771,7 +1909,7 @@ def test_the_packaging_smoke_results_reach_the_final_report() -> None:
     assert smoke_at < writer_at < upload_at, (
         "转结论与上传必须紧跟冒烟步(先有 JSON 才能转, 转完才有东西可传)"
     )
-    assert upload_at < build.index("- name: Prepare build files"), (
+    assert upload_at < build.index("- name: Prepare the release file"), (
         "冒烟结论的上传排在打 release/ 之前 —— 与冒烟本身同一个理由, 跑不起来的包不该"
         '被上传成"看起来能发"的样子'
     )

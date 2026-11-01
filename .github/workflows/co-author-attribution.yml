@@ -19,20 +19,16 @@ jobs:
           script: |
             const pullRequest = context.payload.pull_request;
             if (pullRequest.draft) {
-              core.notice("Draft PR: 变更摘要与署名会在标记为可评审后同步。");
+              core.notice("Draft PR: 署名会在标记为可评审后同步。");
               return;
             }
 
-            // 两段自动区块。它们必须待在**同一段脚本**里、共用一次读改写: 两个作业各写一遍 PR 描述
-            // 会互相覆盖(读改写竞态), 而两边都监听 synchronize/edited 时还会互相把对方叫起来。
+            // **只有一格**: 「本次变更」那一节自 2026-10-31 起由**发起者手写**(模板里有引导
+            // 注释), CI 不再自动汇总 —— 发布页要说明的是“用户这一版会看到什么”, 而自动摘要只能
+            // 数出改了儿个文件。这里只维护 Squash 合并署名。
             const MARKERS = {
-              summary: ["<!-- change-summary:start -->", "<!-- change-summary:end -->"],
               authors: ["<!-- co-author-trailers:start -->", "<!-- co-author-trailers:end -->"],
             };
-            // 摘要只给"够用就好"的粒度: 超出就先截断再折成计数, 指向 Commits / Files changed 标签页。
-            const MAX_COMMITS = 5;
-            const MAX_PATHS = 4;
-            const DOC_ROOTS = ["docs/", "wiki/"];
 
             const current = await github.rest.pulls.get({
               owner: context.repo.owner,
@@ -41,7 +37,7 @@ jobs:
             });
             const body = current.data.body || "";
 
-            // 定位一段自动区块; 标记缺失、重复或顺序颠倒时返回 null(交给下面统一判红)。
+            // 定位一段自动区块; 标记缺失、重复或顺序颠倒时返回 null(由调用方区分是哪一种)。
             const locate = (text, [startMarker, endMarker]) => {
               const start = text.indexOf(startMarker);
               const end = text.indexOf(endMarker);
@@ -57,10 +53,25 @@ jobs:
             for (const [name, markers] of Object.entries(MARKERS)) {
               const slot = locate(body, markers);
               if (slot === null) {
-                core.setFailed(`PR 描述缺少 ${name} 区标记，请重新应用仓库 PR 模板。`);
+                // **缺一格不判红**(2026-11-01 实测): 这一节在模板里是可选的 —— 摘要那格已经删了,
+                // 而旧描述、手工重写的描述都可能只有一部分。缺了就是"没什么要同步", 记一条
+                // notice 跳过; 真正坏了的是"开始标记出现多次 / 结束标记在开始之前", 那种才判红。
+                const occurrences = body.split(markers[0]).length - 1;
+                if (occurrences === 0) {
+                  core.notice(`PR 描述里没有 ${name} 区标记, 这一格跳过。`);
+                  continue;
+                }
+                core.setFailed(
+                  `PR 描述里的 ${name} 区标记格式不对(重复或顺序颠倒), 请重新应用仓库 PR 模板。`,
+                );
                 return;
               }
               slots[name] = slot;
+            }
+
+            if (Object.keys(slots).length === 0) {
+              core.info("PR 描述里没有需要同步的自动区块, 跳过。");
+              return;
             }
 
             const selected = {
@@ -69,11 +80,6 @@ jobs:
               pull_number: pullRequest.number,
             };
             const commits = await github.paginate(github.rest.pulls.listCommits, {
-              ...selected,
-              per_page: 100,
-            });
-            // 改动文件取自 API 而不是本地 diff: 这个作业没有 checkout(也不该 checkout PR 的代码)。
-            const files = await github.paginate(github.rest.pulls.listFiles, {
               ...selected,
               per_page: 100,
             });
@@ -106,44 +112,9 @@ jobs:
               .map((author) => `Co-authored-by: ${author.name} <${author.email}>`)
               .join("\n");
 
-            // 摘要的顺序与内容全部取自 API 的稳定顺序, **不写时间戳** —— 否则每次重写都算出不同的
-            // 正文, 于是触发 edited、再跑一轮、再重写, 自激不停。
-            const oneLine = (text) => text.replace(/\s+/g, " ").replace(/`/g, "'").trim();
-            const isDoc = (path) =>
-              DOC_ROOTS.some((root) => path.startsWith(root)) ||
-              (!path.includes("/") && path.endsWith(".md"));
-            const titles = commits.map(
-              (commit) => `「${oneLine(commit.commit.message.split("\n")[0])}」`,
-            );
-            const titleLine =
-              titles.length > MAX_COMMITS
-                ? `${titles.slice(0, MAX_COMMITS).join("、")} 等 ${titles.length} 条(详见 Commits 标签页)`
-                : titles.join("、");
-            const listPaths = (paths) => {
-              const shown = paths.slice(0, MAX_PATHS).map((path) => `\`${path}\``).join("、");
-              return paths.length > MAX_PATHS ? `${shown} 等 ${paths.length} 个` : shown;
-            };
-            const changedPaths = files.map((file) => file.filename);
-            const docPaths = changedPaths.filter(isDoc);
-            const otherPaths = changedPaths.filter((path) => !isDoc(path));
-            // 一条提交都没有时 titles 为空: 直接拼会留一个空行, 这里给出明确占位。
-            const summary = [
-              `**变更摘要**：${commits.length} 个提交 · ${files.length} 个文件`,
-              "",
-              `- 提交：${titleLine || "(空)"}`,
-            ];
-            if (otherPaths.length) {
-              summary.push(`- 代码与配置：${listPaths(otherPaths)}`);
-            }
-            if (docPaths.length) {
-              const wiki = docPaths.some((path) => path.startsWith("wiki/"))
-                ? "，含用户手册(发版后同步到 Wiki)"
-                : "";
-              summary.push(`- 文档：${listPaths(docPaths)}${wiki}`);
-            }
-
+            // 替换结果全部取自 API 的稳定顺序, **不写时间戳** —— 否则每次重写都算出不同的正文,
+            // 于是触发 edited、再跑一轮、再重写, 自激不停。
             const payloads = {
-              summary: `\n\n${summary.join("\n")}\n`,
               authors: trailers
                 ? `\n\n\`\`\`text\n${trailers}\n\`\`\``
                 : "\n\n（无共同作者需要署名）",
@@ -166,9 +137,7 @@ jobs:
                 pull_number: pullRequest.number,
                 body: updatedBody,
               });
-              core.info(
-                `已同步 PR 描述: ${authors.size} 位共同作者, ${commits.length} 个提交 / ${files.length} 个文件。`,
-              );
+              core.info(`已同步 PR 描述: ${authors.size} 位共同作者。`);
             } else {
               core.info("PR 描述里的自动区块已是最新状态。");
             }

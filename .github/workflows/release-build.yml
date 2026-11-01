@@ -19,7 +19,7 @@ on:
         default: ""
         type: string
       checks:
-        description: "构建前的检查档位: full(ruff/格式/mypy/pytest --cov) | build-only(只构建, 给 CI 已经跑过全量的门禁档用)"
+        description: "构建前的检查档位: full(ruff/格式/mypy/全量用例 + 平台口径的覆盖率门禁) | build-only(只构建, 给 CI 已经跑过全量的门禁档用)"
         required: false
         default: full
         type: string
@@ -72,8 +72,8 @@ jobs:
       - name: Stamp the snapshot version into the source
         # 预发布的第 4 位是**派生**量(scripts/dev_snapshot_version.py 按 git 历史算), 它不进 git ——
         # dev 上的 packaging.py 必须保持三段, 那是正式版本的单一真相(release_bump.py 按三段判档)。
-        # 所以只在这次构建的工作区里就地改这一行: 于是产物的 `--version`、`doctor` 与
-        # build-metadata.json 报的是同一个快照号, 而不是一个连预发布都看不出来的基础版本。
+        # 所以只在这次构建的工作区里就地改这一行: 于是产物的 `--version` 与 `doctor` 报的是
+        # 同一个快照号, 而不是一个连预发布都看不出来的基础版本。
         # **只配 build-only**: full 档会跑用例, 而用例里有一批"packaging.py 是三段"的断言 ——
         # 那个红是故意的, 这里提前一步说清楚。
         if: ${{ inputs.version_override != '' }}
@@ -133,12 +133,14 @@ jobs:
 
       - name: Install dependencies
         # 只装这个作业要用的组(见 pyproject 的 [dependency-groups]): 构建前的门禁要
-        # 质量组(ruff/mypy)与测试组(pytest --cov), 打包要 package 组(pyinstaller)。
+        # 质量组(ruff/mypy)、测试组(pytest)**与覆盖率组(coverage CLI)** —— 后两组分开列是
+        # 必需的: 覆盖率判定走 `coverage run/report` 而不是 `pytest --cov`(见下一步的说明),
+        # 而 tests/unit/test_test_config.py 那两条守卫是按命令推组的。打包要 package 组。
         # `--no-install-project`: 打包靠 spec 里的 pathex 指向 src, 不需要把项目装进 .venv
         # (见 pyproject 的 [tool.uv]; 与 ci.yml 的其它作业一致)。
         # 门禁档(`checks: build-only`)跑的是同一套组 —— 为了省一次 sync 而拆两套环境不划算, 而
         # 且下面那批守卫是**按命令**算该装哪几组的。
-        run: uv sync --locked --no-default-groups --group test --group quality --group package --no-install-project
+        run: uv sync --locked --no-default-groups --group test --group quality --group coverage --group package --no-install-project
 
       - name: Run build checks
         # 门禁档传 `checks: build-only`: 同一轮 CI 已经跑过三平台的用例与静态检查, 再在 Windows
@@ -149,7 +151,28 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
           uv run mypy src
-          uv run pytest --cov
+
+      - name: Run the test suite under this platform's coverage config
+        # **不能裸跑 `pytest --cov`**: pyproject 的 [tool.coverage.report] 是**三平台并集**的
+        # 基线(故意不带平台排除 —— 合并口径就是它的含义), 而有一小撮代码只可能跑在自己的
+        # 平台上(winreg / msvcrt / fcntl / Win32 置顶查询)。
+        # 2026-10-31 实测(release.yml 首次跑 full 档): 2998 条用例全绿, 覆盖率却报
+        # **99.94% < fail_under=100**, 缺的正是 platform_scan.py:162-163、
+        # single_instance.py:164/296-297/310-311、topmost.py:41-42 这些打着
+        # `# platform: linux macos` 的行 —— 在 Windows 上它们本来就不该计入。
+        # CI 的覆盖率作业(combine 之后 `coverage_platform.py write` + `coverage report`)与本地
+        # `scripts/run_tests_local.py --coverage` 都是先写平台配置再判门槛, 三处口径必须一致;
+        # 这里也顺便把采数放到同一份配置下(conftest 里设的 COVERAGE_RCFILE 对 pytest-cov
+        # 不生效: 它在导入根 conftest 之前就把 Coverage 建好了)。
+        if: ${{ inputs.checks != 'build-only' }}
+        run: |
+          uv run python scripts/coverage_platform.py write .coverage-platform.rc
+          # pwsh 只认**最后一条**命令的退出码: 中间不拦的话, 用例红了会被后面的 report 收场,
+          # 而"数据不全的 report"照样可能过门槛(假绿)。每步都自己判一次。
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run coverage run --rcfile=.coverage-platform.rc -m pytest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run coverage report -m --rcfile=.coverage-platform.rc
 
       - name: Check the application icon is up to date
         # 硬门禁: 入库的位图必须出自当前这份 resources/app.svg("改了 SVG 忘了重画"就在这里判红)。
@@ -158,13 +181,14 @@ jobs:
         # 见 docs/development.md)。
         run: uv run python scripts/build_icon.py --check
 
-      - name: Build the onedir package
-        # 2026-10-28 起 onefile 停产(发布决定), 只构建 onedir —— 见 spec 末尾的说明。
+      - name: Build the onefile package
+        # 产物是单个 `dist/ArchiveManagement.exe`(2026-10-31 起回到 onefile, 见 spec 末尾的
+        # 说明): 发布页只挂这一个文件, 用户下载双击就能用。
         run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
       # 产物冒烟: 「能编」与「产物能起」是两件事 —— 跑不起来的包不该被上传成"看起来能发"的样子。
       # 判据 = 退出码 + 侧效应(临时 root 下真的出现 config/data/logs、日志里出现"界面启动"),
-      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × onedir(无参数
+      # 不读 stdout —— 窗口化产物(console=False)没有控制台。五条判据 × 那一份单文件产物(无参数
       # 启动 / --version / doctor / gui --smoke / 单实例闸门), 全部限时, 超时在脚本里按
       # CI runner 的最坏情况给足。门禁档与发布档共用这一步; 位置由守卫
       # test_the_build_smokes_the_packages_it_produced 钉住(构建之后、打 release/ 之前)。
@@ -194,29 +218,14 @@ jobs:
           path: allure-results-smoke-windows/
           if-no-files-found: ignore
 
-      - name: Prepare build files
+      - name: Prepare the release file
+        # 发布页只挂**一个文件**, 名字就是产物名(2026-10-31 定): 早先这里是 zip + SHA256SUMS.txt
+        # + build-metadata.json, 它们服务的是“要校验和、要构建元数据”的人 —— 而在下载页上只是
+        # 让用户多点两下、还得先解压一次才能用。单文件 exe 直接拷过去即可。
         shell: pwsh
-        env:
-          BUILD_LABEL: ${{ steps.build.outputs.label }}
-          BUILD_VERSION: ${{ steps.build.outputs.version }}
-          BUILD_REF: ${{ steps.build.outputs.ref }}
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path dist/ArchiveManagement/* -DestinationPath "release/ArchiveManagement-$env:BUILD_LABEL-windows-x64.zip"
-          $files = Get-ChildItem release -File
-          $hashes = foreach ($file in $files) {
-            $hash = Get-FileHash $file.FullName -Algorithm SHA256
-            "$($hash.Hash.ToLowerInvariant())  $($file.Name)"
-          }
-          $hashes | Set-Content release/SHA256SUMS.txt -Encoding ascii
-          @{
-            application = "ArchiveManagement"
-            version = $env:BUILD_VERSION
-            ref = $env:BUILD_REF
-            platform = "windows-x64"
-            commit = "${{ github.sha }}"
-            built_at = (Get-Date).ToUniversalTime().ToString("o")
-          } | ConvertTo-Json | Set-Content release/build-metadata.json -Encoding utf8
+          Copy-Item dist/ArchiveManagement.exe release/ArchiveManagement.exe
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
