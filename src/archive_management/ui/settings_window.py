@@ -9,7 +9,8 @@
 - **游戏启停**: “按进程自动启停”开关(默认关闭)。开启后低频探测当前启用的那一款
   游戏, 观察到它运行就保持启用、观察到它退出就停用; 手动调整始终优先;
 - **快捷键**: 全局保存与创建分支的组合键, 点击按键区域即可现场录制新组合;
-- 后续计划中的设置项说明。
+- 后续计划中的设置项说明;
+- 页头右上角: 当前版本号(来自 ``packaging.package_version``, 与 ``--version`` 同一来源)。
 
 录制流程: 点击某个快捷键按钮后进入"监听输入"状态(同时通知主窗口暂停全局
 快捷键, 否则按下的组合会真的触发动作), 用户按下组合键并松开后收敛成组合键
@@ -30,6 +31,7 @@ import customtkinter as ctk
 
 from archive_management.domain import VERIFICATION_MODES, normalize_verification_mode
 from archive_management.i18n import available_locales, tr
+from archive_management.packaging import package_version
 from archive_management.services.hotkeys import (
     ACTION_CREATE_BRANCH,
     ACTION_SAVE_NOW,
@@ -39,7 +41,7 @@ from archive_management.services.hotkeys import (
 )
 from archive_management.ui.dialogs import _present
 from archive_management.ui.palette import Palette
-from archive_management.ui.typography import FONT_CHOICES
+from archive_management.ui.typography import FONT_CHOICES, FONT_HINT
 from archive_management.ui.widgets import (
     auto_scrollbar,
     track_wraplength,
@@ -226,6 +228,24 @@ class SettingsWindow:
             text_color=palette.text_primary,
         )
         self._title_label.grid(row=0, column=0, sticky="w", pady=(0, 12))
+
+        # 版本号与标题同一行、贴右列(column 1 无 weight, 标题列占满剩余宽度):
+        # 来源是 packaging 的单一版本常量, 命令行 --version 与这里永远一致。
+        # 字号取提示档、颜色取 text_hint —— 它是元信息, 不该和标题抢视觉。
+        self._version_label = ctk.CTkLabel(
+            self._body,
+            text=tr("settings.version", version=package_version()),
+            anchor="e",
+            font=ctk.CTkFont(size=FONT_HINT),
+            text_color=palette.text_hint,
+        )
+        # 版本号与标题同一行、贴右上角。用 place 叠加而不是再开一列: 窗口宽度是
+        # 固定的 _WINDOW_WIDTH, 但滚动区内容按 grid 协商请求宽度 —— 第二列会把
+        # "标题行"的请求宽度顶宽, 整个设置窗口跟着被撑开(2026-11-01 实测)。
+        # place 不参与宽度协商, 贴的是滚动内容区的右缘, 不贡献任何宽度。
+        # y=3 是手调的基线偏移: 标题 16px 加粗、版本 11px, 顶对齐再下移 3px
+        # 恰好两档字号行高差的一半, 视觉上与标题居中。
+        self._version_label.place(relx=1.0, y=3, anchor="ne")
 
         self._appearance_panel = ctk.CTkFrame(
             self._body,
@@ -988,6 +1008,7 @@ class SettingsWindow:
             (self._capture_status, palette.accent),
             (self._shortcut_error, palette.danger),
             (self._note_label, palette.text_hint),
+            (self._version_label, palette.text_hint),
         ):
             label.configure(text_color=color)
         self._toggle_btn.configure(

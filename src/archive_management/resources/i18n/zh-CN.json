@@ -149,6 +149,7 @@
   "dialog.schedule_add_blocked_hint": "请在「游戏设置」里为它们添加存档路径。",
   "dialog.schedule_add_confirm": "下一步",
   "settings.title": "设置",
+  "settings.version": "版本 {version}",
   "settings.appearance": "外观",
   "settings.language": "界面语言",
   "settings.language_switched": "已切换语言：{language}",

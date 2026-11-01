@@ -431,6 +431,33 @@ def _press(window: Any, keysym: str, keycode: int) -> None:
     window._on_key_release(SimpleNamespace(keysym=keysym, keycode=keycode))
 
 
+def test_settings_window_shows_the_app_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """设置页右上角显示当前版本号(单一来源: packaging.package_version), 且不撑宽窗口."""
+    from archive_management.packaging import package_version
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.settings_window import _WINDOW_WIDTH
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+
+    # 文案经 i18n 组装, 但版本号必须来自 packaging 的单一来源(与 --version 一致).
+    shown = window._version_label.cget("text")
+    assert shown == tr("settings.version", version=package_version()), shown
+    assert package_version() in shown
+    # 位置: place 叠加贴滚动内容区的右上(relx=1.0 + ne 锚) —— 不能再开 grid 列,
+    # 那会把标题行的请求宽度顶宽、整个窗口被撑开(2026-11-01 实测后撤回改的).
+    info = window._version_label.place_info()
+    assert float(info["relx"]) == 1.0, "版本号要贴内容区右缘"
+    assert info["anchor"] == "ne", "版本号以右上角锚定"
+    # 宽度守卫: 版本号不参与宽度协商, 窗口宽度保持固定值.
+    assert _wait_for(app, lambda: window._window.winfo_width() > 1), "窗口未布局"
+    assert window._window.winfo_width() == _WINDOW_WIDTH, "版本号把设置窗口撑宽了"
+
+
 def test_settings_window_holds_theme_and_hotkey_shortcuts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

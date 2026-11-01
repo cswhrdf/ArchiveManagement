@@ -149,6 +149,7 @@
   "dialog.schedule_add_blocked_hint": "Add a save path for them in Game settings.",
   "dialog.schedule_add_confirm": "Next",
   "settings.title": "Settings",
+  "settings.version": "Version {version}",
   "settings.appearance": "Appearance",
   "settings.language": "Language",
   "settings.language_switched": "Language switched to {language}",
