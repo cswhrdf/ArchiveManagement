@@ -992,6 +992,10 @@ def test_the_push_runs_publish_the_report_to_pages() -> None:
     assert "actions/upload-pages-artifact@" in code, "Pages 产物要用官方 action 打"
     assert "actions/deploy-pages@" in code, "部署要用官方 action(OIDC 换写权限)"
     assert "name: allure-report-final" in code, "发布的就是汇总作业上传的那份产物"
+    assert "if-no-files-found" not in code, (
+        "download-artifact 没有这个输入(它是 upload 侧的开关): 写了只有一句"
+        " Unexpected input(s) 告警, 拦不住任何东西"
+    )
     assert "actions/checkout" not in code, "这个作业不碰仓库代码, 权限才敢给到 pages"
 
     # 汇总侧: 发布闸门的事实来源是"归档在不在" —— archive-present 清点 tar.gz 文件
@@ -1022,6 +1026,11 @@ def test_the_push_runs_publish_the_report_to_pages() -> None:
     assert "Generate final Allure report" in summary_code, "汇总本身还在这里"
     assert "name: allure-report-final" in summary_code, "报告仍要作为产物上传"
     assert "allure-report.tar.gz" in summary_code, "上传的是自检打过包的那个归档"
+    assert "archive: false" not in summary_code, (
+        "archive: false 模式下 upload-artifact 拿文件名当产物名、name 输入被忽略"
+        " —— 产物实际叫 allure-report.tar.gz, 发布侧按注册名去下就是 Artifact not found"
+        "(2026-11-01 实测)"
+    )
     assert "Verify final Allure report" in summary_code, (
         "自检还在原地: 打不打包由它判(“打得开”才打包), 退出码照旧管门禁"
     )

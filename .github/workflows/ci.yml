@@ -1700,16 +1700,20 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload final Allure report
-        # 报告作为 `allure-report-final` 产物上传(单个 tar.gz, `archive: false` 不再多套一层
-        # zip); push 轮的站点发布由 `publish-report` 作业下载这一份去部署。归档在就传:
-        # 自检脚本"打不开"时根本不打包(这里自然跳过), 内容性失败照样传 —— 失败轮的报告
-        # 恰恰是最该能打开看的(与 pytest-report 那份同一口径)。
+        # 报告作为 `allure-report-final` 产物上传(单个 tar.gz); push 轮的站点发布由
+        # `publish-report` 作业下载这一份去部署。归档在就传: 自检脚本"打不开"时根本
+        # 不打包(这里自然跳过), 内容性失败照样传 —— 失败轮的报告恰恰是最该能打开看的
+        # (与 pytest-report 那份同一口径)。
+        # 不能用 `archive: false` 直传原文件(2026-11-01 实测): 那个模式下 upload-artifact
+        # 拿**文件名**当产物名、`name` 输入被静默忽略 —— 产物实际叫 allure-report.tar.gz,
+        # 发布作业按 `allure-report-final` 去下就是 "Artifact not found"。tar.gz 本身已是
+        # 压缩格式, 外层 zip 容器给 0 级(只存储), 免得白压一遍。
         if: always() && !cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-final
           path: allure-report.tar.gz
-          archive: false # 不打包，直接上传原始文件
+          compression-level: 0
           if-no-files-found: ignore
 
       - name: Record whether the report archive exists
@@ -1793,12 +1797,13 @@ jobs:
     steps:
       - name: Download the final Allure report
         # 汇总作业上传的那份单个 tar.gz(闸门在作业条件里: 归档不在整个作业都不会启动);
-        # 下不来就是上传侧出了问题 —— 响亮失败, 不部署半份或旧份。
+        # 下不来就是上传侧出了问题 —— 响亮失败, 不部署半份或旧份。注意 download-artifact
+        # 没有"找不到就算了"的开关(那是 upload 侧的 if-no-files-found, 写在这里只会得到
+        # 一句 "Unexpected input(s)" 告警), 按名字找不到它本来就失败 —— 正是这里要的。
         uses: actions/download-artifact@v7
         with:
           name: allure-report-final
           path: report-archive
-          if-no-files-found: error
 
       - name: Unpack the report for Pages
         # tar 里就是整站: 解到干净的 site/ 作为站点根, 后面 upload-pages-artifact 上传的
