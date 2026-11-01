@@ -238,12 +238,15 @@ jobs:
         # 重建同版本会 422(tag_name was used by an immutable release)。上面 decision 已经把
         # "tag 还在"的情况挡掉了; 真要重发只能换版本号 —— 这是 GitHub 的规则, 不是流程选择。
         run: |
-          gh release create "v$VERSION" \
+          if ! gh release create "v$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$RELEASE_TARGET" \
             --title "ArchiveManagement v$VERSION" \
             --notes-file release-notes.md \
-            release/*
+            release/*; then
+            echo "::error::创建 Release 失败。若上面报 'tag_name was used by an immutable release': 这个版本号的 tag 名被历史不可变 Release 永久占用 —— 删 Release、删 tag、关掉仓库的 Enable release immutability 都**不会**解锁(2026-11-01 实测), 只能换一个版本号: 把 packaging.py 的 __version__ 往上加一位。"
+            exit 1
+          fi
 
   wiki:
     # 用户手册要标"本页内容随哪个版本更新", 而版本号只有发完版才知道 —— 所以它挂在发布之后, 只沿
