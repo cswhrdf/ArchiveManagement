@@ -1811,7 +1811,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p site
-          tar -xzf report-archive/allure-report.tar.gz -C site
+          tar -xzf report-archive/allure-report.tar.gz --strip-components=1 -C site
 
       - name: Upload the report as a Pages artifact
         uses: actions/upload-pages-artifact@v5

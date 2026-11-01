@@ -992,6 +992,10 @@ def test_the_push_runs_publish_the_report_to_pages() -> None:
     assert "actions/upload-pages-artifact@" in code, "Pages 产物要用官方 action 打"
     assert "actions/deploy-pages@" in code, "部署要用官方 action(OIDC 换写权限)"
     assert "name: allure-report-final" in code, "发布的就是汇总作业上传的那份产物"
+    assert (
+        "tar -xzf report-archive/allure-report.tar.gz --strip-components=1 -C site"
+        in code
+    ), "归档带 allure-report/ 顶层目录, 解包时要剥掉它, 让 index.html 落在 Pages 根目录"
     assert "if-no-files-found" not in code, (
         "download-artifact 没有这个输入(它是 upload 侧的开关): 写了只有一句"
         " Unexpected input(s) 告警, 拦不住任何东西"
