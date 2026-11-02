@@ -859,6 +859,12 @@ jobs:
     # 作业与历史回填都照旧读它们 —— 历史也按平台各一条, 改名会把累计曲线清零。
     name: 合并测试报告 (${{ matrix.platform }})
     needs: [changes, pytest]
+    # 历史基线的第一来源是 Pages 站点(见 Fetch previous Allure history from the
+    # Pages site): pages: read 只用来查"站点开没开、地址是什么", 不给写。
+    permissions:
+      contents: read
+      actions: read
+      pages: read
     # 分片作业失败也要出报告: 报告正是用来看"哪一片挂了"的。
     # 但**被取代的运行不必再出报告**: 这一条要用 `!cancelled()` 表达, 不能只写 `always()`
     # —— `always()` 连“整轮被取消”也返回 true, 那样旧的那一轮会在取消后照样启动本作业
@@ -1085,8 +1091,53 @@ jobs:
           echo "::error::覆盖率数据不全(缺片): 本轮不判覆盖率门槛。请到本平台的分片作业里看哪一片没上传产物。"
           exit 1
 
+      - name: Fetch previous Allure history from the Pages site
+        id: pages-history
+        # 历史基线的第一来源是 Pages 站点而不是 artifact: artifact 有 90 天寿命,
+        # 开发节奏放缓后"上一轮"可能已在窗口外, 趋势静默从零开始; 站点是发布作业每轮
+        # 整体重部署的快照, 永远停在"最近一次部署的那一轮"(publish-report 把
+        # history.jsonl 放在站点根)。取不到(Pages 未启用/首次部署前/网络)时
+        # core.warning 后返回, 下面的 artifact 老路照走 —— 降级是正常路径, 不是故障。
+        # PR 轮同样先走这里: 站点公开只读, fork 的降级 token 查不到 Pages 配置时
+        # 正好落回 artifact。
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let site;
+            try {
+              site = await github.rest.repos.getPagesInfo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+            } catch (error) {
+              core.warning(`查不到 Pages 配置(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl`;
+            let body;
+            try {
+              const response = await fetch(target, { redirect: "follow" });
+              if (!response.ok) {
+                core.warning(`站点上没有 history.jsonl(HTTP ${response.status}): 历史基线改走 artifact 老路`);
+                return;
+              }
+              body = await response.text();
+              JSON.parse(body.split("\n", 1)[0]);
+            } catch (error) {
+              core.warning(`读取 Pages 历史失败(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const { mkdir, writeFile } = require("fs/promises");
+            await mkdir(".allure", { recursive: true });
+            await writeFile(".allure/history.jsonl", body, "utf8");
+            core.setOutput("fetched", "true");
+            core.notice(`历史基线来自 Pages: ${target}`);
+
       - name: Resolve previous run with Allure history
         id: prev-run
+        # 只在 Pages 没给出历史时才查 artifact(Pages 命中时这一步白跑还会把趋势
+        # 锚到更旧的一轮上)。
+        if: steps.pages-history.outputs.fetched != 'true'
         # 基线**不要求**那一轮是 success(2026-10-05 教训): 只认成功运行时, 连续失败的
         # 时期(如 macOS Tk 崩溃那几天)没有任何一轮被消费, 基线会冻结在更早的成功运行上
         # —— 恰逢历史键的形状变了(environments 多出一段), 于是每轮都按旧形状"修",
@@ -1128,7 +1179,7 @@ jobs:
             }
 
       - name: Download previous Allure history
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         uses: actions/download-artifact@v7
         with:
           name: allure-resources-${{ matrix.os }}
@@ -1142,7 +1193,7 @@ jobs:
         # allure-manifest.json)才会保留 .allure/ 前缀。两种布局都认 —— 2026-10-05 实测:
         # 汇总作业的上传侧从多路径改成单路径后, 下一轮的 cp 在两种布局里都只找得到其中
         # 一种, 于是 final 历史链悄悄断掉(每轮清零重来)。找不到时响亮报错而不是静默跳过。
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         shell: bash
         run: |
           mkdir -p .allure
@@ -1374,10 +1425,13 @@ jobs:
     # 测试红 / 非门禁路径 / 纯文档的轮次里它就是 skipped, 汇总照常出报告, 冒烟那一族按
     # 条件期望处理(见后面调 create_allure_summary.py 的那一步)。
     # 这个作业只跑仓库自己的脚本(不跑 PR 里的代码), 权限与顶层一致即可:
-    # `contents: read`(checkout 要它) + `actions: read`(取本轮的产物)。
+    # `contents: read`(checkout 要它) + `actions: read`(取本轮的产物);
+    # 另加 `pages: read`: 历史基线的第一来源是 Pages 站点(见 Fetch previous Allure
+    # history from the Pages site), 只用来查站点开没开、地址是什么。
     permissions:
       contents: read
       actions: read
+      pages: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -1488,12 +1542,51 @@ jobs:
           # 各平台的产物同名, 分开存放才能各自出现在汇总报告里(不能被后写的覆盖).
           merge-multiple: false
 
+      - name: Fetch previous Allure history from the Pages site
+        id: pages-history
+        # 与逐平台作业同一条链路(见 pytest-report 里那段说明): 站点优先、artifact 降级。
+        # final 报告的趋势也一样吃这份基线 —— 两处取的是同一个 URL, 站点永远停在
+        # 最近一次部署的那一轮。
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let site;
+            try {
+              site = await github.rest.repos.getPagesInfo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+            } catch (error) {
+              core.warning(`查不到 Pages 配置(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl`;
+            let body;
+            try {
+              const response = await fetch(target, { redirect: "follow" });
+              if (!response.ok) {
+                core.warning(`站点上没有 history.jsonl(HTTP ${response.status}): 历史基线改走 artifact 老路`);
+                return;
+              }
+              body = await response.text();
+              JSON.parse(body.split("\n", 1)[0]);
+            } catch (error) {
+              core.warning(`读取 Pages 历史失败(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const { mkdir, writeFile } = require("fs/promises");
+            await mkdir(".allure", { recursive: true });
+            await writeFile(".allure/history.jsonl", body, "utf8");
+            core.setOutput("fetched", "true");
+            core.notice(`历史基线来自 Pages: ${target}`);
+
       - name: Resolve previous run with Allure history
         id: prev-run
         # 与逐平台作业同一条理由: 基线不问成败, 只看那一轮是否真的传了产物 ——
         # 只认成功运行会把链条冻结在旧基线上(连续失败时期 + 键形状变更 = 历史永远
         # 接不上), 详见 pytest-report 作业里那段说明。
-        if: always()
+        # Pages 已给出历史时不再查 artifact: 查了也只是把基线锚到更旧的一轮上。
+        if: always() && steps.pages-history.outputs.fetched != 'true'
         uses: actions/github-script@v9
         env:
           ARTIFACT_NAME: allure-resources-final
@@ -1530,7 +1623,7 @@ jobs:
             }
 
       - name: Download previous Allure history
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         uses: actions/download-artifact@v7
         with:
           name: allure-resources-final
@@ -1544,7 +1637,7 @@ jobs:
         # 按带前缀的路径去 cp, 每轮都失败, 修复步骤跟着"读入 0 份", 最终报告的历史
         # 每轮清零。找不到时响亮报错: 这一步的前一步刚确认过产物存在, 拷不出来只能是
         # 布局变了, 不能让"趋势从零开始"再静默发生一次。
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         shell: bash
         run: |
           mkdir -p .allure
@@ -1805,6 +1898,17 @@ jobs:
           name: allure-report-final
           path: report-archive
 
+      - name: Download the final Allure history
+        # 站点是历史基线的"永久"落脚点: 下一轮两个报告作业优先从站点根取回这份文件
+        # (见 pytest-report / allure-summary 的 Fetch previous Allure history from
+        # the Pages site)。能走到本作业说明归档在, generate 一定追加过历史 —— 这个
+        # 产物必然存在, 下不来就是上传侧出了问题, 响亮失败而不是部署一个让下一轮
+        # 接不上基线的站点。
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-resources-final
+          path: final-resources
+
       - name: Unpack the report for Pages
         # tar 里就是整站: 解到干净的 site/ 作为站点根, 后面 upload-pages-artifact 上传的
         # 就是这个目录。
@@ -1812,6 +1916,20 @@ jobs:
         run: |
           mkdir -p site
           tar -xzf report-archive/allure-report.tar.gz --strip-components=1 -C site
+          # 历史文件放进站点根, 路径与取数侧的 URL 一致(<站点>/history.jsonl)。两种
+          # artifact 布局都认(与报告作业的恢复步骤同一个实测结论: 单文件上传时
+          # history.jsonl 落在压缩包根部)。
+          for candidate in \
+            final-resources/.allure/history.jsonl \
+            final-resources/history.jsonl
+          do
+            if [ -f "${candidate}" ]; then
+              cp "${candidate}" site/history.jsonl
+              exit 0
+            fi
+          done
+          echo "::error::allure-resources-final 里找不到 history.jsonl —— 站点是下一轮历史基线的来源, 缺了它趋势就要从零开始。请对照 'Upload final Allure resources' 的 path 列表。"
+          exit 1
 
       - name: Upload the report as a Pages artifact
         uses: actions/upload-pages-artifact@v5

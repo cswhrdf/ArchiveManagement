@@ -984,6 +984,7 @@ def test_the_push_runs_publish_the_report_to_pages() -> None:
     assert "github-pages" in header, "deploy-pages 要挂 github-pages 环境"
     for step in (
         "Download the final Allure report",
+        "Download the final Allure history",
         "Unpack the report for Pages",
         "Upload the report as a Pages artifact",
         "Deploy to GitHub Pages",
@@ -992,6 +993,9 @@ def test_the_push_runs_publish_the_report_to_pages() -> None:
     assert "actions/upload-pages-artifact@" in code, "Pages 产物要用官方 action 打"
     assert "actions/deploy-pages@" in code, "部署要用官方 action(OIDC 换写权限)"
     assert "name: allure-report-final" in code, "发布的就是汇总作业上传的那份产物"
+    assert "name: allure-resources-final" in code, (
+        "站点同时要带历史文件(下一轮基线的来源, 见 test_ci_history 的 Pages 优先守卫)"
+    )
     assert (
         "tar -xzf report-archive/allure-report.tar.gz --strip-components=1 -C site"
         in code

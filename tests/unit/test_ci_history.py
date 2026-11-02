@@ -502,6 +502,74 @@ def test_history_restore_accepts_both_artifact_layouts() -> None:
     assert checked == 2, "逐平台与汇总两处都要恢复历史"
 
 
+def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
+    """历史基线优先取 Pages 站点(不会过期), 取不到才走 artifact 老路(90 天寿命).
+
+    artifact 会过期是这条链路的已知短板: 趋势寿命 = artifact 寿命, 开发节奏放缓后
+    "上一轮"可能在窗口之外, 曲线静默从零开始。发布作业每轮把 history.jsonl 放到
+    站点根(见 publish-report 的 Unpack the report for Pages), 两个报告作业先从那里
+    取。钉四件事: ① 两处都有取数步骤且排在 artifact 链之前; ② 站点地址从仓库的
+    Pages 配置查(getPagesInfo), 不硬拼 owner/repo; ③ 取不到要 core.warning(降级是
+    正常路径, 但不能无声)且 artifact 老路的三步都判 fetched 让路 —— 漏判哪一步,
+    Pages 命中时它还会去跑, 把基线锚到更旧的一轮上; ④ 发布侧真的把 history.jsonl
+    放上站点根, 缺了它"优先 Pages"就只是每轮都降级的老路。
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    jobs = _job_blocks(workflow)
+    fallback_condition = "steps.pages-history.outputs.fetched != 'true'"
+    restore_by_job = {
+        "pytest-report": "Restore previous Allure history",
+        "allure-summary": "Restore previous final Allure history",
+    }
+    for job_id, restore_name in restore_by_job.items():
+        job = jobs[job_id]
+        fetch = _step(job, "Fetch previous Allure history from the Pages site")
+        assert "/history.jsonl" in fetch, (
+            f"{job_id} 取的是站点根下的 history.jsonl, 与发布侧放的位置要一致"
+        )
+        assert "getPagesInfo" in fetch, (
+            f"{job_id} 的站点地址要从仓库 Pages 配置查, 不硬拼 owner/repo(自定义域名/改名都不怕)"
+        )
+        assert "core.warning" in fetch, (
+            f"{job_id} 降级要走 core.warning: 站点取不到是正常路径, 但不能无声"
+        )
+        assert 'setOutput("fetched", "true")' in fetch, (
+            f"{job_id} 取到要置 fetched, 否则下面的 artifact 老路永远照跑"
+        )
+        read_guard = re.search(
+            r'try \{\s*const response = await fetch\(target, \{ redirect: "follow" \}\);'
+            r'.*?body = await response\.text\(\);\s*JSON\.parse\(body\.split\("\\n", 1\)\[0\]\);'
+            r"\s*\} catch \(error\) \{\s*core\.warning\(`读取 Pages 历史失败",
+            fetch,
+            re.DOTALL,
+        )
+        assert read_guard, (
+            f"{job_id} 必须捕获 fetch/响应读取/JSONL 校验异常并 warning, 让 artifact fallback 能继续"
+        )
+        for step_name in (
+            "Resolve previous run with Allure history",
+            "Download previous Allure history",
+            restore_name,
+        ):
+            assert fallback_condition in _step(job, step_name), (
+                f"{job_id}/{step_name} 要在 Pages 没给出历史时才跑: Pages 命中时它"
+                "白跑一场, 还会把趋势基线锚到更旧的一轮上"
+            )
+        fetch_at = job.index("name: Fetch previous Allure history from the Pages site")
+        resolve_at = job.index("name: Resolve previous run with Allure history")
+        assert fetch_at < resolve_at, f"{job_id} 要先试 Pages, 再谈 artifact 降级"
+        assert re.search(r"^      pages: read$", job, re.MULTILINE), (
+            f"{job_id} 查 Pages 配置要 pages: read(作业级权限是覆盖语义, 缺了查不到)"
+        )
+    publish = jobs["publish-report"]
+    assert "site/history.jsonl" in publish, (
+        "发布要把历史文件放到站点根: 它是下一轮 Pages 优先链路的取数地址"
+    )
+    assert "name: allure-resources-final" in publish, (
+        "站点上的历史来自汇总作业的 allure-resources-final, 与报告分开下载"
+    )
+
+
 def test_quality_gate_does_not_touch_the_history_file() -> None:
     """质量门步骤不许写历史: 它追加的"半套快照"会冒充上一轮.
 

@@ -128,7 +128,7 @@ run: echo "::error::质量门未通过 …" && exit 1
 
 ## 8. 历史趋势：链条比数据更脆
 
-趋势靠"取上一轮的 `allure-resources-*` 产物里的 `.allure/history.jsonl` 再追加"。三件事必须一起盯着：
+趋势靠"取上一轮的 `allure-resources-*` 产物里的 `.allure/history.jsonl` 再追加"；2026-11-02 起第一来源是 **Pages 站点根的 `history.jsonl`**（`publish-report` 每轮放上站点，不会像 artifact 那样 90 天过期），artifact 降级路径与取舍见 `docs/testing-ci.md` 第 2 节。三件事必须一起盯着：
 
 - **基线只问"有没有产物"，不问那一轮成败**：只认成功运行时，连续失败期（如 macOS Tk 崩溃那几天）会没有任何一轮被消费，基线冻结在更早的成功运行上；恰逢键形状变过，就每轮都按旧形状"修"，趋势永远接不上。取消/没跑到上传的运行自然被跳过。
 - **取回时要认两种打包布局**：artifact 内的路径取决于上传侧 `path` 的形状 —— 只列**一个**文件时它落在压缩包**根部**，列多个路径才保留 `.allure/` 前缀。两个恢复步骤都要对 `.previous-allure-resources/.allure/history.jsonl` 与 `.previous-allure-resources/history.jsonl` 依次尝试，都找不到就 `::error::` + `exit 1`（静默跳过 = 每轮把趋势清零重来，2026-10-05 实测）。守卫 `test_history_restore_accepts_both_artifact_layouts`。
