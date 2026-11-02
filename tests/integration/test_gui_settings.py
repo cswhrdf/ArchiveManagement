@@ -67,6 +67,8 @@ def test_settings_changes_without_a_config_path_stay_in_memory() -> None:
     app._save_debug(True)
     app._save_activation(True)
     app._save_font_size(20)
+    app._save_theme("light")
+    app._save_log_rotation(50, 3)
     app._save_shortcuts()
 
     # 没有任何配置路径: 写回口只改内存态, 不写文件也不报错。
@@ -409,6 +411,8 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         verification_mode=app._verification_mode,
         verification_parallel=app._verification_parallel,
         debug=app._debug,
+        log_max_mb=app._log_max_mb,
+        log_backups=app._log_backups,
         activation=app._activation,
         remember_window=app._remember_window,
         shortcuts=app._shortcuts,
@@ -417,6 +421,7 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         on_apply_font_size=app._on_font_size_change,
         on_apply_verification=app._on_verification_change,
         on_apply_debug=app._on_debug_change,
+        on_apply_log_rotation=app._on_log_rotation_change,
         on_apply_activation=app._on_activation_change,
         on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=apply,
@@ -721,6 +726,85 @@ def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
     assert reloaded._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
 
 
+def test_theme_toggle_is_persisted_and_restored(tmp_path: Path) -> None:
+    """主题切换写入配置文件, 下次启动按它启动(此前 config.theme 是没人读的死配置)."""
+    from archive_management.config import load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    app = gui_app(
+        _new_app,
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        paths=paths,
+    )
+    try:
+        _pump(app)
+        # 默认 system 解析为深色: 这个配置项在落盘功能之前从未被读过, 沿用旧观感.
+        assert app._theme == "dark"
+        assert app._on_toggle_theme() == "light"
+        assert load_config(paths.config_path).theme == "light"
+    finally:
+        app.destroy()
+
+    reloaded = build_with_retry(
+        _new_app,
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        paths=paths,
+    )
+    assert reloaded._theme == "light"
+    # 后端读数与界面一致: current_theme 不许再回退到固定深色.
+    assert reloaded.backend.current_theme() == "light"
+
+
+def test_log_rotation_entries_apply_and_revert() -> None:
+    """日志滚动两行输入: 值没动不提交; 非整数在窗口侧拦; 主窗口拒绝时拨回生效值."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+    applied: list[tuple[int, int]] = []
+
+    def apply(max_mb: int, count: int) -> str | None:
+        applied.append((max_mb, count))
+        return None
+
+    window._on_apply_log_rotation = apply
+
+    # ① 值没变: 回车/失焦都不触发一次多余的落盘.
+    window._on_log_entry_submit()
+    assert applied == []
+
+    # ② 合法修改: 送主窗口, 错误行保持整行收起, 窗口副本跟着前进.
+    window._log_mb_entry.delete(0, "end")
+    window._log_mb_entry.insert(0, "200")
+    window._on_log_entry_submit()
+    _pump(app)
+    assert applied == [(200, 5)]
+    assert window._log_error.winfo_manager() == ""
+
+    # ③ 非整数: 窗口侧拦下不送主窗口, 输入框拨回生效值并说明原因.
+    window._log_mb_entry.delete(0, "end")
+    window._log_mb_entry.insert(0, "abc")
+    window._on_log_entry_submit()
+    _pump(app)
+    assert applied == [(200, 5)]
+    assert window._log_mb_entry.get() == "200"
+    assert tr("settings.log_rotation_number") in window._log_error.cget("text")
+
+    # ④ 主窗口拒绝(如超范围): 原因进错误行, 两个输入框都拨回实际生效的值.
+    window._on_apply_log_rotation = lambda _max_mb, _count: "超出范围"
+    window._log_backups_entry.delete(0, "end")
+    window._log_backups_entry.insert(0, "99")
+    window._on_log_entry_submit()
+    _pump(app)
+    assert "超出范围" in window._log_error.cget("text")
+    assert window._log_backups_entry.get() == "5"
+    assert window._log_mb_entry.get() == "200"
+
+
 def test_invalid_config_entries_are_repaired_on_startup(tmp_path: Path) -> None:
     """启动时只写坏一项: 剔除那一项并提示用户, 而不是把整份配置都冲掉."""
     from archive_management.config import load_config
@@ -826,6 +910,8 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         verification_mode="sha256",
         verification_parallel=2,
         debug=True,
+        log_max_mb=100,
+        log_backups=5,
         activation=True,
         remember_window=True,
         shortcuts=app._shortcuts,
@@ -834,6 +920,7 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         on_apply_font_size=fail_font,
         on_apply_verification=fail_verification,
         on_apply_debug=fail_debug,
+        on_apply_log_rotation=lambda _max_mb, _count: None,
         on_apply_activation=fail_activation,
         on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda action, accelerator: None,
@@ -957,6 +1044,8 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         verification_mode="sha256",
         verification_parallel=2,
         debug=False,
+        log_max_mb=100,
+        log_backups=5,
         activation=False,
         remember_window=True,
         shortcuts=app._shortcuts,
@@ -965,6 +1054,7 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         on_apply_font_size=lambda _size: None,
         on_apply_verification=lambda _mode: None,
         on_apply_debug=lambda _enabled: None,
+        on_apply_log_rotation=lambda _max_mb, _count: None,
         on_apply_activation=lambda _enabled: None,
         on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda _action, _accelerator: "快捷键被占用",

@@ -17,7 +17,7 @@ import tkinter as tk
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import customtkinter as ctk
 from PIL import Image
@@ -30,6 +30,7 @@ from archive_management.config import (
     AppConfig,
     ConfigLoad,
     HotkeySettings,
+    ThemeName,
     WindowSettings,
     load_or_repair_config,
     save_config,
@@ -52,7 +53,7 @@ from archive_management.exceptions import (
 )
 from archive_management.i18n import DEFAULT_LOCALE, set_locale, tr
 from archive_management.infrastructure.paths import ApplicationPaths
-from archive_management.logging_config import apply_debug
+from archive_management.logging_config import apply_debug, apply_rotation
 from archive_management.services import icon_assets, single_instance
 from archive_management.services.audit import log_action
 from archive_management.services.hotkeys import (
@@ -441,11 +442,22 @@ class ArchiveApp(ctk.CTk):
         )
         # 只读一次配置: 语言、快捷键与"配置被还原过"的提示都从同一份结果出发。
         loaded = self._load_config()
+        # 主题同样来自这份配置: 用户在设置里切过 light/dark 就按它启动。默认 system
+        # 解析成深色 —— 这个配置项在本功能之前从未被读过(界面一直固定深色), 沿用它
+        # 保证升级后行为不跳变; 设置里一动开关就会写成具体值。后端也同步一份,
+        # ``current_theme`` 的读数才与界面一致。
+        self._theme = self._startup_theme(loaded.config.theme)
+        ctk.set_appearance_mode(self._theme)
+        self.p = Palette.for_theme(self._theme)
+        self.backend.set_theme(self._theme)
         # 语言要在构造界面之前生效: 所有文案都是构建时取的.
         self._language = self._apply_language(loaded.config.language)
         self._shortcuts = self._shortcuts_from(loaded)
         # 调试日志开关来自同一份配置(默认关闭): 设置窗口展示的与生效的要是同一个值.
         self._debug = loaded.config.logging.debug
+        # 日志滚动的两个数字(设置窗口两行输入的初值; 修改即写回并即时生效).
+        self._log_max_mb = self._mb_from(loaded.config.logging.max_bytes)
+        self._log_backups = loaded.config.logging.backup_count
         # 界面字号(px 口径的基准字号, 1rem): 要在建界面**之前**生效, 因此先把缩放
         # 装到 CTkFont 上 —— 之后所有字体都按它换算。
         install_font_scaling()
@@ -565,6 +577,34 @@ class ArchiveApp(ctk.CTk):
         shortcuts[ACTION_SAVE_NOW] = loaded.config.hotkeys.save
         shortcuts[ACTION_CREATE_BRANCH] = loaded.config.hotkeys.branch
         return shortcuts
+
+    @staticmethod
+    def _startup_theme(configured: str) -> str:
+        """把配置里的主题解析成界面实际使用的二值主题.
+
+        ``system`` 沿用深色: 这个配置项在主题落盘功能之前从未被读过, 界面一直
+        固定深色; 真正"跟随系统"需要三平台各自的系统主题探测, 复杂度配不上收益,
+        不做(要做得另立计划)。
+        """
+        return "light" if configured == "light" else "dark"
+
+    @staticmethod
+    def _mb_from(max_bytes: int) -> int:
+        """把配置里的字节上限换算成设置界面展示的 MB 数(至少 1)."""
+        return max(1, max_bytes // (1024 * 1024))
+
+    def _save_theme(self, theme: str) -> None:
+        """把主题写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        # 界面主题是二值(light/dark); system 只出现在从未写过的默认配置里。
+        # cast 只是给 mypy 收窄类型, 值本身来自 set_theme 的二值返回.
+        config.theme = cast(ThemeName, theme)
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存主题失败: %s", exc)
 
     def _save_language(self, locale: str) -> None:
         """把界面语言写回配置文件(没有配置路径时只保存在内存里)."""
@@ -720,6 +760,38 @@ class ArchiveApp(ctk.CTk):
                 else "settings.debug_switched_off"
             ),
         )
+        return None
+
+    def _save_log_rotation(self, max_mb: int, backup_count: int) -> None:
+        """把日志滚动参数写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        config.logging.max_bytes = max_mb * 1024 * 1024
+        config.logging.backup_count = backup_count
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存日志滚动参数失败: %s", exc)
+
+    def _on_log_rotation_change(self, max_mb: int, backup_count: int) -> str | None:
+        """改日志滚动参数: 即时生效 + 写回配置; 返回 None 表示成功.
+
+        即时生效靠现场改已挂载处理器的上限与份数(不重开日志文件, 见
+        ``logging_config.apply_rotation``); 已滚出来的旧文件不因此被清掉, 多出的
+        份数到下一次滚动才收敛(标准库行为), 反馈文案不承诺"立刻清理"。
+        范围校验在这里兜底: 设置窗口拦一遍, 这一侧才是保存口径的唯一权威。
+        """
+        if not 1 <= max_mb <= 1024:
+            return tr("settings.log_rotation_range_mb")
+        if not 0 <= backup_count <= 20:
+            return tr("settings.log_rotation_range_backups")
+        apply_rotation(max_mb * 1024 * 1024, backup_count)
+        self._log_max_mb = max_mb
+        self._log_backups = backup_count
+        self._save_log_rotation(max_mb, backup_count)
+        log_action("ui.switch_log_rotation", max_mb=max_mb, backups=backup_count)
+        self._feedback(FeedbackKind.INFO, tr("settings.log_rotation_switched"))
         return None
 
     def _save_activation(self, enabled: bool) -> None:
@@ -2970,6 +3042,8 @@ class ArchiveApp(ctk.CTk):
         """切换浅/深主题并返回生效主题名(供设置窗口刷新按钮文案)."""
         next_theme = "light" if self._theme == "dark" else "dark"
         self._theme = self.backend.set_theme(next_theme)
+        # 落盘: 主题要跨启动生效(2026-11-02 前只改内存, config.theme 是没人读的死配置).
+        self._save_theme(self._theme)
         ctk.set_appearance_mode(self._theme)
         self.p = Palette.for_theme(self._theme)
         self.configure(fg_color=self.p.background)
@@ -3203,6 +3277,8 @@ class ArchiveApp(ctk.CTk):
             verification_mode=self._verification_mode,
             verification_parallel=self._verification_parallel,
             debug=self._debug,
+            log_max_mb=self._log_max_mb,
+            log_backups=self._log_backups,
             activation=self._activation,
             remember_window=self._remember_window,
             shortcuts=self._shortcuts,
@@ -3211,6 +3287,7 @@ class ArchiveApp(ctk.CTk):
             on_apply_font_size=self._on_font_size_change,
             on_apply_verification=self._on_verification_change,
             on_apply_debug=self._on_debug_change,
+            on_apply_log_rotation=self._on_log_rotation_change,
             on_apply_activation=self._on_activation_change,
             on_apply_remember_window=self._on_remember_window_change,
             on_apply_shortcut=self._apply_shortcut,

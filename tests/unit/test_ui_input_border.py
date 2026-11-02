@@ -37,7 +37,9 @@ _INPUT_TYPES = frozenset({"CTkEntry", "CTkComboBox", "CTkOptionMenu", "CTkTextbo
 # 21 → 22: 设置窗口新增“备份校验方式”下拉框(2026-10-04, 校验方式可选)。
 # 22 → 21: 批量导入卡片移除“合并到”目标下拉框 —— 同名那一款改由后端按原始名称
 # 自动确定, 界面不再让用户挑(2026-10-20)。
-_EXPECTED_INPUT_SITES = 21
+# 21 → 23: 设置窗口日志分区新增两行数字输入(单文件上限 MB / 保留份数), 即改即存
+# 且主窗口拒绝时拨回生效值(2026-11-02)。
+_EXPECTED_INPUT_SITES = 23
 
 
 def _ui_sources() -> list[Path]:

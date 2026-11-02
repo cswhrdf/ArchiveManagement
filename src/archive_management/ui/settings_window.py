@@ -83,6 +83,8 @@ _ApplyLanguage = Callable[[str], "str | None"]
 _ApplyFontSize = Callable[[int], "str | None"]
 # 切换布尔开关(调试日志/自动启停); 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyToggle = Callable[[bool], "str | None"]
+# 保存日志滚动参数(MB 数与保留份数); 返回 None 表示成功, 否则返回失败说明.
+_ApplyLogRotation = Callable[[int, int], "str | None"]
 # 切换备份校验方式; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyVerification = Callable[[str], "str | None"]
 # 录制开始/结束的钩子(主窗口据此暂停与恢复全局快捷键).
@@ -140,6 +142,8 @@ class SettingsWindow:
         verification_parallel: int,
         on_apply_font_size: _ApplyFontSize,
         debug: bool,
+        log_max_mb: int,
+        log_backups: int,
         activation: bool,
         remember_window: bool,
         shortcuts: Mapping[str, str],
@@ -147,6 +151,7 @@ class SettingsWindow:
         on_apply_language: _ApplyLanguage,
         on_apply_verification: _ApplyVerification,
         on_apply_debug: _ApplyToggle,
+        on_apply_log_rotation: _ApplyLogRotation,
         on_apply_activation: _ApplyToggle,
         on_apply_remember_window: _ApplyToggle,
         on_apply_shortcut: _ApplyShortcut,
@@ -164,6 +169,8 @@ class SettingsWindow:
         self._verification_parallel = verification_parallel
         self._on_apply_font_size = on_apply_font_size
         self._debug = debug
+        self._log_max_mb = log_max_mb
+        self._log_backups = log_backups
         self._activation = activation
         self._remember_window = remember_window
         self._shortcuts: dict[str, str] = dict(shortcuts)
@@ -171,6 +178,7 @@ class SettingsWindow:
         self._on_apply_language = on_apply_language
         self._on_apply_verification = on_apply_verification
         self._on_apply_debug = on_apply_debug
+        self._on_apply_log_rotation = on_apply_log_rotation
         self._on_apply_activation = on_apply_activation
         self._on_apply_remember_window = on_apply_remember_window
         self._on_apply_shortcut = on_apply_shortcut
@@ -450,7 +458,7 @@ class SettingsWindow:
             text_color=palette.danger,
         )
         self._debug_error.grid(
-            row=1, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
+            row=1, column=0, columnspan=2, padx=16, pady=(2, 0), sticky="ew"
         )
         self._track_hint(
             self._logging_panel,
@@ -458,6 +466,68 @@ class SettingsWindow:
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
         self._set_transient_line(self._debug_error, "")
+
+        # 日志滚动的两个数字(单文件上限与保留份数): 两行"名字 + 输入框", 回车或失焦
+        # 提交; 校验与落盘都在主窗口那一侧, 这里只把值送过去, 失败时把输入框拨回
+        # 实际生效的值 —— 界面显示的一套不能与配置里的另一套脱节。
+        self._log_mb_label = ctk.CTkLabel(
+            self._logging_panel,
+            text=tr("settings.log_max_mb"),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        self._log_mb_label.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="w")
+        self._log_mb_entry = ctk.CTkEntry(
+            self._logging_panel,
+            width=140,
+            justify="right",
+            fg_color=palette.input_bg,
+            border_color=palette.input_border,
+            text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+        )
+        self._log_mb_entry.insert(0, str(self._log_max_mb))
+        self._log_mb_entry.grid(row=2, column=1, padx=16, pady=(0, 8))
+        self._log_backups_label = ctk.CTkLabel(
+            self._logging_panel,
+            text=tr("settings.log_backups"),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        self._log_backups_label.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="w")
+        self._log_backups_entry = ctk.CTkEntry(
+            self._logging_panel,
+            width=140,
+            justify="right",
+            fg_color=palette.input_bg,
+            border_color=palette.input_border,
+            text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+        )
+        self._log_backups_entry.insert(0, str(self._log_backups))
+        self._log_backups_entry.grid(row=3, column=1, padx=16, pady=(0, 8))
+        for entry in (self._log_mb_entry, self._log_backups_entry):
+            entry.bind("<Return>", self._on_log_entry_submit)
+            entry.bind("<FocusOut>", self._on_log_entry_submit)
+        self._log_error = ctk.CTkLabel(
+            self._logging_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.danger,
+        )
+        self._log_error.grid(
+            row=4, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
+        )
+        self._track_hint(
+            self._logging_panel,
+            self._log_error,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
+        self._set_transient_line(self._log_error, "")
 
         self._activation_panel = ctk.CTkFrame(
             self._body,
@@ -915,6 +985,45 @@ class SettingsWindow:
         self._set_transient_line(self._debug_error, "")
         self._refit_height()
 
+    def _on_log_entry_submit(self, _event: object | None = None) -> None:
+        """回车或失焦时提交日志滚动参数; 值没动就放行, 不落多余的盘.
+
+        两个输入框一起读: "改了上限顺手改份数"是常态, 一行一行分开报反而烦人。
+        非整数在这里拦(输入框的口径), 范围则交给主窗口 —— 它是保存口径的唯一权威,
+        直接调用后端的其他入口也要拦得住。
+        """
+        raw_mb = self._log_mb_entry.get().strip()
+        raw_backups = self._log_backups_entry.get().strip()
+        if raw_mb == str(self._log_max_mb) and raw_backups == str(self._log_backups):
+            return
+        try:
+            max_mb = int(raw_mb)
+            backup_count = int(raw_backups)
+        except ValueError:
+            self._show_log_error(tr("settings.log_rotation_number"))
+            return
+        error = self._on_apply_log_rotation(max_mb, backup_count)
+        if error is not None:
+            self._show_log_error(error)
+            return
+        # 成功后同步窗口里的副本: 它是"拨回生效值"的依据, 不更新会在失败回滚时
+        # 把已经改成功的旧值写回去(界面与配置脱节, 恰是这套交互要防的事).
+        self._log_max_mb = max_mb
+        self._log_backups = backup_count
+        self._set_transient_line(self._log_error, "")
+        self._refit_height()
+
+    def _show_log_error(self, message: str) -> None:
+        """写一条日志参数的错误行, 并把两个输入框拨回实际生效的值."""
+        self._set_transient_line(
+            self._log_error, tr("settings.log_rotation_failed", reason=message)
+        )
+        self._log_mb_entry.delete(0, "end")
+        self._log_mb_entry.insert(0, str(self._log_max_mb))
+        self._log_backups_entry.delete(0, "end")
+        self._log_backups_entry.insert(0, str(self._log_backups))
+        self._refit_height()
+
     def _set_activation_switch(self, enabled: bool) -> None:
         """把开关拨到指定状态(不触发 ``command``, 所以失败回滚不会递归)."""
         if enabled:
@@ -1004,6 +1113,9 @@ class SettingsWindow:
             (self._remember_error, palette.danger),
             (self._language_error, palette.danger),
             (self._debug_error, palette.danger),
+            (self._log_error, palette.danger),
+            (self._log_mb_label, palette.text_body),
+            (self._log_backups_label, palette.text_body),
             (self._activation_error, palette.danger),
             (self._capture_status, palette.accent),
             (self._shortcut_error, palette.danger),
@@ -1032,6 +1144,13 @@ class SettingsWindow:
         # 下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
         for box in (self._font_box, self._language_box, self._verification_box):
             _paint_combo(box, palette)
+        # 日志参数的两个输入框同样要重绘: 漏掉时会留上一套主题的底色与边框.
+        for entry in (self._log_mb_entry, self._log_backups_entry):
+            entry.configure(
+                fg_color=palette.input_bg,
+                border_color=palette.input_border,
+                text_color=palette.text_body,
+            )
         # 快捷键行的动作名也是文字控件, 漏在重绘表外时它会留着**旧主题**的正文色
         # (浅色主题的深灰文字落在深色面板上, 就是一条几乎看不见的淡灰字)。
         for label in self._shortcut_labels:

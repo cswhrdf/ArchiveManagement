@@ -228,7 +228,10 @@ def _run_doctor(paths: ApplicationPaths, *, verbose: bool) -> int:
     if loaded.reset:
         _report(f"配置   : 内容非法, 已还原为默认值(原文件: {loaded.backup})")
     else:
-        _report(f"配置   : 格式 v{loaded.config.version}, 主题 {loaded.config.theme}")
+        _report(
+            f"配置   : 格式 v{loaded.config.version}, "
+            f"主题 {loaded.config.theme}(界面启动时生效)"
+        )
 
     try:
         database = Database(paths.database_path)
