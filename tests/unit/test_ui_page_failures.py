@@ -514,10 +514,16 @@ def test_an_unwritable_config_only_warns(
         app._save_debug(True)
         app._save_activation(True)
         app._save_verification("name")
+        app._save_theme("dark")
+        app._save_log_rotation(50, 3)
         app._save_shortcuts()
 
     # 写失败要留下痕迹: 界面已经切过去了, 日志是唯一的线索.
     assert any("保存校验方式失败" in record.getMessage() for record in caplog.records)
+    assert any("保存主题失败" in record.getMessage() for record in caplog.records)
+    assert any(
+        "保存日志滚动参数失败" in record.getMessage() for record in caplog.records
+    )
 
     app._paths = None  # 没有配置路径: 只保存在内存里
     app._save_remember_window(False)

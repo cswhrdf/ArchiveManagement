@@ -805,6 +805,43 @@ def test_log_rotation_entries_apply_and_revert() -> None:
     assert window._log_mb_entry.get() == "200"
 
 
+def test_log_rotation_change_rejects_out_of_range_and_persists(
+    tmp_path: Path,
+) -> None:
+    """主窗口的日志滚动口径: 范围外只回原因不动配置, 范围内即时生效并落盘.
+
+    设置窗口侧的拦截(见上一个用例)只是第一道; 这里的范围校验才是保存口径的
+    唯一权威 —— 两道都过才写配置与处理器。
+    """
+    from archive_management.config import load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    app = gui_app(_new_app, DemoArchiveService(delay=0), paths=paths)
+    _pump(app)
+    try:
+        # ① 范围外: 原因文案原样回给设置窗口, 配置一个字段都不动.
+        assert app._on_log_rotation_change(0, 5) == tr("settings.log_rotation_range_mb")
+        assert app._on_log_rotation_change(100, 21) == tr(
+            "settings.log_rotation_range_backups"
+        )
+        unchanged = load_config(paths.config_path)
+        assert unchanged.logging.max_bytes == 100 * 1024 * 1024
+        assert unchanged.logging.backup_count == 5
+
+        # ② 范围内: 即时生效(主窗口口径更新; 处理器属性那一半由 test_audit 的
+        # apply_rotation 用例钉住 —— GUI 测试环境不装配日志, 这里不重复搭) + 写回配置.
+        assert app._on_log_rotation_change(200, 7) is None
+        assert app._log_max_mb == 200
+        assert app._log_backups == 7
+        saved = load_config(paths.config_path)
+        assert saved.logging.max_bytes == 200 * 1024 * 1024
+        assert saved.logging.backup_count == 7
+        _pump(app)
+    finally:
+        app.destroy()
+
+
 def test_invalid_config_entries_are_repaired_on_startup(tmp_path: Path) -> None:
     """启动时只写坏一项: 剔除那一项并提示用户, 而不是把整份配置都冲掉."""
     from archive_management.config import load_config
