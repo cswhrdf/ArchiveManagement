@@ -73,3 +73,9 @@
 
 紧接上一条: 五条复述"当前状态"的说明行也收掉了 —— 控件本身已经直观展示当前值(开关的拨杆位置、下拉框的选中内容、主题按钮写着「切换到浅色主题」), 再用一行文字复述一遍只是陪读(用户 2026-10-30 反馈)。删掉的键(中英两份同删): `settings.current_theme`、`settings.current_language`、`settings.debug_state` / `debug_on` / `debug_off`、`settings.activation_state` / `activation_on` / `activation_off`、`settings.current_verification`, 以及随之失去引用的 `theme.name_dark` / `theme.name_light`。语言/调试/启停三行**原位**改成平时整行收起的错误行(与「记住窗口」那条同款, 见 `settings_window._set_transient_line`), 应用失败时仍会把原因写出来; 主题按钮本来就没有失败路径, 整行删除。备份校验面板只留并发数一句 —— 那个数界面上没有别的控件表达, 改键为 `settings.verification_parallel`(「同时进行的校验任务数: {parallel}(按本机自动确定)」)。
 现在的做法: 弹窗建好后照看主窗口一小会儿(几十毫秒一轮, 有上限), 尺寸/位置一变就跟着重算居中; 主窗口落地且几何稳定后立即停手。热路径(软件已经打开)下位置一次就算对, 复查只是空转 —— 用户看不到任何跳动。不"先睡一会儿再校一次"是因为主窗口什么时候落地由窗口管理器决定, 固定时长要么不够要么白等。
+
+## 设置窗口页脚指引说明(2026-11-04)
+
+删掉的键(中英两份同删): `settings.note`(「备份目录与日志位置见「存储位置」分区，其余设置按类别放在上面各分区。」/ "Backup and log locations are shown in the Storage section; other settings live in the sections above.")。
+
+为什么删: 那句是对全场布局的二次描述, 而分区标题本身已经说明内容归属(用户 2026-11-04 反馈)。同一天把存储分区升到最上、两处详情块改默认折叠后它进一步归零 —— 常开区就是最常用的区, 细节按需展开, 与其用一行文字解释布局, 不如把布局本身改成不需要解释。与「设置面板的成段说明」同一条取舍线: 界面文字只写控件自己说不清的事。

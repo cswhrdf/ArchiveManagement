@@ -340,6 +340,40 @@ def test_reveal_uses_the_platform_file_manager_command(
         monkeypatch.setattr(reveal, "current_platform", lambda f=family: f)
         reveal.reveal_in_file_manager(str(tmp_path))
         assert ran == [[command, str(tmp_path)]]
+    # 文件行不打开文件本体: macOS 选中它(``open -R``), Linux 没有统一的"选中"
+    # 惯例、退到打开其父目录 —— 两边落点都是"所在目录"。
+    log = tmp_path / "app.log"
+    log.write_text("x", encoding="utf-8")
+    ran.clear()
+    monkeypatch.setattr(reveal, "current_platform", lambda: "macos")
+    reveal.reveal_in_file_manager(str(log))
+    assert ran == [["open", "-R", str(log)]]
+    ran.clear()
+    monkeypatch.setattr(reveal, "current_platform", lambda: "linux")
+    reveal.reveal_in_file_manager(str(log))
+    assert ran == [["xdg-open", str(tmp_path)]]
+
+
+def test_reveal_selects_an_existing_file_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows 对文件行走资源管理器的"选中"(``explorer /select,``), 绝不直接打开文件."""
+    monkeypatch.setattr(reveal, "current_platform", lambda: "windows")
+    ran: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool = False) -> None:
+        ran.append(args)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", opened.append, raising=False)
+    target = tmp_path / "archive-management.db"
+    target.write_bytes(b"x")
+
+    reveal.reveal_in_file_manager(str(target))
+
+    assert ran == [["explorer", f"/select,{target}"]]
+    assert opened == [], "文件不能被当作目录用 os.startfile 打开本体"
 
 
 def test_reveal_swallows_open_failures(

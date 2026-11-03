@@ -554,8 +554,8 @@ def test_settings_window_fits_its_content(
 
     文字会随语言换行, 写死高度时"关闭"按钮会被推到窗口外面 —— 用户看不到也点不到
     (2026-10 实测: 面板还带成段说明时中文要 630px、英文要 644px)。成段说明与各
-    面板的"当前状态"行移出后, 常驻的多行文字只剩校验面板的并发数说明与页脚说明
-    (语言/调试/启停的错误行平时整行收起, 没有可量的宽度).
+    面板的"当前状态"行移出后, 常驻的多行文字只剩校验面板的并发数说明(语言/调试/
+    启停的错误行平时整行收起, 页脚指引说明 2026-11-04 已删, 没有可量的宽度).
     """
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -564,22 +564,16 @@ def test_settings_window_fits_its_content(
     _pump(app)
     window = _settings_window(app, [])
     # 窗口要先真的被映射/布局, 下面的尺寸才有意义(winfo_width 在未布局时是 1).
-    assert _wait_for(app, lambda: window._note_label.winfo_width() > 1), "窗口未布局"
+    assert _wait_for(app, lambda: window._close_btn.winfo_width() > 1), "窗口未布局"
 
     frame = window._window
     frame.update_idletasks()
     bottom = frame.winfo_rooty() + frame.winfo_height()
-    for name, widget in (
-        ("说明", window._note_label),
-        ("关闭按钮", window._close_btn),
-    ):
+    for name, widget in (("关闭按钮", window._close_btn),):
         edge = widget.winfo_rooty() + widget.winfo_height()
         hint = f"{name}被推出窗口: {edge} > {bottom}"
         assert edge <= bottom, hint
-    for name, label in (
-        ("校验并发数说明", window._verification_status),
-        ("页脚说明", window._note_label),
-    ):
+    for name, label in (("校验并发数说明", window._verification_status),):
         cut = label.winfo_reqwidth() - label.winfo_width()
         hint = f"{name}被裁掉 {cut}px(换行宽度超过了可用宽度)"
         assert cut <= 1, hint
@@ -1203,6 +1197,26 @@ def test_settings_storage_panel_wires_locations_and_pending_restart() -> None:
         on_open_location=opened.append,
     )
     try:
+        # ⓪ 两个详情块默认折叠(P2c): 常开的只有主路径, 细节点开才占高度;
+        #    按钮文字写"点击后会发生什么", 点开/收起各验一次。
+        assert window._storage_details.winfo_manager() == "", "位置详情默认应收起"
+        assert window._log_details.winfo_manager() == "", "滚动详情默认应收起"
+        assert window._storage_details_btn.cget("text") == tr(
+            "settings.storage_details_show"
+        )
+        window._storage_details_btn.invoke()
+        assert window._storage_details.winfo_manager() != "", "点开后位置详情要占回"
+        assert window._storage_details_btn.cget("text") == tr(
+            "settings.storage_details_hide"
+        )
+        window._log_details_btn.invoke()
+        assert window._log_details.winfo_manager() != "", "点开后滚动详情要占回"
+        assert window._log_mb_entry.get() == "100", "展开后输入框仍带初值"
+        # 收得回去才算真折叠(两块各自验一次)。
+        window._storage_details_btn.invoke()
+        assert window._storage_details.winfo_manager() == ""
+        window._log_details_btn.invoke()
+        assert window._log_details.winfo_manager() == ""
         # ① 只读位置行: 五个内置位置都展示, 值原样挂在行上(显示时会按宽度重裁)。
         keys = list(window._storage_values)
         assert keys == [
