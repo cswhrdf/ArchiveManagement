@@ -427,6 +427,10 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         on_apply_shortcut=apply,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
 
 
@@ -963,6 +967,10 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         on_apply_shortcut=lambda action, accelerator: None,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
     try:
         # ① 语言: 不认识的值与"当前语言"都不写回; 换一种语言则回调报错 → 显示原因.
@@ -1097,6 +1105,10 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         on_apply_shortcut=lambda _action, _accelerator: "快捷键被占用",
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
     try:
         # ① 字号: 回调返回 None 表示成功, 下拉停在新值上。
@@ -1133,6 +1145,153 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         assert window._verification_status.cget("text") == tr(
             "settings.verification_parallel", parallel=2
         )
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_settings_storage_panel_wires_locations_and_pending_restart() -> None:
+    """存储位置分区: 只读行带"打开位置"接线, 动作按钮触发注入回调, 待重启提示随回填翻转."""
+    from dataclasses import replace
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import StorageOverview
+    from archive_management.ui.settings_window import SettingsWindow
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    builtin = "D:/AppData/Demo/data/backups"
+    storage = StorageOverview(
+        backup_root=builtin,
+        next_backup_root=builtin,
+        database_path="D:/AppData/Demo/data/archive-management.db",
+        config_path="D:/AppData/Demo/config/config.json",
+        log_file="D:/AppData/Demo/logs/app.log",
+        exports_dir="D:/AppData/Demo/data/exports",
+        artwork_dir="D:/AppData/Demo/data/artwork",
+    )
+    opened: list[str] = []
+    requested: list[str] = []
+    window = SettingsWindow(
+        app,
+        palette=app.p,
+        theme=app._theme,
+        language=app._language,
+        base_font_px=16,
+        verification_mode="sha256",
+        verification_parallel=2,
+        debug=False,
+        log_max_mb=100,
+        log_backups=5,
+        activation=False,
+        remember_window=True,
+        shortcuts=app._shortcuts,
+        on_toggle_theme=lambda: app._theme,
+        on_apply_language=lambda _locale: None,
+        on_apply_font_size=lambda _size: None,
+        on_apply_verification=lambda _mode: None,
+        on_apply_debug=lambda _enabled: None,
+        on_apply_log_rotation=lambda _max_mb, _count: None,
+        on_apply_activation=lambda _enabled: None,
+        on_apply_remember_window=lambda _enabled: None,
+        on_apply_shortcut=lambda _action, _accelerator: None,
+        on_capture_start=lambda: None,
+        on_capture_end=lambda: None,
+        storage=storage,
+        on_change_backup_root=lambda: requested.append("change"),
+        on_restore_backup_root=lambda: requested.append("restore"),
+        on_open_location=opened.append,
+    )
+    try:
+        # ① 只读位置行: 五个内置位置都展示, 值原样挂在行上(显示时会按宽度重裁)。
+        keys = list(window._storage_values)
+        assert keys == [
+            "settings.storage_database",
+            "settings.storage_config",
+            "settings.storage_log",
+            "settings.storage_exports",
+            "settings.storage_artwork",
+        ], "只读行的顺序即展示顺序, 不能随便插行"
+        assert window._storage_values["settings.storage_log"][1] == (storage.log_file)
+        # ② "打开位置"把该行的值交给注入的回调(打开的是日志所在目录那一路径本身,
+        #    回退到最近已存在父目录是 reveal 服务的事)。
+        window._storage_open_buttons[2].invoke()
+        assert opened == [storage.log_file]
+        # ③ 两个动作按钮只触发回调: 校验/写配置/回填都在主窗口的应用链路里。
+        window._backup_change_btn.invoke()
+        window._backup_restore_btn.invoke()
+        assert requested == ["change", "restore"]
+        # ④ 平时没有"重启后"行(状态由行的有无表达); 改了还没重启才出现。
+        assert window._backup_next.winfo_manager() == "", "未改动时提示行应收起"
+        pending = replace(storage, next_backup_root="E:/NewBackups")
+        window.refresh_storage(pending)
+        assert window._backup_next.cget("text") == tr(
+            "settings.backup_root_next", path="E:/NewBackups"
+        )
+        assert window._backup_next.winfo_manager() != ""
+        # 恢复默认后(两口径重合)提示行重新收起。
+        window.refresh_storage(storage)
+        assert window._backup_next.winfo_manager() == ""
+        # ⑤ 反馈行: 失败文案显示(颜色由语义色守卫族盯着, 这里只管内容与收起)。
+        window.notify_storage("无法更改备份位置", error=True)
+        assert window._storage_error.cget("text") == "无法更改备份位置"
+        window.notify_storage("")
+        assert window._storage_error.winfo_manager() == ""
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_change_and_restore_backup_root_flow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """主窗口应用链路: 选目录→写配置→回填+成功反馈; 取消静默; 拒绝给原因; 无窗口不抛."""
+    from archive_management.ui import main_window as main_window_module
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = app._open_settings()
+    app._active_window = window
+    try:
+        # ① 目录选择器被取消: 静默返回, 不写任何反馈(两条说明行都还收着)。
+        monkeypatch.setattr(main_window_module, "pick_directory", lambda **_kw: None)
+        app._change_backup_root()
+        assert window._storage_error.winfo_manager() == ""
+        assert window._backup_next.winfo_manager() == ""
+
+        # ② 选了合法目录: 覆盖写入, 总览回填, "重启后"行出现, 反馈是保存成功。
+        chosen = str(tmp_path / "new-backups")
+        monkeypatch.setattr(main_window_module, "pick_directory", lambda **_kw: chosen)
+        app._change_backup_root()
+        overview = app.backend.storage_overview()
+        assert overview.restart_pending
+        assert Path(overview.next_backup_root) == (tmp_path / "new-backups").resolve()
+        assert window._backup_next.cget("text") == tr(
+            "settings.backup_root_next", path=overview.next_backup_root
+        )
+        assert window._storage_error.cget("text") == tr("settings.storage_saved")
+
+        # ③ 恢复默认: 反馈换恢复文案, 待重启提示重新收起。
+        app._restore_backup_root()
+        assert window._storage_error.cget("text") == tr("settings.storage_restored")
+        assert window._backup_next.winfo_manager() == ""
+        assert app.backend.storage_overview().restart_pending is False
+
+        # ④ 后端拒绝(带原因代码): 原因翻译进反馈行, 配置不被改动。
+        def refuse(_raw: str) -> None:
+            raise ValueError("not_writable")
+
+        monkeypatch.setattr(app.backend, "set_backup_root", refuse)
+        app._restore_backup_root()
+        assert window._storage_error.cget("text") == tr(
+            "settings.storage_failed",
+            reason=tr("settings.storage_err_not_writable"),
+        )
+
+        # ⑤ 设置窗口不在(理论上点不到): 早退, 不抛异常。
+        app._active_window = None
+        app._restore_backup_root()  # 不抛即通过
     finally:
         window.close()
         app.destroy()

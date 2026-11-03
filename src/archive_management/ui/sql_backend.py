@@ -40,7 +40,11 @@ from archive_management.application.locations import (
     remove_save_location,
 )
 from archive_management.application.restore import RestorePlan, RestoreService
-from archive_management.config import load_or_repair_config
+from archive_management.application.storage import (
+    backup_root_error,
+    normalize_backup_root,
+)
+from archive_management.config import load_or_repair_config, save_config
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     PLATFORM_IDS,
@@ -68,6 +72,7 @@ from archive_management.exceptions import (
 )
 from archive_management.i18n import current_locale, tr
 from archive_management.infrastructure.database import Database
+from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.infrastructure.repository import (
     BackupRepository,
     CandidateRepository,
@@ -76,6 +81,7 @@ from archive_management.infrastructure.repository import (
     SaveLocationRepository,
     ScheduledJobRepository,
 )
+from archive_management.logging_config import LOG_FILENAME
 from archive_management.services.artwork import (
     ArtworkCache,
     UserArtworkStore,
@@ -130,6 +136,7 @@ from archive_management.ui.models import (
     SavePathSuggestion,
     ScanSummary,
     ScheduleItem,
+    StorageOverview,
     TaskStatus,
     clean_game_name,
     delete_result_text,
@@ -324,6 +331,7 @@ class SqlArchiveService:
         name_fetcher: NameFetcher | None = None,
         process_provider: ProcessNameProvider | None = None,
         config_path: Path | None = None,
+        builtin_paths: ApplicationPaths | None = None,
     ) -> None:
         """绑定数据库、备份根目录、调度器与缓存目录(后两者默认惰性创建).
 
@@ -335,7 +343,9 @@ class SqlArchiveService:
         它**不在这里创建**, 只在真的要写出告别包时创建。``artwork_dir`` 是**用户自己
         指定**的封面/图标落点, 同样省略时取备份目录旁边(生产里是
         :attr:`ApplicationPaths.artwork_dir`) —— 它与 ``cache_dir`` 分开: 缓存可以
-        整体清理, 用户挑的图不能。
+        整体清理, 用户挑的图不能。``builtin_paths`` 是**内置**应用路径(不随
+        ``storage.backup_root`` 覆盖移动), 设置页"存储位置"分区靠它展示各位置与
+        "下次启动"的内置备份根; 省略时总览里的位置字段为空、下次启动按当前根算。
         """
         self._database = database
         self._backup_root = backup_root
@@ -380,6 +390,9 @@ class SqlArchiveService:
         self._cache_dir = cache_dir
         self._save_source = save_source
         self._adapters = adapters
+        self._builtin_paths = builtin_paths
+        # config_path 也留字段引用: 存储位置分区要反复读它(改备份根写的就是这份配置)。
+        self._config_path = config_path
         self._name_fetcher = name_fetcher
         self._process_provider = process_provider
         self._names_lock = threading.Lock()
@@ -876,6 +889,76 @@ class SqlArchiveService:
         self._theme = "dark" if name == "dark" else "light"
         log_action("ui.set_theme", basic=True, theme=self._theme)
         return self._theme
+
+    # -- 存储位置 -----------------------------------------------------------
+
+    def storage_overview(self) -> StorageOverview:
+        """返回存储位置总览: 当前生效根 + 配置里写定的"下次启动"根."""
+        override: str | None = None
+        if self._config_path is not None:
+            override = load_or_repair_config(
+                self._config_path
+            ).config.storage.backup_root
+        builtin = self._builtin_paths
+        if override is not None:
+            next_root = override
+        elif builtin is not None:
+            next_root = str(builtin.backup_root)
+        else:
+            next_root = str(self._backup_root)
+        return StorageOverview(
+            backup_root=str(self._backup_root),
+            next_backup_root=next_root,
+            database_path=(str(builtin.database_path) if builtin is not None else ""),
+            config_path=str(builtin.config_path) if builtin is not None else "",
+            log_file=(
+                str(builtin.log_dir / LOG_FILENAME) if builtin is not None else ""
+            ),
+            exports_dir=str(builtin.exports_dir) if builtin is not None else "",
+            artwork_dir=str(builtin.artwork_dir) if builtin is not None else "",
+        )
+
+    def set_backup_root(self, path: str | None) -> None:
+        """写入备份根覆盖(空串或 None = 恢复内置位置); 非法时抛带原因代码的 ValueError.
+
+        只改配置并审计: 当前会话的服务(快照/备份/导出)已按旧位置注入, 新位置
+        **重启后生效** —— 运行中切换会把"正在写的备份"与"界面显示的根"拆到两
+        个目录, 这正是 P2b 明确不做的事。
+        """
+        raw = "" if path is None else path
+        protected: tuple[Path, ...] = (self._backup_root,)
+        if self._builtin_paths is not None:
+            protected = (
+                self._builtin_paths.data_dir,
+                self._builtin_paths.backup_root,
+                self._backup_root,
+            )
+        reason = backup_root_error(
+            raw,
+            protected=protected,
+            save_paths=tuple(self._locations.list_all_paths()),
+        )
+        if reason is not None:
+            log_action(
+                "storage.set_backup_root_rejected",
+                target=redacted_path(raw),
+                reason=reason,
+            )
+            raise ValueError(reason)
+        if self._config_path is None:
+            # 没有配置文件可写(未注入 config_path 的测试场景): 明确报错而不是
+            # 静默"成功", 否则界面会告诉用户"已保存"而磁盘上什么都没变。
+            raise ValueError("no_config")
+        config = load_or_repair_config(self._config_path).config
+        normalized = normalize_backup_root(raw)
+        config.storage.backup_root = normalized or None
+        save_config(config, self._config_path)
+        log_action(
+            "storage.set_backup_root",
+            target=redacted_path(normalized),
+            restored=normalized == "",
+        )
+        self._touch()
 
     # -- 本地游戏探测与监控目录 -------------------------------------------
 

@@ -687,6 +687,43 @@ def can_backup(game: GameSummary | None) -> bool:
 
 
 @dataclass(frozen=True)
+class StorageOverview:
+    """存储位置总览(设置页「存储位置」分区).
+
+    ``backup_root`` 是**当前会话**生效的备份根(启动时注入, 之后改配置也不变);
+    ``next_backup_root`` 是下次启动会用的位置(配置里写定的覆盖, 没写就是内置
+    位置)。两者不一致 = 用户改了位置但还没重启, 界面据此高亮提示。
+    其余字段都是内置位置(不随备份根覆盖移动, 见 P2b 范围红线)。
+    """
+
+    backup_root: str
+    next_backup_root: str
+    database_path: str
+    config_path: str
+    # 日志文件(不是目录): "打开位置"打开它所在的目录。
+    log_file: str
+    exports_dir: str
+    artwork_dir: str
+
+    @property
+    def restart_pending(self) -> bool:
+        """改了备份位置但还没重启(当前与下次启动不一致)."""
+        return self.backup_root != self.next_backup_root
+
+
+def storage_error_text(code: str) -> str:
+    """把 ``set_backup_root`` 抛出的原因代码映射为用户可读文案.
+
+    已知代码走 ``settings.storage_err_*`` 文案键; 未知代码(后端将来新增、界面
+    还没跟上)原样返回, 至少比一串键名可读。放在展示模型层: 后端只抛代码,
+    "怎么向用户解释"与其它文案规则同属一层。
+    """
+    key = f"settings.storage_err_{code}"
+    text = tr(key)
+    return text if text != key else code
+
+
+@dataclass(frozen=True)
 class ScanSummary:
     """一次本机探测的结果摘要(探测窗口据此显示提示与计数)."""
 

@@ -67,6 +67,7 @@ from archive_management.services.hotkeys import (
     parse_accelerator,
 )
 from archive_management.services.naming import game_slug
+from archive_management.services.reveal import reveal_in_file_manager
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import (
     ask_branch_name,
@@ -108,10 +109,11 @@ from archive_management.ui.models import (
     import_prompt,
     import_strategies,
     size_label,
+    storage_error_text,
     timeline_order,
 )
 from archive_management.ui.palette import DEFAULT_THEME, Palette
-from archive_management.ui.pickers import pick_file, pick_save_file
+from archive_management.ui.pickers import pick_directory, pick_file, pick_save_file
 from archive_management.ui.rendering import host_image
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
@@ -3282,6 +3284,7 @@ class ArchiveApp(ctk.CTk):
             activation=self._activation,
             remember_window=self._remember_window,
             shortcuts=self._shortcuts,
+            storage=self.backend.storage_overview(),
             on_toggle_theme=self._on_toggle_theme,
             on_apply_language=self._on_language_change,
             on_apply_font_size=self._on_font_size_change,
@@ -3293,6 +3296,51 @@ class ArchiveApp(ctk.CTk):
             on_apply_shortcut=self._apply_shortcut,
             on_capture_start=self._hotkeys.suspend,
             on_capture_end=self._hotkeys.resume,
+            on_change_backup_root=self._change_backup_root,
+            on_restore_backup_root=self._restore_backup_root,
+            on_open_location=reveal_in_file_manager,
+        )
+
+    def _change_backup_root(self) -> None:
+        """设置窗口"更改位置": 弹目录选择器, 选完走同一条应用链路."""
+        overview = self.backend.storage_overview()
+        picked = pick_directory(
+            title=tr("settings.change_backup_root"),
+            start_from=overview.next_backup_root,
+        )
+        if not picked:
+            return  # 取消选择: 不动配置, 也不用提示打断用户
+        self._apply_backup_root(picked)
+
+    def _restore_backup_root(self) -> None:
+        """设置窗口"使用默认位置": 清掉配置里的覆盖(空输入即恢复内置)."""
+        self._apply_backup_root("")
+
+    def _apply_backup_root(self, raw: str) -> None:
+        """校验并写入新的备份根覆盖, 回填设置窗口; 失败原因就地显示在分区里.
+
+        后端只改配置(服务仍按旧位置跑), 因此成功后只回填总览与"重启后"提示,
+        不去动当前会话的任何路径 —— 运行中切换会把正在写的备份与界面显示的根
+        拆到两个目录, 这正是 P2b 明确不做的事。
+        """
+        window = self._active_window
+        if not isinstance(window, SettingsWindow):
+            return
+        try:
+            self.backend.set_backup_root(raw)
+        except ValueError as exc:
+            window.notify_storage(
+                tr(
+                    "settings.storage_failed",
+                    reason=storage_error_text(str(exc)),
+                ),
+                error=True,
+            )
+            return
+        restored = not raw.strip()
+        window.refresh_storage(self.backend.storage_overview())
+        window.notify_storage(
+            tr("settings.storage_restored" if restored else "settings.storage_saved")
         )
 
     def _apply_shortcut(self, action: str, accelerator: str) -> str | None:
@@ -3746,11 +3794,17 @@ def run_gui(
     """
     from archive_management.config import load_or_repair_config
     from archive_management.infrastructure.database import Database
+    from archive_management.infrastructure.paths import effective_paths
     from archive_management.logging_config import configure_from_settings
     from archive_management.ui.sql_backend import SqlArchiveService
 
-    paths = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
-    loaded = load_or_repair_config(paths.config_path)
+    # 两步构造: 自建 paths 时(没有调用方给)还要按配置里的 storage.backup_root
+    # 覆盖备份根; 调用方(app._start_gui)传入的已经是生效值, 再套一次也幂等。
+    # base 始终留着"内置"那套引用: 设置页"存储位置"分区靠它展示各位置与
+    # "下次启动"的内置备份根(它们不随备份根覆盖移动)。
+    base = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
+    loaded = load_or_repair_config(base.config_path)
+    paths = effective_paths(base, loaded.config)
     configure_from_settings(paths.log_dir, loaded.config.logging, verbose=verbose)
     if loaded.reset:
         logger.warning("配置文件内容非法, 已还原为默认值: %s", loaded.backup)
@@ -3769,9 +3823,11 @@ def run_gui(
     backend: ArchiveService = SqlArchiveService(
         database,
         backup_root=paths.backup_root,
+        exports_dir=paths.exports_dir,
         cache_dir=paths.cache_dir,
         artwork_dir=paths.artwork_dir,
         config_path=paths.config_path,
+        builtin_paths=base,
     )
     app = ArchiveApp(
         backend,

@@ -753,6 +753,10 @@ def _settings_window(app: Any) -> Any:
         on_apply_shortcut=lambda _action, _accelerator: None,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
 
 

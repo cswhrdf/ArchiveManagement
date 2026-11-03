@@ -411,6 +411,16 @@ class SaveLocationRepository:
             ).fetchall()
         return {int(row["game_id"]) for row in rows}
 
+    def list_all_paths(self) -> list[str]:
+        """返回库里登记过的全部存档位置路径(改备份根前的"重合"校验用).
+
+        新备份根若与任何一条原始存档位置相同, "备份绝不写进原始目录"的保护就
+        会失效, 因此设置页改位置时要把这张清单交给校验(见 application.storage)。
+        """
+        with self._database.connect() as connection:
+            rows = connection.execute("SELECT path FROM save_locations").fetchall()
+        return [str(row["path"]) for row in rows]
+
     def get(self, location_id: int) -> SaveLocation | None:
         """按 id 返回单个存档位置; 不存在返回 None."""
         with self._database.connect() as connection:

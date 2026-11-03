@@ -24,6 +24,10 @@ from archive_management.application.imports import (
 )
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan, RestoreTarget
+from archive_management.application.storage import (
+    backup_root_error,
+    normalize_backup_root,
+)
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     ActivationState,
@@ -57,6 +61,7 @@ from archive_management.ui.models import (
     SavePathSuggestion,
     ScanSummary,
     ScheduleItem,
+    StorageOverview,
     TaskStatus,
     clean_game_name,
     delete_result_text,
@@ -66,6 +71,9 @@ from archive_management.ui.models import (
 
 # 刻意用于演示恢复失败的中断节点
 _FAIL_RESTORE_ID = "b2"
+
+# 演示后端"内置备份根"的占位文本: 不触碰真实磁盘, 只用于展示与词法比较。
+_DEMO_BACKUP_ROOT = str(Path.home() / "ArchiveManagement-Demo" / "backups")
 
 
 def _chosen_strategy(choice: ImportChoice | None) -> str:
@@ -402,6 +410,9 @@ class DemoArchiveService:
         self._theme = "dark"
         self._keep_auto = 3
         self._revision = 0
+        # 设置页"存储位置"的演示状态: 备份根覆盖只记在内存(演示后端不写用户磁盘),
+        # 语义与真实后端一致 —— 改完要重启才反映到 backup_root 字段。
+        self._backup_root_override: str | None = None
         # 每个游戏的定时备份配置: game_id -> (周期文本, 是否启用, 保留份数).
         self._schedules: dict[str, tuple[str, bool, int]] = {
             "outer-wilds": ("1d", True, 3),
@@ -704,6 +715,29 @@ class DemoArchiveService:
         """切换主题 (dark/light), 返回生效主题."""
         self._theme = "dark" if name == "dark" else "light"
         return self._theme
+
+    # -- 存储位置 -----------------------------------------------------------
+
+    def storage_overview(self) -> StorageOverview:
+        """演示总览: 内置位置用假路径占位, 覆盖语义与真实后端一致."""
+        override = self._backup_root_override
+        return StorageOverview(
+            backup_root=_DEMO_BACKUP_ROOT,
+            next_backup_root=override if override else _DEMO_BACKUP_ROOT,
+            database_path="",
+            config_path="",
+            log_file="",
+            exports_dir="",
+            artwork_dir="",
+        )
+
+    def set_backup_root(self, path: str | None) -> None:
+        """演示: 覆盖只记在内存, 但校验语义与真实后端完全一致(非法值照样抛)."""
+        raw = "" if path is None else path
+        reason = backup_root_error(raw, protected=(Path(_DEMO_BACKUP_ROOT),))
+        if reason is not None:
+            raise ValueError(reason)
+        self._backup_root_override = normalize_backup_root(raw) or None
 
     # -- 写操作(阻塞,供后台线程执行) --------------------------------------
 

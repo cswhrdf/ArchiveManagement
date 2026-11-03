@@ -18,6 +18,7 @@ from archive_management.config import DEFAULT_LOG_MAX_BYTES, LoggingSettings
 
 _ROOT_LOGGER = "archive_management"
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+LOG_FILENAME = "archive-management.log"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -99,7 +100,7 @@ def configure_logging(
 
     formatter = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
     file_handler = RotatingFileHandler(
-        log_dir / "archive-management.log",
+        log_dir / LOG_FILENAME,
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",

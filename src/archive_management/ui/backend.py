@@ -31,6 +31,7 @@ from archive_management.ui.models import (
     MonitoredDirItem,
     ScanSummary,
     ScheduleItem,
+    StorageOverview,
     TaskStatus,
 )
 
@@ -61,6 +62,18 @@ class ArchiveService(Protocol):
 
     def set_theme(self, name: str) -> str:
         """切换主题并返回最终生效的主题名."""
+        ...
+
+    def storage_overview(self) -> StorageOverview:
+        """返回存储位置总览(各位置 + 下次启动的备份根)."""
+        ...
+
+    def set_backup_root(self, path: str | None) -> None:
+        """写入备份根覆盖(空串或 None = 恢复内置位置); 非法时抛带原因代码的 ValueError.
+
+        只改配置: 当前会话的服务已按旧位置注入, 新位置**重启后生效**(界面据此
+        提示, 不做运行中切换)。
+        """
         ...
 
     def run_backup_now(self, game_id: str) -> str:

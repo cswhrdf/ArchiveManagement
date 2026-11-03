@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 import archive_management.app as app_module
-from archive_management.config import AppConfig, load_config
+from archive_management.config import AppConfig, load_config, save_config
 from archive_management.infrastructure.database import Database
 from archive_management.infrastructure.paths import ApplicationPaths
 
@@ -483,3 +483,51 @@ def test_the_escape_hatch_lets_a_second_packaged_instance_through(
         running.release()
 
     assert opened == ["gui"], "逃生门打开时不该拦"
+
+
+def test_explicit_root_suppresses_the_configured_backup_root(
+    tmp_path: Path,
+) -> None:
+    """--root 便携模式压制配置覆盖: 备份根跟随 --root, 报告标注来源."""
+    code, output = _run_with_output(["--root", str(tmp_path), "doctor"])
+    assert code == 0
+    builtin = tmp_path / "data" / "backups"
+    assert f"备份根  : {builtin} (跟随 --root)" in output
+
+    alt = tmp_path / "alt-backups"
+    save_config(
+        AppConfig.model_validate({"storage": {"backup_root": str(alt)}}),
+        tmp_path / "config" / "config.json",
+    )
+    code, output = _run_with_output(["--root", str(tmp_path), "doctor"])
+    assert code == 0
+    assert f"备份根  : {builtin} (跟随 --root)" in output
+    assert str(alt) not in output
+
+
+def test_doctor_reports_the_configured_backup_root_override(tmp_path: Path) -> None:
+    """无 --root 时配置覆盖生效: 报告显示新根并标注"配置覆盖".
+
+    不走 run()(会碰真实系统目录), 直接按"没写 --root"的口径调 doctor ——
+    GUI 的两步构造(app._start_gui)与这里同一条链路。
+    """
+    base = ApplicationPaths.default(override_root=tmp_path).ensure()
+    builtin = base.backup_root
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        code = app_module._run_doctor(base, override_root_used=False, verbose=False)
+    assert code == 0
+    assert f"备份根  : {builtin} (内置位置)" in buffer.getvalue()
+
+    alt = tmp_path / "alt-backups"
+    save_config(
+        AppConfig.model_validate({"storage": {"backup_root": str(alt)}}),
+        base.config_path,
+    )
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        code = app_module._run_doctor(base, override_root_used=False, verbose=False)
+
+    assert code == 0
+    assert f"备份根  : {alt.resolve()} (配置覆盖)" in buffer.getvalue()
+    assert alt.resolve().is_dir()

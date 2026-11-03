@@ -20,6 +20,7 @@ from archive_management.config import (
     load_config,
     load_or_repair_config,
     parse_config,
+    repair_config,
     save_config,
 )
 from archive_management.exceptions import ConfigurationError
@@ -483,3 +484,35 @@ def test_a_failed_derived_write_still_yields_a_usable_config(
 
     assert loaded.reset is False
     assert MIN_PARALLEL <= loaded.config.verification.max_parallel <= MAX_PARALLEL
+
+
+def test_storage_backup_root_defaults_to_none_and_normalizes_blank(
+    tmp_path: Path,
+) -> None:
+    """storage 段默认没有覆盖; 空串一律归一成 None(清空输入 = 恢复内置位置)."""
+    assert AppConfig().storage.backup_root is None
+    target = tmp_path / "backups-elsewhere"
+    config = AppConfig.model_validate({"storage": {"backup_root": str(target)}})
+    assert config.storage.backup_root == str(target)
+    blank = AppConfig.model_validate({"storage": {"backup_root": ""}})
+    assert blank.storage.backup_root is None
+
+
+def test_storage_backup_root_rejects_relative_paths() -> None:
+    """相对路径拒绝: 备份根必须是绝对路径."""
+    with pytest.raises(ConfigurationError):
+        parse_config({"version": 1, "storage": {"backup_root": "relative/path"}})
+
+
+def test_storage_backup_root_repairs_to_default() -> None:
+    """非法的备份根在逐字段修复里剔除, 其余字段原样保留."""
+    raw: dict[str, Any] = {
+        "theme": "dark",
+        "storage": {"backup_root": "relative/path"},
+    }
+    cleaned, notes = repair_config(raw)
+    assert "storage.backup_root" in notes
+    assert "theme" not in notes
+    config = AppConfig.model_validate(cleaned)
+    assert config.storage.backup_root is None
+    assert config.theme == "dark"

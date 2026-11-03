@@ -74,7 +74,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 
 ## 配置文件
 
-配置文件是配置目录下的 `config.json`（主题、全局快捷键、日志参数、界面字号、是否记住窗口大小与位置、上次关闭时的窗口尺寸位置），由 pydantic 严格校验：未知字段、版本不符、非法快捷键都直接拒绝。
+配置文件是配置目录下的 `config.json`（主题、全局快捷键、日志参数、界面字号、是否记住窗口大小与位置、上次关闭时的窗口尺寸位置、备份根覆盖 `storage.backup_root`），由 pydantic 严格校验：未知字段、版本不符、非法快捷键都直接拒绝。
 
 `window` 段（`width`/`height`/`x`/`y`）是程序自己写的：关窗时记下主窗口当时的尺寸与位置（**最大化/最小化/全屏关闭时跳过这一项**，见 `ui/main_window.py` 的 `current_window_geometry`），下次打开时夹进当前屏幕再用；四项缺一项就当没记过（用设计尺寸）。手改这四个值时超范围会被逐字段修复剔掉，不会把窗口摆到屏幕外。
 
@@ -95,6 +95,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - **换版本、移动或删掉程序目录都不会动到这些目录**；想彻底重置就删掉它们（清理步骤见 `wiki/10 常见问题与故障排查`）。
 - **想看当前生效的真实路径**：打包版 `ArchiveManagement.exe doctor`、源码版 `uv run python -m archive_management doctor`，它会把配置 / 数据 / 日志 / 数据库 / 备份根逐行打出来（不带参数启动的 `init` 也会打同一张表）。
 - **便携模式**：给程序加 `--root <目录>`，四类目录都收敛到 `<目录>\{config,data,logs,cache}` 下（打包版可以把参数写进快捷方式；“只给 `--root`”也直接开界面，见「命令行」一节）。
+- **备份根覆盖与两步构造**（2026-11-03，P2b）：配置里的 `storage.backup_root`（设置窗口「存储位置」分区写入，绝对路径字符串或 `null` = 内置位置）可以把**备份根**单独指到别处，数据库/配置/日志/缓存/封面仍留内置目录。优先级是 `--root`（明确指定时配置覆盖整个被压制，`doctor` 打印"跟随 --root"）＞ `storage.backup_root`（`doctor` 打印"配置覆盖"）＞ 内置 `data_dir/backups`（`doctor` 打印"内置位置"）。启动因此分两步（`app.py` 的 `_session_paths()`）：先用 `--root`/平台默认构造基础 paths 并 `ensure()`（读配置本身需要 config 目录先在），读出配置后若存在合法覆盖再用 `ApplicationPaths.with_backup_root()` 得出**生效 paths**，后续注入（备份/恢复/导出/导入/调度）一律用生效实例；覆盖值非法（相对路径、点进危险目标等）在配置修复时落回默认并按既有规则留 `.invalid`。**改动重启后才生效**：会话内各服务按启动时注入的位置跑完当次，界面靠 `StorageOverview.restart_pending` 提示"重启后"的下一个值。写入校验集中在 `application/storage.py`（复用 pathcheck 的危险目标判定，另补"与任何游戏的原始存档位置相同"与可写性两条），审计 `storage.set_backup_root` / `_rejected`。已有备份**不做迁移**（一期明确不做）：留在原地仍可恢复，新备份落新处。
 
 ## 质量门禁
 

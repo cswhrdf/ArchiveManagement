@@ -40,10 +40,14 @@ from archive_management.services.hotkeys import (
     tk_token,
 )
 from archive_management.ui.dialogs import _present
+from archive_management.ui.models import StorageOverview
 from archive_management.ui.palette import Palette
+from archive_management.ui.textfit import fit_path
 from archive_management.ui.typography import FONT_CHOICES, FONT_HINT
 from archive_management.ui.widgets import (
     auto_scrollbar,
+    measured_font,
+    sync_tooltip,
     track_wraplength,
     window_scaling,
 )
@@ -89,6 +93,10 @@ _ApplyLogRotation = Callable[[int, int], "str | None"]
 _ApplyVerification = Callable[[str], "str | None"]
 # 录制开始/结束的钩子(主窗口据此暂停与恢复全局快捷键).
 _CaptureHook = Callable[[], None]
+# 请求换一个备份根(主窗口弹目录选择器并走校验/写配置, 再回填窗口).
+_RequestBackupRoot = Callable[[], None]
+# 打开某个位置(注入 services.reveal, 用例换替身).
+_OpenLocation = Callable[[str], None]
 
 # 校验方式下拉里的文案键与取值一一对应(顺序即展示顺序, 默认选中最严的 sha256; 取值
 # 顺序来自 domain.entities.VERIFICATION_MODES, 免得两处各写一份).
@@ -147,6 +155,7 @@ class SettingsWindow:
         activation: bool,
         remember_window: bool,
         shortcuts: Mapping[str, str],
+        storage: StorageOverview,
         on_toggle_theme: _ToggleTheme,
         on_apply_language: _ApplyLanguage,
         on_apply_verification: _ApplyVerification,
@@ -157,6 +166,9 @@ class SettingsWindow:
         on_apply_shortcut: _ApplyShortcut,
         on_capture_start: _CaptureHook,
         on_capture_end: _CaptureHook,
+        on_change_backup_root: _RequestBackupRoot,
+        on_restore_backup_root: _RequestBackupRoot,
+        on_open_location: _OpenLocation,
     ) -> None:
         """构造设置窗口并绑定主题、语言、开关、校验方式与快捷键回调."""
         self._parent = parent
@@ -184,6 +196,12 @@ class SettingsWindow:
         self._on_apply_shortcut = on_apply_shortcut
         self._on_capture_start = on_capture_start
         self._on_capture_end = on_capture_end
+        self._on_change_backup_root = on_change_backup_root
+        self._on_restore_backup_root = on_restore_backup_root
+        self._on_open_location = on_open_location
+        self._storage = storage
+        # 反馈行当前的颜色档(notify_storage 切换, restyle 换主题时按它重新着色)。
+        self._storage_error_tone = "danger"
         # 下拉框里显示的是语言自己的名字(中文写中文、英文写 English), 因此需要文案到
         # locale 的映射; 值来自资源目录, 新增语言不用改这里。
         self._locales: dict[str, str] = {
@@ -640,6 +658,10 @@ class SettingsWindow:
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
+        # 存储位置面板整块抽成独立方法: 塞在 _build 里会把它顶过 xenon 的 B 档上限
+        # (2026-11-03 存储分区落地时拆出)。
+        self._build_storage_panel()
+
         self._shortcut_panel = ctk.CTkFrame(
             self._body,
             fg_color=palette.panel,
@@ -647,7 +669,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._shortcut_panel.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        self._shortcut_panel.grid(row=7, column=0, sticky="ew", pady=(10, 0))
         self._shortcut_panel.grid_columnconfigure(0, weight=1)
         self._shortcut_title = ctk.CTkLabel(
             self._shortcut_panel,
@@ -792,6 +814,258 @@ class SettingsWindow:
         self._refit_height()
         # 常驻窗口不接窗口级的 Esc/回车/定焦: 那三件事是对话框的约定(见 _present)。
         _present(self._parent, window, modal=False)
+
+    def _build_storage_panel(self) -> None:
+        """存储位置分区(row 6): 备份根可改, 其余位置只读 + "打开位置"."""
+        palette = self._palette
+
+        # 存储位置: 只有备份目录可以改(经目录选择器, 重启生效), 其余位置只读
+        # + "打开位置"。路径值全部经 _refit_storage_paths 按列宽重裁(中间省略号
+        # + 悬停完整路径): 窗口宽度固定, 但列宽仍随文案语言变, 不能写死预算。
+        self._storage_panel = ctk.CTkFrame(
+            self._body,
+            fg_color=palette.panel,
+            corner_radius=10,
+            border_width=1,
+            border_color=palette.border,
+        )
+        self._storage_panel.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        self._storage_panel.grid_columnconfigure(1, weight=1)
+        self._storage_title = ctk.CTkLabel(
+            self._storage_panel,
+            text=tr("settings.storage"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        self._storage_title.grid(
+            row=0, column=0, columnspan=3, padx=16, pady=(16, 6), sticky="w"
+        )
+        self._storage_hint = ctk.CTkLabel(
+            self._storage_panel,
+            text=tr("settings.storage_hint"),
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._storage_hint.grid(
+            row=1, column=0, columnspan=3, padx=16, pady=(0, 8), sticky="ew"
+        )
+        self._track_hint(
+            self._storage_panel,
+            self._storage_hint,
+            initial=_NOTE_INITIAL_WRAPLENGTH,
+        )
+
+        # 备份目录块: 名字 + 两个动作按钮(点完会发生什么写在按钮上)。
+        self._backup_label = ctk.CTkLabel(
+            self._storage_panel,
+            text=tr("settings.backup_root"),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        self._backup_label.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="w")
+        self._backup_change_btn = ctk.CTkButton(
+            self._storage_panel,
+            text=tr("settings.change_backup_root"),
+            command=self._on_change_backup_root,
+            width=104,
+            height=28,
+            corner_radius=8,
+            fg_color=palette.raised,
+            hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            border_width=1,
+            border_color=palette.border,
+            font=ctk.CTkFont(size=12),
+        )
+        self._backup_change_btn.grid(row=2, column=1, pady=(0, 8), sticky="e")
+        self._backup_restore_btn = ctk.CTkButton(
+            self._storage_panel,
+            text=tr("settings.restore_backup_root"),
+            command=self._on_restore_backup_root,
+            width=112,
+            height=28,
+            corner_radius=8,
+            fg_color=palette.raised,
+            hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            border_width=1,
+            border_color=palette.border,
+            font=ctk.CTkFont(size=12),
+        )
+        self._backup_restore_btn.grid(row=2, column=2, padx=16, pady=(0, 8), sticky="e")
+        # 当前生效值(整个面板宽度): refresh_storage 会随总览重填并重裁。
+        self._backup_value = ctk.CTkLabel(
+            self._storage_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_body,
+        )
+        self._backup_value.grid(
+            row=3, column=0, columnspan=3, padx=16, pady=(0, 2), sticky="ew"
+        )
+        # "重启后: ..."只在改了位置还没重启时出现(平时一个像素都不占)。
+        self._backup_next = ctk.CTkLabel(
+            self._storage_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.accent,
+        )
+        self._backup_next.grid(
+            row=4, column=0, columnspan=3, padx=16, pady=(0, 2), sticky="ew"
+        )
+        self._track_hint(
+            self._storage_panel,
+            self._backup_next,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
+        # 改位置的结果反馈(成功/失败共用一行, 颜色区分; 平时收起)。
+        self._storage_error = ctk.CTkLabel(
+            self._storage_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.danger,
+        )
+        self._storage_error.grid(
+            row=5, column=0, columnspan=3, padx=16, pady=(2, 8), sticky="ew"
+        )
+        self._track_hint(
+            self._storage_panel,
+            self._storage_error,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
+        self._set_transient_line(self._storage_error, "")
+
+        # 只读位置块: 每行"名字 | 值 | 打开位置"。值为空的行(演示后端/未注入
+        # 内置路径)在下面的推导式里就滤掉, 不摆空占位。
+        self._storage_values: dict[str, tuple[ctk.CTkLabel, str]] = {}
+        # 名字标签与"打开位置"按钮留住引用: 切主题时要跟着重绘。
+        self._storage_names: list[ctk.CTkLabel] = []
+        self._storage_open_buttons: list[ctk.CTkButton] = []
+        fields = [
+            (key, value) for key, value in self._readonly_storage_fields() if value
+        ]
+        last_key = fields[-1][0] if fields else None
+        for row, (key, value) in enumerate(fields, start=6):
+            name = ctk.CTkLabel(
+                self._storage_panel,
+                text=tr(key),
+                anchor="w",
+                font=ctk.CTkFont(size=12),
+                text_color=palette.text_body,
+            )
+            value_label = ctk.CTkLabel(
+                self._storage_panel,
+                text="",
+                anchor="w",
+                justify="left",
+                font=ctk.CTkFont(size=11),
+                text_color=palette.text_muted,
+            )
+            open_btn = ctk.CTkButton(
+                self._storage_panel,
+                text=tr("settings.open_location"),
+                command=lambda path=value: self._on_open_location(path),
+                width=88,
+                height=26,
+                corner_radius=8,
+                fg_color=palette.raised,
+                hover_color=palette.item_hover,
+                text_color=palette.text_body,
+                border_width=1,
+                border_color=palette.border,
+                font=ctk.CTkFont(size=11),
+            )
+            bottom = 16 if key == last_key else 6
+            name.grid(row=row, column=0, padx=16, pady=(0, bottom), sticky="w")
+            value_label.grid(row=row, column=1, pady=(0, bottom), sticky="ew")
+            open_btn.grid(row=row, column=2, padx=16, pady=(0, bottom), sticky="e")
+            self._storage_names.append(name)
+            self._storage_open_buttons.append(open_btn)
+            self._storage_values[key] = (value_label, value)
+        # 路径重裁绑定一次: <Configure> 反复触发也只会重算, 不会重复挂事件。
+        self._refit_storage_paths()
+        self._storage_panel.bind(
+            "<Configure>", lambda _event: self._refit_storage_paths(), add="+"
+        )
+        # "重启后"行的初始有无跟着总览走: 改了还没重启时一打开窗口就要看见。
+        self._set_transient_line(
+            self._backup_next,
+            tr("settings.backup_root_next", path=self._storage.next_backup_root)
+            if self._storage.restart_pending
+            else "",
+        )
+
+    # -- 存储位置 -----------------------------------------------------------
+
+    def _readonly_storage_fields(self) -> tuple[tuple[str, str], ...]:
+        """只读位置行的(文案键, 当前值)序列; 顺序即展示顺序."""
+        storage = self._storage
+        return (
+            ("settings.storage_database", storage.database_path),
+            ("settings.storage_config", storage.config_path),
+            ("settings.storage_log", storage.log_file),
+            ("settings.storage_exports", storage.exports_dir),
+            ("settings.storage_artwork", storage.artwork_dir),
+        )
+
+    def _refit_storage_paths(self) -> None:
+        """按各值标签的实得宽度重裁全部路径(中间省略号 + 悬停完整路径).
+
+        窗口宽度固定, 但"名字列 + 按钮列"的宽度会随文案语言变, 预算不能用
+        常量; 值标签被 grid 拉伸(sticky ew / columnspan), 自身宽度与文本无关,
+        拿它当预算来源才稳。宽度还没量出来(<=1)时跳过 —— 首帧之后的
+        ``<Configure>`` 会再触发一次补裁。
+        """
+        try:
+            targets: list[tuple[ctk.CTkLabel, str]] = [
+                (self._backup_value, self._storage.backup_root),
+                *[(label, value) for label, value in self._storage_values.values()],
+            ]
+            for label, value in targets:
+                width = int(label.winfo_width())
+                if width <= 1:
+                    continue
+                font = measured_font(label.cget("font"), label)
+                shown = fit_path(value, font, width)
+                label.configure(text=shown)
+                sync_tooltip(label, full=value, shown=shown)
+        except tk.TclError:  # pragma: no cover - 面板已在销毁中
+            return
+        # 构造期还没有页脚(_footer 在快捷键面板之后才建), 这时收高度会 AttributeError;
+        # 首帧 <Configure> 还会再触发一次, 高度不会漏算。
+        if getattr(self, "_footer", None) is not None:
+            self._refit_height()
+
+    def refresh_storage(self, storage: StorageOverview) -> None:
+        """按新总览重填备份目录块(改完位置后的回填; 只读行不随会话变)."""
+        self._storage = storage
+        self._refit_storage_paths()
+        # "重启后"只在改了还没重启时占一行: 平时当前值就在上一行, 再抄一遍
+        # 下次值只是噪声(状态由这行的存在与否表达, 按钮文字只写动作)。
+        self._set_transient_line(
+            self._backup_next,
+            tr("settings.backup_root_next", path=storage.next_backup_root)
+            if storage.restart_pending
+            else "",
+        )
+
+    def notify_storage(self, message: str, *, error: bool = False) -> None:
+        """显示改位置的反馈(成功为强调色, 失败为危险色; 空文案整行收起)."""
+        self._storage_error_tone = "danger" if error else "accent"
+        self._storage_error.configure(
+            text_color=getattr(self._palette, self._storage_error_tone)
+        )
+        self._set_transient_line(self._storage_error, message)
 
     def _track_hint(
         self,
@@ -1097,6 +1371,7 @@ class SettingsWindow:
             self._logging_panel,
             self._activation_panel,
             self._verification_panel,
+            self._storage_panel,
             self._shortcut_panel,
         ):
             panel.configure(fg_color=palette.panel, border_color=palette.border)
@@ -1107,6 +1382,12 @@ class SettingsWindow:
             (self._logging_title, palette.text_primary),
             (self._activation_title, palette.text_primary),
             (self._verification_title, palette.text_primary),
+            (self._storage_title, palette.text_primary),
+            (self._storage_hint, palette.text_muted),
+            (self._backup_label, palette.text_body),
+            (self._backup_value, palette.text_body),
+            (self._backup_next, palette.accent),
+            (self._storage_error, getattr(palette, self._storage_error_tone)),
             (self._shortcut_title, palette.text_primary),
             (self._font_label, palette.text_body),
             (self._verification_status, palette.text_muted),
@@ -1155,6 +1436,24 @@ class SettingsWindow:
         # (浅色主题的深灰文字落在深色面板上, 就是一条几乎看不见的淡灰字)。
         for label in self._shortcut_labels:
             label.configure(text_color=palette.text_body)
+        # 存储位置分区: 名字用正文色、值用提示色、动作按钮与关闭按钮同一套描边。
+        for label in self._storage_names:
+            label.configure(text_color=palette.text_body)
+        for label, _value in self._storage_values.values():
+            label.configure(text_color=palette.text_muted)
+        for button in (
+            self._backup_change_btn,
+            self._backup_restore_btn,
+            *self._storage_open_buttons,
+        ):
+            button.configure(
+                fg_color=palette.raised,
+                hover_color=palette.item_hover,
+                text_color=palette.text_body,
+                border_color=palette.border,
+            )
+        # 换主题后字体度量不变, 但省略号是按像素算的: 重裁一遍不吃亏。
+        self._refit_storage_paths()
         self._close_btn.configure(
             fg_color=palette.raised,
             hover_color=palette.item_hover,
