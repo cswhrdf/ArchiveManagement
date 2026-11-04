@@ -1212,6 +1212,20 @@ def test_settings_storage_panel_wires_locations_and_pending_restart() -> None:
         window._log_details_btn.invoke()
         assert window._log_details.winfo_manager() != "", "点开后滚动详情要占回"
         assert window._log_mb_entry.get() == "100", "展开后输入框仍带初值"
+        #    展开后两行与其他分区同款: 标签在左、输入框保持默认宽贴右内边距,
+        #    中间留白(先等窗口真的布局, 否则宽度断言会拿请求宽空转)。
+        assert _wait_for(app, lambda: window._log_details.winfo_width() > 300), (
+            "滚动详情未布局"
+        )
+        right_gap = (
+            window._log_details.winfo_width()
+            - window._log_mb_entry.winfo_x()
+            - window._log_mb_entry.winfo_width()
+        )
+        assert right_gap <= 20, f"滚动详情输入框要贴住右内边距(右缘留白 {right_gap}px)"
+        assert window._log_mb_entry.winfo_width() <= 200, (
+            "输入框保持默认宽度贴右, 不拉伸撑满"
+        )
         # 收得回去才算真折叠(两块各自验一次)。
         window._storage_details_btn.invoke()
         assert window._storage_details.winfo_manager() == ""

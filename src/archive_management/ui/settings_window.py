@@ -510,6 +510,9 @@ class SettingsWindow:
         self._log_details_btn.grid(row=2, column=0, padx=16, pady=(2, 16), sticky="w")
         self._log_details = ctk.CTkFrame(self._logging_panel, fg_color="transparent")
         self._log_details.grid(row=3, column=0, columnspan=2, sticky="ew")
+        # 标签列吸收剩余宽度、输入框保持默认宽贴右内边距(与主题按钮/语言下拉/
+        # 快捷键行同一套: 左边文字+空白, 右边控件区; 行占满但控件不拉伸)。
+        self._log_details.grid_columnconfigure(0, weight=1)
         self._log_details_open = False
         self._log_mb_label = ctk.CTkLabel(
             self._log_details,
@@ -529,7 +532,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
         )
         self._log_mb_entry.insert(0, str(self._log_max_mb))
-        self._log_mb_entry.grid(row=0, column=1, padx=16, pady=(0, 8))
+        self._log_mb_entry.grid(row=0, column=1, padx=16, pady=(0, 8), sticky="e")
         self._log_backups_label = ctk.CTkLabel(
             self._log_details,
             text=tr("settings.log_backups"),
@@ -548,7 +551,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=12),
         )
         self._log_backups_entry.insert(0, str(self._log_backups))
-        self._log_backups_entry.grid(row=1, column=1, padx=16, pady=(0, 16))
+        self._log_backups_entry.grid(row=1, column=1, padx=16, pady=(0, 16), sticky="e")
         for entry in (self._log_mb_entry, self._log_backups_entry):
             entry.bind("<Return>", self._on_log_entry_submit)
             entry.bind("<FocusOut>", self._on_log_entry_submit)
