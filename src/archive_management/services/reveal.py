@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-import subprocess
+import subprocess  # nosec B404 - 起进程是本模块职责: 固定程序名 + 路径参数, 无 shell
 from pathlib import Path
 
 from archive_management.services.platforms import current_platform
@@ -33,16 +33,22 @@ def _resolve_target(path: Path) -> tuple[Path, Path | None]:
 
 
 def _reveal_windows(target: Path, highlight: Path | None) -> None:
-    # os.startfile 只在 Windows 上存在, 放在单独函数里避免其他平台导入失败。
+    # 真正的平台差异不是 import, 而是 os.startfile 这个属性只在 Windows 存在。
     import os
 
     if highlight is not None:
-        subprocess.run(  # noqa: S603 - 固定命令 + 路径参数, 无 shell
+        # explorer 用 PATH 解析是平台惯例; /select 传的是路径参数, 不是命令。
+        subprocess.run(  # noqa: S603 - 固定命令 + 路径参数, 无 shell  # nosec B603, B607
             ["explorer", f"/select,{highlight}"],  # noqa: S607 - 平台惯例
             check=False,
         )
     else:
-        os.startfile(str(target))  # noqa: S606 - 打开的是本机目录路径, 不是命令
+        # 下方的 ignore 注释是给非 Windows 平台的 mypy 看的: os.startfile 只存在
+        # 于 Windows 的 typeshed(strict 下 win32 不触发, unused-ignore 让两边都
+        # 过, 2026-11-05 远端报告: darwin/linux 的 CI mypy 曾在此红)。运行期分
+        # 发只看 current_platform(), 用例在任意宿主平台上都能模拟 Windows, 所
+        # 以这里不能再叠一层 sys.platform 判断(会把模拟路径挡掉)。
+        os.startfile(str(target))  # type: ignore[attr-defined,unused-ignore]  # noqa: S606  # nosec B606
 
 
 def _reveal_macos(target: Path, highlight: Path | None) -> None:
@@ -51,7 +57,8 @@ def _reveal_macos(target: Path, highlight: Path | None) -> None:
         if highlight is not None
         else ["open", str(target)]
     )
-    subprocess.run(  # noqa: S603 - 固定命令 + 路径参数, 无 shell
+    # open 由 PATH 解析是平台惯例; 传的是路径参数, 不是命令。
+    subprocess.run(  # noqa: S603 - 固定命令 + 路径参数, 无 shell  # nosec B603
         args,
         check=False,
     )
@@ -61,7 +68,7 @@ def _reveal_linux(target: Path, highlight: Path | None) -> None:
     # xdg-open 没有统一的"选中"惯例, 能到所在目录即可。
     if highlight is not None:
         target = highlight.parent
-    subprocess.run(  # noqa: S603 - 固定命令 + 路径参数, 无 shell
+    subprocess.run(  # noqa: S603 - 固定命令 + 路径参数, 无 shell  # nosec B603, B607
         ["xdg-open", str(target)],  # noqa: S607 - PATH 解析系统工具是平台惯例
         check=False,
     )
