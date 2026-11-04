@@ -70,6 +70,10 @@ class Game(_RowModel):
     origin: str = "manual"
     # 用户自定义标签(主页分类), 落库时按逗号拼接, 因此标签内不含逗号.
     tags: tuple[str, ...] = ()
+    # 导入候选时从安装目录播种的进程名候选(目录名 + 顶层主程序 exe 名): 进程匹配
+    # 的针在界面名/原始名之外靠它们补漏(译名对不上进程名时识别启动). 只在插入时
+    # 写入、不进导出包 —— 见 infrastructure.schema 的 v16.
+    process_names: tuple[str, ...] = ()
     # 归档等价于"从主页收起来": 记录与备份都保留, 只是默认列表不再显示.
     archived: bool = False
     # 最近一次与该游戏相关的动作(备份/恢复/修改)发生的时间.

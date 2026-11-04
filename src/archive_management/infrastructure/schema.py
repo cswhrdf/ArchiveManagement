@@ -432,6 +432,20 @@ _V15_STATEMENTS: Sequence[str] = (
     """,
 )
 
+# 版本 16: 导入候选时播种的进程名候选.
+#
+# 进程匹配的候选原先只有「界面名 + 原始名」两个, 中文译名/缩写名与进程名对不上时
+# 「关注后识别启动」就漏报. 导入发现候选时安装目录就在手边, 于是把「安装目录名 +
+# 顶层主程序 exe 名」一次性记在这列里(逗号拼接, 同 tags 先例; 播种前就过滤掉含逗号
+# 与归一化后过短的名字, 见 services.processes.install_process_candidates).
+# 记录是**一次性的派生数据**而不是用户资产: 不进导出包, 也不随 GameRepository.update
+# 改写(与 original_name 一样只在插入时写入).
+_V16_STATEMENTS: Sequence[str] = (
+    """
+    ALTER TABLE games ADD COLUMN process_names TEXT NOT NULL DEFAULT ''
+    """,
+)
+
 SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, _V1_STATEMENTS),
     (2, _V2_STATEMENTS),
@@ -448,6 +462,7 @@ SCHEMA_MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (13, _V13_STATEMENTS),
     (14, _V14_STATEMENTS),
     (15, _V15_STATEMENTS),
+    (16, _V16_STATEMENTS),
 )
 
 

@@ -7,12 +7,16 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from archive_management.domain.activation import build_name_ownership
+from archive_management.domain import Game
+from archive_management.domain.activation import build_name_ownership, process_names
 from archive_management.services.processes import (
+    _executable_size,
+    install_process_candidates,
     probe_game_process,
     probe_games,
     probe_processes,
@@ -110,6 +114,102 @@ def test_probe_processes_checks_every_candidate_once() -> None:
     assert calls == [1]
     assert probe.running is True
     assert probe.matches == ("OuterWilds.exe",)
+
+
+def test_install_candidates_seed_directory_name_and_largest_executables(
+    tmp_path: Path,
+) -> None:
+    """播种 = 安装目录名 + 顶层可执行按大小降序; 崩溃处理器与过短名被滤掉."""
+    install = tmp_path / "Oddsparks"
+    install.mkdir()
+    (install / "OddsparksGame.exe").write_bytes(b"x" * 40)
+    (install / "Launcher.exe").write_bytes(b"x" * 20)
+    (install / "UnityCrashHandler64.exe").write_bytes(b"x" * 60)
+    (install / "ab.exe").write_bytes(b"x" * 30)
+    # 名字带逗号的 exe 存不进拼接列(v16), 播种前就要滤掉.
+    (install / "Foo,Bar.exe").write_bytes(b"x" * 50)
+
+    candidates = install_process_candidates(install, "windows")
+
+    assert candidates == ("Oddsparks", "OddsparksGame.exe", "Launcher.exe")
+
+
+def test_install_candidates_are_capped_at_five(tmp_path: Path) -> None:
+    """超上限时按"目录名 + 最大的可执行"截断: 候选越多跨游戏撞针风险越大."""
+    install = tmp_path / "Bundle"
+    install.mkdir()
+    for index in range(7):
+        (install / f"Tool{index}.exe").write_bytes(b"x" * ((index + 1) * 10))
+
+    candidates = install_process_candidates(install, "windows")
+
+    assert candidates == ("Bundle", "Tool6.exe", "Tool5.exe", "Tool4.exe", "Tool3.exe")
+
+
+def test_install_candidates_skip_comma_names_and_missing_directories(
+    tmp_path: Path,
+) -> None:
+    """含逗号的名字存不进拼接列(v16); 目录不存在时只剩目录名(健康由发现层判定)."""
+    comma = tmp_path / "My, Game"
+    comma.mkdir()
+
+    assert install_process_candidates(comma, "windows") == ()
+    assert install_process_candidates(tmp_path / "Gone", "windows") == ("Gone",)
+
+
+def test_install_candidates_only_take_the_directory_name_on_linux(
+    tmp_path: Path,
+) -> None:
+    """Linux 没有可靠的可执行扩展名约定: 只取目录名, 不做目录扫描."""
+    install = tmp_path / "Hades"
+    install.mkdir()
+    (install / "Hades.exe").write_bytes(b"x" * 10)
+
+    assert install_process_candidates(install, "linux") == ("Hades",)
+
+
+def test_install_candidates_take_app_bundles_on_macos(tmp_path: Path) -> None:
+    """macOS 取顶层的 ``.app`` 应用包名(进程表里报的就是它)."""
+    install = tmp_path / "Hades"
+    install.mkdir()
+    (install / "Hades.app").mkdir()
+    (install / "CrashReportClient.app").mkdir()
+
+    assert install_process_candidates(install, "macos") == ("Hades", "Hades.app")
+
+
+def test_executable_size_degrades_to_last_place_when_stat_fails() -> None:
+    """取不到大小(文件刚好消失)时按 -1 参与排序: 播种不因个别文件失败."""
+    assert _executable_size(Path("Z:/definitely/not/here.exe")) == -1
+
+
+def test_seeded_process_names_join_the_matching_candidates() -> None:
+    """播种的候选名参与匹配: 界面名与原始名都漏时靠它识别(B 条的主场景)."""
+    game = Game(
+        id=7,
+        name="星露谷物语",
+        original_name="Stardew Valley",
+        process_names=("Stardew Valley", "StardewModdingAPI.exe"),
+    )
+
+    assert process_names(game) == (
+        "星露谷物语",
+        "Stardew Valley",
+        "StardewModdingAPI.exe",
+    )
+
+
+def test_seeded_needles_shared_by_two_games_are_dropped() -> None:
+    """两款游戏播种了同一个候选名: 这根针整体进 conflicts(宁可不判断, 不误报)."""
+    ownership = build_name_ownership(
+        [
+            Game(id=1, name="甲游戏", process_names=("SharedLauncher.exe",)),
+            Game(id=2, name="乙游戏", process_names=("SharedLauncher.exe",)),
+        ]
+    )
+
+    assert ownership.needles == {}
+    assert ownership.conflicts == ("sharedlauncher",)
 
 
 def test_default_provider_uses_psutil() -> None:

@@ -79,14 +79,18 @@ def _game(
     enabled: bool = False,
     original: str = "",
     save_paths: bool = True,
+    process_names: tuple[str, ...] = (),
 ) -> int:
     """插入一个游戏并返回 id; ``enabled`` 为真时走真实的手动启用入口.
 
     ``save_paths`` 默认为真(补一条存档位置): 没有关联存档位置的游戏不参与自动
-    启停监控, 因此除专门验证这一点的用例外都要给上。
+    启停监控, 因此除专门验证这一点的用例外都要给上。``process_names`` 模拟
+    "导入候选时播种的进程候选"(默认没有)。
     """
     repository = GameRepository(database)
-    created = repository.add(Game(name=name, original_name=original or name))
+    created = repository.add(
+        Game(name=name, original_name=original or name, process_names=process_names)
+    )
     assert created.id is not None
     if save_paths:
         SaveLocationRepository(database).add(
@@ -237,6 +241,28 @@ def test_the_original_name_is_used_for_matching(tmp_path: Path) -> None:
     assert provider.calls == 1
     assert outcome.reason == REASON_RUNNING
     assert _state(database).armed is True
+
+
+def test_seeded_process_names_identify_a_launch_the_names_miss(
+    tmp_path: Path,
+) -> None:
+    """译名与原始名都对不上进程名: 靠导入时播种的候选名识别启动(关注链路主场景)."""
+    database = _database(tmp_path)
+    game_id = _game(
+        database,
+        "鏡之邊緣",
+        enabled=True,
+        original="Mirror's Edge",
+        process_names=("ME2008", "ME_dx12.exe"),
+    )
+    provider = _Processes("ME_dx12.exe")
+
+    outcome = activation_cases.poll_activation(database, provider=provider)
+
+    assert provider.calls == 1
+    assert outcome.reason == REASON_RUNNING
+    assert _state(database).armed is True
+    assert _state(database).monitor_game_id == game_id
 
 
 def test_a_manual_stop_is_not_undone_while_the_game_keeps_running(

@@ -45,6 +45,8 @@ from archive_management.services.platform_scan import (
     default_roots,
     path_health,
 )
+from archive_management.services.platforms import current_platform
+from archive_management.services.processes import install_process_candidates
 
 
 @dataclass(frozen=True)
@@ -523,8 +525,17 @@ def import_candidate(
     known = _known_games(database).get(normalize_game_name(final_name))
     if known is not None:
         raise ArchiveManagementError(f"同名游戏「{known.name}」已在库中")
+    # 播种进程名候选: 安装目录此刻就在手边(导入完成后只剩脱敏日志里的它), 一次性
+    # 派生「目录名 + 主程序 exe 名」存进游戏 —— 关注链路靠它们识别"译名对不上进程
+    # 名"的游戏启动(见 domain.activation.process_names 与 services.processes)。
+    seeded = install_process_candidates(Path(candidate.install_dir), current_platform())
     game = games.add(
-        Game(name=final_name, original_name=candidate.name, origin=candidate.source)
+        Game(
+            name=final_name,
+            original_name=candidate.name,
+            origin=candidate.source,
+            process_names=seeded,
+        )
     )
     if game.id is None:  # pragma: no cover - add() 总是返回 id
         raise ArchiveManagementError("导入游戏失败: 未返回游戏 id")
@@ -539,6 +550,7 @@ def import_candidate(
         game_id=game.id,
         name=final_name,
         source=candidate.source,
+        process_candidates=len(seeded),
         path=redacted_path(candidate.install_dir),
     )
     return game

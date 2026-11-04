@@ -636,3 +636,22 @@ def test_record_hashes_writes_the_files_and_the_node_together(tmp_path: Path) ->
     assert updated is not None
     assert updated.content_hash == "新" * 64
     assert updated.verify_mode == "sha256"
+
+
+def test_game_round_trips_seeded_process_names(tmp_path: Path) -> None:
+    """导入播种的进程名候选按逗号拼接落库(schema v16), 读回还原成元组."""
+    database = _database(tmp_path)
+    repository = GameRepository(database)
+
+    seeded = repository.add(Game(name="Hades", process_names=("Hades", "Hades.exe")))
+    plain = _add_game(repository, "Demo")
+    assert seeded.id is not None
+    assert plain.id is not None
+
+    loaded_seeded = repository.get(seeded.id)
+    loaded_plain = repository.get(plain.id)
+
+    assert loaded_seeded is not None
+    assert loaded_plain is not None
+    assert loaded_seeded.process_names == ("Hades", "Hades.exe")
+    assert loaded_plain.process_names == ()

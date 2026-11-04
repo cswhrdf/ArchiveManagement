@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 
+import archive_management.application.discovery as discovery_mod
 import archive_management.ui.sql_backend as sql_mod
 from archive_management.domain import (
     GameCandidate,
@@ -164,6 +165,29 @@ def test_import_candidate_writes_the_confirmed_save_paths(tmp_path: Path) -> Non
         item.path: item.source for item in service.list_locations(summary.game_id)
     }
     assert sources == {str(save): "steam", str(extra): "manual"}
+
+
+def test_import_candidate_seeds_process_names_from_the_install_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """导入时从安装目录播种进程候选(目录名 + 最大主程序 exe): 译名对不上也能识别启动."""
+    monkeypatch.setattr(discovery_mod, "current_platform", lambda: "windows")
+    service, _game_id, database = _steam_service(tmp_path)
+    install = tmp_path / "Games" / "Oddsparks"
+    install.mkdir(parents=True)
+    (install / "OddsparksGame.exe").write_bytes(b"x" * 40)
+    (install / "UnityCrashHandler64.exe").write_bytes(b"x" * 60)
+    candidate, _created = CandidateRepository(database).upsert(
+        GameCandidate(name="ODD SPARKS", install_dir=str(install), source="epic")
+    )
+    assert candidate.id is not None
+
+    summary = service.import_candidate(str(candidate.id))
+
+    game = GameRepository(database).get(int(summary.game_id))
+    assert game is not None
+    assert game.process_names == ("Oddsparks", "OddsparksGame.exe")
 
 
 def test_monitored_directories_crud(tmp_path: Path) -> None:
