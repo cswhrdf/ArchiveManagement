@@ -579,31 +579,44 @@ def test_settings_window_fits_its_content(
         assert cut <= 1, hint
 
 
-def test_settings_window_scrollbar_only_when_the_content_overflows(
+def test_settings_window_height_is_fixed_below_the_main_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """屏幕够高(窗口按内容定高)时不该立着一条拖不动的滚动条(评审时定的).
+    """窗口高度固定为"主窗高 - 留白", 不跟内容长高; 超出的内容由滚动区接管.
 
-    窗口没映射时 ``winfo_ismapped()`` 恒为 0(假绿), 因此先等到窗口真的在屏幕上,
-    再断言滚动条与“内容是否溢出”一致。
+    高度跟内容长会一路长到接近整屏, 弹窗反客为主(P2c 反馈)。定高矮一截后内容
+    必然溢出, 滚动条要立起来; 展开/收起详情块也不再改变窗口高度。
     """
     from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.settings_window import (
+        _PARENT_HEIGHT_MARGIN,
+        _WINDOW_MIN_HEIGHT,
+    )
 
     _patch_dialogs(monkeypatch)
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(app)
-    # 把屏幕报得很高: 窗口高度会等于内容高度, 滚动区刚好装下.
+    # 屏幕报得很高也一样定高: 不再"屏够高就按内容定高".
     monkeypatch.setattr(app, "winfo_screenheight", lambda: 4000)
     window = _settings_window(app, [])
     assert _wait_for(app, lambda: window._window.winfo_ismapped()), "窗口未映射"
 
+    expected = max(_WINDOW_MIN_HEIGHT, app.winfo_height() - _PARENT_HEIGHT_MARGIN)
+    assert window._window.winfo_height() == expected, (
+        f"设置窗高 {window._window.winfo_height()} 应为主窗高 {app.winfo_height()}"
+        f" - {_PARENT_HEIGHT_MARGIN}"
+    )
     canvas = window._body._parent_canvas
     region = canvas.bbox("all")
     content = 0 if region is None else int(region[3]) - int(region[1])
-    assert scrollbar_needed(content, int(canvas.winfo_height())) is False
-    assert _wait_for(app, lambda: not window._body._scrollbar.winfo_ismapped()), (
-        "内容装得下却仍立着滚动条"
+    assert scrollbar_needed(content, int(canvas.winfo_height())) is True
+    assert _wait_for(app, lambda: window._body._scrollbar.winfo_ismapped()), (
+        "内容溢出却没有滚动条"
     )
+    # 高度不跟内容走: 展开详情块不该把窗口顶高.
+    window._storage_details_btn.invoke()
+    _pump(app)
+    assert window._window.winfo_height() == expected, "折叠块展开不该把窗口顶高"
 
 
 def test_settings_window_scrollbar_appears_when_the_content_does_not_fit(

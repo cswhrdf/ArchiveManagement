@@ -56,17 +56,18 @@ logger = logging.getLogger(__name__)
 
 _ToggleTheme = Callable[[], str]
 
-# 窗口固定宽度 + 边距; 高度按内容算: 说明文字会随语言换行, 写死高度会把底部的
-# 说明与"关闭"按钮裁到窗口外面(用户看不到也点不到)。
+# 窗口固定宽度 + 边距; 高度固定为"主窗口高 - 留白"(见 _refit_height), 超出的
+# 内容由滚动区滚, 页脚的"关闭"按钮永远在窗口里。
 _WINDOW_WIDTH = 480
 _WINDOW_PAD_X = 16
 _WINDOW_PAD_Y = 16
 _WINDOW_MIN_HEIGHT = 500
-# 滚动区与固定页脚之间的间距(与 _footer 的 pady 一致).
-_FOOTER_GAP = 12
 # 窗口高度最多占到"屏幕高 - 这个留白": 给系统标题栏与任务栏留位, 免得窗口
 # 在 1366x768 上比屏幕还高(底部的关闭按钮被推到屏幕外)。
 _SCREEN_MARGIN = 120
+# 设置窗比主窗口矮的这一截(P2c 反馈: 分区变多后高度跟内容长到接近整屏, 弹窗
+# 比主窗口还高、反客为主)。主窗最小高 720, 减它后设置窗约 624 起。
+_PARENT_HEIGHT_MARGIN = 96
 # 成段说明的左右内裐(单侧): 面板里的说明都按 padx=16 排版, 算可用宽度时要减掉两侧。
 _HINT_PAD = 16
 # 说明 wraplength 的下限: 这里**不能用**默认的 widgets.WRAPLENGTH_MINIMUM(240) ——
@@ -242,8 +243,8 @@ class SettingsWindow:
         )
         self._body.grid(row=0, column=0, sticky="nsew")
         self._body.grid_columnconfigure(0, weight=1)
-        # 内容装得下就不立滚动条: 窗口高度按内容算, 恰好放下时右侧那条拖不动的滑块
-        # 只是噪声(与主页列表/定时窗口同一条规则)。
+        # 定高矮于内容后滚动条基本常驻; auto_scrollbar 仍留"恰好装得下就收起"
+        # 的规则(内容极短时拖不动的滑块只是噪声, 与主页列表/定时窗口同一条)。
         auto_scrollbar(self._body)
 
         self._title_label = ctk.CTkLabel(
@@ -1181,37 +1182,28 @@ class SettingsWindow:
             label.grid_remove()
 
     def _refit_height(self) -> None:
-        """按当前内容重算窗口高度(说明换行变了行数就变了).
+        """窗口高度固定为"主窗口高 - 一截留白", 不跟内容长高; 超出内容交给滚动区.
 
-        宽度写死, 高度只能按**实际内容**算: 说明文字会随语言与可用宽度换行, 写死高度会把
-        底部的说明与“关闭”按钮裁到窗口外面(评审时定的)。装不下时夹到屏幕可用高度以内,
-        滚动区自己滚, 那两样留在固定页脚里(1366x768 上底部按钮被屏幕下沿切掉过)。
+        高度跟内容长会一路长到接近整屏, 弹窗比主窗口还高、反客为主(P2c 反馈)。
+        定高矮一截后内容必然溢出, 由滚动区接管, 页脚"关闭"按钮永远在窗口里。
+        屏高上限与最小高度只作兜底: 小屏夹取; 主窗未映射时 winfo_height 是 1,
+        夹取后落到最小高度。
         """
         try:
             self._window.update_idletasks()
-            content_height = (
-                int(self._body.winfo_reqheight())
-                + int(self._footer.winfo_reqheight())
-                + _FOOTER_GAP
-                + _WINDOW_PAD_Y * 2
-            )
-            # ``available`` 是"屏高 - 安全边距": 它来自 ``winfo_screenheight()``(**物理**
-            # 像素), 而 ``content_height`` 与写进 geometry 的都是**逻辑**像素(125% 的屏上
-            # 物理 = 逻辑 x 1.25)—— 两边必须换到同一套, 否则高 DPI 的矮屏上窗口会比屏幕
-            # 还高(2026-10-02 实测: 768 高的屏上 648 逻辑 = 810 物理 > 768, 底部按钮被屏幕
-            # 下沿切掉)。
-            #
-            # 但**不**据此把窗口压到"刚好等于内容高度": 主体是 ``sticky="nsew"`` 的滚动区,
-            # 比内容略高的那点全被它吸收(底部说明与关闭按钮照旧贴在窗口下沿), 而"刚好等高"
-            # 会让滚动条在临界点上闪进闪出, 进而把说明文字的换行宽度推来推去(2026-10-02
-            # 实测: 刚好等高的那版让两条说明被判成"被硬裁")。
+            # ``available`` 是"屏高 - 安全边距": 它来自 ``winfo_screenheight()``
+            # (**物理**像素), 而 ``winfo_height()`` 与写进 geometry 的都是**逻辑**
+            # 像素(125% 的屏上物理 = 逻辑 x 1.25)—— 屏高必须换到逻辑再夹, 主窗
+            # 高天然就是逻辑, 不用换(2026-10-02 实测: 不换算时高 DPI 矮屏上窗口
+            # 会比屏幕还高, 底部按钮被屏幕下沿切掉)。
             available = round(
                 (int(self._parent.winfo_screenheight()) - _SCREEN_MARGIN)
                 / window_scaling(self._window)
             )
-            self._window.geometry(
-                f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, min(content_height, available))}"
+            capped = min(
+                int(self._parent.winfo_height()) - _PARENT_HEIGHT_MARGIN, available
             )
+            self._window.geometry(f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, capped)}")
         except tk.TclError:  # 窗口已销毁: 延后的量宽可能晚于关闭
             return
 
