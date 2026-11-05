@@ -64,6 +64,7 @@ from archive_management.ui.models import (
     StorageOverview,
     TaskStatus,
     clean_game_name,
+    clean_process_names,
     delete_result_text,
     format_moment,
     home_board,
@@ -248,6 +249,8 @@ _DETAILS: dict[str, GameDetail] = {
         next_backup_label="今天 12:00",
         original_name="星际拓荒",
         storage_folder=game_folder("星际拓荒", [r"D:\Games\OuterWilds\save"]),
+        # 进程名候选的演示数据: 游戏设置里的"进程名候选"一节读它。
+        process_names=("OuterWilds.exe",),
     ),
     "shanhai": GameDetail(
         name="山海旅人",
@@ -1027,6 +1030,16 @@ class DemoArchiveService:
         self._meta[game_id] = replace(self._meta[game_id], name=clean)
         # 只改展示名称: 原始名称与备份目录名保持不变.
         self._details[game_id] = replace(self._details[game_id], name=clean)
+        return self._live_summary(game_id)
+
+    def set_game_process_names(self, game_id: str, names: Sequence[str]) -> GameSummary:
+        """覆盖写入演示游戏的进程名候选(校验与真实后端同一套)."""
+        self._require_game(game_id)
+        clean = clean_process_names(names)
+        self._details[game_id] = replace(self._details[game_id], process_names=clean)
+        # 候选显示在管理窗口、也决定自动启停的匹配口径: 抬版本让打开中的界面与
+        # 真实后端一样"改完就能被下一次轮询看见"。
+        self._revision += 1
         return self._live_summary(game_id)
 
     def _remember_storage_folder(self, game_id: str) -> None:

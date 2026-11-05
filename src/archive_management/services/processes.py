@@ -22,6 +22,7 @@ from pathlib import Path
 
 from archive_management.domain.activation import NameOwnership
 from archive_management.domain.process_names import (
+    MAX_PROCESS_NAMES,
     MIN_NAME_LENGTH,
     name_needles,
     names_match,
@@ -151,9 +152,9 @@ def probe_processes(
     return ProcessProbe(checked=True, running=bool(matches), matches=tuple(matches))
 
 
-# 导入候选时播种的进程名候选上限: 候选越多, 跨游戏撞针(NameOwnership"共享即弃")
-# 把现有判断挤掉的风险越大 —— 5 个足够覆盖"目录名 + 主程序 + 常见启动变体".
-_MAX_INSTALL_CANDIDATES = 5
+# 播种时的截断上限沿用 domain.process_names 的 MAX_PROCESS_NAMES: 候选越多, 跨游戏
+# 撞针(NameOwnership"共享即弃")把现有判断挤掉的风险越大 —— 5 个足够覆盖
+# "目录名 + 主程序 + 常见启动变体"。上限与游戏设置里的手动编辑共用(见 v16 设计)。
 
 # 已知的辅助程序前缀(归一化后匹配): 崩溃处理器/上报器不是游戏本体, 却常年挂在
 # 进程表里, 把它们当候选只会制造误报.
@@ -204,7 +205,7 @@ def install_process_candidates(install_dir: Path, platform: str) -> tuple[str, .
             reverse=True,
         )
         names.extend(entry.name for entry in entries)
-    return tuple(dict.fromkeys(names))[:_MAX_INSTALL_CANDIDATES]
+    return tuple(dict.fromkeys(names))[:MAX_PROCESS_NAMES]
 
 
 def psutil_process_names() -> Iterable[str]:

@@ -28,6 +28,7 @@ from archive_management.domain import (
     HomeView,
     SavePathCandidate,
 )
+from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.ui.models import (
     AppPage,
@@ -56,6 +57,7 @@ from archive_management.ui.models import (
     branch_order,
     branch_tree,
     can_backup,
+    clean_process_names,
     export_batch_prompt,
     exportable_games,
     filter_by_source,
@@ -1485,3 +1487,40 @@ def test_schedule_item_without_an_interval_reports_unscheduled() -> None:
     assert item.can_toggle is False
     # 有周期就能暂停/继续(与 state_label 的三种状态同一套判据, 与游戏启用无关).
     assert replace(item, interval_text="30m", enabled=True).can_toggle is True
+
+
+def test_clean_process_names_accepts_and_keeps_written_forms() -> None:
+    """可用的候选 strip 后原样保留(写法差异交给匹配阶段归一化), 上限内完整通过."""
+    cleaned = clean_process_names(["OuterWilds.exe", " Outer Wilds DLC ", "demo"])
+    assert cleaned == ("OuterWilds.exe", "Outer Wilds DLC", "demo")
+    five = ("one1", "two2", "three3", "four4", "five5")
+    assert clean_process_names(list(five)) == five
+    assert clean_process_names(()) == ()
+
+
+def test_clean_process_names_rejects_bad_input() -> None:
+    """空名/逗号/归一化过短/重复/超上限直接报错, 文案从资源拼(带名字便于定位)."""
+    bad = [
+        ([""], tr("error.process_name_empty")),
+        (["demo.exe", "   "], tr("error.process_name_empty")),
+        (["a,b.exe"], tr("error.process_name_comma", name="a,b.exe")),
+        # 全角逗号同样拒绝: 它也是存储分隔符(写转义免得标点守卫拦源码)。
+        (["a\uff0cb"], tr("error.process_name_comma", name="a\uff0cb")),
+        (["ab"], tr("error.process_name_short", name="ab", count=3)),
+        (
+            ["游戏名.exe"],
+            tr("error.process_name_short", name="游戏名.exe", count=3),
+        ),
+        (
+            ["OuterWilds.exe", "outer wilds"],
+            tr("error.process_name_duplicate", name="outer wilds"),
+        ),
+        (
+            ["one1", "two2", "three3", "four4", "five5", "six6"],
+            tr("error.process_name_limit", count=5),
+        ),
+    ]
+    for names, message in bad:
+        with pytest.raises(ArchiveManagementError) as exc:
+            clean_process_names(names)
+        assert str(exc.value) == message, names

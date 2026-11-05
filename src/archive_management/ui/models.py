@@ -40,6 +40,11 @@ from archive_management.domain import (
     keep_surviving,
     tree_depths,
 )
+from archive_management.domain.process_names import (
+    MAX_PROCESS_NAMES,
+    MIN_NAME_LENGTH,
+    normalize_name,
+)
 from archive_management.exceptions import ArchiveManagementError
 from archive_management.i18n import tr
 from archive_management.services.export_format import ARCHIVE_SUFFIX
@@ -144,6 +149,38 @@ def clean_game_name(name: str) -> str:
     if not clean:
         raise ArchiveManagementError(tr("error.game_name_empty"))
     return clean
+
+
+def clean_process_names(names: Sequence[str]) -> tuple[str, ...]:
+    """清洗用户编辑的进程名候选: 逐条校验, 两个后端共用同一套判定与文案.
+
+    与 :func:`clean_game_name` 同一条纪律。违法输入**直接拒绝**而不是静默丢弃 ——
+    用户刚敲进去的名字被悄悄吞掉, 比一句报错更让人糊涂。判重按归一化口径
+    (``OuterWilds.exe`` 与 ``outer wilds`` 算同一个候选), 与匹配阶段同一套规则;
+    逗号是名单的存储分隔符(见 schema v16), 半角全角都不许出现。
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        name = raw.strip()
+        if not name:
+            raise ArchiveManagementError(tr("error.process_name_empty"))
+        if "," in name or "\uff0c" in name:
+            raise ArchiveManagementError(tr("error.process_name_comma", name=name))
+        needle = normalize_name(name)
+        if len(needle) < MIN_NAME_LENGTH:
+            raise ArchiveManagementError(
+                tr("error.process_name_short", name=name, count=MIN_NAME_LENGTH)
+            )
+        if needle in seen:
+            raise ArchiveManagementError(tr("error.process_name_duplicate", name=name))
+        if len(cleaned) >= MAX_PROCESS_NAMES:
+            raise ArchiveManagementError(
+                tr("error.process_name_limit", count=MAX_PROCESS_NAMES)
+            )
+        seen.add(needle)
+        cleaned.append(name)
+    return tuple(cleaned)
 
 
 def delete_result_text(plan: DeletionPlan, title: str) -> str:
@@ -273,6 +310,9 @@ class GameDetail:
     # 游戏本身是否启用: 定时任务的启停与它无关(两者互不影响), 但到点能不能真的跑
     # 出去看它 —— 停用期间任务照旧排队, 触发时被跳过(见 next_backup_text).
     game_enabled: bool = True
+    # 进程名候选(自动启停的识别名单): 导入时自动播种, 游戏设置里可增删。展示前
+    # 已过清洗(空名/逗号/过短/重复都会被拒), 这里只负责原样带回。
+    process_names: tuple[str, ...] = ()
 
     @property
     def next_backup_text(self) -> str:

@@ -1,8 +1,8 @@
 """管理游戏与存档位置窗口.
 
-一个模态浮层: 上半部管理游戏信息(重命名/删除; 启停已抽到详情页页头的
-开关, 2026-10-20), 下半部管理该
-游戏的"原始存档位置"(添加目录/文件、设为主位置、重新验证、编辑路径、
+一个模态浮层: 上半部管理游戏信息(重命名/删除; 启停已抽到详情页页头的开关,
+2026-10-20; 进程名候选 2026-11-05 起也在这里增删), 下半部管理该游戏的
+"原始存档位置"(添加目录/文件、设为主位置、重新验证、编辑路径、
 删除记录), 并提供"删除原始存档位置": 把磁盘上的原目录移入
 系统回收站(需输入游戏名称确认, 不会永久删除)。界面明确区分原始位置与
 由应用管理的备份目录, 避免误操作。
@@ -20,6 +20,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from archive_management.domain import ArtworkKind, GameAction, PathKind, action_allowed
+from archive_management.domain.process_names import MAX_PROCESS_NAMES
 from archive_management.exceptions import ArchiveManagementError, ArtworkImageError
 from archive_management.i18n import tr
 from archive_management.ui.backend import ArchiveService
@@ -131,6 +132,11 @@ class ManageGameWindow:
         self._backup_location = backup_location
         self._on_change = on_change
         self._items: list[LocationItem] = []
+        # 进程名候选(自动启停的识别名单): refresh 时从 get_detail 重读.
+        self._process_names: tuple[str, ...] = ()
+        self._process_buttons: list[ctk.CTkButton] = []
+        self._process_entry: ctk.CTkEntry | None = None
+        self._process_add_btn: ctk.CTkButton | None = None
         self._selected: str | None = None
         self._rows: dict[str, list[ctk.CTkBaseClass]] = {}
         # 鼠标悬停的那一行位置: 与主页卡片/详情页备份卡片同一套反馈.
@@ -241,6 +247,32 @@ class ManageGameWindow:
         )
         self._schedule_state.grid(row=3, column=0, sticky="w", pady=(2, 6))
 
+        # 「进程名候选」一节: 自动启停靠这份名单认出游戏进程(导入时自动播种)。
+        # 译名与进程名对不上时, 这里是用户唯一的补救入口 —— 名单看得见才谈得上改。
+        process_heading = ctk.CTkLabel(
+            container,
+            text=tr("manage.process_title"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_body,
+        )
+        process_heading.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        process_hint = ctk.CTkLabel(
+            container,
+            text=tr("manage.process_hint"),
+            anchor="w",
+            wraplength=540,
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        process_hint.grid(row=5, column=0, sticky="w", pady=(2, 6))
+        self._process_panel = ctk.CTkFrame(
+            container, fg_color=palette.panel, corner_radius=10
+        )
+        self._process_panel.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+        self._process_panel.grid_columnconfigure(0, weight=1)
+
         locations_title = ctk.CTkLabel(
             container,
             text=tr("manage.locations_title"),
@@ -248,7 +280,7 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_body,
         )
-        locations_title.grid(row=4, column=0, sticky="w", pady=(0, 6))
+        locations_title.grid(row=7, column=0, sticky="w", pady=(0, 6))
 
         self._list_scroll = ctk.CTkScrollableFrame(
             container,
@@ -256,7 +288,7 @@ class ManageGameWindow:
             corner_radius=10,
             height=_LIST_MIN_HEIGHT,
         )
-        self._list_scroll.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        self._list_scroll.grid(row=8, column=0, sticky="ew", pady=(0, 8))
         self._list_scroll.grid_columnconfigure(0, weight=1)
         auto_scrollbar(self._list_scroll)
 
@@ -271,11 +303,11 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        note.grid(row=6, column=0, sticky="w", pady=(0, 8))
+        note.grid(row=9, column=0, sticky="w", pady=(0, 8))
         attach_tooltip(note, tr("manage.backup_note_tip", path=self._backup_location))
 
         action_bar = ctk.CTkFrame(container, fg_color="transparent")
-        action_bar.grid(row=7, column=0, sticky="w")
+        action_bar.grid(row=10, column=0, sticky="w")
         self._location_buttons: list[ctk.CTkButton] = []
         # 两行两组: 第一行是"新增(主操作, 强调色) + 管理现有位置", 第二行只放破坏性的
         # "删除"。六个按钮挤一行时总宽(96+96+108+92+92+80 = 564)已经等于容器可用宽度,
@@ -303,7 +335,7 @@ class ManageGameWindow:
         self._location_buttons.append(remove)
 
         danger_bar = ctk.CTkFrame(container, fg_color="transparent")
-        danger_bar.grid(row=8, column=0, sticky="w", pady=(8, 0))
+        danger_bar.grid(row=11, column=0, sticky="w", pady=(8, 0))
         self._delete_origin_btn = self._make_button(
             danger_bar,
             tr("loc.delete_origin"),
@@ -599,6 +631,9 @@ class ManageGameWindow:
         # 「外观」那一节也归在“改游戏信息”里: 归档后与重命名/启停同一档置灰。
         for choose, _reset in self._artwork_buttons.values():
             choose.configure(state="disabled")
+        # 「进程名候选」的归档置灰不在这里做: 面板控件随 refresh 重建, 而本方法
+        # 在建窗时先于 refresh 运行 —— 渲染时按 _archived 起始就置灰(见
+        # _render_process_names), 免得留一段永远空转的兜底循环。
         self._paint_buttons()
 
     def _blocked(self, action: GameAction) -> bool:
@@ -623,13 +658,17 @@ class ManageGameWindow:
         )
 
     def refresh(self) -> None:
-        """从后端重载存档位置列表并重绘."""
+        """从后端重载存档位置与进程名候选并重绘."""
         self._items = self._backend.list_locations(self._game_id)
+        self._process_names = tuple(
+            self._backend.get_detail(self._game_id).process_names
+        )
         if self._selected is not None and not any(
             item.location_id == self._selected for item in self._items
         ):
             self._selected = None
         self._rebuild_rows()
+        self._render_process_names()
         self._fit_list_height()
         self._fit_window_height()
 
@@ -697,6 +736,143 @@ class ManageGameWindow:
         canvas = getattr(self._body, "_parent_canvas", None)
         box = None if canvas is None else canvas.bbox("all")
         return 0 if box is None else int(box[3]) - int(box[1])
+
+    # -- 进程名候选 ---------------------------------------------------------
+
+    def _render_process_names(self) -> None:
+        """重绘候选区: 每行一个名字 + 移除按钮, 末行是输入框 + 添加按钮.
+
+        名单整体重绘而不是增删单行: 候选至多 MAX_PROCESS_NAMES 行, 重建的成本
+        可忽略, 也不用维护"移除后行号错位"这类簿记(与位置列表同一套做法)。
+        """
+        palette = self._palette
+        for child in self._process_panel.winfo_children():
+            child.destroy()
+        self._process_buttons = []
+        names = self._process_names
+        row_index = 0
+        if not names:
+            empty = ctk.CTkLabel(
+                self._process_panel,
+                text=tr("manage.process_empty"),
+                anchor="w",
+                justify="left",
+                wraplength=440,
+                font=ctk.CTkFont(size=11),
+                text_color=palette.text_muted,
+            )
+            empty.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 0))
+            row_index = 1
+        for name in names:
+            row = ctk.CTkFrame(self._process_panel, fg_color="transparent")
+            row.grid(row=row_index, column=0, sticky="ew", padx=12, pady=(6, 0))
+            row.grid_columnconfigure(0, weight=1)
+            label = ctk.CTkLabel(
+                row,
+                text=name,
+                anchor="w",
+                font=ctk.CTkFont(size=12),
+                text_color=palette.text_body,
+            )
+            label.grid(row=0, column=0, sticky="w")
+            # 名字通常不长, 但安装目录名可以做得很长: 跟随行宽裁剪, 悬停看全文。
+            track_fit(row, label, (name,), inset=8)
+            remove = self._make_button(
+                row,
+                tr("manage.process_remove"),
+                partial(self._on_remove_process_name, name),
+                width=72,
+                # 危险色: 回调名带 remove 的动作按配色判据必须穿危险色(与"删除位置
+                # 记录"同一档 —— 移除播种来的候选同样丢的是用户拿不回来的名单项)。
+                danger=True,
+            )
+            remove.grid(row=0, column=1, padx=(8, 0))
+            self._process_buttons.append(remove)
+            if self._archived:
+                remove.configure(state="disabled")
+                # 单颗重绘而不是全量 _paint_buttons: 注册表里还留着上一轮重建时
+                # 已销毁的按钮(位置列表同一情况, 见 _rebuild_rows 只走 _paint_rows)。
+                paint_button_state(remove, palette, self._buttons[remove])
+            row_index += 1
+        add_row = ctk.CTkFrame(self._process_panel, fg_color="transparent")
+        add_row.grid(row=row_index, column=0, sticky="ew", padx=12, pady=(10, 12))
+        add_row.grid_columnconfigure(0, weight=1)
+        entry = ctk.CTkEntry(
+            add_row,
+            fg_color=palette.input_bg,
+            border_color=palette.input_border,
+            text_color=palette.text_body,
+            placeholder_text=tr("manage.process_placeholder"),
+        )
+        entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        # add="+": 不顶掉控件自己对这些键的处理(与 ui.keyboard 同一条规矩)。
+        entry.bind("<Return>", lambda _event: self._on_add_process_name(), add="+")
+        entry.bind(
+            "<KeyRelease>", lambda _event: self._refresh_process_add_state(), add="+"
+        )
+        self._process_entry = entry
+        self._process_add_btn = self._make_button(
+            add_row,
+            tr("manage.process_add"),
+            self._on_add_process_name,
+            width=72,
+            primary=True,
+        )
+        self._process_add_btn.grid(row=0, column=1)
+        if self._archived:
+            entry.configure(state="disabled")
+        self._refresh_process_add_state()
+
+    def _refresh_process_add_state(self) -> None:
+        """「添加」按钮的可用性: 有字、未到上限、未归档(与标签编辑对话框同口径)."""
+        entry = self._process_entry
+        button = self._process_add_btn
+        if entry is None or button is None:  # pragma: no cover - 建窗后必然存在
+            return
+        usable = (
+            bool(entry.get().strip())
+            and len(self._process_names) < MAX_PROCESS_NAMES
+            and not self._archived
+        )
+        button.configure(state="normal" if usable else "disabled")
+        # 同上: 只重绘这一颗, 注册表里的旧按钮可能已随上一轮重建销毁。
+        paint_button_state(button, self._palette, self._buttons[button])
+
+    def _on_add_process_name(self) -> None:
+        """把输入框里的名字追加进候选名单(后端校验失败时把原因亮给用户)."""
+        if self._blocked("process_names"):
+            return
+        entry = self._process_entry
+        if entry is None:  # pragma: no cover - 建窗后必然存在
+            return
+        raw = entry.get().strip()
+        if not raw:
+            return
+        try:
+            self._backend.set_game_process_names(
+                self._game_id, [*self._process_names, raw]
+            )
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
+        entry.delete(0, "end")
+        self.refresh()
+        self._on_change()
+
+    def _on_remove_process_name(self, name: str) -> None:
+        """从候选名单里移除一个名字(其余原样保留)."""
+        if self._blocked("process_names"):
+            return
+        try:
+            self._backend.set_game_process_names(
+                self._game_id,
+                [kept for kept in self._process_names if kept != name],
+            )
+        except ArchiveManagementError as exc:  # pragma: no cover - 移除只交子集
+            self._show_error(exc)
+            return
+        self.refresh()
+        self._on_change()
 
     def _rebuild_rows(self) -> None:
         for child in self._list_scroll.winfo_children():

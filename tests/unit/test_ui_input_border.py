@@ -39,7 +39,8 @@ _INPUT_TYPES = frozenset({"CTkEntry", "CTkComboBox", "CTkOptionMenu", "CTkTextbo
 # 自动确定, 界面不再让用户挑(2026-10-20)。
 # 21 → 23: 设置窗口日志分区新增两行数字输入(单文件上限 MB / 保留份数), 即改即存
 # 且主窗口拒绝时拨回生效值(2026-11-02)。
-_EXPECTED_INPUT_SITES = 23
+# 23 → 24: 管理窗口新增「进程名候选」的添加输入框(2026-11-05, 边界取 input_border)。
+_EXPECTED_INPUT_SITES = 24
 
 
 def _ui_sources() -> list[Path]:

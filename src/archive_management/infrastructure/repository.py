@@ -234,9 +234,9 @@ class GameRepository:
 
         只更新名称/Steam/平台/启用状态/译名记录: ``original_name`` 与
         ``storage_key`` 记录的是"首次录入的名称"与"磁盘上实际使用的目录",
-        重命名不得改写; ``process_names``(导入时播种的进程候选)同理只在插入时
-        写入; ``localized_name`` 跟着一起写, 让"名字是谁写的"能跟着
-        名字一起变(用户改名时调用方负责清空它)。
+        重命名不得改写; ``process_names``(进程名候选)只在插入时与
+        :meth:`set_process_names` 里写入; ``localized_name`` 跟着一起写, 让
+        "名字是谁写的"能跟着名字一起变(用户改名时调用方负责清空它)。
         """
         if game.id is None:
             raise ValueError("更新游戏需要 id")
@@ -254,6 +254,18 @@ class GameRepository:
                 ),
             )
         return game
+
+    def set_process_names(self, game_id: int, names: Sequence[str]) -> None:
+        """覆盖写入该游戏的进程名候选(逗号拼接, 与插入时同一存储格式).
+
+        候选有两个来源: 导入时的自动播种(随 :meth:`add` 插入)与游戏设置里的
+        手动增删(走这里) —— 后者是完整覆盖, 调用方先按当前名单加减出新的全集。
+        """
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE games SET process_names = ? WHERE id = ?",
+                (_join_tags(names), game_id),
+            )
 
     def ensure_storage_key(self, game_id: int, key: str) -> str:
         """写入并返回该游戏在备份根下的目录名(已有取值时不再改写).

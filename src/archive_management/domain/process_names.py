@@ -26,6 +26,10 @@ _EXECUTABLE_SUFFIXES = (".exe", ".app", ".bin", ".run")
 # 短于这个长度的名字不参与匹配: 三两个字母的进程名太容易误报。
 MIN_NAME_LENGTH = 3
 
+# 候选名单的上限: 导入时的自动播种(services.processes)与游戏设置里的手动编辑
+# (ui.models 的清洗)共用同一个数 —— 两处口径不一致时, 名单会在界面上"看起来坏了"。
+MAX_PROCESS_NAMES = 5
+
 
 def normalize_name(raw: str) -> str:
     """去掉可执行后缀与分隔符, 只留下用于比较的字符."""
@@ -56,6 +60,7 @@ def name_needles(names: Sequence[str]) -> tuple[str, ...]:
 
 
 __all__ = [
+    "MAX_PROCESS_NAMES",
     "MIN_NAME_LENGTH",
     "name_needles",
     "names_match",

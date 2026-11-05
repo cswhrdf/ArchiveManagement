@@ -527,6 +527,195 @@ def test_detail_page_enable_button_toggles_game(
     )
 
 
+def test_manage_window_edits_process_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """游戏设置里的「进程名候选」: 展示播种名单, 添加/移除立即生效并刷新."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    manager = _open_manager(
+        app,
+        game_id="outer-wilds",
+        name="星际拓荒",
+        backup_location="D:/Backup",
+        on_change=app._refresh_after_manage,
+    )
+
+    # 播种名单显示为一行一个候选; 输入框为空时「添加」禁用, 敲进字才亮。
+    assert manager._process_names == ("OuterWilds.exe",)
+    assert len(manager._process_buttons) == 1
+    assert str(manager._process_add_btn.cget("state")) == "disabled"
+    manager._on_add_process_name()  # 空输入: 静默返回, 不报错也不写后端
+    assert manager._process_names == ("OuterWilds.exe",)
+
+    manager._process_entry.insert(0, "OuterWildsDLC.exe")
+    manager._refresh_process_add_state()
+    assert str(manager._process_add_btn.cget("state")) == "normal"
+    manager._on_add_process_name()
+    _pump(app)
+    assert manager._process_names == ("OuterWilds.exe", "OuterWildsDLC.exe")
+    assert manager._process_entry.get() == ""
+    assert app.backend.get_detail("outer-wilds").process_names == (
+        "OuterWilds.exe",
+        "OuterWildsDLC.exe",
+    )
+
+    # 移除一个再移除最后一个: 名单与界面跟着收, 收空后显示空状态说明。
+    manager._on_remove_process_name("OuterWilds.exe")
+    _pump(app)
+    assert manager._process_names == ("OuterWildsDLC.exe",)
+    manager._on_remove_process_name("OuterWildsDLC.exe")
+    _pump(app)
+    assert manager._process_names == ()
+    assert manager._process_buttons == []
+    manager.close()
+
+
+def test_process_candidates_cap_and_archived_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """到上限后「添加」置灰; 归档游戏整节只读(不参与自动启停, 改名单无意义)."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.manage_window import ManageGameWindow
+    from archive_management.ui.palette import Palette
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    names = ["aa1.exe", "bb2.exe", "cc3.exe", "dd4.exe", "ee5.exe"]
+    app.backend.set_game_process_names("outer-wilds", names)
+    manager = _open_manager(
+        app, game_id="outer-wilds", name="星际拓荒", backup_location="D:/Backup"
+    )
+    assert manager._process_names == tuple(names)
+
+    # 名单已满: 输入框里有字也加不进去(按钮置灰, 兜底路径也拦下)。
+    manager._process_entry.insert(0, "ff6.exe")
+    manager._refresh_process_add_state()
+    assert str(manager._process_add_btn.cget("state")) == "disabled"
+
+    archived = ManageGameWindow(
+        app,
+        backend=app.backend,
+        palette=Palette.for_theme(app._theme),
+        game_id="outer-wilds",
+        name="星际拓荒",
+        enabled=False,
+        backup_location="D:/Backup",
+        archived=True,
+        on_change=lambda: None,
+    )
+    _pump(app)
+    assert str(archived._process_buttons[0].cget("state")) == "disabled"
+    assert archived._process_add_btn is not None
+    assert archived._process_entry is not None
+    assert str(archived._process_add_btn.cget("state")) == "disabled"
+    assert str(archived._process_entry.cget("state")) == "disabled"
+
+    # 绕过按钮直接调回调也要被拦: 名单一个字都不动。
+    archived._on_add_process_name()
+    archived._on_remove_process_name("aa1.exe")
+    assert app.backend.get_detail("outer-wilds").process_names == tuple(names)
+    archived.close()
+    manager.close()
+
+
+def test_adding_an_invalid_process_name_shows_the_backend_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """校验失败不弹后端异常: 原因进对话框, 输入保留待改, 名单不变."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    manager = _open_manager(
+        app, game_id="outer-wilds", name="星际拓荒", backup_location="D:/Backup"
+    )
+    shown: list[str] = []
+    monkeypatch.setattr(manager, "_show_error", lambda exc: shown.append(str(exc)))
+    manager._process_entry.insert(0, "Outer Wilds")  # 归一化后与已有候选重复
+    manager._on_add_process_name()
+    assert manager._process_names == ("OuterWilds.exe",)
+    assert shown != []
+    assert "Outer Wilds" in shown[0]
+    # 输入保留: 用户改两个字就能重试, 不用整段重敲。
+    assert manager._process_entry.get() == "Outer Wilds"
+    manager.close()
+
+
+def test_detail_header_follows_backend_enable_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启用态被外部(自动启停)改写后, 详情页头在下一拍轮询里自己换新."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._open_game_detail("outer-wilds")
+    _pump(app)
+
+    # 只改后端并抬高版本号, 不碰任何界面入口 —— 轮询要自己发现并换新页头。
+    app.backend.set_game_enabled("outer-wilds", False)
+    app._task_ticks = 4  # 下一拍正好轮到 5 的倍数(空闲时每 5 拍才读一次)
+    app._refresh_task()
+    _pump(app)
+    assert app._enable_state_label.cget("text") == tr("detail.state_disabled")
+    assert app._enable_btn.cget("text") == tr("detail.enable_game")
+
+    app.backend.set_game_enabled("outer-wilds", True)
+    app._task_ticks = 4
+    app._refresh_task()
+    _pump(app)
+    assert app._enable_state_label.cget("text") == tr("detail.state_enabled")
+    assert app._enable_btn.cget("text") == tr("detail.disable_game")
+
+
+def test_finish_activation_refreshes_the_current_page_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真切换发生的那一刻当前页立刻重读, 不等下一拍 500ms 轮询."""
+    from archive_management.application.games import ActivationOutcome
+    from archive_management.domain import Game
+    from archive_management.domain.activation import REASON_ENABLED, ActivationState
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import AppPage
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    app._open_game_detail("outer-wilds")
+    _pump(app)
+    app.backend.set_game_enabled("outer-wilds", False)  # 后台切换, 界面还没读
+
+    home_refreshes: list[int] = []
+    monkeypatch.setattr(
+        app._home_page, "refresh_artwork", lambda: home_refreshes.append(1)
+    )
+    outcome = ActivationOutcome(
+        state=ActivationState(),
+        enabled=Game(name="星际拓荒", enabled=True),
+        reason=REASON_ENABLED,
+    )
+
+    # 详情页分支: 完整重载, 页头状态词立刻对齐后端(中间不跑任何轮询拍)。
+    app._activation_run = outcome
+    app._finish_activation()
+    _pump(app)
+    assert app._enable_state_label.cget("text") == tr("detail.state_disabled")
+
+    # 主页分支: 重读面板数据(卡片徽章/启停按钮), 同样是立即的。
+    app._show_page(AppPage.HOME)
+    _pump(app)
+    app._activation_run = outcome
+    app._finish_activation()
+    assert home_refreshes == [1]
+
+
 def test_the_enable_button_on_an_archived_game_explains_why(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -655,3 +655,22 @@ def test_game_round_trips_seeded_process_names(tmp_path: Path) -> None:
     assert loaded_plain is not None
     assert loaded_seeded.process_names == ("Hades", "Hades.exe")
     assert loaded_plain.process_names == ()
+
+
+def test_set_process_names_overwrites_the_candidate_list(tmp_path: Path) -> None:
+    """set_process_names 覆盖写入候选(手动增删的落库路径), 拼接格式与插入时一致."""
+    database = _database(tmp_path)
+    repository = GameRepository(database)
+
+    game = repository.add(Game(name="Hades", process_names=("Hades", "Hades.exe")))
+    assert game.id is not None
+
+    repository.set_process_names(game.id, ("Hades",))
+    trimmed = repository.get(game.id)
+    assert trimmed is not None
+    assert trimmed.process_names == ("Hades",)
+
+    repository.set_process_names(game.id, ())
+    emptied = repository.get(game.id)
+    assert emptied is not None
+    assert emptied.process_names == ()

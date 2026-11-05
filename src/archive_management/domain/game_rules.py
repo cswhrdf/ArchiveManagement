@@ -33,6 +33,7 @@ GameAction = Literal[
     "locations",
     "tags",
     "rename",
+    "process_names",
     "schedule",
     "enable",
 ]

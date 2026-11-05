@@ -139,6 +139,7 @@ from archive_management.ui.models import (
     StorageOverview,
     TaskStatus,
     clean_game_name,
+    clean_process_names,
     delete_result_text,
     format_moment,
     home_board,
@@ -474,6 +475,7 @@ class SqlArchiveService:
             next_backup_label=_stamp_or_empty(next_run),
             next_backup_paused=next_paused,
             game_enabled=game.enabled,
+            process_names=tuple(game.process_names),
             original_name=game.original_name or game.name,
             storage_folder=game.storage_key,
         )
@@ -528,6 +530,14 @@ class SqlArchiveService:
         updated = game.model_copy(update={"name": clean, "localized_name": ""})
         self._games.update(updated)
         log_action("game.rename", game_id=game.id, name=clean)
+        return self._summary(updated)
+
+    def set_game_process_names(self, game_id: str, names: Sequence[str]) -> GameSummary:
+        """覆盖写入游戏的进程名候选(游戏设置里手动增删的入口)."""
+        _game, gid = self._game_ref(game_id)
+        clean = clean_process_names(names)
+        updated = games_cases.set_process_names(self._database, gid, clean)
+        self._touch()
         return self._summary(updated)
 
     def delete_export_path(self, game_id: str) -> str:

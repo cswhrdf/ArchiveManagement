@@ -408,6 +408,10 @@ class ArchiveService(Protocol):
         """覆盖写入游戏的自定义标签, 返回重算后的主页数据."""
         ...
 
+    def set_game_process_names(self, game_id: str, names: Sequence[str]) -> GameSummary:
+        """覆盖写入游戏的进程名候选(自动启停的识别名单), 返回该游戏摘要."""
+        ...
+
     def shutdown(self) -> None:
         """释放后台资源(调度器、监听器); 幂等, 供应用退出时调用."""
         ...

@@ -2015,6 +2015,13 @@ class ArchiveApp(ctk.CTk):
             # 当前游戏已被删除(例如在别处删除后由轮询触发的重载): 整体回到空状态.
             self._show_empty_list()
             return
+        # 启用态可能刚被自动启停在后台改写(名字与归档态同理): 页头那对"状态词 +
+        # 启停按钮"与图标位色调都取自 self._game, 不跟着重读就会一直停在旧文案上
+        # (2026-11-05 用户反馈: 游戏启动后详情页看不出已启用)。
+        self._game = next(
+            (game for game in games if game.game_id == self._game_id), None
+        )
+        self._sync_enable_control()
         self._render_list()
         detail = self.backend.get_detail(self._game_id)
         self._render_hero(detail)
@@ -3671,10 +3678,10 @@ class ArchiveApp(ctk.CTk):
             self._messages.put(("activation", ""))
 
     def _finish_activation(self) -> None:
-        """处理自动启停的轮询结果(主线程): 记账、回填分页, 只在真切换时提示.
+        """处理自动启停的轮询结果(主线程): 记账、回填分页, 真切换时立即刷新.
 
-        列表与详情不用在这里重读: 切换会抬高后端的数据版本号, 下一次
-        :meth:`_refresh_task` 自己会重载。
+        版本号轮询(空闲时 500ms 一拍)最终也会把列表与详情带新, 但用户盯着页面
+        的这一刻就该看到状态切换 —— 真切换时当前页立刻重读一遍, 不等下一拍。
         """
         outcome, self._activation_run = self._activation_run, None
         self._activation_busy = False
@@ -3683,6 +3690,13 @@ class ArchiveApp(ctk.CTk):
         self._track_activation_interval(outcome)
         self._home_page.refresh_activation(outcome, enabled=self._activation)
         self._report_activation(outcome)
+        if outcome.changed:
+            # 主页重读面板数据(卡片徽章/启停按钮, 保留筛选与页码); 详情页走完整
+            # 重载, 页头状态词与概要区一起换新。
+            if self._page is AppPage.HOME:
+                self._home_page.refresh_artwork()
+            else:
+                self._reload_data()
 
     def _track_activation_interval(self, outcome: ActivationOutcome) -> None:
         """队列是否非空决定下一轮的间隔档位(空队列回最快档; 见 activation_delay)."""

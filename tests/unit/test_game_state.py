@@ -183,3 +183,25 @@ def test_the_seam_can_take_the_enabled_state_back(tmp_path: Path) -> None:
     assert outcome.enabled is None
     assert outcome.disabled is not None
     assert outcome.disabled.id == game.id
+
+
+def test_set_process_names_overwrites_the_candidate_list(tmp_path: Path) -> None:
+    """手动增删进程名候选走用例: 覆盖写入、读回还原, 清空也是合法结果."""
+    database = _database(tmp_path)
+    game, _candidate_id = _imported_game(database, tmp_path)
+    assert game.id is not None
+
+    updated = games_cases.set_process_names(
+        database, game.id, ("Demo", "Demo.exe", "DemoLauncher")
+    )
+    assert updated.process_names == ("Demo", "Demo.exe", "DemoLauncher")
+
+    reloaded = GameRepository(database).get(game.id)
+    assert reloaded is not None
+    assert reloaded.process_names == ("Demo", "Demo.exe", "DemoLauncher")
+
+    cleared = games_cases.set_process_names(database, game.id, ())
+    assert cleared.process_names == ()
+
+    with pytest.raises(ArchiveManagementError, match="未知游戏"):
+        games_cases.set_process_names(database, 9999, ("Demo",))
