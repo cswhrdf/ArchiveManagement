@@ -3,8 +3,9 @@
 平台适配的边界约定: 领域层、应用层与界面只认
 :class:`~archive_management.domain.PlatformGame` 与
 :class:`~archive_management.domain.SavePathCandidate`, 平台差异(目录规则、清单
-格式、云端清单)全部挡在适配器内部。本期只有 Steam 有真正的实现, 其余平台注册
-"暂不支持"的**显式降级**(空结果 + 原因), 而不是让调用方以为查询过。
+格式、云端清单)全部挡在适配器内部。Steam 与 Epic 有真正的实现( Epic 只到存档
+路径推断, 封面与图标仍不支持), 其余平台注册 "暂不支持"的**显式降级**(空结果 +
+原因), 而不是让调用方以为查询过。
 
 约定:
 
@@ -18,7 +19,9 @@
   运行在对应平台上;
 - **复用而非重写**: Steam 的清单解析复用
   :mod:`archive_management.services.platform_scan`, 云端清单解析复用
-  :mod:`archive_management.services.steam_cloud`。
+  :mod:`archive_management.services.steam_cloud`; Epic 的安装清单与云存档缓存
+  同样复用 :func:`archive_management.services.platform_scan.read_epic_items` 与
+  :mod:`archive_management.services.epic_cloud`。
 """
 
 from __future__ import annotations
@@ -36,9 +39,11 @@ from archive_management.domain import (
     SavePathCandidate,
 )
 from archive_management.services.artwork import steam_artwork
+from archive_management.services.epic_cloud import EpicCloudSource
 from archive_management.services.pathcheck import normalize_path
 from archive_management.services.platform_scan import (
     ScanRoots,
+    read_epic_items,
     read_steam_installs,
 )
 from archive_management.services.steam_appinfo import (
@@ -226,11 +231,94 @@ class SteamAdapter:
         return Path(game.install_dir) if game.install_dir else None
 
 
+class EpicAdapter:
+    """Epic 适配器(存档路径推断已接入; 封面与图标仍走占位).
+
+    游戏列表来自启动器安装清单(``*.item``, 见
+    :func:`archive_management.services.platform_scan.read_epic_items`); 存档候选
+    来自云存档缓存(见 :mod:`archive_management.services.epic_cloud`) —— 只对
+    开过云存档的游戏有痕迹, 拿不到就返回空列表, 界面提示手动添加。
+    """
+
+    def __init__(
+        self, roots: ScanRoots, *, cloud: SaveCandidateSource | None = None
+    ) -> None:
+        """绑定探测环境; ``cloud`` 缺省用同一套根目录构建, 测试可注入替身."""
+        self._roots = roots
+        self._cloud = cloud if cloud is not None else EpicCloudSource(roots)
+
+    @property
+    def platform(self) -> PlatformId:
+        """平台标识."""
+        return "epic"
+
+    @property
+    def supported(self) -> bool:
+        """已实现(存档路径推断; 封面与图标不在其中)."""
+        return True
+
+    @property
+    def unsupported_reason(self) -> str:
+        """已实现, 无降级说明."""
+        return ""
+
+    @property
+    def supports_save_paths(self) -> bool:
+        """支持从云存档缓存推断存档路径."""
+        return True
+
+    @property
+    def supports_artwork(self) -> bool:
+        """不支持: Epic 没有公开的本机封面/图标清单, 界面显示占位图."""
+        return False
+
+    def artwork_refs(self, game: PlatformGame) -> tuple[ArtworkRef, ...]:
+        """始终返回空元组, 并记一条 DEBUG 日志."""
+        logger.debug("Epic 适配器不提供图片资源(%s)", game.name)
+        return ()
+
+    def list_games(self) -> list[PlatformGame]:
+        """返回本机安装清单里的游戏(没有 AppName 的旧清单跳过)."""
+        try:
+            items = read_epic_items(self._roots)
+        except Exception as exc:  # 清单损坏不应影响手动管理, 只降级
+            logger.debug("读取 Epic 安装清单失败: %s", exc)
+            return []
+        return [
+            PlatformGame(
+                platform="epic",
+                game_id=item.app_name,
+                name=item.name,
+                install_dir=normalize_path(str(item.install_dir)),
+            )
+            for item in items
+            if item.app_name
+        ]
+
+    def save_candidates(self, game: PlatformGame) -> list[SavePathCandidate]:
+        """返回该游戏的存档路径候选(来自云存档缓存)."""
+        if game.platform != "epic":
+            logger.debug("Epic 适配器收到其它平台的数据, 已忽略: %s", game.platform)
+            return []
+        try:
+            return self._cloud.candidates(
+                game.game_id, install_dir=self._install_dir(game)
+            )
+        except Exception as exc:  # 同上: 缓存损坏不应影响手动管理
+            logger.debug("解析 Epic 云存档缓存失败(%s): %s", game.game_id, exc)
+            return []
+
+    @staticmethod
+    def _install_dir(game: PlatformGame) -> Path | None:
+        """返回记录里的安装目录(按安装清单回查 AppName 的依据)."""
+        return Path(game.install_dir) if game.install_dir else None
+
+
 class UnsupportedPlatformAdapter:
     """未实现平台的显式降级.
 
     保留这个类(而不是干脆不注册平台)有两个好处: 平台矩阵在日志与界面里是完整的
-    ——用户看到的是"Epic 暂不支持", 而不是"什么都没有"; 契约用例也能用同一套断言
+    ——用户看到的是"GOG 暂不支持", 而不是"什么都没有"; 契约用例也能用同一套断言
     覆盖降级路径。
     """
 
@@ -285,8 +373,11 @@ class UnsupportedPlatformAdapter:
 
 
 def default_adapters(roots: ScanRoots) -> dict[PlatformId, PlatformAdapter]:
-    """构建平台标识到适配器的映射(本期只有 Steam 有实现)."""
-    adapters: dict[PlatformId, PlatformAdapter] = {"steam": SteamAdapter(roots)}
+    """构建平台标识到适配器的映射(Steam 全量实现, Epic 到存档路径推断)."""
+    adapters: dict[PlatformId, PlatformAdapter] = {
+        "steam": SteamAdapter(roots),
+        "epic": EpicAdapter(roots),
+    }
     for platform in PLATFORM_IDS:
         adapters.setdefault(platform, UnsupportedPlatformAdapter(platform))
     return adapters

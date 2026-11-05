@@ -16,6 +16,7 @@ from pathlib import Path
 
 from archive_management.domain import (
     Game,
+    GameCandidate,
     SaveCandidate,
     SaveCandidateStatus,
     SaveLocation,
@@ -64,13 +65,14 @@ def suggest_candidates(
     """探测存档路径候选, 校验后落库(状态 ``suggested``).
 
     ``source`` 是平台适配器给出的候选来源(Steam 为
-    :class:`~archive_management.services.steam_cloud.SteamCloudSource`);
+    :class:`~archive_management.services.steam_cloud.SteamCloudSource`, Epic 为
+    :class:`~archive_management.services.epic_cloud.EpicCloudSource`);
     ``install_dir`` 为游戏安装目录, 用于识别"把整个游戏目录当存档"的危险候选,
     省略时按该游戏已导入的探测结果回查。
     """
     game = _require_game(database, game_id)
     resolved_install = _resolve_install_dir(database, game_id, install_dir)
-    app_id = _app_id(game)
+    app_id = _app_id(database, game, game_id, platform)
     produced = source.candidates(app_id, install_dir=resolved_install)
     repository = SaveCandidateRepository(database)
     locations = SaveLocationRepository(database)
@@ -159,7 +161,10 @@ def _save_source(platform: str) -> SaveSource:
     """把平台标识映射成存档位置允许的来源取值.
 
     ``save_locations.source`` 只有 ``steam``/``manual`` 两种(见建表语句的
-    CHECK), 目前只有 Steam 适配器会产出候选, 其余平台按其输入性质归为手工。
+    CHECK)。Steam 云端推断出的位置记 ``steam``; Epic 候选的用户确认与手动添加
+    同档记 ``manual`` —— 完整的来源可追溯性(平台、清单文件)保留在
+    ``save_candidates`` 表的 ``platform``/``reason_code`` 里, 不需要为此扩
+    schema(该字段界面不展示, 改 CHECK 要整表重建)。
     """
     return "steam" if platform == "steam" else "manual"
 
@@ -218,11 +223,29 @@ def _require_candidate(
     return candidate
 
 
-def _app_id(game: Game) -> str:
-    """返回游戏对应的平台游戏标识(Steam 为 AppID 文本)."""
+def _app_id(database: Database, game: Game, game_id: int, platform: str) -> str:
+    """返回游戏对应的平台游戏标识(Steam 为 AppID 文本, Epic 为 AppName 文本).
+
+    Epic 的标识在探测结果行的 ``detail`` 里(``<AppName>.item`` 文件名), ``Game``
+    记录不带它: 回查已导入的候选行, 查不到就返回空串, 由来源按安装目录回查
+    安装清单(:func:`~archive_management.services.epic_cloud.EpicCloudSource`)。
+    """
+    if platform == "epic":
+        row = _candidate_row_for(database, game_id)
+        if row is not None and row.detail.endswith(".item"):
+            return row.detail[: -len(".item")].strip()
+        return ""
     if game.steam_app_id is None:
         raise ArchiveManagementError(f"游戏「{game.name}」没有平台标识, 无法探测存档")
     return str(game.steam_app_id)
+
+
+def _candidate_row_for(database: Database, game_id: int) -> GameCandidate | None:
+    """回查该游戏已导入的探测结果行(带 ``game_id`` 的那条)."""
+    for candidate in CandidateRepository(database).list_all():
+        if candidate.game_id == game_id:
+            return candidate
+    return None
 
 
 def _resolve_install_dir(
@@ -236,8 +259,5 @@ def _resolve_install_dir(
     """
     if explicit is not None:
         return Path(normalize_path(str(explicit)))
-    repository = CandidateRepository(database)
-    for candidate in repository.list_all():
-        if candidate.game_id == game_id:
-            return Path(candidate.install_dir)
-    return None
+    row = _candidate_row_for(database, game_id)
+    return None if row is None else Path(row.install_dir)

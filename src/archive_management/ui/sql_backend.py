@@ -93,6 +93,7 @@ from archive_management.services.artwork import (
     square_icon,
 )
 from archive_management.services.audit import log_action, redacted_path
+from archive_management.services.epic_cloud import EpicCloudSource
 from archive_management.services.exclusions import load_exclusions
 from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.services.game_names import (
@@ -256,12 +257,12 @@ def _platform_game(candidate: GameCandidate) -> PlatformGame | None:
     """把探测结果包装成平台数据模型(解析不出平台游戏标识时返回 ``None``)."""
     if candidate.source not in PLATFORM_IDS:
         return None
-    app_id = discovery_cases.candidate_app_id(candidate)
+    app_id = discovery_cases.candidate_platform_id(candidate)
     if app_id is None:
         return None
     return PlatformGame(
         platform=candidate.source,
-        game_id=str(app_id),
+        game_id=app_id,
         name=candidate.name,
         install_dir=candidate.install_dir,
     )
@@ -1095,7 +1096,10 @@ class SqlArchiveService:
         if adapter is None or not adapter.supports_save_paths:
             return {}
         report = candidate_cases.suggest_candidates(
-            self._database, game.id, self._save_candidate_source(), platform=game.origin
+            self._database,
+            game.id,
+            self._save_candidate_source(game.origin),
+            platform=game.origin,
         )
         stored: dict[str, int] = {}
         for item in report.candidates:
@@ -1103,10 +1107,12 @@ class SqlArchiveService:
                 stored[normalize_path(item.path)] = item.id
         return stored
 
-    def _save_candidate_source(self) -> SaveCandidateSource:
-        """存档候选来源: 未注入时读本机公开的 Steam 云同步清单."""
+    def _save_candidate_source(self, platform: str) -> SaveCandidateSource:
+        """存档候选来源: 未注入时按平台读本机清单, 注入的替身优先(测试)."""
         if self._save_source is not None:
             return self._save_source
+        if platform == "epic":
+            return EpicCloudSource(default_roots())
         return SteamCloudSource(default_roots())
 
     def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:

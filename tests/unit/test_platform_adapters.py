@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import archive_management.services.platform_adapters as adapters_mod
 import helpers
 from archive_management.domain import (
     PLATFORM_DATA_FORMAT_VERSION,
@@ -22,6 +23,7 @@ from archive_management.domain import (
     SavePathCandidate,
 )
 from archive_management.services.platform_adapters import (
+    EpicAdapter,
     PlatformAdapter,
     SteamAdapter,
     UnsupportedPlatformAdapter,
@@ -39,6 +41,8 @@ pytestmark = [
 
 _LOGGER = "archive_management.services.platform_adapters"
 _APP_ID = "753640"
+# Epic 的游戏标识(平台自己的 AppName, 真实启动器里是一段 GUID 文本).
+_EPIC_APP_NAME = "EpicCeleste"
 # 一款游戏的官方图标哈希(appinfo.vdf 的 clienticon).
 _ICON_HASH = "b2f863a4c63bc1c5667a8a7e3e9355ef260ce6d2"
 
@@ -83,13 +87,18 @@ def test_every_platform_is_registered_once(
         assert adapter.platform == platform
 
 
-def test_only_steam_is_supported_today(
+def test_only_steam_and_epic_are_supported_today(
     adapters: dict[PlatformId, PlatformAdapter],
 ) -> None:
+    """Steam 三项全支持, Epic 到存档路径推断; 其余平台必须显式说明原因."""
     assert adapters["steam"].supported is True
     assert adapters["steam"].unsupported_reason == ""
+    assert adapters["epic"].supported is True
+    assert adapters["epic"].unsupported_reason == ""
+    assert adapters["epic"].supports_save_paths is True
+    assert adapters["epic"].supports_artwork is False
     unsupported = {name for name, item in adapters.items() if not item.supported}
-    assert unsupported == set(PLATFORM_IDS) - {"steam"}
+    assert unsupported == set(PLATFORM_IDS) - {"steam", "epic"}
     assert all(adapters[name].unsupported_reason for name in unsupported)
 
 
@@ -258,6 +267,95 @@ def test_unsupported_adapter_keeps_a_custom_reason() -> None:
     assert adapter.supported is False
     assert adapter.platform == "epic"
     assert adapter.unsupported_reason == "Epic 适配器尚未接入"
+
+
+# --------------------------------------------------------------------- Epic
+
+
+def _epic_environment(tmp_path: Path) -> Path:
+    """造出"安装清单 + 云存档缓存 + 真实存档目录", 返回安装目录."""
+    install = tmp_path / "Games" / "Celeste"
+    install.mkdir(parents=True)
+    helpers.write_epic_item(
+        helpers.epic_tree(tmp_path), _EPIC_APP_NAME, "Celeste", install
+    )
+    (tmp_path / "Local" / "Celeste" / "Saves").mkdir(parents=True)
+    helpers.write_epic_cloud_cache(
+        tmp_path / "Local", _EPIC_APP_NAME, "${AppData}/Celeste/Saves/"
+    )
+    return install
+
+
+def test_epic_games_come_from_the_install_manifests(tmp_path: Path) -> None:
+    """游戏列表来自 ``*.item`` 清单; AppName 就是平台标识, 缺它的旧清单跳过."""
+    install = _epic_environment(tmp_path)
+    helpers.write_epic_item(
+        helpers.epic_tree(tmp_path),
+        "OldStyle",
+        "Old Style",
+        tmp_path / "Games" / "OldStyle",
+        with_app_name=False,
+    )
+
+    games = EpicAdapter(helpers.scan_roots(tmp_path)).list_games()
+
+    assert [(game.game_id, game.name, game.install_dir) for game in games] == [
+        (_EPIC_APP_NAME, "Celeste", str(install))
+    ]
+    assert all(game.platform == "epic" for game in games)
+
+
+def test_epic_save_candidates_come_from_the_cloud_cache(tmp_path: Path) -> None:
+    install = _epic_environment(tmp_path)
+    adapter = EpicAdapter(helpers.scan_roots(tmp_path))
+
+    candidates = adapter.save_candidates(adapter.list_games()[0])
+
+    assert [item.path for item in candidates] == [
+        str(tmp_path / "Local" / "Celeste" / "Saves")
+    ]
+    assert [item.reason_code for item in candidates] == ["epic_cloudcache"]
+    assert candidates[0].confidence == "medium"
+    assert install.is_dir()
+
+
+def test_epic_offers_no_artwork(tmp_path: Path) -> None:
+    """Epic 没有公开的本机封面/图标清单: 声明不支持并返回空引用."""
+    adapter = EpicAdapter(helpers.scan_roots(tmp_path))
+    game = PlatformGame(platform="epic", game_id=_EPIC_APP_NAME, name="Celeste")
+
+    assert adapter.supports_artwork is False
+    assert adapter.artwork_refs(game) == ()
+
+
+def test_epic_save_candidates_ignore_data_from_another_platform(
+    tmp_path: Path,
+) -> None:
+    other = PlatformGame(platform="steam", game_id=_APP_ID, name="Outer Wilds")
+
+    assert EpicAdapter(helpers.scan_roots(tmp_path)).save_candidates(other) == []
+
+
+def test_a_failing_epic_environment_only_shrinks_the_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """清单读不出来时只少条目; 缓存解析炸掉时只少候选, 都不抛给界面."""
+
+    def broken(_roots: ScanRoots) -> list[object]:
+        raise RuntimeError("清单目录不可读")
+
+    monkeypatch.setattr(adapters_mod, "read_epic_items", broken)
+    adapter = EpicAdapter(helpers.scan_roots(tmp_path))
+
+    assert adapter.list_games() == []
+
+    monkeypatch.undo()
+    _epic_environment(tmp_path)
+    game = PlatformGame(platform="epic", game_id=_EPIC_APP_NAME, name="Celeste")
+    failing = EpicAdapter(helpers.scan_roots(tmp_path), cloud=BrokenCloud())
+
+    assert failing.save_candidates(game) == []
 
 
 # ------------------------------------------------------- 适配器边界不抛异常

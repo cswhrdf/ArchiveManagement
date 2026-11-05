@@ -9,7 +9,7 @@
 | 探测：Steam                            | ✅ 注册表 + 默认安装目录                   | ✅ `~/.steam`、XDG 与 Flatpak/Snap 目录 | ✅ `~/Library/Application Support/Steam` |
 | 探测：Epic                             | ✅ `%PROGRAMDATA%\Epic\...`                | ❌ 无官方启动器，用监控目录             | ✅ `/Users/Shared/Epic Games/...`        |
 | 探测：GOG / Ubisoft                    | ✅ 注册表                                  | ❌ 同 macOS                             | ❌ 没有注册表，用监控目录                |
-| 存档位置推断（仅 Steam）               | ✅ 云同步清单                              | ✅ 云同步清单                           | ✅ 云同步清单                            |
+| 存档位置推断（Steam / Epic）           | ✅ Steam 云同步清单 + Epic 云存档缓存      | ✅ 云同步清单（Epic 无启动器）          | ✅ 云同步清单（Epic 缓存位置未实测）     |
 | 封面与图标（仅 Steam）                 | ✅ CDN 封面 + 本机官方图标                 | ✅ CDN 封面 + 本机官方图标              | ✅ CDN 封面 + 本机官方图标               |
 | 监控目录                               | ✅ 人工实测                                | ✅                                      | ✅                                       |
 | PyInstaller 打包                       | ✅ 单文件 exe（已构建并量过体积/启动时间） | ✅ CI（构建 + 冒烟，glibc ≥ 2.39）      | ⏳ 未纳入                                |
@@ -19,7 +19,7 @@
 ## 探测来源的平台差异
 
 - **Steam 在三个平台上都可用**，只是安装位置不同：Windows 先读注册表登记的路径，再回落到默认安装目录；macOS 用 `~/Library/Application Support/Steam`；Linux 依次尝试 `~/.steam`、XDG 数据目录以及 Flatpak/Snap 沙箱内的目录。识别方式统一是库清单`libraryfolders.vdf` + `appmanifest_*.acf`。
-- **Epic 只在 Windows 与 macOS 可用**（分别是 `%PROGRAMDATA%` 下的 `*.item` 清单与`/Users/Shared/Epic Games/...`）；Linux 没有官方启动器，该来源返回空。
+- **Epic 只在 Windows 与 macOS 可用**（分别是 `%PROGRAMDATA%` 下的 `*.item` 清单与`/Users/Shared/Epic Games/...`）；Linux 没有官方启动器，该来源返回空。存档位置推断（云存档缓存）**只接了 Windows**：macOS 侧的缓存位置未实测，这两个平台之外的调用显式返回空。
 - **GOG 与 Ubisoft 的安装位置只写在 Windows 注册表里**，因此在 macOS/Linux 上**显式跳过**（日志会记下"仅 Windows 可用"，而不是让查询静默返回空结果），这两个平台请用监控目录覆盖。注册表相关的探测只会在 Windows 上执行，其它平台连注册表读取器都不会构造。Ubisoft Connect 的子键是数字安装 id，游戏名取子键里的 `GameName`/`DisplayName`，都没有时退回安装目录的目录名。
 - 监控目录在三个平台上的行为完全一致。
 
@@ -27,31 +27,34 @@
 
 同一款游戏的“自动程度”取决于该平台提供了什么本机数据，共三档：**自动发现安装位置** → **自动推断存档位置** → **自动取封面与图标**。拿不到可信数据就降到“手动添加 / 占位图”，不猜路径 —— 与下一节“可信存档来源”同一条纪律。
 
-| 游戏平台              | 自动发现安装位置                                                                | 自动推断存档位置                | 封面与图标                                     | 落点                         |
-| --------------------- | ------------------------------------------------------------------------------- | ------------------------------- | ---------------------------------------------- | ---------------------------- |
-| Steam                 | ✅ 三平台（应用清单 + Windows 注册表）                                          | ✅ 云同步清单 `remotecache.vdf` | ✅ 公开 CDN 封面 + 本机 `appinfo.vdf` 官方图标 | `SteamAdapter`               |
-| Epic                  | ✅ Windows 与 macOS（`%PROGRAMDATA%` 的 `*.item` / `/Users/Shared/Epic Games`） | ❌ 未接入，界面提示手动添加     | ❌ 占位图                                      | `UnsupportedPlatformAdapter` |
-| GOG / Ubisoft Connect | ✅ 仅 Windows（注册表）                                                         | ❌ 未接入，界面提示手动添加     | ❌ 占位图                                      | 同上                         |
-| 监控目录 / 手动添加   | ✅ 自己指定目录（三平台一致）                                                   | ❌ 只能手动添加                 | ❌ 占位图                                      | 扫描器与界面，不经适配器     |
+| 游戏平台              | 自动发现安装位置                                                                | 自动推断存档位置                                | 封面与图标                                     | 落点                         |
+| --------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------- | ---------------------------------------------- | ---------------------------- |
+| Steam                 | ✅ 三平台（应用清单 + Windows 注册表）                                          | ✅ 云同步清单 `remotecache.vdf`                 | ✅ 公开 CDN 封面 + 本机 `appinfo.vdf` 官方图标 | `SteamAdapter`               |
+| Epic                  | ✅ Windows 与 macOS（`%PROGRAMDATA%` 的 `*.item` / `/Users/Shared/Epic Games`） | ✅ 仅 Windows：启动器云存档缓存                 | ❌ 占位图                                      | `EpicAdapter`                |
+| GOG / Ubisoft Connect | ✅ 仅 Windows（注册表）                                                         | ❌ 未接入，界面提示手动添加                     | ❌ 占位图                                      | `UnsupportedPlatformAdapter` |
+| 监控目录 / 手动添加   | ✅ 自己指定目录（三平台一致）                                                   | ❌ 只能手动添加                                 | ❌ 占位图                                      | 扫描器与界面，不经适配器     |
 
-- **能力由适配器声明**（`services/platform_adapters.py`）：Steam 三项全支持；Epic / GOG / Ubisoft 与监控目录走 `UnsupportedPlatformAdapter` 的显式降级（空结果 + 原因，见下一节的“其它平台的降级路径”）。它们将来接入时只需实现适配器接口，上层流程不用改。
+- **能力由适配器声明**（`services/platform_adapters.py`）：Steam 三项全支持；Epic 支持存档路径推断、不提供封面与图标；GOG / Ubisoft 与监控目录走 `UnsupportedPlatformAdapter` 的显式降级（空结果 + 原因，见下一节的“其它平台的降级路径”）。它们将来接入时只需实现适配器接口，上层流程不用改。
 - **封面与图标是可再生的派生数据**：取图顺序、缓存位置与清理见 [library.md](./library.md) 的“封面与图标”；取不到只影响外观，不影响备份、恢复与导出。
-- **证据**：`tests/unit/test_platform_adapters.py` 用同一套契约断言逐个平台跑（含“不支持时必须显式说明原因”），`tests/unit/test_steam_cloud.py` 与 `tests/unit/test_artwork.py` 覆盖云清单解析与取图两条链；三者都在 CI 的全量测试里。
+- **证据**：`tests/unit/test_platform_adapters.py` 用同一套契约断言逐个平台跑（含“不支持时必须显式说明原因”），`tests/unit/test_steam_cloud.py`、`tests/unit/test_epic_cloud.py` 与 `tests/unit/test_artwork.py` 覆盖两种云清单解析与取图链路；它们都在 CI 的全量测试里。
 
 ## 可信存档来源（按平台）
 
-存档位置只接受**可信来源**，绝不按路径模板推断（推错的路径一旦被确认，恢复与删除会动到不该动的地方）。目前实际接入的来源只有一个：
+存档位置只接受**可信来源**，绝不按路径模板推断（推错的路径一旦被确认，恢复与删除会动到不该动的地方）。目前实际接入的来源有两个：
 
-| 平台                                    | 可信来源                                               | 状态                                              |
-| --------------------------------------- | ------------------------------------------------------ | ------------------------------------------------- |
-| Steam                                   | 云端同步清单 `userdata/<账号>/<appid>/remotecache.vdf` | ✅ 已实现（`services/steam_cloud.py`）            |
-| Epic / GOG / Ubisoft Connect / 监控目录 | —                                                      | ⏳ 接口保留，本期一律“暂不支持”，界面提示手动添加 |
-| 任意平台                                | 平台官方清单、游戏自带配置                             | ⏳ 尚未接入，只能手动填写                         |
+| 平台                             | 可信来源                                                                                                | 状态                                          |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| Steam                            | 云端同步清单 `userdata/<账号>/<appid>/remotecache.vdf`                                                  | ✅ 已实现（`services/steam_cloud.py`）        |
+| Epic                             | 启动器云存档缓存 `%LOCALAPPDATA%\EpicGamesLauncher\Saved\Saves\<账号>\<AppName>\CloudCache\*.manifest` | ✅ 仅 Windows（`services/epic_cloud.py`）     |
+| GOG / Ubisoft Connect / 监控目录 | —                                                                                                       | ⏳ 接口保留，本期“暂不支持”，界面提示手动添加 |
+| 任意平台                         | 平台官方清单、游戏自带配置                                                                              | ⏳ 尚未接入，只能手动填写                     |
 
 - **Steam 云端清单怎么用**：清单里的相对路径要配上它记的 `root` 编号才能变成绝对路径。已知映射：`1` = 游戏安装目录、`2` = 用户的“文档”、`3` = `%LOCALAPPDATA%`、`12` = `%LOCALAPPDATA%Low`（与 Steam SDK 的 `ERemoteStorageFileRoot` 一致）。**只在把它与已安装清单（`appmanifest_*.acf`）求交集之后使用** —— 这个文件包含已卸载但保留了云同步状态的游戏，不筛一遍会凭空多出一批候选。
-- **没有清单就没有候选**：没开云同步、清单缺失或损坏、`root` 编号认不出来，都只记 DEBUG 日志并返回空结果（“拿不到来源”是正常降级，不是错误），界面会说“需要手动添加”。
+- **Epic 云存档缓存怎么用**：启动器给开过云存档的游戏在 `CloudCache` 下写 `*.manifest`（未公开的二进制容器），里面**内嵌明文** ``CloudSaveFolder${宏}/相对路径/`` —— 云存档的根目录由启动器自己记录。解析器只做保守扫描：定位 `CloudSaveFolder` 前缀、取后面可打印的路径段；宏只认一张显式映射表（`${AppData}`/`${LocalAppData}` → `%LOCALAPPDATA%` 优先、`AppData\Roaming` 次选，`${MyDocuments}`、`${UserProfile}`、`${InstalledDir}`），**展开后目录必须真实存在**才算候选，绝对路径与 `..` 一律丢弃。宏到目录的映射用本机真实数据核对过：`${AppData}` 落在 `AppData\Local` 而不是直觉上的 Roaming。
+- **Epic 的覆盖范围与置信度**：只对**开过云存档**的游戏有痕迹，没开的只能手动添加；`*.item` 安装清单还在时按安装目录回查 AppName，游戏卸载后就查不到（孤儿缓存不用，也不按路径段猜游戏）；平台适配器因此把候选的置信度定为 `medium`（低于 Steam 云清单的 `high`）——证据可信，但格式无公开契约、GUID 映射有缺口。
+- **没有清单就没有候选**：没开云同步、清单缺失或损坏、`root`（或宏）认不出来，都只记 DEBUG 日志并返回空结果（“拿不到来源”是正常降级，不是错误），界面会说“需要手动添加”。
 - **候选必须经用户确认**：探测结果里展示路径与危险标记，导入对话框里可改可勾选，确认后才写进存档位置（危险目标会被拦下；详细流程见 [library.md](./library.md) 的“存档路径推断”）。
-- **其它平台的降级路径**：Epic / GOG / Ubisoft 走 `UnsupportedPlatformAdapter` —— 能力声明为不支持、返回空结果并带上“暂未实现”的说明，安装探测依旧可用，存档位置与封面由用户手动提供；它们将来接入时只需实现适配器接口，上层流程不用改。
+- **其它平台的降级路径**：GOG / Ubisoft 走 `UnsupportedPlatformAdapter` —— 能力声明为不支持、返回空结果并带上“暂未实现”的说明，安装探测依旧可用，存档位置与封面由用户手动提供；它们将来接入时只需实现适配器接口，上层流程不用改。
 
 ## 这张表是按什么验的（跨平台与发布前验证）
 

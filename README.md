@@ -25,11 +25,11 @@
 
 发布包是免安装的单文件程序，覆盖以下系统。链接始终指向**最新正式版**的对应文件（也可到[发布页](https://github.com/cswhrdf/ArchiveManagement/releases/latest)查看全部版本与各版的下载指引）：
 
-| 系统                                   | 版本要求                                                                 | 下载                                                                                                                                           |
-| -------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows                                | Windows 10 / 11（64 位）                                                  | [ArchiveManagement.exe](https://github.com/cswhrdf/ArchiveManagement/releases/latest/download/ArchiveManagement.exe)                             |
-| Linux（x64，需桌面环境）               | Ubuntu 24.04+ / Debian 13+ / Fedora 40+ / Arch / openSUSE 等（glibc ≥ 2.39） | [ArchiveManagement-linux-x64.tar.gz](https://github.com/cswhrdf/ArchiveManagement/releases/latest/download/ArchiveManagement-linux-x64.tar.gz) |
-| macOS                                  | —                                                                        | 暂未提供安装包，可从源码运行（见下方快速开始）                                                                                                   |
+| 系统                     | 版本要求                                                                     | 下载                                                                                                                                           |
+| ------------------------ | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows                  | Windows 10 / 11（64 位）                                                     | [ArchiveManagement.exe](https://github.com/cswhrdf/ArchiveManagement/releases/latest/download/ArchiveManagement.exe)                           |
+| Linux（x64，需桌面环境） | Ubuntu 24.04+ / Debian 13+ / Fedora 40+ / Arch / openSUSE 等（glibc ≥ 2.39） | [ArchiveManagement-linux-x64.tar.gz](https://github.com/cswhrdf/ArchiveManagement/releases/latest/download/ArchiveManagement-linux-x64.tar.gz) |
+| macOS                    | —                                                                            | 暂未提供安装包，可从源码运行（见下方快速开始）                                                                                                 |
 
 - Windows 下载后双击即可运行，不需要解压；Linux 下载后先解压（`tar -xzf ArchiveManagement-linux-x64.tar.gz`），在终端执行 `./ArchiveManagement` 启动。
 - 更老的 Linux 发行版（如 Ubuntu 22.04 / Debian 12）不在当前支持范围——构建基线决定了 glibc 地板，口径与各发行版覆盖见 [docs/platforms.md](docs/platforms.md)。
@@ -63,14 +63,14 @@ uv run python -m archive_management gui --root ./dev-data     # 启动图形界�
 
 游戏库的来源按"能自动做到多少"分三档；逐个平台的位置、可信来源与例外见 [platforms.md](./docs/platforms.md) 的"商店平台的支持程度"。
 
-| 游戏平台              | 自动发现安装位置    | 自动推断存档位置 | 封面与图标  |
-| --------------------- | ------------------- | ---------------- | ----------- |
-| Steam                 | ✅ 三个平台都支持   | ✅ 云同步清单    | ✅ 自动获取 |
-| Epic                  | ✅ Windows 与 macOS | ❌ 手动添加      | ❌ 占位图   |
-| GOG / Ubisoft Connect | ✅ 仅 Windows       | ❌ 手动添加      | ❌ 占位图   |
-| 监控目录 / 手动添加   | ✅ 目录由你指定     | ❌ 手动添加      | ❌ 占位图   |
+| 游戏平台              | 自动发现安装位置    | 自动推断存档位置            | 封面与图标  |
+| --------------------- | ------------------- | --------------------------- | ----------- |
+| Steam                 | ✅ 三个平台都支持   | ✅ 云同步清单               | ✅ 自动获取 |
+| Epic                  | ✅ Windows 与 macOS | ✅ 仅 Windows（云存档缓存） | ❌ 占位图   |
+| GOG / Ubisoft Connect | ✅ 仅 Windows       | ❌ 手动添加                 | ❌ 占位图   |
+| 监控目录 / 手动添加   | ✅ 目录由你指定     | ❌ 手动添加                 | ❌ 占位图   |
 
-- **自动发现安装位置**：扫描平台客户端自己的安装清单与 Windows 注册表就能列出游戏； **自动推断存档位置**：直接给出可信的存档路径（Steam 读的是它自己的云同步清单）。拿不到可信来源的一律**手动添加**，绝不按路径模板猜。
+- **自动发现安装位置**：扫描平台客户端自己的安装清单与 Windows 注册表就能列出游戏； **自动推断存档位置**：直接给出可信的存档路径（Steam 读它的云同步清单，Epic 读启动器的云存档缓存）。拿不到可信来源的一律**手动添加**，绝不按路径模板猜。
 - **封面与图标只影响外观**：它们是可再生的派生数据，取不到时显示占位，不影响备份、恢复与导出。
 - 不论哪一档，手动添加游戏与存档位置始终可用；探测结果也要你确认后才会进入游戏库。
 

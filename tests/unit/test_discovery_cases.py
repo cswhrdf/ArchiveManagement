@@ -16,6 +16,7 @@ import pytest
 from archive_management.application.discovery import (
     add_candidate_as_monitored,
     add_monitored_directory,
+    candidate_platform_id,
     clear_scan_results,
     ignore_candidate,
     import_candidate,
@@ -502,6 +503,49 @@ def test_import_candidate_carries_the_steam_app_id(tmp_path: Path) -> None:
 
     assert steam_game.steam_app_id == 1145360
     assert plain_game.steam_app_id is None
+
+
+def test_the_platform_identifier_comes_from_the_manifest_name() -> None:
+    """Steam 取清单文件名里的 AppID; Epic 取 ``.item`` 清单的 AppName."""
+    steam = GameCandidate(
+        name="Outer Wilds",
+        install_dir="C:\\Steam\\OuterWilds",
+        source="steam",
+        detail="appmanifest_753640.acf",
+    )
+    epic = GameCandidate(
+        name="Celeste",
+        install_dir="C:\\Epic\\Celeste",
+        source="epic",
+        detail="EpicCeleste.item",
+    )
+
+    assert candidate_platform_id(steam) == "753640"
+    assert candidate_platform_id(epic) == "EpicCeleste"
+
+
+def test_sources_without_a_platform_identifier_get_none() -> None:
+    """监控目录、非法清单文件名与"只有扩展名"的 Epic 记录都拿不到标识."""
+    monitored = GameCandidate(
+        name="Demo", install_dir="D:\\Games\\Demo", source="monitored"
+    )
+    epic_without_item = GameCandidate(
+        name="Demo", install_dir="D:\\Games\\Demo", source="epic", detail="watched"
+    )
+    bad_steam = GameCandidate(
+        name="Demo",
+        install_dir="C:\\Steam\\Demo",
+        source="steam",
+        detail="appmanifest_demo.acf",
+    )
+    empty_epic = GameCandidate(
+        name="Demo", install_dir="C:\\Epic\\Demo", source="epic", detail=".item"
+    )
+
+    assert candidate_platform_id(monitored) is None
+    assert candidate_platform_id(epic_without_item) is None
+    assert candidate_platform_id(bad_steam) is None
+    assert candidate_platform_id(empty_epic) is None
 
 
 def test_import_candidate_requires_name(tmp_path: Path) -> None:

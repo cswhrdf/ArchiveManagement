@@ -338,7 +338,12 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
         status="new",
         health="ok",
         detail="terraria.item",
-        save_supported=False,
+        save_paths=(
+            SavePathSuggestion(
+                path="C:\\Users\\demo\\AppData\\Local\\Terraria\\Players",
+                path_kind="directory",
+            ),
+        ),
     ),
     CandidateItem(
         candidate_id="cand-4",

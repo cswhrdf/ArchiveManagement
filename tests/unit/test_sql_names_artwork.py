@@ -513,7 +513,7 @@ def test_save_candidate_source_prefers_the_injected_one(tmp_path: Path) -> None:
         save_source=injected,
     )
 
-    assert service._save_candidate_source() is injected
+    assert service._save_candidate_source("steam") is injected
 
 
 def test_candidate_names_skip_unresolvable_and_already_cached_rows(
@@ -644,15 +644,17 @@ def test_artwork_game_needs_the_adapter_to_offer_references(
     assert service._artwork_game(game) is None
 
 
-def test_save_candidate_source_falls_back_to_the_local_steam_cloud(
+def test_save_candidate_source_falls_back_to_the_local_clouds(
     tmp_path: Path,
 ) -> None:
-    """没有注入来源时读本机公开的 Steam 云同步清单(只读本机文件, 不联网)."""
+    """没有注入来源时按平台读本机清单(只读本机文件, 不联网)."""
+    from archive_management.services.epic_cloud import EpicCloudSource
     from archive_management.services.steam_cloud import SteamCloudSource
 
     service = _service(tmp_path)
 
-    assert isinstance(service._save_candidate_source(), SteamCloudSource)
+    assert isinstance(service._save_candidate_source("steam"), SteamCloudSource)
+    assert isinstance(service._save_candidate_source("epic"), EpicCloudSource)
 
 
 def test_prefetch_artwork_starts_one_background_round(

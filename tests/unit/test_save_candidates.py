@@ -382,6 +382,76 @@ def test_install_dir_comes_from_the_imported_candidate(tmp_path: Path) -> None:
     assert source.requests == [("730", install_dir)]
 
 
+def _epic_game(database: Database) -> int:
+    """建一款 Epic 来源的游戏并返回 id(Epic 的标识不在 ``Game`` 记录里)."""
+    game = GameRepository(database).add(Game(name="Celeste", origin="epic"))
+    assert game.id is not None
+    return game.id
+
+
+def test_epic_candidates_take_the_app_name_from_the_imported_row(
+    tmp_path: Path,
+) -> None:
+    """Epic 的 AppName 在探测结果行的 ``detail`` 里(``<AppName>.item``)."""
+    database = migrated_database(tmp_path)
+    install_dir = tmp_path / "Epic" / "Celeste"
+    install_dir.mkdir(parents=True)
+    game_id = _epic_game(database)
+    CandidateRepository(database).upsert(
+        GameCandidate(
+            name="Celeste",
+            install_dir=str(install_dir),
+            source="epic",
+            reason_code="epic_manifest",
+            detail="EpicCeleste.item",
+            status="imported",
+            game_id=game_id,
+        )
+    )
+    source = _FakeSource(str(tmp_path / "saves"))
+
+    suggest_candidates(database, game_id, source, platform="epic")
+
+    assert source.requests == [("EpicCeleste", install_dir)]
+
+
+def test_epic_candidates_leave_the_app_name_empty_without_an_item_row(
+    tmp_path: Path,
+) -> None:
+    """探测结果不是 Epic 清单(例如监控目录)时留空, 由来源按安装目录回查."""
+    database = migrated_database(tmp_path)
+    install_dir = tmp_path / "Epic" / "Celeste"
+    install_dir.mkdir(parents=True)
+    game_id = _epic_game(database)
+    CandidateRepository(database).upsert(
+        GameCandidate(
+            name="Celeste",
+            install_dir=str(install_dir),
+            source="epic",
+            reason_code="monitored",
+            detail="watched",
+            status="imported",
+            game_id=game_id,
+        )
+    )
+    source = _FakeSource(str(tmp_path / "saves"))
+
+    suggest_candidates(database, game_id, source, platform="epic")
+
+    assert source.requests == [("", install_dir)]
+
+
+def test_epic_candidates_without_a_probe_row_stay_empty(tmp_path: Path) -> None:
+    """手工录入的 Epic 游戏没有探测器与安装目录可查, 两样都留空."""
+    database = migrated_database(tmp_path)
+    game_id = _epic_game(database)
+    source = _FakeSource(str(tmp_path / "saves"))
+
+    suggest_candidates(database, game_id, source, platform="epic")
+
+    assert source.requests == [("", None)]
+
+
 def test_candidate_health_reflects_the_current_path_state(tmp_path: Path) -> None:
     database = migrated_database(tmp_path)
     missing = tmp_path / "gone"

@@ -556,11 +556,26 @@ def import_candidate(
     return game
 
 
+def candidate_platform_id(candidate: GameCandidate) -> str | None:
+    """从探测结果里取平台游戏标识(Steam 为 AppID 文本, Epic 为 AppName 文本).
+
+    Steam 的 AppID 在应用清单文件名里; Epic 的 AppName 就是 ``.item`` 清单的
+    文件名(扫描器把它留在 ``detail`` 里), 启动器的云存档缓存也按它组织目录 ——
+    这是把缓存对应到具体游戏的桥梁。其它来源与监控目录返回 ``None``, 游戏保持
+    "没有平台标识"的状态。
+    """
+    if candidate.source == "steam":
+        return app_id_from_manifest(candidate.detail) or None
+    if candidate.source == "epic" and candidate.detail.endswith(".item"):
+        return candidate.detail[: -len(".item")].strip() or None
+    return None
+
+
 def candidate_app_id(candidate: GameCandidate) -> int | None:
     """从探测结果里推断平台游戏标识(Steam 的 AppID 在清单文件名里).
 
-    只有 Steam 清单来源的候选谈得上 AppID; 其它平台与监控目录返回 ``None``,
-    游戏保持"没有平台标识"的状态。
+    供译名缓存与平台工具排除清单匹配使用: 只有 Steam 清单来源的候选谈得上
+    AppID; 其它平台与监控目录返回 ``None``。
     """
     if candidate.source != "steam":
         return None
