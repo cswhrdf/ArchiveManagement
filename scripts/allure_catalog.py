@@ -118,6 +118,20 @@ CATALOG: tuple[Producer, ...] = (
         detail="每个平台的覆盖率结论与原始 coverage.xml",
     ),
     Producer(
+        key="profile",
+        title="耗时追踪",
+        identity=f"{IDENTITY_PREFIX}profile",
+        scope=PER_PLATFORM,
+        artifact="allure-results → 耗时追踪附件",
+        script="scripts/create_allure_profile.py",
+        job="allure-summary",
+        gate=GATE_ON_DEMAND,
+        detail=(
+            "viztracer 的函数级耗时(按平台一条, 只在开追踪的平台上有): 汇总作业把它从"
+            "用例上摘成结论项, 并带上原始 trace"
+        ),
+    ),
+    Producer(
         key="performance",
         title="Performance baseline",
         identity=f"{IDENTITY_PREFIX}performance",

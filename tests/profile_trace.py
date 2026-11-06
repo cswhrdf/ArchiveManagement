@@ -18,6 +18,11 @@ viztracer 会把**每个函数调用**写进 trace, 默认配置下一个 1.2 s 
 Perfetto/``vizviewer`` 打开, 而摘要能在报告里直接读。
 
 viztracer 没装时降级: 只打印一条提示, 不挂附件, 用例照常跑。
+
+**附件只是搬运**: 这里把 trace 与摘要挂在用例上, 报告作业(汇总作业)的
+``scripts/create_allure_profile.py`` 会把它们从用例上摘下来, 变成一条按平台归环境的
+结论项 ``archive-management.profile`` —— 用户 2026-11-07 定的口径: 它衡量的是"这一轮
+哪几个函数最费时", 与那条用例的断言无关, 按用例去找反而更难找。
 """
 
 from __future__ import annotations

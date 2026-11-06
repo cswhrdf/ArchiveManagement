@@ -98,6 +98,7 @@ pytestmark = [
 - **归属靠 `env` 标签**：`create_allure_coverage.py` 的平台由 `--platform` 给出（主机的 `platform.system()` 会把三平台结论全标成 Linux）。守卫 `test_coverage_item_platform_comes_from_the_flag`。
 - **脚本产物不许带 `framework=pytest`**：那是 allure-pytest 给真实用例写的标签，质量门用它区分"用例"与"汇总项"。守卫 `test_quality_gate_asks_every_platform_for_real_tests`（断言四个 `create_allure_*` 里不出现 `"framework"`）。
 - **产物冒烟的结论项产在打包作业里**（`create_allure_smoke.py`）：执行方是 `smoke_packaged.py`（它落 `smoke-report.json`，失败也写），writer 只做转换——`env` 标签取报告 JSON 里的平台显示名、身份由"产物标识 + 判据标识"拼成（改显示名不断历史、改标识断趋势）、退出码恒 0（门禁是 `smoke_packaged.py` 的退出码）。守卫 `tests/unit/test_report_smoke_items.py`。
+- **耗时追踪也是结论项，且是"从用例上搬过去的"**（`scripts/create_allure_profile.py`，2026-11-07 起）：`tests/profile_trace.py` 先把 trace 与摘要挂在标记用例上（那只是运输），汇总作业在生成报告**之前**把它们搬成一条按平台归环境的 `archive-management.profile`，并把 Top self time 内联进描述；搬完后源用例上的这两条附件引用会删掉 —— 报告里只出现一次。它是**按需产出**（`GATE_ON_DEMAND`）：只有开追踪的平台（默认 Linux）才有这一项，缺了不算缺失。守卫 `tests/unit/test_report_profile.py`。
 - **每条结论都要有人负责**：`scripts/allure_catalog.py` 逐族列出"应该有哪一条结论、由哪个上游作业产生、由哪条规则判定"，并在运行总账的「证据核对」里逐项标"已收到 / 缺失"，缺失项另写一条 `broken` 并打 `::warning::`。**加一条结论就要同时加进清单**，双向同步由 `test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions` 钉住。例外有两族：按需一族（作业崩溃现场）不进"应有"；冒烟一族是**条件期望**（`expected_items` 的 `smoke_platforms`，CI 按 `needs.package.result` 传值），不适用时整族不出现、不报假缺失——守卫 `test_smoke_expectation_follows_the_declared_platforms`。
 
 ## 6. 附件与体积：能挂，但不能把报告拖死
@@ -105,7 +106,7 @@ pytestmark = [
 - **失败现场只在失败时留证，且留证失败不许改变用例结果**（`tests/crash_capture.py` 的整段 try）。
 - **dump 用 Allure 不认识的媒体类型**（`application/octet-stream`）：用 `attachment_type` 里认识的类型时，上兆字节的 dump 一打开就把页面卡死。守卫在 `tests/unit/test_crash_capture.py`：断言 dump 的媒体类型不以 `text/`、`image/` 开头。
 - **必须有上限**：dump ≤ 25 MiB（超限只留落点与大小）、截图 ≤ 3 张、每用例只留一份（`StashKey`）。
-- **耗时追踪只挂显式标记的那一条**（`tests/profile_trace.py`，2026-11-06 起）：只有 `@pytest.mark.profile` 的用例才跑 viztracer，且**只在一个平台开**（默认 Linux，`ARCHIVE_PROFILE_TRACE=1` 可临时覆盖）。参数固定为 `min_duration=1000`（只留 ≥1 ms 的帧）——默认配置下一个 1.2 s 的模块能写 148 MB，过滤后 ≈7 MB；超过 20 MiB 则**不挂 trace**、只挂 Top-N self time 摘要。trace 的媒体类型必须是 `application/octet-stream`（原因同 dump），摘要用 `text`。
+- **耗时追踪只挂显式标记的那一条**（`tests/profile_trace.py`，2026-11-06 起）：只有 `@pytest.mark.profile` 的用例才跑 viztracer，且**只在一个平台开**（默认 Linux，`ARCHIVE_PROFILE_TRACE=1` 可临时覆盖）。参数固定为 `min_duration=1000`（只留 ≥1 ms 的帧）——默认配置下一个 1.2 s 的模块能写 148 MB，过滤后 ≈7 MB；超过 20 MiB 则**不挂 trace**、只挂 Top-N self time 摘要。trace 的媒体类型必须是 `application/octet-stream`（原因同 dump），摘要用 `text`。**它最终不在用例上**：汇总作业里 `scripts/create_allure_profile.py` 把这两条附件搬成 `archive-management.profile` 结论项（2026-11-07，用户定的口径：它衡量"这一轮哪几个函数最费时"，与那条用例的断言无关，按用例找反而更难找）。
 - **给字符串媒体类型的附件补真实后缀**：allure 只在拿到枚举时才从枚举推后缀，否则文件会存成 `<uuid>-attachment.attach`。
 - **`globalAttachments` 里的可选物要"按文件在不在"收**（`existsSync(...) ? [...] : []`）：一份永远挂在首页的空"失败现场"只会让人以为可能崩过。守卫 `test_diagnostics_report_lands_in_the_allure_config`、`test_global_attachment_matches_what_the_summary_writes`。
 - **豁免清单是"人工写、机器列"的**：`allure-coverage-exclusions.md` 逐条列出 `# pragma: no cover` / `no branch` 与 `# platform: ...` 两类标记的位置与原因（数据直接来自源码，由 `create_allure_summary.py` 生成）。写标记时记两条：**原因要回答"这一行为什么到不了/不用测"**，别重复平台名或标记类别（`仅 windows — 原因: winreg 仅 Windows 提供` 这种同义反复等于没写）；**连续、同文件、同平台、同原因的多行会在清单里折叠成一条行号区间**（`…:162-163`），但**逐行标记仍然必需** —— 折叠只改呈现，每一行还是要各自排除（少标一行，它在别的平台就是永久缺口）。守卫 `test_consecutive_identical_platform_markers_collapse_into_one_line`。

@@ -11,6 +11,7 @@
 - **汇总结论项的状态由数据决定（报告不许骗人）**：
   - 性能 `Performance baseline` —— 只要有一条测量 `passed` 为假就写 `failed`（描述给出基准名/取值/阈值），结果文件缺失则写 `broken` 并说明原因。
   - 覆盖率**不另出结论项**：每个平台的 `Coverage report` 项自己就是结论——描述第一句固定是"当前覆盖率 X% 大于/小于预期覆盖率 Y%, 验证通过/未通过"（X 按 coverage.py 的 TOTAL 口径 `(行覆盖 + 分支覆盖) / (行总数 + 分支总数)`，Y 读 `pyproject.toml` 的 `[tool.coverage.report] fail_under`），低于门槛该条直接 `failed`，读不到 XML/数字是 `broken`。缺平台（报告作业挂了、产物没合并进来）由运行总账的覆盖率一节指出，不会因为"没有这一条"而静静变绿。
+  - 耗时追踪 `archive-management.profile`（2026-11-07 起，用户定）：`@pytest.mark.profile` 的管线级 trace 与 Top-N self time 摘要在**汇总作业**里由 `scripts/create_allure_profile.py` 从用例上搬成一条按平台归环境的结论项（描述内联摘要，原始 trace 作下载附件，源用例上的引用随即删掉——报告里只出现一次）。只在开追踪的平台（默认 Linux）上有，属**按需产出**（`allure_catalog.GATE_ON_DEMAND`）：缺了不算缺失，因为它是诊断产物而不是门禁。
 - **运行总账的末节是「证据核对（应有 vs 实有）」**：应有的证据清单由 `scripts/allure_catalog.py` 一族族展开（平台矩阵 × 类别 × 各汇总项），逐项标"已收到 / 缺失"；每个缺失项另写一条 `broken` 结论并打 `::warning::`（门禁跟着红）；「判定」列说明每一项由谁负责。开头一行数"应有 N 项，收到 M 项"；末尾两张小表（结论清单 / 结论项声明的附件文件），粒度不同不合成一张表。为什么需要：Allure 只判"结果文件里有的东西"，合并环节吞掉半个平台时报告照样绿——总账把"应该有什么"摊开在页面上，缺一眼可见。
 - 性能 / 覆盖率 / 安全三节每平台一行，结论都从原始数据算出（脚本读文件而不是猜 CI 环境变量）。
 - **「有意不统计的覆盖」是报告首页的全局附件**（`allure-coverage-exclusions.md`）：来自 pragma 标记（`# pragma: no cover` 等）与 `pyproject.toml` 的 `exclude_also`，按文件列出"路径:行号—标记—原因"与总条数，未写原因的标记单独指出；解析规则与 `tests/unit/test_coverage_pragmas.py` 共用同一实现（守卫同步，防止两头漂移）。
