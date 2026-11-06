@@ -157,7 +157,7 @@ test = [
     { name = "pytest", specifier = ">=9" },
     { name = "pytest-cov", specifier = ">=7" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "viztracer", specifier = ">=1.0" },
+    { name = "viztracer", specifier = ">=1.1.1" },
 ]
 visual = [
     { name = "imagehash", specifier = ">=4.3.2" },

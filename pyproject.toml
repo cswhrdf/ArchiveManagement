@@ -51,7 +51,7 @@ test = [
     "coredumpy>=0.5.0",
     # 函数级耗时追踪: 只对 `@pytest.mark.profile` 的用例生效(见 tests/profile_trace.py),
     # 装了才可能挂附件, 没装时自动降级(用例不变红)。
-    "viztracer>=1.0",
+    "viztracer>=1.1.1",
 ]
 
 coverage = ["coverage>=7.16.2"]

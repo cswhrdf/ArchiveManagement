@@ -1030,11 +1030,18 @@ def _assert_centered(parent: Any, window: Any, *, tolerance: int = 12) -> None:
         f"父窗口 {parent.winfo_width()}x{parent.winfo_height()} "
         f"@{parent.winfo_rootx()},{parent.winfo_rooty()}"
     )
-    vertical_limit = max(
-        tolerance, (parent.winfo_height() - window.winfo_height()) // 2
-    )
+    ideal = (parent.winfo_height() - window.winfo_height()) / 2
     assert abs(dx) <= tolerance, f"横向{hint}"
-    assert abs(dy) <= vertical_limit, f"纵向{hint}"
+    if ideal >= 0:
+        # 父窗口比弹窗高: 居中或(理想偏移只有十几像素时)贴父窗口上沿都算过。
+        assert abs(dy) <= max(tolerance, ideal), f"纵向{hint}"
+    else:
+        # 弹窗比父窗口**还高**: 居中在物理上做不到, 唯一可行的摆法是"与父窗口上沿对齐",
+        # 那时的偏移恰好是 ``|ideal|``。2026-11-07 的 macOS CI 就是这一幕: 弹窗 600x850
+        # (游戏设置多了"进程名候选"一节, 内容长高了)、父窗口 1024x720, 理想偏移 -65,
+        # 实测贴上沿 ⇒ dy = +65。原来只按 ``max(tolerance, ideal)`` 放宽, 负的理想值被
+        # 忽略, 于是 65 > 12 判红 —— 允差仍是十几像素, 真偏了几百像素照样拦得住。
+        assert abs(dy) <= tolerance or abs(dy - abs(ideal)) <= tolerance, f"纵向{hint}"
 
 
 def test_the_first_dialog_of_a_cold_start_is_centered(
