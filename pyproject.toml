@@ -49,6 +49,9 @@ test = [
     "pytest-timeout>=2.4.0",
     "allure-pytest>=2.16",
     "coredumpy>=0.5.0",
+    # 函数级耗时追踪: 只对 `@pytest.mark.profile` 的用例生效(见 tests/profile_trace.py),
+    # 装了才可能挂附件, 没装时自动降级(用例不变红)。
+    "viztracer>=1.0",
 ]
 
 coverage = ["coverage>=7.16.2"]
@@ -228,6 +231,7 @@ known_first_party = [
   "durations",
   "gui_support",
   "helpers",
+  "profile_trace",
   "report_support",
   "reporting",
   "sharding",
@@ -255,6 +259,8 @@ exclude = ["build", "dist", ".venv", "dev-data", "allure-report", "allure-result
 # scripts/create_allure_visual.py 使用, 不在 src 里出现。
 # pytest_timeout: 超时留证的接管点(见 tests/timeout_guard.py)—— 我们调它的钩子
 # (`is_debugging` / `dump_stacks`), 而不是只把它当插件用。
+# viztracer: 只给打了 @pytest.mark.profile 的那条全流程用例做函数级耗时追踪(声明在 test 组),
+# 见 tests/profile_trace.py —— 与上面的留证工具同一个量级, 不进运行时依赖。
 DEP004 = [
   "pytest",
   "allure",
@@ -264,6 +270,7 @@ DEP004 = [
   "imagehash",
   "skimage",
   "pytest_timeout",
+  "viztracer",
 ]
 # `allure` 与 `allure_commons` 这两个模块由 allure-pytest 带进来, 测试里直接用它记
 # 附件(含 AttachmentType 类型标注)属正常用法。
@@ -313,6 +320,7 @@ markers = [
     "package: tests for package imports and metadata",
     "paths: tests for filesystem path handling",
     "performance: benchmark and scale tests (CI only, excluded locally)",
+    "profile: function-level tracing for explicitly marked tests (Linux only)",
     "repository: tests for repository operations",
     "security: security and hostile-input tests (CI only, excluded locally)",
     "smoke: smoke tests for startup or package availability",

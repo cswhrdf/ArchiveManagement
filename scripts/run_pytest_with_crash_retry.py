@@ -67,7 +67,13 @@ from typing import Any
 # Tk 源码)要么出了补丁, 要么确认无解要换方案; Windows 那条超时(见模块说明的二)也一样 ——
 # 要么 runner 的磁盘卡顿不再出现, 要么那时该换一条更根本的路子。无论哪种, 都该回来重新审视
 # 这层包装 —— 守卫测试会在到期次日变红, 忘不掉。
-RETRY_UNTIL = dt.date(2026, 11, 5)
+#
+# 2026-11-06 续期一个月(用户拍板, 原到期日 2026-11-05): 两条路都还没有结论。Windows 侧
+# 2026-11-05 本机又观测到 ``test_gui_transfer`` 的 "database disk image is malformed" /
+# ``_drain`` 超时一族(已按纪律登记为 local-full-run.instructions.md 的第六条已知偶发),
+# 成因未定论; macOS 侧自 2026-10 之后没再复现, 但没有证据表明上游 Tcl/Tk 9.0 的
+# use-after-free 已修 —— 所以不能当成"事故不再来"而撤掉这层包装。
+RETRY_UNTIL = dt.date(2026, 12, 6)
 
 # "进程被信号/原生异常杀死"的退出码:
 # * 负值: ``subprocess`` 直接报告的信号死亡(SIGSEGV=-11 这一类);

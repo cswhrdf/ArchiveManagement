@@ -38,6 +38,7 @@ from allure_pytest.utils import allure_name
 import ci_workflow
 import conftest
 import gui_support
+import profile_trace
 import tk_guard
 from archive_management.services.platforms import PLATFORM_LABELS
 
@@ -632,6 +633,8 @@ class _ProbeItem:
         self.funcargs: dict[str, object] = {}
         self.module = None
         self.fspath = Path("tests/unit/test_probe.py")
+        # 收尾钩子会读 item.stash 取耗时追踪句柄(真实实现是 pytest.Stash, 这里用 dict 顶替).
+        self.stash: dict[object, object] = {}
 
     def get_closest_marker(self, name: str) -> None:
         return None
@@ -1064,7 +1067,7 @@ def test_a_test_that_leaves_threads_behind_is_marked_failed(
     )
 
     hook = conftest.pytest_runtest_makereport(
-        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid)),
+        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid, stash={})),
         call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
     )
     report = cast(pytest.TestReport, _reported(hook, _report(nodeid, "teardown")))
@@ -1089,13 +1092,56 @@ def test_a_test_that_cleans_up_is_not_marked_failed(
     )
 
     hook = conftest.pytest_runtest_makereport(
-        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid)),
+        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid, stash={})),
         call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
     )
     report = cast(pytest.TestReport, _reported(hook, _report(nodeid, "teardown")))
 
     assert report.outcome == "passed"
     assert report.longrepr is None
+
+
+def test_the_trace_handle_is_opened_at_setup_and_closed_at_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """耗时追踪的收尾必须落在 teardown 的**报告阶段**.
+
+    2026-11-06 实测: 收尾写在 ``pytest_runtest_protocol`` 的 ``finally`` 里时, allure 已经把
+    这条结果关了, 挂附件只会拿到 ``KeyError: None``(trace 整个丢掉, 报告里只剩摘要)。这里
+    钉住接线: setup 把句柄存进 ``item.stash``, 只在 teardown 的报告阶段取出来收尾。
+    """
+    nodeid = "tests/unit/test_x.py::test_traced"
+    handle = object()
+    opened: list[object] = []
+    closed: list[object] = []
+
+    def record_start(item: object) -> object:
+        opened.append(item)
+        return handle
+
+    monkeypatch.setattr(profile_trace, "start", record_start)
+    monkeypatch.setattr(profile_trace, "finish", closed.append)
+    item = SimpleNamespace(nodeid=nodeid, stash={})
+
+    conftest.pytest_runtest_setup(cast(pytest.Item, item))
+    assert item.stash[profile_trace.TRACE_KEY] is handle, "setup 后要存住句柄"
+
+    for when in ("setup", "call"):
+        hook = conftest.pytest_runtest_makereport(
+            item=cast(pytest.Item, item),
+            call=cast(pytest.CallInfo[Any], SimpleNamespace(when=when)),
+        )
+        _reported(hook, _report(nodeid, when))
+    assert closed == [], "用例还在跑的时候不许收尾"
+
+    hook = conftest.pytest_runtest_makereport(
+        item=cast(pytest.Item, item),
+        call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
+    )
+    _reported(hook, _report(nodeid, "teardown"))
+
+    assert opened == [item], "setup 时只开一次"
+    assert closed == [handle], "teardown 的报告阶段要拿同一个句柄收尾"
 
 
 def test_a_clean_session_is_not_touched(

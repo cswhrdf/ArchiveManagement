@@ -114,7 +114,11 @@ from archive_management.services.platform_adapters import (
     adapter_for,
     default_adapters,
 )
-from archive_management.services.platform_scan import default_roots, path_health
+from archive_management.services.platform_scan import (
+    ScanRoots,
+    default_roots,
+    path_health,
+)
 from archive_management.services.processes import ProcessNameProvider
 from archive_management.services.scheduler import (
     BackupScheduler,
@@ -330,6 +334,7 @@ class SqlArchiveService:
         cache_dir: Path | None = None,
         save_source: SaveCandidateSource | None = None,
         adapters: Mapping[PlatformId, PlatformAdapter] | None = None,
+        roots: ScanRoots | None = None,
         name_fetcher: NameFetcher | None = None,
         process_provider: ProcessNameProvider | None = None,
         config_path: Path | None = None,
@@ -348,6 +353,9 @@ class SqlArchiveService:
         整体清理, 用户挑的图不能。``builtin_paths`` 是**内置**应用路径(不随
         ``storage.backup_root`` 覆盖移动), 设置页"存储位置"分区靠它展示各位置与
         "下次启动"的内置备份根; 省略时总览里的位置字段为空、下次启动按当前根算。
+        ``roots`` 是平台探测使用的根目录: 省略时按当前环境推导(生产); 用例传入一套
+        指向临时目录的根目录就能把"发现"限制在那套目录里 —— 否则 ``scan_candidates``
+        会读开发机上真实的 Steam/Epic 清单, 同一条用例在两台机器上的口径就不同。
         """
         self._database = database
         self._backup_root = backup_root
@@ -392,6 +400,7 @@ class SqlArchiveService:
         self._cache_dir = cache_dir
         self._save_source = save_source
         self._adapters = adapters
+        self._roots = roots
         self._builtin_paths = builtin_paths
         # config_path 也留字段引用: 存储位置分区要反复读它(改备份根写的就是这份配置)。
         self._config_path = config_path
@@ -1015,7 +1024,7 @@ class SqlArchiveService:
         排除清单(`resources/excluded-games.json`)的候选会被默认标记为"已忽略"。
         """
         report = discovery_cases.scan_library(
-            self._database, exclusions=load_exclusions()
+            self._database, roots=self._roots, exclusions=load_exclusions()
         )
         # 扫描完就顺手补一次译名(后台线程 + 走缓存): 探测结果页要直接显示译名.
         self.prefetch_names()
@@ -1111,9 +1120,10 @@ class SqlArchiveService:
         """存档候选来源: 未注入时按平台读本机清单, 注入的替身优先(测试)."""
         if self._save_source is not None:
             return self._save_source
+        roots = self._roots if self._roots is not None else default_roots()
         if platform == "epic":
-            return EpicCloudSource(default_roots())
-        return SteamCloudSource(default_roots())
+            return EpicCloudSource(roots)
+        return SteamCloudSource(roots)
 
     def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
         """把候选标记为"已忽略"或恢复为"待处理"."""
@@ -1199,7 +1209,9 @@ class SqlArchiveService:
         适配器表在第一次真正需要时才构造(要读本机注册表与安装目录)。
         """
         if self._adapters is None:
-            self._adapters = default_adapters(default_roots())
+            self._adapters = default_adapters(
+                self._roots if self._roots is not None else default_roots()
+            )
         return adapter_for(self._adapters, platform)
 
     # -- 游戏译名 -----------------------------------------------------------
