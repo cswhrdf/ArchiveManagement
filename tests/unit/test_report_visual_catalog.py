@@ -658,3 +658,43 @@ def test_the_capture_pins_the_clock_so_baselines_stop_drifting(
     monkeypatch.setattr(module, "_capture_screens", lambda *_args: ([], [], {}))
     assert module.capture_screens(tmp_path, ModuleType("grab")) == ([], [], {})
     assert entered == ["in", "out"], "整段拍摄都要在固定时钟里跑(建窗口 + 拍每一张)"
+
+
+#: 画面名在脚本里就是**字面量**(``"08-游戏设置-默认折叠态"``): 不带冒号是它与那些
+#: "跳过原因"(``"08-11: 演示数据里没有游戏..."``)唯一可靠的区别。
+_SCREEN_LITERAL = re.compile(r'"(\d{2}-[^"\n:]+)"')
+_BASELINE_ROW = re.compile(r"`(\d{2}-[^`\n]+)\.png`")
+
+
+def test_every_captured_screen_is_documented_and_nameable() -> None:
+    """脚本拍的画面与 README 的表必须一一对上, 编号还要连续.
+
+    这三处是**手写多份**的: 脚本里的名字、`visual-baselines/README.md` 的表、目录里的
+    PNG。少写一处不会让任何东西变红, 只会静默降级 —— 报告里出现"无基线(已产出候选)"
+    却没人知道那张图在守什么, 或者新画面根本没进表。所以直接从源码里抽名字字面量,
+    与 README 的表格逐字比(基线图本身**不**要求存在: 新画面要等一轮 CI 才采得到)。
+    """
+    source = (_REPO_ROOT / "scripts" / "create_allure_visual.py").read_text(
+        encoding="utf-8"
+    )
+    captured = set(_SCREEN_LITERAL.findall(source))
+    readme = (_REPO_ROOT / "tests" / "visual-baselines" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    documented = set(_BASELINE_ROW.findall(readme))
+
+    assert captured == documented, (
+        "脚本与 README 的画面清单不一致: 只写在脚本里="
+        f"{sorted(captured - documented)}, 只写在 README 里="
+        f"{sorted(documented - captured)}"
+    )
+    numbers = sorted(name[:2] for name in captured)
+    assert numbers == [f"{index + 1:02d}" for index in range(len(numbers))], (
+        f"编号要连着排(报告里的先后就是它): {numbers}"
+    )
+    baselines = {
+        path.stem for path in (_REPO_ROOT / "tests" / "visual-baselines").glob("*.png")
+    }
+    assert baselines <= captured, (
+        f"目录里躺着脚本已经不拍的基线图: {sorted(baselines - captured)}"
+    )

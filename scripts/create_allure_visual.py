@@ -107,20 +107,44 @@ import shutil
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, cast
 
+from archive_management.application.imports import STRATEGY_MERGE
 from archive_management.domain import HomeLayout
+from archive_management.i18n import tr
 from archive_management.infrastructure.paths import ApplicationPaths
+from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.services.hotkeys import GlobalHotkeyService, UnavailableBackend
+from archive_management.services.platforms import PLATFORM_LABELS
 from archive_management.ui.demo_backend import DemoArchiveService
+from archive_management.ui.dialogs import (
+    batch_import_dialog,
+    export_batch_dialog,
+    import_package_dialog,
+    restore_dialog,
+)
 from archive_management.ui.home_page import HomePage
 from archive_management.ui.main_window import ArchiveApp
-from archive_management.ui.models import AppPage, DiscoveryPage, HomeSection
+from archive_management.ui.manage_window import ManageGameWindow
+from archive_management.ui.models import (
+    AppPage,
+    BatchImportPrompt,
+    BatchImportRow,
+    DiscoveryPage,
+    GameSummary,
+    HomeSection,
+    ImportLocationRow,
+    ImportPrompt,
+    export_batch_prompt,
+    exportable_games,
+    import_strategies,
+    size_label,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIRECTORY = REPO_ROOT / "tests"
@@ -421,13 +445,18 @@ def show_home_filter(app: ArchiveApp, *, layout: HomeLayout) -> None:
 
 
 def shot(
-    app: ArchiveApp, screens_dir: Path, name: str, grab: ModuleType
+    target: Pumpable, screens_dir: Path, name: str, grab: ModuleType
 ) -> tuple[str | None, str]:
-    """拍一张窗口截图并落盘, 返回 ``(文件名 | None, 说明)``; 拿不到画面时文件名为 None."""
-    box = grab.window_box(app)
+    """拍一张截图并落盘, 返回 ``(文件名 | None, 说明)``; 拿不到画面时文件名为 None.
+
+    ``target`` 既可以是主窗口, 也可以是某个自己开出来的 Toplevel(工作窗口/对话框) ——
+    抓图原语读的是"这个控件在屏幕上的方框", 两者没有区别(它内部按属性取, 取不到就当
+    "拿不到画面", 见 tests/crash_capture.py 的 window_box)。
+    """
+    box = grab.window_box(target)
     if box is None:
         return None, "窗口未映射或尺寸为 0, 拿不到画面"
-    png, note = grab.grab_png(app, box)
+    png, note = grab.grab_png(target, box)
     if png is None:
         return None, note
     (screens_dir / f"{name}.png").write_bytes(png)
@@ -435,7 +464,7 @@ def shot(
 
 
 def _record(
-    app: ArchiveApp,
+    target: Pumpable,
     screens_dir: Path,
     name: str,
     grab: ModuleType,
@@ -443,7 +472,7 @@ def _record(
     skipped: list[str],
 ) -> None:
     """拍一张并把结果登记进 produced / skipped(拿不到画面不是"通过", 是要报出来的)."""
-    file_name, note = shot(app, screens_dir, name, grab)
+    file_name, note = shot(target, screens_dir, name, grab)
     if file_name is None:
         skipped.append(f"{name}: {note}")
         print(f"[跳过] {name}: {note}")
@@ -487,6 +516,390 @@ def record_a_folded_subtree(
         pump(app)
         return
     skipped.append(f"{name}: 演示数据里没有可折叠的分支")
+
+
+# -- 08-15: 自己开 Toplevel 的界面 -------------------------------------------
+#
+# 01-07 拍的**全是主窗口**(1360x860 那一张)。可这个软件有一半面积长在独立的 Toplevel
+# 上: 三个常驻工作窗口(游戏设置/定时任务/设置)与十二个对话框。它们此前一个像素判据都
+# 没有 —— 尺寸与对齐有数值守卫(test_gui_sizes / test_gui_layout), 但"折叠之后上半截
+# 空了一块""按钮条与正文挤在一起"这类只有看一眼才知道的问题, 那些守卫看不见。
+#
+# 为什么只拍四个对话框而不是十二个: 确认/信息/输入/标签这类简单框只有一行字加一两颗
+# 按钮, 外观完全由 dialogs._present 与 UiKit 统一决定; 而每一张基线都是一笔**永久的**
+# 维护成本(改一次共用控件就要重采一次, 见 tests/visual-baselines/README.md)。挑的是
+# 有滚动正文与多行列表的那四个 —— 排版最容易挤歪的地方。
+
+#: 导入对话框里的两条演示存档位置: 一条"本机已有"(输入框预填), 一条只有包内路径(留空
+#: 表示这一条不导入)。**路径是画面的一部分**, 所以写成常量而不是取本机真实路径 ——
+#: 换台机器采基线就变了。
+IMPORT_LOCATION_PRESENT = "D:\\Games\\Vault-Tec\\Saves"
+IMPORT_LOCATION_MISSING = "C:\\Users\\demo\\AppData\\Local\\Starfield\\Saves"
+#: 导入摘要里的演示数值(AppID / 备份数 / 文件数 / 体积): 只决定那几句文案里的数字,
+#: 结构与真的体检结果一致(摘要折行、逐条位置输入框、策略单选)。
+IMPORT_DEMO_APP_ID = 2486820
+IMPORT_DEMO_BACKUPS = 6
+IMPORT_DEMO_FILES = 214
+IMPORT_DEMO_BYTES = 734_003_200
+
+#: 设置窗口页头右上角的版本号: 它是**构建事实**而不是布局, 所以拍图时钉成常量 ——
+#: 真读 ``package_version()`` 的话, 每次发版都会让这一张红一次, 而那一轮的 CI 恰好
+#: 就是发版流程自己的门禁(定版作业会把版本号提上去)。这一行要钉的是"它还在、没被
+#: 挤掉", 具体是几号与布局无关。
+PINNED_VERSION = "0.0.0"
+
+
+@contextlib.contextmanager
+def pinned_version() -> Iterator[None]:
+    """把设置窗口展示的版本号钉在 :data:`PINNED_VERSION`(理由见那个常量).
+
+    换的是 ``settings_window`` 模块里**已经绑定的那个名字**(它是
+    ``from ... import package_version``), 退出时还回去。
+    """
+    module = importlib.import_module("archive_management.ui.settings_window")
+    original = cast(Any, module).package_version
+    cast(Any, module).package_version = lambda: PINNED_VERSION
+    try:
+        yield
+    finally:
+        cast(Any, module).package_version = original
+
+
+def _demo_locations() -> tuple[ImportLocationRow, ...]:
+    """两条演示存档位置: 一条本机已有(预填)、一条只有包内路径(留空)."""
+    return (
+        ImportLocationRow(
+            index=0,
+            text=tr("dialog.import_location_exists", path=IMPORT_LOCATION_PRESENT),
+            default=IMPORT_LOCATION_PRESENT,
+        ),
+        ImportLocationRow(index=1, text=IMPORT_LOCATION_MISSING, default=""),
+    )
+
+
+@contextlib.contextmanager
+def non_blocking_modal(app: ArchiveApp) -> Iterator[list[Any]]:
+    """把 ``wait_window`` 换成"记下窗口就返回", 于是模态框能被留住拍照.
+
+    对话框全都在最后一行 ``parent.wait_window(window)`` 上阻塞主线程。换掉它之后:
+    对话框函数立刻返回(它内部的 result 列表还是空的, 所以返回值是"取消", 调用方
+    什么都不做 —— 这正是这里要的: 只拍画面, 不产生任何副作用), 而窗口本身仍然映射
+    在屏幕上, 拍完由 :func:`record_dialog` 自己销毁。做法与界面用例量模态框的那一套
+    相同(见 ``tests/integration/test_gui_keyboard.py`` 的 ``_open``)。
+    """
+    windows: list[Any] = []
+    original = app.wait_window
+    app.wait_window = lambda window, *_args, **_kwargs: windows.append(window)
+    try:
+        yield windows
+    finally:
+        app.wait_window = original
+
+
+def _record_window(
+    target: Pumpable,
+    screens_dir: Path,
+    name: str,
+    grab: ModuleType,
+    produced: list[str],
+    skipped: list[str],
+) -> None:
+    """泵到子窗口画完再拍(它们映射之后还有一轮居中与夹取, 见 dialogs._present)."""
+    pump(target, SETTLE_SECONDS)
+    _record(target, screens_dir, name, grab, produced, skipped)
+
+
+def record_dialog(
+    app: ArchiveApp,
+    name: str,
+    opener: Callable[[], object],
+    screens_dir: Path,
+    grab: ModuleType,
+    produced: list[str],
+    skipped: list[str],
+) -> None:
+    """开一个对话框、拍它、再按"取消"关掉(窗口由这里销毁, 调用方拿到的是 None)."""
+    with non_blocking_modal(app) as windows:
+        opener()
+    if not windows:
+        skipped.append(f"{name}: 对话框没开出来")
+        return
+    window = windows[-1]
+    _record_window(window, screens_dir, name, grab, produced, skipped)
+    with contextlib.suppress(Exception):
+        window.destroy()
+    pump(app, PUMP_SECONDS)
+
+
+def record_workspace_windows(
+    app: ArchiveApp,
+    screens_dir: Path,
+    grab: ModuleType,
+    produced: list[str],
+    skipped: list[str],
+) -> None:
+    """08-11: 三个常驻工作窗口(游戏设置两个态 + 定时任务 + 设置)."""
+    games = list(app.backend.list_games())
+    if not games:
+        skipped.append("08-11: 演示数据里没有游戏, 工作窗口没有内容可拍")
+        return
+    seed = games[0]
+    manage = ManageGameWindow(
+        app,
+        backend=app.backend,
+        palette=app.p,
+        game_id=seed.game_id,
+        name=seed.name,
+        enabled=seed.enabled,
+        archived=seed.archived,
+        backup_location=app.backend.task_status(seed.game_id).target_label,
+        on_change=noop,
+    )
+    try:
+        _record_window(
+            manage._window,
+            screens_dir,
+            "08-游戏设置-默认折叠态",
+            grab,
+            produced,
+            skipped,
+        )
+        # 两块折叠区默认收起(见 manage_window 的 _toggle_*): 09 拍全展开的样子 ——
+        # "展开后正文被撑开、页脚与按钮条仍各就各位"只有这一张看得见。
+        manage._toggle_artwork()
+        manage._toggle_process()
+        _record_window(
+            manage._window,
+            screens_dir,
+            "09-游戏设置-全部展开态",
+            grab,
+            produced,
+            skipped,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            manage.close()
+    pump(app, PUMP_SECONDS)
+    _record_workspace_window(
+        app,
+        "10-定时任务-演示数据",
+        app._on_open_schedules,
+        screens_dir,
+        grab,
+        produced,
+        skipped,
+    )
+    # 设置窗口页头带着版本号, 拍它时把版本钉住(见 PINNED_VERSION)。
+    with pinned_version():
+        _record_workspace_window(
+            app,
+            "11-设置窗口-演示数据",
+            app._on_open_settings,
+            screens_dir,
+            grab,
+            produced,
+            skipped,
+        )
+
+
+def _record_workspace_window(
+    app: ArchiveApp,
+    name: str,
+    opener: Callable[[], object],
+    screens_dir: Path,
+    grab: ModuleType,
+    produced: list[str],
+    skipped: list[str],
+) -> None:
+    """开一个工作区窗口(定时任务/设置)、拍它、再关掉."""
+    opener()
+    window = app._active_window
+    if window is None:  # pragma: no cover - 只有界面被替身换掉时才会走到
+        skipped.append(f"{name}: 窗口没开出来")
+        return
+    try:
+        _record_window(window._window, screens_dir, name, grab, produced, skipped)
+    finally:
+        with contextlib.suppress(Exception):
+            window.close()
+    pump(app, PUMP_SECONDS)
+
+
+def _open_restore_dialog(app: ArchiveApp) -> None:
+    """开恢复确认框: 参数与 ``main_window._on_restore`` 一模一样, 只是不真的恢复."""
+    game = app._game
+    items = list(app._items)
+    if game is None or not items:  # pragma: no cover - 调用方已挡掉这个组合
+        return
+    item = next((entry for entry in items if entry.is_current), items[0])
+    plan = app.backend.preview_restore(game.game_id, item.backup_id)
+    restore_dialog(
+        app,
+        app.p,
+        title=tr("dialog.restore_title"),
+        summary=app._restore_summary(game.name, item, plan),
+        safety_label=tr("dialog.restore_safety"),
+        safety_hint=tr("dialog.restore_safety_hint"),
+        safety_available=plan.safety_point_available,
+        danger_note=app._restore_danger_note(plan),
+    )
+
+
+def _open_export_batch_dialog(app: ArchiveApp) -> None:
+    """开批量导出框(候选是演示库里未归档的那几款, 与产品入口同一套参数)."""
+    export_batch_dialog(
+        app,
+        app.p,
+        title=tr("dialog.export_batch_title"),
+        prompt=export_batch_prompt(exportable_games(app.backend.list_games())),
+        filter_label=tr("dialog.export_batch_filter"),
+        list_label=tr("dialog.export_batch_list"),
+        no_match_text=tr("dialog.export_batch_no_match"),
+        select_all_label=tr("dialog.export_batch_select_all"),
+        select_all_scope=tr("dialog.export_batch_select_all_scope"),
+        confirm_text=tr("dialog.export_batch_confirm"),
+    )
+
+
+def _merge_label(game_name: str) -> str:
+    """「导入到同名游戏 [名称]」那条选项的文案(产品文案, 名字用演示库里那一款)."""
+    return tr("dialog.import_strategy_merge_named", name=game_name)
+
+
+def _open_import_package_dialog(app: ArchiveApp, game_name: str) -> None:
+    """开单包导入框: 文案全走产品的 tr 键(与 ``models.import_prompt`` 同一套).
+
+    不用真的包, 是因为真的体检要读一个包文件(``backend.inspect_import``), 而演示后端
+    不碰文件系统。这个画面要钉的是对话框的**排版**, 文案仍取自产品资源 —— 图上那句话
+    与用户真看到的是同一句。
+    """
+    merge_label = _merge_label(game_name)
+    import_package_dialog(
+        app,
+        app.p,
+        title=tr("dialog.import_title"),
+        prompt=ImportPrompt(
+            summary=tr(
+                "dialog.import_summary",
+                name=game_name,
+                platform=PLATFORM_LABELS.get("steam", "steam"),
+                app_id=IMPORT_DEMO_APP_ID,
+                backups=IMPORT_DEMO_BACKUPS,
+                files=IMPORT_DEMO_FILES,
+                size=size_label(IMPORT_DEMO_BYTES),
+            ),
+            locations=_demo_locations(),
+            merge_label=merge_label,
+        ),
+        locations_label=tr("dialog.import_locations"),
+        locations_hint=tr("dialog.import_locations_hint"),
+        strategy_label=tr("dialog.import_strategy"),
+        strategies=import_strategies(merge_label=merge_label),
+        confirm_text=tr("dialog.import_confirm"),
+    )
+
+
+def _batch_rows(games: Sequence[GameSummary]) -> tuple[BatchImportRow, ...]:
+    """批量导入框里的逐游戏行(取前两款, 排序即包内清单的顺序)."""
+    merge_label = _merge_label(games[0].name)
+    return tuple(
+        BatchImportRow(
+            entry=f"{index + 1:02d}-{game.name}{ARCHIVE_SUFFIX}",
+            name=game.name,
+            meta=tr(
+                "dialog.import_batch_row_meta",
+                platform=PLATFORM_LABELS.get("steam", "steam"),
+                app_id=IMPORT_DEMO_APP_ID + index,
+                backups=IMPORT_DEMO_BACKUPS - index,
+                files=IMPORT_DEMO_FILES - index,
+            ),
+            locations=_demo_locations(),
+            strategies=import_strategies(merge_label=merge_label),
+            strategy=STRATEGY_MERGE,
+        )
+        for index, game in enumerate(games[:2])
+    )
+
+
+def _open_batch_import_dialog(app: ArchiveApp, games: Sequence[GameSummary]) -> None:
+    """开批量导入框: 逐款选方式与映射, 一屏里同时有两行(容易挤歪的那种)."""
+    rows = _batch_rows(games)
+    batch_import_dialog(
+        app,
+        app.p,
+        title=tr("dialog.import_batch_title"),
+        prompt=BatchImportPrompt(
+            summary=tr(
+                "dialog.import_batch_summary",
+                games=len(rows),
+                backups=IMPORT_DEMO_BACKUPS,
+                files=IMPORT_DEMO_FILES,
+                size=size_label(IMPORT_DEMO_BYTES),
+            ),
+            hint=tr("dialog.import_batch_hint"),
+            rows=rows,
+        ),
+        locations_label=tr("dialog.import_locations"),
+        locations_hint=tr("dialog.import_locations_hint"),
+        strategy_label=tr("dialog.import_strategy"),
+        confirm_text=tr("dialog.import_confirm"),
+    )
+
+
+def record_content_dialogs(
+    app: ArchiveApp,
+    screens_dir: Path,
+    grab: ModuleType,
+    produced: list[str],
+    skipped: list[str],
+) -> None:
+    """12-15: 四个内容最多的对话框(恢复/批量导出/导入归档包/批量导入)."""
+    games = list(app.backend.list_games())
+    if app._game is None or not app._items:
+        skipped.append("12-恢复确认-演示数据: 没有当前游戏或备份列表")
+    else:
+        record_dialog(
+            app,
+            "12-恢复确认-演示数据",
+            lambda: _open_restore_dialog(app),
+            screens_dir,
+            grab,
+            produced,
+            skipped,
+        )
+    if not exportable_games(games):
+        skipped.append("13-批量导出-演示数据: 演示库里没有可导出的游戏")
+    else:
+        record_dialog(
+            app,
+            "13-批量导出-演示数据",
+            lambda: _open_export_batch_dialog(app),
+            screens_dir,
+            grab,
+            produced,
+            skipped,
+        )
+    if not games:
+        skipped.append("14-15: 演示数据里没有游戏, 导入框没有可展示的内容")
+        return
+    record_dialog(
+        app,
+        "14-导入归档包-演示数据",
+        lambda: _open_import_package_dialog(app, games[0].name),
+        screens_dir,
+        grab,
+        produced,
+        skipped,
+    )
+    record_dialog(
+        app,
+        "15-批量导入-演示数据",
+        lambda: _open_batch_import_dialog(app, games),
+        screens_dir,
+        grab,
+        produced,
+        skipped,
+    )
 
 
 def capture_screens(
@@ -537,7 +950,13 @@ def _capture_screens(
         pump(app, SETTLE_SECONDS)
         _record(app, screens_dir, "06-主页-游戏启停-演示数据", grab, produced, skipped)
 
-        # 最后一张: "一条数据都没有"时界面长什么样(空状态文案 + 连表头一起收起来)。
+        # 08-15 排在**07 之前**: 空库那张会把演示数据删光, 删完就没东西给这些窗口填了。
+        # 编号仍从 08 接下去 —— 报告里的先后只由文件名排序决定(见 main), 与抓拍顺序无关。
+        record_workspace_windows(app, screens_dir, grab, produced, skipped)
+        record_content_dialogs(app, screens_dir, grab, produced, skipped)
+
+        # 07 在代码里排在最后(它删光了演示数据), 编号却是 07(见上一行的说明)。
+        # 拍的是"一条数据都没有"时界面长什么样(空状态文案 + 连表头一起收起来)。
         empty_the_library(app, page)
         _record(app, screens_dir, "07-主页-列表视图-空库", grab, produced, skipped)
         probe = probe_fonts(app)
