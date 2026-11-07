@@ -1100,12 +1100,16 @@ jobs:
         # core.warning 后返回, 下面的 artifact 老路照走 —— 降级是正常路径, 不是故障。
         # PR 轮同样先走这里: 站点公开只读, fork 的降级 token 查不到 Pages 配置时
         # 正好落回 artifact。
+        # 方法名是 `repos.getPages`(读一个 GitHub Pages 站点), **不是** `repos.getPagesInfo`:
+        # 后者是旧版 `@octokit/rest` 的名字, 在 github-script 里会抛
+        # "is not a function" —— 那种 TypeError 会被下面的 catch 当成"站点取不到",
+        # 于是永远静默降级(2026-11-07 实测: 站点上其实有 history.jsonl, 一轮也没读过)。
         uses: actions/github-script@v9
         with:
           script: |
             let site;
             try {
-              site = await github.rest.repos.getPagesInfo({
+              site = await github.rest.repos.getPages({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
               });
@@ -1544,15 +1548,15 @@ jobs:
 
       - name: Fetch previous Allure history from the Pages site
         id: pages-history
-        # 与逐平台作业同一条链路(见 pytest-report 里那段说明): 站点优先、artifact 降级。
-        # final 报告的趋势也一样吃这份基线 —— 两处取的是同一个 URL, 站点永远停在
-        # 最近一次部署的那一轮。
+        # 与逐平台作业同一条链路(见 pytest-report 里那段说明, 包括方法名为什么是
+        # `repos.getPages` 而不是 `repos.getPagesInfo`)。final 报告的趋势也一样吃这份基线 ——
+        # 两处取的是同一个 URL, 站点永远停在最近一次部署的那一轮。
         uses: actions/github-script@v9
         with:
           script: |
             let site;
             try {
-              site = await github.rest.repos.getPagesInfo({
+              site = await github.rest.repos.getPages({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
               });

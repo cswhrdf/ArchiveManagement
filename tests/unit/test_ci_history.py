@@ -509,8 +509,11 @@ def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
     "上一轮"可能在窗口之外, 曲线静默从零开始。发布作业每轮把 history.jsonl 放到
     站点根(见 publish-report 的 Unpack the report for Pages), 两个报告作业先从那里
     取。钉四件事: ① 两处都有取数步骤且排在 artifact 链之前; ② 站点地址从仓库的
-    Pages 配置查(getPagesInfo), 不硬拼 owner/repo; ③ 取不到要 core.warning(降级是
-    正常路径, 但不能无声)且 artifact 老路的三步都判 fetched 让路 —— 漏判哪一步,
+    Pages 配置查(`repos.getPages`, **不是** `repos.getPagesInfo` —— 后者是旧版
+    `@octokit/rest` 的名字, 在 github-script 里直接抛 "is not a function", 那个 TypeError
+    会被降级分支吃掉, 于是每轮都静默走 artifact, 站点永远没人读), 不硬拼 owner/repo;
+    ③ 取不到要 core.warning(降级是正常路径, 但不能无声)且 artifact 老路的三步都判
+    fetched 让路 —— 漏判哪一步,
     Pages 命中时它还会去跑, 把基线锚到更旧的一轮上; ④ 发布侧真的把 history.jsonl
     放上站点根, 缺了它"优先 Pages"就只是每轮都降级的老路。
     """
@@ -527,8 +530,18 @@ def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
         assert "/history.jsonl" in fetch, (
             f"{job_id} 取的是站点根下的 history.jsonl, 与发布侧放的位置要一致"
         )
-        assert "getPagesInfo" in fetch, (
-            f"{job_id} 的站点地址要从仓库 Pages 配置查, 不硬拼 owner/repo(自定义域名/改名都不怕)"
+        hint = f"{job_id} 的站点地址要从仓库 Pages 配置查, 不硬拼 owner/repo(自定义域名/改名都不怕)"
+        assert "repos.getPages(" in fetch, hint
+        # 反向断言只看**生效的行**: 步骤上面的注释会特意点名旧方法名(那是给人看的说明),
+        # 不剥注释的话这条反向断言会被它自己喂红 —— 同一类坑这个仓库已经记录过多次。
+        # 旧名 `getPagesInfo` 是 `@octokit/rest` 的名字, 在 github-script 里直接抛
+        # "is not a function", 然后被降级分支当"站点取不到"吃掉: 站点上明明有
+        # history.jsonl, 却一轮也读不到(2026-11-07 在 CI 里实测到的 warning)。
+        code_only = "\n".join(
+            line for line in fetch.splitlines() if not line.strip().startswith("#")
+        )
+        assert "getPagesInfo" not in code_only, (
+            f"{job_id} 用了旧版方法名, 会永远静默降级"
         )
         assert "core.warning" in fetch, (
             f"{job_id} 降级要走 core.warning: 站点取不到是正常路径, 但不能无声"
