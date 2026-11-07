@@ -1591,19 +1591,30 @@ class HomePage:
             meta_font,
             scaled_px(badge, _POSTER_TEXT_WIDTH),
         )
+        activity_font = ctk.CTkFont(size=11)
+        activity_text = (
+            tr("home.activity", stamp=item.activity_label)
+            if item.activity_label
+            else tr("home.activity_none")
+        )
         activity = ctk.CTkLabel(
             card,
-            text=(
-                tr("home.activity", stamp=item.activity_label)
-                if item.activity_label
-                else tr("home.activity_none")
-            ),
+            text=activity_text,
             anchor="w",
-            font=ctk.CTkFont(size=11),
+            font=activity_font,
             text_color=palette.text_muted,
         )
         activity.grid(
             row=3, column=0, sticky="ew", padx=10, pady=_POSTER_ACTIVITY_PAD_Y
+        )
+        # 活动时间那一行也要裁: 中文"最近活动 2026/01/02 09:40"放得下, 英文
+        # "Last activity 2026/11/07 11:05" 比卡片内宽多 10px —— 之前它没走 fit_label,
+        # 于是被 Tk 硬裁且不补省略号(2026-11-07 加英文档的裁剪用例在 Linux 上抓到)。
+        fit_label(
+            activity,
+            activity_text,
+            activity_font,
+            scaled_px(activity, _POSTER_TEXT_WIDTH),
         )
         self._fit_poster_height(
             card,

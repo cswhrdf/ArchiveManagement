@@ -1004,16 +1004,23 @@ class ManageGameWindow:
         title.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(8, 0))
         # 路径可以很长: 按行内剩下的宽度**中间省略**(尾部是目录名, 比盘符值得留),
         # 否则会被行硬切 —— 它自己是 pack/grid 到左边、宽度随文字变的, 不能拿来当依据。
-        # 预算是"行宽 - chip 实测宽 - 固定内衬": chip 那一截**必须量**而不是按 56 算 ——
-        # 译文更长时它自己会长大(英文 "Main dir" = 61), 写死的 56 会让预算比标签宽出那
-        # 一截, 路径尾部于是被 Tk 静默切掉几个像素(2026-11-07 英文视觉/裁剪用例实测 5px)。
+        # 预算是"行宽 - chip 宽 - 固定内衬", 而 chip 那一截必须**量**: 译文更长时它自己
+        # 会长大(英文 "Main dir" 56 → 61), 按设计值写死就会让预算多出那一截, 路径尾部被
+        # Tk 静默切掉几个像素(2026-11-07 实测 5px)。
+        # 用 ``winfo_reqwidth()`` 而不是 ``winfo_width()``: 后者要等布局跑完, 而本函数第一
+        # 次被调时(POSTER/列表刚建)chip 还是 0/1 宽 —— Linux 与 macOS 上因此算出一个偏大
+        # 的预算(实测 504 vs 454)且之后不再有 ``<Configure>`` 来纠正, 裁剪后的文字反而比
+        # 标签宽(2026-11-07 CI 三平台都红)。请求宽度是"文字 + 内衬", 建控件时就有了。
         # ``track_fit`` 的 inset 支持函数, 返回值按**物理**像素算(见它的说明)。
         track_fit(
             row,
             title,
             (title_text,),
             path=True,
-            inset=lambda: chip.winfo_width() + scaled_px(row, _ROW_TEXT_INSET),
+            inset=lambda: (
+                max(chip.winfo_reqwidth(), scaled_px(row, _ROW_CHIP_WIDTH))
+                + scaled_px(row, _ROW_TEXT_INSET)
+            ),
         )
 
         note = ctk.CTkLabel(
