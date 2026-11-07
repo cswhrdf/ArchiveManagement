@@ -315,6 +315,10 @@ _SELECTED_PANEL_WIDTH = 333
 _SELECTED_TEXT_INSET = 32
 # 面板里"文件摘要"那一行的上限行数(它可能是一条很长的备注, 见 sel.digest)。
 _SELECTED_FILES_LINES = 2
+# "当前节点/非当前节点"那一行的上限行数: 它是一整句话, 英文比中文长一倍
+# ("Current node: later backups and branches continue from here" 实测 318px, 面板只给
+# 301), 封顶一行就只能整句截掉 —— 两行才容得下且版面不会抽出太多。
+_SELECTED_STATE_LINES = 2
 # 卡片副标题的左右内边距(见 _build_backup_card 的 padx=12).
 _CARD_DETAIL_INSET = 24
 # 当前节点标记: 后续备份/分支都从这个节点继续(图里画在小字那一行, 卡片上写在标题前).
@@ -410,8 +414,8 @@ class ArchiveApp(ctk.CTk):
         self._detail_name = ""
         self._detail_subtitle = ""
         self._refit_job: str | None = None
-        # 右侧面板三行的**完整**文本(名称/元信息/摘要): 同样要在宽度变化后重裁。
-        self._selected_texts: tuple[str, str, str] = ("", "", "")
+        # 右侧面板四行的**完整**文本(名称/元信息/摘要/当前节点): 同样要在宽度变化后重裁。
+        self._selected_texts: tuple[str, str, str, str] = ("", "", "", "")
         # 消息轮询任务的 id(destroy() 里要撤掉, 见那里的说明)。
         self._poll_job: str | None = None
 
@@ -1806,23 +1810,28 @@ class ArchiveApp(ctk.CTk):
         width = label.winfo_width()
         return width if width > 1 else scaled_px(label, fallback)
 
-    def _set_selected_texts(self, name: str, meta: str, files: str) -> None:
-        """写下右侧面板三行的**完整**文本, 再按当前宽度裁一次."""
-        self._selected_texts = (name, meta, files)
+    def _set_selected_texts(self, name: str, meta: str, files: str, state: str) -> None:
+        """写下右侧面板四行的**完整**文本, 再按当前宽度裁一次."""
+        self._selected_texts = (name, meta, files, state)
         self._fit_selected_text()
 
     def _fit_selected_text(self) -> None:
-        """把右侧面板的三行文字裁进面板宽度里(与详情页头部同一条纪律).
+        """把右侧面板的四行文字裁进面板宽度里(与详情页头部同一条纪律).
 
         面板宽度固定(所以这里不像头部那样必须等 ``<Configure>``), 但**超长备份名只有
         这一处能读全** —— 从前它直接被 Tk 硬裁且不补省略号, 用户看到的是半句话;
         现在裁掉的部分补省略号, 完整内容挂在悬停提示上(``fit_label`` 一并做了)。
+
+        第四行("当前节点/非当前节点")是 2026-11-07 补进裁剪表的: 它从前只 ``configure(text)``
+        不参与裁剪, 中文恰好放得下所以就没人发现 —— 英文那句 318px 比标签的 301px 宽,
+        尾部被 Tk 硬裁且不补省略号(是在 ``test_gui_text_fit`` 加了英文档之后才露出来的)。
         """
-        name, meta, files = self._selected_texts
+        name, meta, files, state = self._selected_texts
         rows = (
             (self._selected_name, name, 1),
             (self._selected_meta, meta, 1),
             (self._selected_files, files, _SELECTED_FILES_LINES),
+            (self._selected_state, state, _SELECTED_STATE_LINES),
         )
         for label, text, lines in rows:
             # 预算取**标签自己**的宽度(与详情页头部 :meth:`_set_detail_names` 同一条纪律):
@@ -2351,8 +2360,7 @@ class ArchiveApp(ctk.CTk):
 
     def _render_selected(self, item: BackupItem | None) -> None:
         if item is None:
-            self._set_selected_texts(tr("sel.none"), tr("sel.hint"), "")
-            self._selected_state.configure(text="")
+            self._set_selected_texts(tr("sel.none"), tr("sel.hint"), "", "")
             self._restore_btn.configure(state="disabled")
             self._branch_btn.configure(state="disabled")
             self._rename_btn.configure(state="disabled")
@@ -2363,9 +2371,7 @@ class ArchiveApp(ctk.CTk):
             item.display_title,
             f"{item.created_label}  ·  {item.branch_label}",
             item.sub or tr("sel.digest", size=item.size_label),
-        )
-        self._selected_state.configure(
-            text=(
+            (
                 tr("sel.current")
                 if item.is_current
                 else tr(
@@ -2373,7 +2379,7 @@ class ArchiveApp(ctk.CTk):
                     size=item.size_label,
                     button=tr("action.restore"),
                 )
-            )
+            ),
         )
         self._update_actions()
 

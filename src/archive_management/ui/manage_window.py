@@ -44,6 +44,7 @@ from archive_management.ui.widgets import (
     fit_label,
     paint_button_state,
     paint_button_style,
+    scaled_px,
     track_fit,
     window_scaling,
 )
@@ -79,8 +80,12 @@ _TITLE_TEXT_LINES = 2
 
 _WINDOW_WIDTH = 600
 _WINDOW_PAD_Y = 16
-# 位置行里“路径那一列”要让开的宽度: 类型标签 56 + 左侧 10 + 右侧 8 + 路径自己的右内边距 8.
-_ROW_TEXT_INSET = 56 + 10 + 8 + 8
+#: 位置行里 chip 的默认宽度(设计值, 逻辑像素): 它只是个**起点** —— 译文比它长时
+#: CTkLabel 会自己长大(实测 2026-11-07: 英文 "Main dir" 把它撑到 61)。
+_ROW_CHIP_WIDTH = 56
+# 位置行里"路径那一列"除 chip 之外要让开的宽度: 左侧 10 + chip 右侧 8 + 路径自己的右内边距 8.
+# **chip 自身的宽度不在这里**: 它随译文长度变, 只能到现场量(见 _build_row 的 inset 函数).
+_ROW_TEXT_INSET = 10 + 8 + 8
 # 窗口打开时的初始高度: 实际高度随后按内容算(见 _fit_window_height), 所以它只是一个
 # 合理的起点 —— 不再当内容的下限用(否则位置少的时候底部会空出一大块)。
 _WINDOW_MIN_HEIGHT = 440
@@ -980,7 +985,7 @@ class ManageGameWindow:
         chip = ctk.CTkLabel(
             row,
             text=_chip_text(item.path_kind, primary=item.is_primary),
-            width=56,
+            width=_ROW_CHIP_WIDTH,
             corner_radius=RADIUS_LG,
             font=ctk.CTkFont(size=11),
             fg_color=palette.accent_soft,
@@ -999,7 +1004,17 @@ class ManageGameWindow:
         title.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(8, 0))
         # 路径可以很长: 按行内剩下的宽度**中间省略**(尾部是目录名, 比盘符值得留),
         # 否则会被行硬切 —— 它自己是 pack/grid 到左边、宽度随文字变的, 不能拿来当依据。
-        track_fit(row, title, (title_text,), path=True, inset=_ROW_TEXT_INSET)
+        # 预算是"行宽 - chip 实测宽 - 固定内衬": chip 那一截**必须量**而不是按 56 算 ——
+        # 译文更长时它自己会长大(英文 "Main dir" = 61), 写死的 56 会让预算比标签宽出那
+        # 一截, 路径尾部于是被 Tk 静默切掉几个像素(2026-11-07 英文视觉/裁剪用例实测 5px)。
+        # ``track_fit`` 的 inset 支持函数, 返回值按**物理**像素算(见它的说明)。
+        track_fit(
+            row,
+            title,
+            (title_text,),
+            path=True,
+            inset=lambda: chip.winfo_width() + scaled_px(row, _ROW_TEXT_INSET),
+        )
 
         note = ctk.CTkLabel(
             row,

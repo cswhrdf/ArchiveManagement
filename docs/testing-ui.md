@@ -52,11 +52,11 @@ uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tk
 - **重裁必须一定会发生且不靠等秒**：容器事件（滚动区 `<Configure>`）走延后 60ms 的**合并**式排队（已排过就不再排、不撤销；触发源可能连续时必须合并不是推后——Xvfb/CTk 的连续尺寸事件会把"取消重排"式 debounce 无限推后）；标签自己的 `<Configure>` 兜底（内宽变了外宽没变时容器不发事件）。契约守卫：`tests/unit/test_ui_scheduling.py`（替身控件驱动真实调度与裁剪，不建窗）。
 - **用例不和延迟赛跑**：断言前先等**不变量本身**成立（显示文本 == 该宽度下的 `fit_text` 结果，见 `_wait_until_the_name_fits`，超时才失败），不泵固定时长。
 
-### 列表里的文字"放得下或带省略号"：判据与六个坑
+### 列表里的文字"放得下或带省略号"：判据与七个坑
 
 判据两条：① 每个文本控件的每行都放得下（多行按行分别量）；② **夹具文本必须长到"必须裁"且断言真的出现省略号**（演示数据名字都短，量出的"0 处截断"是假的；`test_gui_text_fit.py` 专门配长文本后端）。
 
-六个坑：
+七个坑：
 
 - `wraplength` 断不开没有空格的 CJK 文本（Tk 只在空格断行）——要先断行再补省略号得自己算：`fit_text(text, font, width, max_lines=N)`（`ui/textfit.py`）。
 - 裁剪宽度取**被拉伸的容器**不取标签自己（`pack(side="left")` / `grid(sticky="w")` 的标签宽度=文字宽度，按它裁会越裁越短）。共享实现 `widgets.track_fit(容器, 标签, …)`：按容器宽裁、宽变重裁、没变不动。期望值用同一个裁剪函数按实测宽算（比文本不比像素），前提用**纯拉丁**长文本。
@@ -64,6 +64,7 @@ uv run python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tk
 - 会自己换行的标签按断行后的宽度判（比 `winfo_reqwidth()`，不比整段文字宽——Tk 已按 wraplength 断行，拿整段比会假红；`_needed_width()`）。
 - **CTkLabel 的 wraplength 是逻辑像素、`winfo_width()` 是物理像素**（CTk 会把 wraplength 乘窗口缩放，125% 屏上写 284 内层拿到 355）——写之前过 `widgets.wrap_budget(window, width)`；inset/minimum/initial 这类设计尺寸本来就是逻辑像素不要换。
 - 行/卡片会被重渲染销毁（`_render_games` 异步落地、延后 60ms 的 `_schedule_list_sync` 都是先 destroy 再重建），"等一会儿再量"的引用必须当场重新取（`_live_row` 先 `winfo_exists()`），"贴右"这类由延后任务算出的不变量写成"等到成立"。反过来，**要量"刚渲染/刚设的状态"就别在中间泵事件**（悬停判定：`_set_hover(None)` 后立刻读）。"夹具必须长到被裁"也别靠时间：after(60ms) 的重裁在 CI 上可能还没跑，量之前 `_flush_delayed(app)` 直接调一次。
+- **只跑中文等于没量英文**（2026-11-07 补）：两类文案长度差一倍以上（实测 `discovery.hint` 112 字 → 261 字，按钮"立即备份" → "Backup now"），而"中文放得下"不代表"英文放得下"。现在 `test_gui_text_fit.py` 的 `app` 夹具按 `("zh-CN", "en")` **各建一个界面**（成本和模块耗时约 2.5 倍，可接受）。两个必须知道的点：① **换语言要在建完之后走 `_on_language_change`** —— `ArchiveApp` 启动时会按配置里的语言再调一次 `set_locale`（没有配置就是 zh-CN），事先 `set_locale("en")` 会被它盖掉，那样英文档其实是把中文又量了一遍，跑绿了什么都没证明；② 加上之后当场找出两处真缺陷，形状值得记：**右侧"当前节点"那行根本没进裁剪表**（它只 `configure(text)`，中文恰好放得下：英文 318px > 标签 301px），以及**位置行的内衬把 chip 宽度写死 56**（英文 "Main dir" 把它撑到 61，预算因此比标签宽 5px，路径尾部被 Tk 静默切掉）—— 凡是**译文会变长的那一截都要现场量**，别按设计值算（`track_fit` 的 `inset` 支持传函数，函数返回值按物理像素）。
 
 ## 3. 尺寸与配色的判据
 
