@@ -56,7 +56,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - **归档的权限边界是单一来源**：`domain/game_rules.py` 的 `GameAction` / `ARCHIVED_ACTIONS` / `action_allowed` / `is_active`；归档后只保留删除、导出、取消归档、打开详情。界面用 `GameSummary.allow()`，不要在窗口里各写一遍 `if archived`。
 - **定时任务的启停与"游戏是否启用"脱钩**：停用游戏不让任务暂停，只让它到点被跳过（`schedule.skipped`）；归档才顺手暂停。改动这块要同时看 `ui/models.py` 的四种"下次备份"口径。
 - **注释写"为什么"**：这个仓库的注释里保存着实测数字、平台差异与"当时为什么选这条路"，改动时保留这类信息，别当噪音删掉。
-- **PR 的「本次变更」由发起者手写，并且会原样成为 Release 说明（2026-10-31 起）**：CI 不再自动汇总那一段（`co-author-attribution.yml` 现在只维护 Squash 署名）；`release.yml` 的发布作业用**合入提交**去问 `/commits/{sha}/pulls`，再用 `scripts/release_notes.py` 取出这一节写进 Release。所以那一节要按"用户会看到什么"写，不要写提交号、文件清单与内部细节 —— 取文只认 `## 本次变更` 这个二级标题，到下一个二级标题为止。
+- **PR 的「本次变更」由发起者手写，并且会原样成为 Release 说明（2026-10-31 起）**：CI 不再自动汇总那一段（`co-author-attribution.yml` 现在只维护 Squash 署名）；`release.yml` 的发布作业用**合入提交**去问 `/commits/{sha}/pulls`，再用 `scripts/release_notes.py` 取出这一节写进 Release（squash 提交与合并提交都挂在这个 PR 上，2026-11-07 拿 parents=2 的真实合并提交实测过）。所以那一节要按"用户会看到什么"写，不要写提交号、文件清单与内部细节 —— 取文只认 `## 本次变更` 这个二级标题，到下一个二级标题为止。
 - **用户手册标版本、且只在发版时同步（2026-10-31 起）**：`wiki/` 里**内容变了的**页面，发版后由 `.github/workflows/wiki.yml` 在页面标题下自动补一行「本页内容随 **vX.Y.Z** 更新」，版本号取「**首个带上这次改动的 tag**」；基线（第一个 tag）那版就有的内容不追溯，标注是派生物、不许手工写进 `wiki/`。所以手册不跟着 `push` 走 —— 由 `release.yml` 的 `wiki` 作业在 Release 建好后调用（`gh release create` 用 `GITHUB_TOKEN`，它触发的 `release` 事件不会再起工作流），`dev` 上改的东西不发版就不上线。机制见 [docs/development.md](docs/development.md)「文档与 Wiki」。
 - **markdown 一段一行**：不按宽度折行（列表项续行并回同一行），表格/代码块/YAML frontmatter 不受影响；长行只改一个词时 diff 才读得懂。
 - **提交**：分支 `main` 禁止直接提交（只收 `dev` 或 `bugfix/*` 的 PR；唯一例外是 `release.yml` 定版作业的 bot 提交，见 docs/development.md「发布」节）；提交信息写成 `<范围>: <一句话>`，**正文要精炼**（最多两三条要点，只写"为什么"与关键实测数字，别写成大段说明 —— 细节留在 PR 描述、代码注释与 `docs/` 里）；钩子会就地排版并重新暂存，属设计行为。
@@ -81,7 +81,7 @@ uv run python -m archive_management gui --smoke 1             # GUI 冒烟自检
 - **风格**：裸 `assert` + 能定位问题的失败消息（太长就把消息存进变量，保持单行）；环境用 `tmp_path`、替身用 `monkeypatch`（仓库里不用 `unittest.mock`）；用例自带数据，不依赖执行顺序。
 - **别绕过门禁**：不许用无原因的 `pytest.skip` 静默掉用例（Tk 环境问题只认白名单症状）、不许放宽 `fail_under` 或复杂度阈值、不许用"既有问题"当借口跳过检查。CI 红了你认为既有问题，在 PR 里写明。
 - **UI 守卫族**（改界面前先知道它们在守什么）：`tests/unit/test_ui_metrics.py`（间距/圆角/字号刻度与站点总数）、`test_ui_contrast.py`（对比度三档阈值）、`test_ui_input_border.py`（输入控件边界色）、`test_gui_styles.py`（语义色与危险动作）、`test_gui_layout.py`（对齐/边框/长文本）、`test_gui_states.py`（忙碌与可用性）、`test_gui_copy_quality.py`（文案截断与空状态）。
-- **CI 工作流**：`.github/workflows/ci.yml`（PR 与 push 都跑全量）、`release-build.yml`（只读构建，被门禁与两条发布档共用）、`release.yml`（合入 `main` 后发 Release + 同步手册）、`dev-release.yml`（dev 的**手动**快照档，带 `Pre-release` 标签）、`ensure-dev.yml`（`dev` 在 PR 合入时被自动删除后补回来）、`co-author-attribution.yml`（PR 合并署名）、`wiki.yml`（被 `release.yml` 调用）。改工作流前读 [.github/instructions/github-actions-pitfalls.instructions.md](.github/instructions/github-actions-pitfalls.instructions.md)，改报告链路前读 [allure-reporting](.github/instructions/allure-reporting.instructions.md)（"改哪一处必须同步改哪几处"）。
+- **CI 工作流**：`.github/workflows/ci.yml`（PR 与 push 都跑全量）、`release-build.yml`（只读构建，被门禁与两条发布档共用）、`release.yml`（合入 `main` 后发 Release + 同步手册）、`dev-release.yml`（dev 的**手动**快照档，带 `Pre-release` 标签）、`co-author-attribution.yml`（PR 的 Squash 署名区；2026-11-05 起合并不再强制 squash，选 Squash 合并时才有意义）、`wiki.yml`（被 `release.yml` 调用）。改工作流前读 [.github/instructions/github-actions-pitfalls.instructions.md](.github/instructions/github-actions-pitfalls.instructions.md)，改报告链路前读 [allure-reporting](.github/instructions/allure-reporting.instructions.md)（"改哪一处必须同步改哪几处"）。
 
 ## 8. 文档导航
 

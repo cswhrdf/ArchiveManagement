@@ -49,7 +49,9 @@ macOS 暂未提供安装包。Windows 双击即可运行；Linux 解压后在终
 ## Squash 合并署名
 
 <!--
-署名区由 Co-author attribution 检查在合并前自动统计 PR 提交作者并更新。 Squash and merge 时，请确认 GitHub 的最终提交说明保留下面生成的 trailer。不要手工编辑两个标记之间的内容。 -->
+署名区由 Co-author attribution 检查在合并前自动统计 PR 提交作者并更新。 Squash and merge 时，请确认 GitHub 的最终提交说明保留下面生成的 trailer。不要手工编辑两个标记之间的内容。
+
+本仓库自 2026-11-05 起**不再强制 squash**（合并时也可以选 Create a merge commit）。所以这一节只在走“Squash and merge”时才需要看一眼：那种合入会把 PR 里的多个提交压成一个，各提交作者只能靠这段 trailer 留在合并提交里；用合并提交时各提交原样进历史，署名天然保留，这一节留着不影响。 -->
 
 <!-- co-author-trailers:start -->
 

@@ -183,3 +183,11 @@ def test_the_release_workflow_reads_the_notes_from_the_merged_pull_request() -> 
     hint = "发布正文必须来自 --notes-file, 不能再用 heredoc 写死一段固定内容"
     assert "--notes-file release-notes.md" in code, hint
     assert "cat > release-notes.md" not in code, hint
+
+    # 合入方式换过一轮(2026-11-05 起不再强制 squash), 取文这条路**不受影响**: GitHub 把 PR 挂在
+    # 该 PR 产生的那个提交上, 合并提交同样会挂(2026-11-07 拿一个 parents=2 的真实合并提交实测
+    # `/commits/{sha}/pulls` 返回了那个 PR)。旧注释写着"squash 合入只把合并提交挂在那个 PR 上",
+    # 容易让人以为换成合并提交就要改这条链路。
+    hint = "合入方式不影响取文: 合并提交同样挂着 PR, 别再写'只有 squash 合入才挂'"
+    assert "合入方式**不影响**这条取文" in workflow, hint
+    assert "squash 合入只把" not in workflow, hint

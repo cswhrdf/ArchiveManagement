@@ -1396,52 +1396,31 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     )
 
 
-def test_the_dev_branch_is_recreated_without_touching_an_existing_one() -> None:
-    """合并时 `dev` 被自动删除 → main 每前进一格就补一个; 但**只补不挪**.
+def test_nothing_recreates_dev_because_merges_no_longer_delete_it() -> None:
+    """合并策略改成"不删来源分支"(用户 2026-11-05 改的设置)之后, 补 dev 的那份流水线已删除.
 
-    背景(用户 2026-10-31): 仓库设置开着"合并后删除来源分支", 而 `dev` 正是 PR 的来源分支 ——
-    `dev -> main` 一合入, 开发分支当场消失, 只能手工重建。
+    原 `ensure-dev.yml` 只有一个职责: `dev -> main` 合入时 `dev` 被自动删掉了, 于是 main 每前进
+    一格就补一个。设置关掉之后它**永远不会触发**; 而比死代码更糟的是它带着一套已经失效的前提 ——
+    文件头、`docs/development.md`、`AGENTS.md` 的工作流清单都在复述"仓库开着合并后删除来源分支",
+    下次谁读都会照着一个不存在的缺口去查。
 
-    落点是一份**独立工作流**而不是挂在现成的两条上, 三条理由都要钉住:
-    ① `ci.yml` 顶层只读(PR 那次运行会执行 PR 里的代码), 不能为它开写权限;
-    ② `release.yml` 的 push 档带 `paths-ignore`, **纯文档合入不跑** —— 而那种合入同样会删掉
-       dev, 挂在那里就会留下"改个文档就再没有 dev"的静默缺口, 所以这份工作流**不许**有
-       `paths-ignore`;
-    ③ 与 `release.yml` 的分工: 它重建的是**合并提交**, bump 提交由 classify 快进过去
-       (`test_the_release_workflow_bumps_the_patch_version_by_default` 钉着那一句)。
-
-    最后一条是安全红线: 只看"在不在", **绝不移动/重置已存在的 dev** —— 别的机器上可能正
-    有人在上面干活。
+    回退点: 整份文件留在 git 历史里(`git show <sha>:.github/workflows/ensure-dev.yml`)。真要重新
+    打开"合并后删除来源分支", 捞回那份流水线之前得先改掉这条守卫 —— 它是故意留在路上的。
     """
     path = _REPO_ROOT / ".github" / "workflows" / "ensure-dev.yml"
-    assert path.is_file(), "缺少 .github/workflows/ensure-dev.yml"
-    text = path.read_text(encoding="utf-8")
-    # 只看真正生效的行: 这份工作流的注释里就写着"**故意不写 paths-ignore**", 不剥注释的话
-    # 那条反向断言会被它自己喂红(2026-10-31 实测踩到, 同一类坑这个仓库已经记录过多次)。
-    head = _without_comments(text.split("\njobs:", 1)[0])
-
-    assert re.search(r"^  push:\n    branches: \[main\]$", head, re.MULTILINE), (
-        "只在 main 前进时补分支"
-    )
-    assert "paths-ignore" not in head, (
-        "纯文档合入同样会删掉 dev: 这份工作流不许按路径过滤"
-    )
-    assert "workflow_dispatch:" in head, "要留手动入口(dev 被手工删掉时能补)"
-    assert re.search(r"^permissions:\n  contents: read$", head, re.MULTILINE), (
-        "顶层保持只读, 写权限只给重建那个作业"
+    assert not path.exists(), (
+        "合并已不删来源分支: 补 dev 的流水线是死代码, 要加回来先确认仓库设置又变了"
     )
 
-    ensure = _without_comments(ci_workflow.job_block(text, "ensure"))
-    assert re.search(
-        r"^    permissions:\n      contents: write$", ensure, re.MULTILINE
-    ), "创建分支需要写权限, 且只给这个作业"
-    assert "repos/$GITHUB_REPOSITORY/branches/dev" in ensure, (
-        "先探测 dev 在不在 —— 存在时什么都不做"
-    )
-    assert "git/refs" in ensure, "只在缺失时创建(git refs 的 POST)"
-    for forbidden in ("-X PATCH", "-X DELETE", "--force", "force=true"):
-        hint = f"绝不许用 {forbidden}: dev 上可能正有别人没推完的提交"
-        assert forbidden not in ensure, hint
+    doc = (_REPO_ROOT / "docs" / "development.md").read_text(encoding="utf-8")
+    hint = "合并策略已改成不删来源分支: 文档要写明 dev 合入后仍在, 免得下次又去找补分支的流水线"
+    assert "合并后不再删除来源分支" in doc, hint
+    hint = "文档里提到这份流水线时必须是'已删除'的口径, 否则读起来像是它还在跑"
+    assert "ensure-dev.yml" in doc, hint
+    assert "已删除" in doc, hint
+
+    agents = (_REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "ensure-dev" not in agents, "工作流清单只列活着的工作流, 这份已经删了"
 
 
 def test_the_release_workflow_only_publishes_from_main() -> None:

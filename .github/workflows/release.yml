@@ -229,8 +229,11 @@ jobs:
       - name: Compose the release notes from the pull request
         # 版本说明**由发起者在 PR 里手写**(模板的「本次变更」一节), CI 不再自动汇总(2026-10-31 定)。
         # 找 PR 用合入提交(`github.sha`), **不是** `RELEASE_TARGET`: 后者是 classify 传出的构建
-        # 目标(手动档可以是任意 ref), 不一定关联着某个 PR —— 而 squash 合入只把**合并提交**
-        # 挂在那个 PR 上。手动档没有 PR, 脚本会回退成一句说明。
+        # 目标(手动档可以是任意 ref), 不一定关联着某个 PR。
+        # 合入方式**不影响**这条取文(2026-11-05 起不再强制 squash): 无论是 squash 出来的那个
+        # 提交, 还是“Create a merge commit”的**合并提交**, GitHub 都把对应的 PR 挂在它上面 ——
+        # 2026-11-07 拿一个 parents=2 的真实合并提交实测 `/commits/{sha}/pulls` 返回了那个 PR。
+        # 手动档没有 PR, 脚本会回退成一句说明。
         if: ${{ steps.decision.outputs.publish == 'true' }}
         run: |
           set -eu
