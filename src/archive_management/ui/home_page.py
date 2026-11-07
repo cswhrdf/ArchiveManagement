@@ -131,7 +131,13 @@ _SEARCH_DEBOUNCE_MS = 300
 # 同一个行宽下, 表头对齐最多迭代几轮(表头几何变化不会触发滚动区的 Configure, 得主动再量一轮).
 # 轮数按**数据行的实测宽度**记账: 行宽一变(滚动条出现/收起、窗口缩放、名称重裁)就是新的一轮
 # 几何, 已算好的内边距全部作废, 得重新给满 —— 见 ``HomePage._rearm_alignment``。
-_ALIGN_MAX_ATTEMPTS = 4
+#
+# 2026-11-07 从 4 提到 24: 满载(双片并行 + 覆盖率追踪)时前几轮量到的往往是**还没落定的**
+# 几何 —— 读完偏移、改完内边距, 真正的布局要等下一轮事件循环才到, 于是"改了几轮却没收敛"
+# 就把预算用光了, 此后 ``_sync_job`` 是 None, 再没有事件来纠正(现场: 六列整体差一个固定量
+# 14/16/22/27/33/65px, 用例等 3s 也等不来)。按 60ms 一轮算 24 轮 ≈ 1.4s, 足够跨过最坏时序;
+# 打转的保护仍是"同一行宽"与"到顶就停手"两道闸, 不是靠这个数字小。
+_ALIGN_MAX_ATTEMPTS = 24
 # 名称重裁在"宽度还没测量出来"时最多重试几轮. 各平台的布局时序不同: Linux/macOS
 # 上首次同步时行内标签可能还没被布局(``winfo_width()`` 是 1), 而之后再没有 Configure
 # 事件来补救 —— 不重试就会一直停在兜底宽度的短文本上。
@@ -1351,7 +1357,12 @@ class HomePage:
         偏移后**一次算准**新的左右内边距(几何对两边都是线性的), 不会来回抖。
 
         轮数上限是防打转的闸, 按**行宽**记账(:meth:`_rearm_alignment`): 同一个行宽下最多
-        再调 ``_ALIGN_MAX_ATTEMPTS`` 轮, 行宽一变就重新给满。
+        调 ``_ALIGN_MAX_ATTEMPTS`` 轮, 行宽一变就重新给满。
+
+        **这一轮算不出新内边距也要再排一轮复核**(2026-11-07): 满载时量到的可能是还没落定的
+        几何 —— 内边距按旧读数算出来与当前一致, 而真正的布局要等下一轮才到。以前这种情况直接
+        收工, 表头就永久停在旧内边距上(六列整体差一个固定量, 用例等 3s 也没人来纠正)。
+        "读到同一个偏移就停"同样不行: 那恰好就是满载时的样子。所以停手只按轮数, 不按读数。
         """
         offset = self._header_offset()
         if offset is None:
@@ -1362,15 +1373,14 @@ class HomePage:
             return
         if self._align_attempts >= _ALIGN_MAX_ATTEMPTS:
             return  # 同一个行宽下调了几轮还不齐就不再折腾(窗口极窄等边界情况)
+        self._align_attempts += 1
         left, right = self._head_pads
         # 左边距变化会**整体平移**表头内容, 所以右边距要把这部分再补回来.
         pads = (max(0, left - off_left), max(0, right + off_right - off_left))
-        if pads == self._head_pads:
-            return  # 已经调到边上了(不能再挪), 就此停手
-        self._align_attempts += 1
-        self._head_pads = pads
-        self._head.grid_configure(padx=pads)
-        # 表头自己的几何变化不会再触发滚动区的 Configure, 所以主动再量一轮.
+        if pads != self._head_pads:
+            self._head_pads = pads
+            self._head.grid_configure(padx=pads)
+        # 表头自己的几何变化不会再触发滚动区的 Configure, 所以主动再量一轮(改没改都量)。
         self._schedule_list_sync()
 
     def _refit_row_names(self) -> None:

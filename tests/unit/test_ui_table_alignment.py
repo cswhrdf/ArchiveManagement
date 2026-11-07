@@ -15,6 +15,11 @@
 
 三条用例把机制钉在替身上(不建 Tk 根, 不跑事件循环), 判据全是可数的数字:
 同一个行宽下最多 ``_ALIGN_MAX_ATTEMPTS`` 轮, 行宽一变重新给满, 量到对齐则归零。
+
+2026-11-07 补第四条: **这一轮算不出新内边距也要再排一轮复核**。满载(双片 + 覆盖率追踪)
+时量到的往往是还没落定的几何 —— 按旧读数算出来的内边距与当前一致, 而真正的布局要等下一轮
+才到; 以前这种情况直接收工, 表头就永久停在旧内边距上(六列整体差一个固定量, 用例等 3s 也
+没人来纠正)。所以停手只按**轮数**, 不按读数。
 """
 
 from __future__ import annotations
@@ -86,18 +91,46 @@ def _sync(page: Any, times: int = 1) -> None:
 def test_a_stuck_reading_stops_at_the_attempt_cap() -> None:
     """同一个行宽下读数一直不收敛: 调满 ``_ALIGN_MAX_ATTEMPTS`` 轮就停手(防自激).
 
-    "停手"要能数出来: 到顶之后**不再改几何**(``_head.grid_configure`` 不再被调用),
-    否则表头会自己抽起来 —— 常量是给这条用的, 不是给"永远别放弃"用的。
+    "停手"要能数出来: 到顶之后**既不再改几何、也不再排下一轮复核**
+    (``_head.grid_configure`` 与 ``_schedule_list_sync`` 都不再被调用), 否则表头会自己抽起来
+    —— 常量是给这条用的, 不是给"永远别放弃"用的。
     """
     page = _page()
     _sync(page, home_page._ALIGN_MAX_ATTEMPTS)
     assert len(page._head.pads) == home_page._ALIGN_MAX_ATTEMPTS
     assert page._align_attempts == home_page._ALIGN_MAX_ATTEMPTS
+    assert page.syncs == home_page._ALIGN_MAX_ATTEMPTS, "每一轮都排了下一轮复核"
 
     _sync(page, home_page._ALIGN_MAX_ATTEMPTS)
     assert len(page._head.pads) == home_page._ALIGN_MAX_ATTEMPTS, (
         "同一个行宽下调不通就该停手: 读数没变还继续改几何就是打转"
     )
+    assert page.syncs == home_page._ALIGN_MAX_ATTEMPTS, (
+        "到顶之后不许再排复核 —— 那等于把 1.4s 的预算变成一个永不结束的循环"
+    )
+
+
+def test_a_stale_reading_does_not_end_the_alignment() -> None:
+    """满载时前几轮读到的可能是还没落定的几何: 改不动也要继续复核, 直到真的对上.
+
+    现场(2026-11-07): 六列整体差 22px, 而 ``_align_attempts`` 已经到顶、``_sync_job`` 是
+    None —— 前几轮按旧读数算出"内边距不用变"就直接收工了, 真正的布局到了却再没人来量。
+    这里把那一幕摆出来: 两轮都读不到进展(内边距已经没收的余量), 第三轮布局落定后才归零。
+    """
+    page = _page()
+    page._head_pads = (0, 0)
+    page.offset = (5, 0)  # 左边已经没有余量可收: 算出来的新值与当前一致
+
+    _sync(page)
+    _sync(page)
+
+    assert page._head.pads == [], "算不出新内边距时不该改几何"
+    assert page._align_attempts == 2, "每一轮都要计入轮数(否则会无限重排)"
+    assert page.syncs == 2, "改不动也要再排一轮复核 —— 直接收工就是那个 22px 的偶发"
+
+    page.offset = (0, 0)  # 布局落定
+    _sync(page)
+    assert page._align_attempts == 0, "对齐之后归零: 下一次几何变化还能用满预算"
 
 
 def test_a_changed_row_width_gives_the_alignment_a_fresh_budget() -> None:
@@ -130,4 +163,4 @@ def test_a_settled_alignment_clears_the_budget() -> None:
     page.offset = (0, 0)  # 下一轮量到"已经对齐"
     _sync(page)
     assert page._align_attempts == 0
-    assert page.syncs >= 1, "对齐之后不该再反复排同步任务"
+    assert page.syncs == 1, "对齐之后不该再反复排同步任务"
