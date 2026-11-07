@@ -278,6 +278,9 @@ class HomePage:
         self._head_pads: tuple[int, int] = (_HEAD_LEFT_PAD, _TABLE_SIDE_PAD)
         # 表头对齐已经调过几轮(收敛后就归零; 行宽一变就重新计数, 见 _rearm_alignment).
         self._align_attempts = 0
+        # 上一轮是否已经量到"完全对齐". 要**连续两轮**读到 0/0 才算数: 满载时单次读数可能是
+        # 还没落定的旧几何(见 _align_table_header).
+        self._align_confirmed = False
         # 上一轮对齐时的行宽(滚动区里数据行真正能用的宽度): 它变了就说明表头的内边距该重算
         # (0 = 还没量到). 见 _rearm_alignment.
         self._aligned_row_width = 0
@@ -1037,6 +1040,7 @@ class HomePage:
         # 列表重建后悬停状态失效: 不清掉会指向已销毁的卡片.
         self._hover = None
         self._align_attempts = 0
+        self._align_confirmed = False
         self._aligned_row_width = 0
         self._refit_attempts = 0
         self._poster_name_blocks = []
@@ -1172,12 +1176,15 @@ class HomePage:
         换来的是不必再新增一个只在真窗口里才有意义的方法。
 
         打转的保护没丢: 同一个行宽下, 对齐自己排出来的下一轮照样计入预算(见
-        :meth:`_align_table_header`), 所以最坏只会调满 4 轮停手, 不会自激。
+        :meth:`_align_table_header`), 所以最坏只会调满 ``_ALIGN_MAX_ATTEMPTS`` 轮停手, 不会自激。
         """
         width = self._row_viewport()
         if width != self._aligned_row_width:
             self._aligned_row_width = width
             self._align_attempts = 0
+            # 行宽变了就是新的一份几何: 上一份几何上的"已对齐"结论作废(否则下一轮读到的
+            # 旧 0/0 会被当成确认过的读数直接收工).
+            self._align_confirmed = False
 
     def _relayout_posters(self, width: int) -> None:
         """按给定宽度重算每行张数, 变了就重新摆放卡片(启动首屏与窗口缩放都会用到)."""
@@ -1363,14 +1370,32 @@ class HomePage:
         几何 —— 内边距按旧读数算出来与当前一致, 而真正的布局要等下一轮才到。以前这种情况直接
         收工, 表头就永久停在旧内边距上(六列整体差一个固定量, 用例等 3s 也没人来纠正)。
         "读到同一个偏移就停"同样不行: 那恰好就是满载时的样子。所以停手只按轮数, 不按读数。
+
+        **量不到、读到 0 也都不能当收工**(2026-11-07 第二轮, 全量分片里又咬了一次):
+        现场 dump 是 ``_align_attempts=0``、``_head_pads=(22, 66)``、名称列对上了而**固定列
+        那一块整体差 33px** —— 也就是有一轮量到的是"还没重新摆"的旧几何(0/0), 按它归零就等于
+        收工, 真正的布局 60ms 后才到, 此后没有事件再来叫我们(行宽没变、标签宽度没变)。所以:
+        ① 量不到(行正在重建/尚未 map)也要排一轮, 计入同一份轮数预算;
+        ② 读到 0/0 要**连续两轮**才算对齐, 单次读数只算"也许", 再复核一轮。
         """
         offset = self._header_offset()
         if offset is None:
+            if self._align_attempts < _ALIGN_MAX_ATTEMPTS:
+                self._align_attempts += 1
+                self._schedule_list_sync()
             return
         off_left, off_right = offset
         if off_left == 0 and off_right == 0:
-            self._align_attempts = 0
+            if self._align_confirmed:
+                self._align_attempts = 0
+                self._align_confirmed = False
+                return
+            self._align_confirmed = True
+            if self._align_attempts < _ALIGN_MAX_ATTEMPTS:
+                self._align_attempts += 1
+                self._schedule_list_sync()
             return
+        self._align_confirmed = False
         if self._align_attempts >= _ALIGN_MAX_ATTEMPTS:
             return  # 同一个行宽下调了几轮还不齐就不再折腾(窗口极窄等边界情况)
         self._align_attempts += 1
