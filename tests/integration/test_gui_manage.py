@@ -410,6 +410,62 @@ def test_manage_window_location_buttons_stay_inside_the_window(
     window.close()
 
 
+def _layout_manager(widget: Any) -> str:
+    """控件当前被哪种几何管理器管着(``grid_remove()`` 之后是空串, 与是否可见无关)."""
+    return str(widget.winfo_manager())
+
+
+def test_the_two_secondary_sections_start_folded_and_open_on_demand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外观与进程名候选默认收起: 这两节把窗口撑到 850px 高(用户 2026-11-07 反馈"过高").
+
+    两节都是低频操作(改封面/图标、增删进程名), 收起来之后"定时备份 + 存档位置 + 底部按钮"
+    一屏能看全; 要用时点开关展开, 文字当场从"展开…"变成"收起…"。
+
+    判据取**内容高度**(滚动区里排出来的那一块)而不是窗口高度: CI 的屏幕比本机矮,
+    ``_fit_window_height`` 会把窗口夹到"屏高 - 安全边距", 两个状态下的窗口高度可能一样高 ——
+    量窗口就会得出"折叠没起作用"的假结论(本机实测 642 / 854, 相差 212px)。
+    """
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _manage_game_window(
+        app, game_id="outer-wilds", name="星际拓荒", enabled=True
+    )
+    assert _wait_for(app, lambda: window._body_content_height() > 1), "窗口未布局"
+
+    folded = window._body_content_height()
+    assert _layout_manager(window._artwork_body) != "grid", "外观那一节默认该收起"
+    assert _layout_manager(window._process_body) != "grid", "进程名候选默认该收起"
+    assert window._artwork_toggle.cget("text") == tr("manage.appearance_show")
+    assert window._process_toggle.cget("text") == tr("manage.process_show")
+
+    window._artwork_toggle.invoke()
+    window._process_toggle.invoke()
+    _pump(app)
+    assert _layout_manager(window._artwork_body) == "grid", (
+        "点开关之后内容要真的回到布局里"
+    )
+    assert _layout_manager(window._process_body) == "grid"
+    assert window._artwork_toggle.cget("text") == tr("manage.appearance_hide")
+    assert window._process_toggle.cget("text") == tr("manage.process_hide")
+    opened = window._body_content_height()
+    assert opened - folded >= 150, f"两节展开后该高出一大截: 收 {folded} / 展 {opened}"
+
+    window._artwork_toggle.invoke()
+    window._process_toggle.invoke()
+    _pump(app)
+    assert _layout_manager(window._artwork_body) != "grid"
+    assert _layout_manager(window._process_body) != "grid"
+    assert abs(window._body_content_height() - folded) <= 2, (
+        "再收回去该回到原来的高度(窗口跟着重新量过一次)"
+    )
+    window.close()
+
+
 def test_manage_window_location_edits_need_a_real_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
