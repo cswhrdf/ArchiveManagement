@@ -48,11 +48,18 @@ export default {
   // `allure open <报告目录>`(以及 `allure generate --open`)默认使用这个端口.
   // CLI 不传 --port 时才会用到它; 端口被占用就临时换一个: `allure open allure-report --port 8081`.
   port: "20000",
-  // 历史趋势: CI 作业会把上一次成功运行的历史文件下载回 .allure/history.jsonl,
-  // 生成报告时把本次结果追加上去(条数上限 40), 于是报告里能看到跨运行的趋势。
+  // 历史趋势: CI 作业会把上一次运行的历史文件下载回 .allure/history.jsonl,
+  // 生成报告时把本次结果追加上去(条数上限 **15**), 于是报告里能看到跨运行的趋势。
+  //
+  // 上限从 40 降到 15(2026-11-07, 用户发现站点体积快撞上限): **报告体积 ≈ 用例数 ×
+  // 这个数**, 因为 Allure 3 把每条用例的趋势链**内联进它自己的结果文件** —— 实测
+  // 9655 条结果 × 40 轮 = 484 MB 的 `data/test-results`, 占整站 611 MB 的 79%(中位数
+  // 文件 53 KB 里 49.7 KB 是 history, 正文本体只有 4.8 KB), 而 Pages 的站点上限是
+  // 1 GB(按解压后算)。15 轮 ≈ 235 MB + 其余 ≈ 350 MB, 留三倍余量; 趋势看最近十几轮
+  // 已经够用。**调大之前先量一遍站点体积**(CI 里有一道 700 MB 的告警闸)。
   historyPath: "./.allure/history.jsonl",
   appendHistory: true,
-  historyLimit: 40,
+  historyLimit: 15,
   // 运行变量: 显示在报告**顶部**, 用来放"读者需要、但报告里看不出来"的稳定事实。
   // 只写跨运行不变的东西: 每次运行都会变的(提交号/分支/run id/时间/平台)由
   // `allure-results/environment.properties` 与运行总账负责, 写在这里只会立刻过期。

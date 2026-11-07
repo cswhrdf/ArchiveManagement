@@ -826,6 +826,14 @@ def test_report_config_keeps_the_history_settings() -> None:
 
     assert 'historyPath: "./.allure/history.jsonl"' in config
     assert "appendHistory: true" in config
+    # 条数上限决定**报告体积**(2026-11-07 实测: 9655 条结果 x 40 轮 = 484 MB 的
+    # data/test-results, 占整站 611 MB 的 79% —— 每条用例的 history 内联在自己的结果
+    # 文件里; Pages 站点上限 1 GB 是按解压后算的)。降到 15 轮后约 350 MB。
+    hint = (
+        "historyLimit 调大之前先量一遍站点体积(报告体积 ≈ 用例数 x 这个数): "
+        " 40 轮时整站已到 611 MB, 离 Pages 的 1 GB 上限只剩四成余量"
+    )
+    assert re.search(r"historyLimit:\s*15,", config), hint
 
 
 def _allowed_environment_ids() -> list[str]:

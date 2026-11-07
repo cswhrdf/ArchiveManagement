@@ -1104,6 +1104,10 @@ jobs:
         # 后者是旧版 `@octokit/rest` 的名字, 在 github-script 里会抛
         # "is not a function" —— 那种 TypeError 会被下面的 catch 当成"站点取不到",
         # 于是永远静默降级(2026-11-07 实测: 站点上其实有 history.jsonl, 一轮也没读过)。
+        # **站点上那份是 gzip 过的**(history.jsonl.gz): 未压缩的已经到 400 MB 量级(40 条
+        # 快照 × 每轮几千条用例的记录), 而压完不到 20 MB —— 站点容量(1 GB)与每轮那 4 次
+        # 下载(3 个平台报告作业 + 汇总)都差一个数量级以上。Pages 对 application/octet-stream
+        # 不做传输压缩, 所以这里自己解(发布侧见 publish-report 的 Unpack the report for Pages)。
         uses: actions/github-script@v9
         with:
           script: |
@@ -1117,15 +1121,16 @@ jobs:
               core.warning(`查不到 Pages 配置(${error.message}): 历史基线改走 artifact 老路`);
               return;
             }
-            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl`;
+            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl.gz`;
             let body;
             try {
               const response = await fetch(target, { redirect: "follow" });
               if (!response.ok) {
-                core.warning(`站点上没有 history.jsonl(HTTP ${response.status}): 历史基线改走 artifact 老路`);
+                core.warning(`站点上没有 history.jsonl.gz(HTTP ${response.status}): 历史基线改走 artifact 老路`);
                 return;
               }
-              body = await response.text();
+              const { gunzipSync } = require("zlib");
+              body = gunzipSync(Buffer.from(await response.arrayBuffer())).toString("utf8");
               JSON.parse(body.split("\n", 1)[0]);
             } catch (error) {
               core.warning(`读取 Pages 历史失败(${error.message}): 历史基线改走 artifact 老路`);
@@ -1564,15 +1569,16 @@ jobs:
               core.warning(`查不到 Pages 配置(${error.message}): 历史基线改走 artifact 老路`);
               return;
             }
-            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl`;
+            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl.gz`;
             let body;
             try {
               const response = await fetch(target, { redirect: "follow" });
               if (!response.ok) {
-                core.warning(`站点上没有 history.jsonl(HTTP ${response.status}): 历史基线改走 artifact 老路`);
+                core.warning(`站点上没有 history.jsonl.gz(HTTP ${response.status}): 历史基线改走 artifact 老路`);
                 return;
               }
-              body = await response.text();
+              const { gunzipSync } = require("zlib");
+              body = gunzipSync(Buffer.from(await response.arrayBuffer())).toString("utf8");
               JSON.parse(body.split("\n", 1)[0]);
             } catch (error) {
               core.warning(`读取 Pages 历史失败(${error.message}): 历史基线改走 artifact 老路`);
@@ -1931,20 +1937,39 @@ jobs:
         run: |
           mkdir -p site
           tar -xzf report-archive/allure-report.tar.gz --strip-components=1 -C site
-          # 历史文件放进站点根, 路径与取数侧的 URL 一致(<站点>/history.jsonl)。两种
-          # artifact 布局都认(与报告作业的恢复步骤同一个实测结论: 单文件上传时
-          # history.jsonl 落在压缩包根部)。
+          # 历史文件放进站点根, 但是**压缩过的**(history.jsonl.gz, 与取数侧的 URL 一致):
+          # 未压缩那份已经 400 MB 量级(40 条快照 × 每轮几千条用例的记录, 含失败用例的
+          # statusDetails), 而站点总容量上限是 1 GB; gzip -9 之后不到 20 MB, 每轮那 4 次
+          # 下载(3 个平台报告作业 + 汇总)也一起掉到原来的 1/20。Pages 对
+          # application/octet-stream 不做传输压缩, 所以只能自己压。两种 artifact 布局都认
+          # (与报告作业的恢复步骤同一个实测结论: 单文件上传时 history.jsonl 落在压缩包根部)。
           for candidate in \
             final-resources/.allure/history.jsonl \
             final-resources/history.jsonl
           do
             if [ -f "${candidate}" ]; then
-              cp "${candidate}" site/history.jsonl
+              gzip -9 -c "${candidate}" > site/history.jsonl.gz
               exit 0
             fi
           done
           echo "::error::allure-resources-final 里找不到 history.jsonl —— 站点是下一轮历史基线的来源, 缺了它趋势就要从零开始。请对照 'Upload final Allure resources' 的 path 列表。"
           exit 1
+
+      - name: Check the site fits the Pages size limit
+        # Pages 的站点上限是 **1 GB, 且按解压后的静态文件算**(不是上传那个 tar.gz 的大小),
+        # 而报告体积几乎正比于"用例数 × historyLimit": Allure 3 把每条用例的趋势链内联进
+        # 它自己的结果文件(实测 2026-11-07: 9655 条 × 40 轮 = 484 MB 的 data/test-results,
+        # 占整站 611 MB 的 79%)。historyLimit 已降到 15(≈ 350 MB), 这里再兜一道 ——
+        # 真撞上限时 deploy-pages 的报错很难读, 提前一轮红比那时候才发现好。
+        # 阈值留两倍余量: 用例数翻倍才会碰到它。
+        shell: bash
+        run: |
+          mb=$(( $(du -sb site | cut -f1) / 1048576 ))
+          echo "站点体积: ${mb} MB(Pages 上限 1024 MB, 告警线 700 MB)"
+          if [ "${mb}" -gt 700 ]; then
+            echo "::error::站点体积 ${mb} MB 已越过 700 MB —— 报告体积 ≈ 用例数 × historyLimit。先看是不是用例数涨了, 再考虑降 historyLimit(见 allurerc.mjs)或改成只发布趋势页。"
+            exit 1
+          fi
 
       - name: Upload the report as a Pages artifact
         uses: actions/upload-pages-artifact@v5

@@ -506,7 +506,7 @@ def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
     """历史基线优先取 Pages 站点(不会过期), 取不到才走 artifact 老路(90 天寿命).
 
     artifact 会过期是这条链路的已知短板: 趋势寿命 = artifact 寿命, 开发节奏放缓后
-    "上一轮"可能在窗口之外, 曲线静默从零开始。发布作业每轮把 history.jsonl 放到
+    "上一轮"可能在窗口之外, 曲线静默从零开始。发布作业每轮把历史**压缩后**放到
     站点根(见 publish-report 的 Unpack the report for Pages), 两个报告作业先从那里
     取。钉四件事: ① 两处都有取数步骤且排在 artifact 链之前; ② 站点地址从仓库的
     Pages 配置查(`repos.getPages`, **不是** `repos.getPagesInfo` —— 后者是旧版
@@ -514,8 +514,8 @@ def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
     会被降级分支吃掉, 于是每轮都静默走 artifact, 站点永远没人读), 不硬拼 owner/repo;
     ③ 取不到要 core.warning(降级是正常路径, 但不能无声)且 artifact 老路的三步都判
     fetched 让路 —— 漏判哪一步,
-    Pages 命中时它还会去跑, 把基线锚到更旧的一轮上; ④ 发布侧真的把 history.jsonl
-    放上站点根, 缺了它"优先 Pages"就只是每轮都降级的老路。
+    Pages 命中时它还会去跑, 把基线锚到更旧的一轮上; ④ 发布侧真的把历史放上站点根,
+    取数侧真的解开它 —— 缺了任一端,"优先 Pages"就只是每轮都降级的老路。
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
     jobs = _job_blocks(workflow)
@@ -527,8 +527,11 @@ def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
     for job_id, restore_name in restore_by_job.items():
         job = jobs[job_id]
         fetch = _step(job, "Fetch previous Allure history from the Pages site")
-        assert "/history.jsonl" in fetch, (
-            f"{job_id} 取的是站点根下的 history.jsonl, 与发布侧放的位置要一致"
+        assert "/history.jsonl.gz" in fetch, (
+            f"{job_id} 取的是站点根下的 history.jsonl.gz(压缩过的), 与发布侧放的地址要一致"
+        )
+        assert "gunzipSync" in fetch, (
+            f"{job_id} 要把站点那份 gzip 解开: 未压缩的历史已经 400 MB 量级, 不上站点"
         )
         hint = f"{job_id} 的站点地址要从仓库 Pages 配置查, 不硬拼 owner/repo(自定义域名/改名都不怕)"
         assert "repos.getPages(" in fetch, hint
@@ -551,7 +554,8 @@ def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
         )
         read_guard = re.search(
             r'try \{\s*const response = await fetch\(target, \{ redirect: "follow" \}\);'
-            r'.*?body = await response\.text\(\);\s*JSON\.parse\(body\.split\("\\n", 1\)\[0\]\);'
+            r".*?gunzipSync\(Buffer\.from\(await response\.arrayBuffer\(\)\)\)"
+            r'.*?JSON\.parse\(body\.split\("\\n", 1\)\[0\]\);'
             r"\s*\} catch \(error\) \{\s*core\.warning\(`读取 Pages 历史失败",
             fetch,
             re.DOTALL,
@@ -575,9 +579,29 @@ def test_ci_fetches_history_from_pages_before_the_artifact_fallback() -> None:
             f"{job_id} 查 Pages 配置要 pages: read(作业级权限是覆盖语义, 缺了查不到)"
         )
     publish = jobs["publish-report"]
-    assert "site/history.jsonl" in publish, (
-        "发布要把历史文件放到站点根: 它是下一轮 Pages 优先链路的取数地址"
+    assert "site/history.jsonl.gz" in publish, (
+        "发布要把历史文件**压缩后**放到站点根: 它是下一轮 Pages 优先链路的取数地址,"
+        " 未压缩那份 400 MB 量级, 塞进 1 GB 的站点上限里不合适"
     )
+    assert "gzip -9 -c" in publish, (
+        "站点上那份要真的过一遍 gzip: 只改名字不改内容的话, 取数侧一解就炸"
+    )
+    assert 'cp "${candidate}" site/history.jsonl' not in publish, (
+        "不许再把明文历史放到站点根(体积差 20 倍, 也没人读它)"
+    )
+    # 站点体积闸: 报告体积 ≈ 用例数 x historyLimit, 而 Pages 的上限是解压后的 1 GB。
+    # 闸必须在**打包上传之前**量(site/ 是 upload-pages-artifact 的输入), 且真的会退 1 ——
+    # 只打一行 warning 等于没有闸, 撞上限时仍然是 deploy-pages 报个看不懂的错。
+    size_step = _step(publish, "Check the site fits the Pages size limit")
+    assert "du -sb site" in size_step, "体积闸要量 site/(站点根), 不是别的目录"
+    assert "::error::" in size_step, (
+        "越线要响亮地报错: 只打 warning 就挡不住 deploy-pages 将来的失败"
+    )
+    assert "exit 1" in size_step, "报了 ::error:: 还必须真的退 1, 否则作业照旧绿"
+    unpack_at = publish.index("name: Unpack the report for Pages")
+    size_at = publish.index("name: Check the site fits the Pages size limit")
+    upload_at = publish.index("Upload the report as a Pages artifact")
+    assert unpack_at < size_at < upload_at, "体积闸要排在解包之后、上传之前"
     assert "name: allure-resources-final" in publish, (
         "站点上的历史来自汇总作业的 allure-resources-final, 与报告分开下载"
     )

@@ -41,7 +41,7 @@ CI 与本地都只跑 `allure generate allure-results --output allure-report`，
 | 键                                               | 作用                                            | 改动时要留意                                                                                                                                                                                                                                |
 | ------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name` / `port`                                  | 报告标题 / 本地默认端口                         | 无守卫                                                                                                                                                                                                                                      |
-| `historyPath` / `appendHistory` / `historyLimit` | 历史趋势（`.allure/history.jsonl`，上限 40 条） | 由 `test_report_config_keeps_the_history_settings` 钉住"必须留在配置里"                                                                                                                                                                     |
+| `historyPath` / `appendHistory` / `historyLimit` | 历史趋势（`.allure/history.jsonl`，上限 **15** 条） | 由 `test_report_config_keeps_the_history_settings` 钉住"必须留在配置里"与上限值：报告体积 ≈ 用例数 × 这个数（每条用例的趋势链内联在它自己的结果文件里），而 Pages 站点上限 1 GB 按解压后算 |
 | `variables`                                      | 报告**顶部**的稳定事实                          | 只写跨运行不变的；每次运行会变的（SHA/分支/时间）走 `environment.properties` 与总账                                                                                                                                                         |
 | `allowedEnvironments`                            | 环境 id 白名单（启动期校验）                    | 必须**恰好等于** `environments` 的键集合：少列一个 `allure generate` 直接 Internal Error（3.18.0 原文：`environment id "common" is not listed in allowedEnvironments`）。守卫 `test_report_config_declares_every_environment_id_as_allowed` |
 | `globalAttachments`                              | 报告首页「全局附件」                            | 只放"挂不上任何用例"的东西；已有结论项的东西别重复挂（让报告 zip 翻倍）                                                                                                                                                                     |
@@ -130,7 +130,7 @@ run: echo "::error::质量门未通过 …" && exit 1
 
 ## 8. 历史趋势：链条比数据更脆
 
-趋势靠"取上一轮的 `allure-resources-*` 产物里的 `.allure/history.jsonl` 再追加"；2026-11-02 起第一来源是 **Pages 站点根的 `history.jsonl`**（`publish-report` 每轮放上站点，不会像 artifact 那样 90 天过期），artifact 降级路径与取舍见 `docs/testing-ci.md` 第 2 节。三件事必须一起盯着：
+趋势靠"取上一轮的 `allure-resources-*` 产物里的 `.allure/history.jsonl` 再追加"；2026-11-02 起第一来源是 **Pages 站点根的 `history.jsonl.gz`**（`publish-report` 每轮把历史上的 gzip 放上站点，不会像 artifact 那样 90 天过期；明文那份 400 MB 量级，压完不到 20 MB，站点上限 1 GB），artifact 降级路径与取舍见 `docs/testing-ci.md` 第 2 节。三件事必须一起盯着：
 
 - **基线只问"有没有产物"，不问那一轮成败**：只认成功运行时，连续失败期（如 macOS Tk 崩溃那几天）会没有任何一轮被消费，基线冻结在更早的成功运行上；恰逢键形状变过，就每轮都按旧形状"修"，趋势永远接不上。取消/没跑到上传的运行自然被跳过。
 - **取回时要认两种打包布局**：artifact 内的路径取决于上传侧 `path` 的形状 —— 只列**一个**文件时它落在压缩包**根部**，列多个路径才保留 `.allure/` 前缀。两个恢复步骤都要对 `.previous-allure-resources/.allure/history.jsonl` 与 `.previous-allure-resources/history.jsonl` 依次尝试，都找不到就 `::error::` + `exit 1`（静默跳过 = 每轮把趋势清零重来，2026-10-05 实测）。守卫 `test_history_restore_accepts_both_artifact_layouts`。
