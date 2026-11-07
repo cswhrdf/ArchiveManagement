@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import customtkinter as ctk
@@ -316,6 +317,40 @@ def test_return_key_in_a_dialog_does_nothing_without_a_primary_button(
     keyboard.bind_window_keys(cast(Any, window))
     assert set(window.handlers) == {"<Escape>", "<Return>"}
     window.handlers["<Return>"]()  # 不该炸, 也不该按到别的按钮
+
+
+def test_return_key_in_a_dialog_presses_the_primary_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回车 = 这一屏的主操作: 窗口级 ``<Return>`` 要按下那颗主色按钮.
+
+    2026-11-07 的 macOS/Linux 覆盖率里这 3 行是靠某条 GUI 用例顺路盖到的(它得恰好在
+    那个平台上找得到主按钮); 这里直接固定行为本身, 不再依赖哪条界面跑在哪台机器上。
+    """
+    button = _WidgetStub()
+    monkeypatch.setattr(keyboard, "primary_button", lambda _window: button)
+    monkeypatch.setattr(keyboard, "ctk", SimpleNamespace(CTkButton=_WidgetStub))
+    window = _WindowStub()
+    keyboard.bind_window_keys(cast(Any, window))
+
+    window.handlers["<Return>"]()
+
+    assert button.invocations == 1, "回车没按到主按钮"
+
+
+def test_return_key_skips_a_disabled_primary_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主按钮禁用时回车不许替它按下去(忙碌态下按回车就是把同一件事提交两次)."""
+    button = _WidgetStub(state="disabled")
+    monkeypatch.setattr(keyboard, "primary_button", lambda _window: button)
+    monkeypatch.setattr(keyboard, "ctk", SimpleNamespace(CTkButton=_WidgetStub))
+    window = _WindowStub()
+    keyboard.bind_window_keys(cast(Any, window))
+
+    window.handlers["<Return>"]()
+
+    assert button.invocations == 0, "禁用按钮被回车按到了"
 
 
 def test_attach_ignores_objects_that_are_not_ctk_widgets() -> None:

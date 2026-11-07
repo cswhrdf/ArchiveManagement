@@ -725,14 +725,13 @@ class ManageGameWindow:
             min(round(int(self._window.winfo_reqheight()) / scale), available),
         )
         self._window.geometry(f"{_WINDOW_WIDTH}x{height}")
-        # ``modal=False``: 键盘接线与初始焦点在 _build 那次 _present 里已经接完, 这里只要
-        # "摆到中间"这一步。**不能**让它再走对话框的舒适线夹取: 那一步会把正文区收矮
-        # (夹取跑在高度已经定下来之后), 于是窗口比内容高出 100 多像素 —— 2026-11-07 的
-        # Linux CI 实测: 本函数定高 874, _present 把正文从 770 收到 696, 整窗请求变成 764,
-        # test_the_manage_window_hugs_its_content 因此报 "874 > 840"。本窗口自己的夹取
-        # (屏高 - _SCREEN_MARGIN) 已经保证不出屏, 舒适线是给"内容不能自己滚"的对话框用的
-        # (与 settings_window / schedule_window 两个常驻窗口同一口径)。
-        _present(self._parent, self._window, modal=False)
+        # ``clamp=False``: 键盘接线与初始定焦照旧(抓取式窗口该有的), 只是不再走对话框的
+        # 舒适线夹取 —— 那一步会把正文区收矮, 而且跑在高度已经定下来之后, 于是窗口比内容
+        # 高出 100 多像素。2026-11-07 的 Linux CI 实测: 本函数定高 874, 夹取把正文从 770 收到
+        # 696(整窗请求变成 764), test_the_manage_window_hugs_its_content 因此报 "874 > 840"。
+        # 本窗口自己的夹取(屏高 - _SCREEN_MARGIN)已经保证不出屏; 也不能整体改 modal=False:
+        # 那会连初始定焦一起省掉, 重新映射之后就没有人再把焦点放回去了(macOS/Linux 实测)。
+        _present(self._parent, self._window, clamp=False)
 
     def _body_content_height(self) -> int:
         """正文内容想要多高(**物理**像素): 数滚动区画布里排出来的那一块.
