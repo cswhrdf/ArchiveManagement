@@ -31,7 +31,7 @@ description: '本仓库 Allure 报告体系的用法与不变式: 配置的唯�
 
 ## 2. 配置的唯一真相：`allurerc.mjs`
 
-CI 与本地都只跑 `allure generate allure-results --output allure-report`，**不传 `--config`** —— CLI 从 cwd 读这份配置。以前的写法是每个作业临时写一份 `.allure/allurerc.json` 并把历史设置重复三遍，那三处已删除：**重复的配置就是会漂移的配置**。
+CI 与本地都只跑 `allure generate allure-results --output allure-report --clean`（逐平台那份另加 `--config allurerc.per-platform.mjs`），**不写临时配置** —— CLI 从 cwd 读这份配置。以前的写法是每个作业临时写一份 `.allure/allurerc.json` 并把历史设置重复三遍，那三处已删除：**重复的配置就是会漂移的配置**。`--clean` 不是可选项（2026-11-08 补上）：生成器**不刷新**已存在的输出目录，目录里有上一份的残留时它只打一句 warning 就混着用 —— 旧静态资源的哈希名与新清单对不上时，详情页会随机打不开，而报告本身看着是好的（2026-11-07 的 CI 日志里已经出现过那句 warning）。
 
 - **必须在仓库根执行**：换目录 CLI 找不到配置，环境维度**静默**退回 default（报告照样生成、作业照样绿），由 `verify_allure_report.py` 判"报告不完整"。
 - **只有 `allurerc.js/mjs/ts/mts/cts` 这类可执行配置支持 `environments`**；声明式 `allurerc.json/yaml` 不支持（官方 README 明确说明），这也是当初合并成一份 `.mjs` 的原因。
@@ -180,7 +180,7 @@ CI 红、报告缺块、或者“本地根本不复现的那种失败”来了�
 | 覆盖率门槛                                         | `pyproject.toml` 的 `fail_under`、`create_allure_summary.COVERAGE_THRESHOLD`（守卫 `test_coverage_fail_under_matches_pyproject`）、`allurerc.mjs` 的 `variables.覆盖率门槛`（**这处没有守卫**：注释里写的"守卫会核对"只覆盖前面两处，改门槛要手动跟上）                              |
 | 片数                                               | CI 矩阵、`--shard-count` / `--shard-index`、`--expect-shards`、报告作业矩阵的 `expect_shards`（`test_ci_shard_count_matches_the_matrix`）                                                                                                                                            |
 | 新增一条结论项                                     | `scripts/allure_catalog.py` 的清单（`test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions`）+ 产生它的上游作业 + 运行总账里的一节；若是**条件适用**的一族（如产物冒烟），还要接上 CI 的条件取值（汇总作业按上游作业的 result 推导）与 `expected_items` 的参数         |
-| 新增一个 `allure generate` / `quality-gate` 调用点 | 那个作业要先装 Node 与 CLI（`test_every_job_that_drives_the_allure_cli_installs_it`）；只含一个平台就用 `allurerc.per-platform.mjs`                                                                                                                                                  |
+| 新增一个 `allure generate` / `quality-gate` 调用点 | 那个作业要先装 Node 与 CLI（`test_every_job_that_drives_the_allure_cli_installs_it`）；只含一个平台就用 `allurerc.per-platform.mjs`；**一律带 `--clean`**（守卫 `test_per_platform_reports_skip_the_native_gate` 钉着两处 `generate`）                                                                  |
 | 改分类规则 / 环境 id                               | `allurerc.mjs`、守卫里的期望集合、`tests/tk_guard.py` 的症状清单（`test_report_config_categorises_the_known_environment_problems`）                                                                                                                                                  |
 | 改视觉回归的画面或 `FROZEN_NOW`                    | `tests/visual-baselines/` 的基线图（必须重采）与那里的 README 表；重采只能用**包含这次改动的那一轮** CI 的 `visual-baselines-candidates`—— 两张主页图上带着 `FROZEN_NOW` 那一天的日期，拿旧一轮的产物一上来就红（守卫 `test_the_capture_pins_the_clock_so_baselines_stop_drifting`） |
 

@@ -249,12 +249,17 @@ def test_per_platform_reports_skip_the_native_gate() -> None:
 
     assert 'from "./allurerc.mjs"' in config, "设置只有一处真相: 从主配置继承"
     assert "qualityGate" in config, "它要说明自己摘掉的是什么"
+    # `--clean` 与配置文件一起钉(2026-11-08): 生成器**不刷新**已存在的输出目录, 目录里
+    # 有上一份的残留时它只打一句 warning 就混着用 —— 两处 generate 缺了它, 详情页会
+    # 随机打不开而报告看着是好的(2026-11-07 的 CI 日志里已经出现过那句 warning)。
     assert (
-        "allure generate allure-results --output allure-report "
+        "allure generate allure-results --output allure-report --clean "
         "--config allurerc.per-platform.mjs" in workflow
-    )
+    ), "逐平台那份要 --clean + 不带质量门的配置"
     # 汇总作业那句仍不带 --config: 它要用主配置里的门。
-    assert "allure generate allure-results --output allure-report\n" in workflow
+    assert (
+        "allure generate allure-results --output allure-report --clean\n" in workflow
+    ), "汇总那份要 --clean + 主配置(它本来就是跑门的地方)"
 
 
 def test_native_quality_gate_is_configured_and_pinned() -> None:
@@ -992,6 +997,34 @@ def test_the_push_runs_publish_the_report_to_pages() -> None:
         assert f"name: {step}" in job, f"发布链缺了 {step}"
     assert "actions/upload-pages-artifact@" in code, "Pages 产物要用官方 action 打"
     assert "actions/deploy-pages@" in code, "部署要用官方 action(OIDC 换写权限)"
+    # 部署要能**重试一次**(2026-11-08): deploy-pages 卡在 Pages 服务端排队时会撞上
+    # 它自己的 600s 内部上限(2026-11-07 实测一次 618s 才退, 那一轮整轮被判红)。
+    # 直接 continue-on-error 了事会把"站点没更新"变成静默故障 —— 站点是下一轮历史
+    # 基线的第一来源, 少一次部署就是**永久少一个趋势点**(下一轮命中站点就不再走
+    # artifact 降级)。所以口径是: 第一次失败 ⇒ 等一会儿 ⇒ 再部署一次, 两次都失败才红。
+    assert code.count("uses: actions/deploy-pages@") == 2, (
+        "部署失败要重试一次: 只写一次时, 600s 排队超时会直接变成整轮失败"
+    )
+    assert "name: Wait before retrying the Pages deployment" in job, (
+        "重试前要等一下: 600s 是服务端排队耗掉的, 立刻重试多半还排在同一队尾"
+    )
+    deploy_at = code.index("name: Deploy to GitHub Pages")
+    retry_at = code.index("name: Retry the Pages deployment once")
+    first_attempt = code[deploy_at:retry_at]
+    retry_attempt = code[retry_at:]
+    assert "continue-on-error: true" in first_attempt, (
+        "第一次部署失败不直接判红 —— 留给下一步重试"
+    )
+    assert "continue-on-error" not in retry_attempt, (
+        "重试那次不能再吞掉失败: 两次都失败就是真的发布不了, 该红就红"
+    )
+    assert "if: steps.deployment.outcome == 'failure'" in retry_attempt, (
+        "重试只在第一次真的失败时才跑(continue-on-error 之后要靠 outcome 判)"
+    )
+    assert "sleep 60" in code, "重试之间要隔一会儿"
+    assert "steps.deployment-retry.outputs.page_url" in header, (
+        "environment.url 要回落到重试那次的 page_url: 第一次失败时它拿不到输出"
+    )
     assert "name: allure-report-final" in code, "发布的就是汇总作业上传的那份产物"
     assert "name: allure-resources-final" in code, (
         "站点同时要带历史文件(下一轮基线的来源, 见 test_ci_history 的 Pages 优先守卫)"

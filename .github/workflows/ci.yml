@@ -1238,12 +1238,16 @@ jobs:
         # 但这里用 **allurerc.per-platform.mjs**: 3.20.0 起 `generate` 也会执行质量门, 而
         # `environmentsTested` 只在汇总那份报告里成立 —— 本作业只合并**一个平台**的结果,
         # 用主配置生成会以退 1 收场(实测)。那份配置从主配置继承, 只摘掉 qualityGate。
+        #
+        # `--clean` 不是可选项(2026-11-08): 生成器**不刷新**已存在的输出目录, 目录里有
+        # 上一份报告的残留时它只打一句 warning 就混着用 —— 旧静态资源的哈希名与新清单
+        # 对不上时, 详情页会随机打不开, 而报告本身看着是好的。
         if: always()
         shell: bash
         run: |
           mkdir -p .allure
           if [ -n "$(find allure-results -type f -print -quit 2>/dev/null)" ]; then
-            allure generate allure-results --output allure-report --config allurerc.per-platform.mjs
+            allure generate allure-results --output allure-report --clean --config allurerc.per-platform.mjs
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi
@@ -1767,12 +1771,15 @@ jobs:
 
       - name: Generate final Allure report
         # 同 pytest 作业: 历史与环境设置都在仓库根的 allurerc.mjs 里。
+        # `--clean` 的理由同上一步(生成器不刷新已存在的输出目录): 这一处是最先踩到的
+        # —— 2026-11-07 的 CI 日志里已经有 "The output directory ... is not empty"
+        # 这句 warning, 只是那一轮产物恰好对得上, 没红。
         if: always()
         shell: bash
         run: |
           mkdir -p .allure
           if [ -n "$(ls -A allure-results)" ]; then
-            allure generate allure-results --output allure-report
+            allure generate allure-results --output allure-report --clean
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi
@@ -1907,7 +1914,9 @@ jobs:
       cancel-in-progress: true
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      # 第一次部署成功用第一份; 第一次失败、重试成功时第一份是空的, 回落到第二份
+      # (失败的那次 action 走不到 setOutput, 所以 `||` 是必需的, 不是保险)。
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url }}
     steps:
       - name: Download the final Allure report
         # 汇总作业上传的那份单个 tar.gz(闸门在作业条件里: 归档不在整个作业都不会启动);
@@ -1979,5 +1988,31 @@ jobs:
       - name: Deploy to GitHub Pages
         # 前提(只能手动设置一次): 仓库 Settings → Pages 的 Source 选 "GitHub Actions"。
         # deploy-pages 走 OIDC(id-token)换站点写权限 —— 上面权限里那一条的由来。
+        #
+        # **第一次失败不判红, 留给下一步重试一次**(2026-11-08): deploy-pages 卡在 Pages
+        # 服务端排队时会撞上它自己的 600s 内部上限, 2026-11-07 实测一次 618s 才退 ——
+        # 那一次把整轮 CI 判成了失败。而「站点没更新」比「这一轮红」更难发现: 站点是下一轮
+        # 历史基线的**第一来源**(见 pytest-report 的 Fetch previous Allure history from the
+        # Pages site), 部署没成功时这一轮的趋势点会**永久缺失** —— 下一轮命中站点就
+        # 不再走 artifact 降级, 少了的那一点补不回来。所以这里不写「continue-on-error 了事」
+        # (那只是让作业变绿, 站点照样停在上一轮), 而是重试一次; 第二次仍失败就让作业红。
+        # deploy-pages 是幂等的(它重新读已上传好的 pages artifact), 重试不会留下半份站点。
         id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Wait before retrying the Pages deployment
+        # deploy-pages 那 600s 是**服务端排队**耗掉的, 立刻重试多半还排在同一队尾 ——
+        # 隔 60s 让服务端的上一个部署落定, 顺带把「第一次为什么失败」写进运行日志。
+        if: steps.deployment.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::warning::第一次部署 Pages 失败(多半是排队超过 deploy-pages 的 600s 内部上限), 60s 后重试一次"
+          sleep 60
+
+      - name: Retry the Pages deployment once
+        # 这一步**不带** continue-on-error: 两次都失败就是真的发布不了(权限/配额/站点
+        # 配置), 该红就红 —— 静默地把站点停在上一轮才是这里最贵的故障。
+        if: steps.deployment.outcome == 'failure'
+        id: deployment-retry
         uses: actions/deploy-pages@v5
