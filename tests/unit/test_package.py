@@ -373,3 +373,51 @@ def test_the_platform_gate_and_the_display_warning_are_wired() -> None:
     )
     assert "DISPLAY" in warning, "X11 会话认 DISPLAY"
     assert "WAYLAND_DISPLAY" in warning, "Wayland 会话常只有 WAYLAND_DISPLAY 在"
+
+
+def _linux_hidden_imports() -> list[str]:
+    """解析 spec 里 ``hidden_imports`` 的**非 Windows 那一支**清单.
+
+    写的是 ``[] if is_windows else [...]``(模块级赋值, 再传给 ``hiddenimports=``), 所以
+    这里按 AST 取 ``orelse`` —— 而不是搜原文: 注释里就写着这几条的名字, 拿子串断言会被
+    自己喂绿。
+    """
+    tree = ast.parse(_SPEC_PATH.read_text(encoding="utf-8"), filename=str(_SPEC_PATH))
+    for node in tree.body:
+        targets: list[ast.expr]
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        else:
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "hidden_imports"
+            for target in targets
+        ):
+            continue
+        if isinstance(value, ast.IfExp):
+            value = value.orelse
+        assert isinstance(value, ast.List), "hidden_imports 要写字面量清单"
+        return [str(ast.literal_eval(element)) for element in value.elts]
+    raise AssertionError("spec 里没找到 hidden_imports = ...")
+
+
+def test_the_linux_hidden_imports_cover_what_static_analysis_cannot_see() -> None:
+    """Linux 侧两条隐藏导入必须还在, 它们都是静态分析看不见的**动态**导入.
+
+    * ``fcntl``: ``services/single_instance.py`` 用 ``importlib.import_module`` 取它;
+    * ``PIL._tkinter_finder``: Pillow 的 ``_imagingtk`` 在**模块初始化**时由 C 代码
+      ``PyImport_ImportModule("PIL._tkinter_finder")`` 取它(Pillow 的
+      ``src/Tk/tkImaging.c`` 里 **Unix 分支才有**这一句, Windows 分支是扫进程里已加载
+      的模块)。少了它, onefile 起来第一次建 ``PhotoImage`` 就
+      "No module named 'PIL._tkinter_finder'", GUI 起不来 —— 2026-11-07 的 dev 预发布档
+      就是这么红的(构建成功、冒烟 5 条判据里 3 条失败)。
+    """
+    names = _linux_hidden_imports()
+    hint = (
+        "Linux 的隐藏导入少了一条静态分析看不见的模块: fcntl(动态导入)与 "
+        "PIL._tkinter_finder(Pillow 的 C 代码在 Unix 上导入)缺一个, 冻结产物就会在"
+        "运行时抛 ModuleNotFoundError"
+    )
+    assert {"fcntl", "PIL._tkinter_finder"} <= set(names), hint

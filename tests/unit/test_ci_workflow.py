@@ -2063,6 +2063,13 @@ def test_the_linux_package_bundles_a_tk_that_can_render_cjk() -> None:
     build_step = build_step.split("\n      - name:", 1)[0]
     hint = "构建步必须把发行版 _tkinter 放到 PYTHONPATH 最前面(不然冻进包的是画不出汉字的那份 Tk)"
     assert "PYTHONPATH: ${{ runner.temp }}/tk-xft" in build_step, hint
+    # 构建步要套 xvfb-run: PyInstaller 的 hook-pynput 靠 import 这个包来收集后端, 没有
+    # DISPLAY 时 pynput 一 import 就抛错, 两个 X11 后端(键盘/鼠标)不会进包 —— 装到用户
+    # 机器上就是"全局快捷键永远不可用", 而冒烟只把它记成一条 WARNING。
+    assert "xvfb-run -a uv run pyinstaller" in build_step, (
+        "Linux 构建步要包在 xvfb-run 里: 否则 pynput 的 X11 后端不会被收集, "
+        "产物里的全局快捷键永远不可用"
+    )
     # 只认生效行(带冒号的 YAML 键): 注释里也写着这两个名字, 拿裸名字断言会被注释喂绿。
     build_code = "\n".join(
         line for line in build_step.splitlines() if not line.strip().startswith("#")

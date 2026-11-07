@@ -362,11 +362,18 @@ jobs:
         # PYTHONPATH 换发行版 _tkinter(来路见 apt 那步); TCL_LIBRARY/TK_LIBRARY 帮
         # PyInstaller 找到发行版摊在 /usr/share/tcltk 的 Tcl/Tk 脚本库(Debian 系布局,
         # 不在二进制旁边) —— 少了它们, 冻结产物会以 "Can't find a usable tk.tcl" 起不来。
+        #
+        # **套一层 xvfb-run 不是为了 GUI**, 是为了 PyInstaller 的分析能看见 pynput 的
+        # X11 后端: ``hook-pynput`` 靠 ``collect_submodules("pynput")`` 收集, 而它要
+        # import 这个包 —— 没有 DISPLAY 时 pynput 一 import 就抛 "this platform is not
+        # supported: failed to acquire X connection", 于是 ``pynput.keyboard._xorg`` /
+        # ``pynput.mouse._xorg`` 一个都没进包, 用户装上以后**全局快捷键永远是"不可用"**
+        # (只降级成一条 WARNING, 冒烟不会因此判红 —— 2026-11-07 的 dev 预发布档实测)。
         env:
           PYTHONPATH: ${{ runner.temp }}/tk-xft
           TCL_LIBRARY: /usr/share/tcltk/tcl8.6
           TK_LIBRARY: /usr/share/tcltk/tk8.6
-        run: uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
+        run: xvfb-run -a uv run pyinstaller --noconfirm --clean packaging/archive-management.spec
 
       # 以下四步与 Windows 作业同一个骨架, 差异只有: 冒烟包在 xvfb-run 里、结论目录/产物名
       # 的平台段是 linux。位置约束同样由守卫 test_the_build_smokes_the_packages_it_produced 钉住。

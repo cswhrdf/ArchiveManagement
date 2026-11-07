@@ -33,7 +33,17 @@ if is_windows and not icon_file.is_file():
 # 动态导入。PyInstaller 的静态分析对字面量 import_module 大多能认, Windows 上 msvcrt
 # 就是这么被打进去的(单实例冒烟一直绿); 但 fcntl 这条只有 Linux 构建才走得到, 而本仓库
 # 没有 Linux 上的本地构建可以当场验证 —— 显式列出来, 不赌它。
-hidden_imports: list[str] = [] if is_windows else ["fcntl"]
+#
+# ``PIL._tkinter_finder`` 同理, 但它是 **C 层**的导入, 静态分析根本看不见:
+# ``PIL._imagingtk`` 的模块初始化会调 Pillow C 源码里的 ``load_tkinter_funcs()``
+# (src/Tk/tkImaging.c), 而那个函数**只在 Unix 分支**里 ``PyImport_ImportModule(
+# "PIL._tkinter_finder")`` —— 靠它给出的 libtk 路径 dlopen Tk; Windows 分支改成扫描
+# 进程里已加载的模块, 所以这一条**只有 Linux 需要**。2026-11-07 的 dev 预发布档就红在
+# 这里: 构建成功、冒烟的 5 条判据里 3 条失败, 产物起来后第一次建 ``PhotoImage`` 就
+# "No module named 'PIL._tkinter_finder'"(GUI 起不来)。
+hidden_imports: list[str] = (
+    [] if is_windows else ["fcntl", "PIL._tkinter_finder"]
+)
 
 a = Analysis(
     [str(source_root / "archive_management" / "__main__.py")],
