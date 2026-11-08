@@ -847,14 +847,18 @@ def _alignment_places(
 
 
 def _wait_for_the_columns_to_line_up(
-    app: ArchiveApp, page: Any, *, timeout: float = 3.0
+    app: ArchiveApp, page: Any, *, timeout: float = 5.0
 ) -> tuple[list[list[tuple[int, int]]], list[tuple[int, int]], bool]:
     """等到"各行 + 表头 + 名称列"都落在同一条竖线上, 返回最后一轮的读数.
 
-    表头对齐是 ``after(60ms)`` 的任务, 而且**要跑两轮才收敛**(第一轮按实测差值改内边距,
-    第二轮复核后归零): 用例里流逝的墙钟时间很短, CI 上可能还没轮到 —— 实测 Windows runner
-    上就是"六列整体差同一个 16px"(正好一个滚动条宽度)。等不变量成立比"先睡一会儿再断言"
-    可靠: 它既容忍慢机器, 又真的能在不收敛时报错(与 ``_wait_until_the_name_fits`` 同一套做法)。
+    表头对齐是 ``after(60ms)`` 的任务, 而它**可能要跑好几轮**才收敛: 满载时前几轮量到的是
+    还没落定的几何(改完内边距, 真正的布局要等下一轮事件循环才到)。实现侧的预算是同一行宽下
+    最多 ``_ALIGN_MAX_ATTEMPTS``(24)轮 ≈ 1.4s, 所以等待上限要长过它, 否则用例会在实现还要
+    继续调的时候先超时 —— 2026-10-07 那族偶发就是这个指纹: 六列整体差一个固定量
+    (14/16/22/27/33/65px), 而那时实现已经收工、再没人来纠正。5s 给最坏时序留足余量。
+
+    等不变量成立比"先睡一会儿再断言"可靠: 它既容忍慢机器, 又真的能在不收敛时报错
+    (与 ``_wait_until_the_name_fits`` 同一套做法)。
     """
     deadline = time.monotonic() + timeout
     places, header, name_aligned = _alignment_places(page)
@@ -873,7 +877,7 @@ def _wait_for_the_columns_to_line_up(
 
 
 def _wait_for_the_fixed_block_to_hug_the_right(
-    app: Any, page: Any, *, timeout: float = 3.0
+    app: Any, page: Any, *, timeout: float = 5.0
 ) -> int:
     """等到"最后一列贴住行右边界"成立, 返回实测缝隙(超时给最后一轮的读数).
 

@@ -18,6 +18,7 @@ from archive_management.config import DEFAULT_LOG_MAX_BYTES, LoggingSettings
 
 _ROOT_LOGGER = "archive_management"
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+LOG_FILENAME = "archive-management.log"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -34,6 +35,21 @@ def apply_debug(enabled: bool) -> None:
     logger.setLevel(level)
     for handler in logger.handlers:
         handler.setLevel(level)
+
+
+def apply_rotation(max_bytes: int, backup_count: int) -> None:
+    """按新的上限与保留份数调整已挂载的滚动文件处理器(设置里改完马上生效).
+
+    与 :func:`apply_debug` 同理**不重建处理器**(那会重开日志文件): 标准库的
+    ``shouldRollover`` 每次现场读 ``maxBytes``/``backupCount``, 改属性即时生效。
+    已经滚出来的旧日志不会被立即清理 —— 保留份数要等下一次滚动才开始约束,
+    因此界面的反馈文案不承诺"立刻清掉旧文件"。
+    """
+    logger = logging.getLogger(_ROOT_LOGGER)
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler):
+            handler.maxBytes = max_bytes
+            handler.backupCount = backup_count
 
 
 def configure_from_settings(
@@ -84,7 +100,7 @@ def configure_logging(
 
     formatter = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
     file_handler = RotatingFileHandler(
-        log_dir / "archive-management.log",
+        log_dir / LOG_FILENAME,
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",

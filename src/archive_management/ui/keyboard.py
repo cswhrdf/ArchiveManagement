@@ -544,31 +544,50 @@ def _focus_on_map(event: tk.Event) -> None:
             widget.after_idle(action)
 
 
+def _is_visible(widget: tk.Misc) -> bool:
+    """控件是否**已经映射出来**(收起在折叠区里的、建窗时还没映射的都不算)."""
+    return bool(widget.winfo_ismapped())
+
+
+def _initial_target(window: tk.Misc) -> tk.Misc | None:
+    """挑初始焦点的目标: 第一个**看得见**的输入框, 没有就落到主操作按钮上.
+
+    为什么按可见性挑(2026-11-07): 管理窗口把「外观」「进程名候选」两节默认收起了,
+    而它们里面的输入框在 :func:`walk` 里仍排在前面 —— 定焦给一个没映射的控件等于没定焦
+    (实测整窗连 ``<FocusIn>`` 都收不到, ``test_every_screen_is_reachable_by_keyboard``
+    报"窗口可见时定焦也没生效").
+
+    建窗那一刻所有控件都还没映射, 所以调用方还要在 ``<Map>`` 之后再挑一次
+    (见 :func:`focus_first`) —— 两次都走这一个函数, 判据只有一份。
+    """
+    for child in walk(window):
+        if isinstance(child, INPUT_TYPES) and _is_visible(child):
+            return child
+    return primary_button(window)
+
+
 def focus_first(window: tk.Misc) -> tk.Misc | None:
-    """给窗口定个初始焦点: 第一个输入框优先, 没有输入框就落到主操作按钮上.
+    """给窗口定个初始焦点: 第一个可见输入框优先, 没有就落到主操作按钮上.
 
     打开对话框就能直接打字(或者直接按回车), 不必先点一下。两件事都是实测出来的:
 
     * **窗口可见之前 ``focus_set`` 不生效** —— 所以除了 ``after_idle`` 之外还要绑一次
       ``<Map>``: CustomTkinter 的标题栏着色会先隐藏再重新映射窗口, 定焦得跟着再来一次;
+      ``<Map>`` 之后再挑一次目标也顺带解决了"建窗时量不到可见性"这件事(那时一个控件都
+      还没映射, 只能先挑主按钮)。
     * 焦点在**输入框**上时回车等于确认(输入框自己绑了 ``<Return>``), 在按钮上时
       回车按下的是**那个按钮**。
 
     只挑输入框(:data:`INPUT_TYPES` = ``CTkEntry``): 下拉框键盘动不了, 定焦过去会
     让用户以为可以打字(实测反馈: 设置窗口"默认聚焦到界面字号上", 按回车反而切了主题)。
     """
-    target: tk.Misc | None = None
-    for child in walk(window):
-        if isinstance(child, INPUT_TYPES):
-            target = child
-            break
-    if target is None:
-        target = primary_button(window)
-    inner = focus_target(target) if target is not None else None
-    if inner is None:
-        return target
 
     def apply(_event: object = None) -> None:
+        """把焦点送到"此刻"该去的那个控件上(每次重新挑, 见上面的说明)."""
+        target = _initial_target(window)
+        inner = focus_target(target) if target is not None else None
+        if inner is None:
+            return
         with suppress(tk.TclError):
             inner.focus_set()
 
@@ -580,7 +599,7 @@ def focus_first(window: tk.Misc) -> tk.Misc | None:
             window.bind("<Map>", _focus_on_map, add="+")
     with suppress(tk.TclError):
         window.after_idle(apply)
-    return target
+    return _initial_target(window)
 
 
 # -- 全局补丁 ---------------------------------------------------------------

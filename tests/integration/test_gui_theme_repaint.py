@@ -37,6 +37,7 @@ from archive_management.ui import contrast, main_window
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.demo_backend import DemoArchiveService
 from archive_management.ui.main_window import ArchiveApp
+from archive_management.ui.models import StorageOverview
 from archive_management.ui.palette import DARK, LIGHT, Palette
 from archive_management.ui.settings_window import SettingsWindow
 
@@ -166,8 +167,14 @@ def _new_app(backend: ArchiveService) -> ArchiveApp:
     )
 
 
-def _settings_window(app: ArchiveApp) -> SettingsWindow:
-    """直接构造设置窗口(它的重绘表最长, 最容易被漏)."""
+def _settings_window(
+    app: ArchiveApp, storage: StorageOverview | None = None
+) -> SettingsWindow:
+    """直接构造设置窗口(它的重绘表最长, 最容易被漏).
+
+    ``storage`` 缺省用后端总览; 演示后端的只读位置全空, 要量存储行的重绘就得
+    显式给一份非空总览。
+    """
     return SettingsWindow(
         app,
         palette=app.p,
@@ -177,6 +184,8 @@ def _settings_window(app: ArchiveApp) -> SettingsWindow:
         verification_mode=app._verification_mode,
         verification_parallel=app._verification_parallel,
         debug=app._debug,
+        log_max_mb=app._log_max_mb,
+        log_backups=app._log_backups,
         activation=app._activation,
         remember_window=app._remember_window,
         shortcuts=app._shortcuts,
@@ -185,11 +194,16 @@ def _settings_window(app: ArchiveApp) -> SettingsWindow:
         on_apply_font_size=app._on_font_size_change,
         on_apply_verification=lambda _mode: None,
         on_apply_debug=app._on_debug_change,
+        on_apply_log_rotation=app._on_log_rotation_change,
         on_apply_activation=app._on_activation_change,
         on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda _action, _accelerator: None,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=storage if storage is not None else app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
 
 
@@ -223,6 +237,51 @@ def test_switching_theme_repaints_every_widget() -> None:
             )
         # 兜底: 窗口里真的要量到控件, 否则上面几条在空树上空转(实测 39 个)。
         assert len(_ctk_widgets(window._window)) >= 30
+    finally:
+        if window is not None:
+            window.close()
+        application.destroy()
+
+
+def test_repaint_reaches_the_storage_location_rows() -> None:
+    """存储分区的只读行也要换色: 名字/值标签漏进重绘表会留上一主题的正文色.
+
+    演示后端的总览只读位置全空(行全被滤掉), 上一条用例量不到这些行 —— 这里
+    显式给一份五个位置都非空的总览, 专量存储行的重绘。
+    """
+    builtin = "D:/AppData/Demo/data/backups"
+    storage = StorageOverview(
+        backup_root=builtin,
+        next_backup_root=builtin,
+        database_path="D:/AppData/Demo/data/archive-management.db",
+        config_path="D:/AppData/Demo/config/config.json",
+        log_file="D:/AppData/Demo/logs/app.log",
+        exports_dir="D:/AppData/Demo/data/exports",
+        artwork_dir="D:/AppData/Demo/data/artwork",
+    )
+    application = gui_app(_new_app, DemoArchiveService(delay=0))
+    window: SettingsWindow | None = None
+    try:
+        for _ in range(3):
+            application.update_idletasks()
+            application.update()
+        window = _settings_window(application, storage=storage)
+        window._window.update_idletasks()
+        # 夹具必须造出"必须触发"的条件: 存储行真的建出来了, 否则下面在空表上空转。
+        assert len(window._storage_names) == 5
+        # 构造时是深色面板, 先切浅色再切回: 最后一轮直接断言目标行取的是浅色板的色。
+        for palette in (LIGHT, DARK, LIGHT):
+            window.restyle(palette)
+            window._window.update_idletasks()
+            problems = stale_color_problems(window._window, palette)
+            assert not problems, "切主题后这些控件还留着别的主题的颜色:\n" + "\n".join(
+                problems
+            )
+        assert window._storage_names[0].cget("text_color") == LIGHT.text_body
+        assert (
+            window._storage_values["settings.storage_log"][0].cget("text_color")
+            == LIGHT.text_muted
+        )
     finally:
         if window is not None:
             window.close()

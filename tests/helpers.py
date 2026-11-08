@@ -346,6 +346,76 @@ def write_remotecache(
     return manifest
 
 
+# 测试用 Epic 账号目录名与游戏标识: 真实启动器用 GUID 文本, 这里用可读短串.
+EPIC_ACCOUNT = "00000000accountone00000000000000"
+# manifest 里的明文前缀: 解析器只认这一段之后的宏路径.
+EPIC_CLOUD_PREFIX = b"CloudSaveFolder"
+
+
+def epic_tree(root: Path) -> Path:
+    """造出 Epic 安装清单目录并返回它(位置按 Windows 的 ``%PROGRAMDATA%`` 规则)."""
+    manifests = (
+        root / "ProgramData" / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+    )
+    manifests.mkdir(parents=True, exist_ok=True)
+    return manifests
+
+
+def write_epic_item(
+    manifests: Path,
+    app_name: str,
+    name: str,
+    install_dir: Path,
+    *,
+    with_app_name: bool = True,
+) -> Path:
+    """写入一份 ``<app_name>.item`` 安装清单并返回路径.
+
+    ``with_app_name=False`` 用来造"旧版清单没写 ``AppName`` 字段"的形态:
+    本地探测照常可用, 云存档缓存则定位不到。
+    """
+    payload: dict[str, object] = {
+        "DisplayName": name,
+        "InstallLocation": str(install_dir),
+    }
+    if with_app_name:
+        payload["AppName"] = app_name
+    path = manifests / f"{app_name}.item"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def write_epic_cloud_cache(
+    local_app_data: Path,
+    app_name: str,
+    macro_path: str,
+    *,
+    account: str = EPIC_ACCOUNT,
+    stamp: str = "20261105T120000",
+    extra: bytes = b"",
+) -> Path:
+    """写入一份 CloudCache 清单(``Saved/Saves/<账号>/<AppName>/CloudCache``).
+
+    只有明文宏路径是解析器认的部分, 其余字节模仿真实容器的二进制头与尾部;
+    ``macro_path`` 不带头部的 ``CloudSaveFolder`` 前缀, 由这里补上。
+    """
+    cache = (
+        local_app_data
+        / "EpicGamesLauncher"
+        / "Saved"
+        / "Saves"
+        / account
+        / app_name
+        / "CloudCache"
+    )
+    cache.mkdir(parents=True, exist_ok=True)
+    data = b"\x0c\xc0\xbe\x44\x00\x01" + extra
+    data += EPIC_CLOUD_PREFIX + macro_path.encode("ascii") + b"\x00\xff"
+    manifest = cache / f"{stamp}.manifest"
+    manifest.write_bytes(data)
+    return manifest
+
+
 def write_json_report(path: Path, payload: dict[str, Any]) -> Path:
     """把机器可读的测试结果写入 ``path``(父目录自动创建)."""
     path.parent.mkdir(parents=True, exist_ok=True)

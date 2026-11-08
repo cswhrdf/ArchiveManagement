@@ -24,6 +24,10 @@ from archive_management.application.imports import (
 )
 from archive_management.application.locations import LocationRemovalPlan
 from archive_management.application.restore import RestorePlan, RestoreTarget
+from archive_management.application.storage import (
+    backup_root_error,
+    normalize_backup_root,
+)
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     ActivationState,
@@ -57,8 +61,10 @@ from archive_management.ui.models import (
     SavePathSuggestion,
     ScanSummary,
     ScheduleItem,
+    StorageOverview,
     TaskStatus,
     clean_game_name,
+    clean_process_names,
     delete_result_text,
     format_moment,
     home_board,
@@ -66,6 +72,9 @@ from archive_management.ui.models import (
 
 # 刻意用于演示恢复失败的中断节点
 _FAIL_RESTORE_ID = "b2"
+
+# 演示后端"内置备份根"的占位文本: 不触碰真实磁盘, 只用于展示与词法比较。
+_DEMO_BACKUP_ROOT = str(Path.home() / "ArchiveManagement-Demo" / "backups")
 
 
 def _chosen_strategy(choice: ImportChoice | None) -> str:
@@ -240,6 +249,8 @@ _DETAILS: dict[str, GameDetail] = {
         next_backup_label="今天 12:00",
         original_name="星际拓荒",
         storage_folder=game_folder("星际拓荒", [r"D:\Games\OuterWilds\save"]),
+        # 进程名候选的演示数据: 游戏设置里的"进程名候选"一节读它。
+        process_names=("OuterWilds.exe",),
     ),
     "shanhai": GameDetail(
         name="山海旅人",
@@ -327,7 +338,12 @@ _CANDIDATES: tuple[CandidateItem, ...] = (
         status="new",
         health="ok",
         detail="terraria.item",
-        save_supported=False,
+        save_paths=(
+            SavePathSuggestion(
+                path="C:\\Users\\demo\\AppData\\Local\\Terraria\\Players",
+                path_kind="directory",
+            ),
+        ),
     ),
     CandidateItem(
         candidate_id="cand-4",
@@ -402,6 +418,9 @@ class DemoArchiveService:
         self._theme = "dark"
         self._keep_auto = 3
         self._revision = 0
+        # 设置页"存储位置"的演示状态: 备份根覆盖只记在内存(演示后端不写用户磁盘),
+        # 语义与真实后端一致 —— 改完要重启才反映到 backup_root 字段。
+        self._backup_root_override: str | None = None
         # 每个游戏的定时备份配置: game_id -> (周期文本, 是否启用, 保留份数).
         self._schedules: dict[str, tuple[str, bool, int]] = {
             "outer-wilds": ("1d", True, 3),
@@ -705,6 +724,29 @@ class DemoArchiveService:
         self._theme = "dark" if name == "dark" else "light"
         return self._theme
 
+    # -- 存储位置 -----------------------------------------------------------
+
+    def storage_overview(self) -> StorageOverview:
+        """演示总览: 内置位置用假路径占位, 覆盖语义与真实后端一致."""
+        override = self._backup_root_override
+        return StorageOverview(
+            backup_root=_DEMO_BACKUP_ROOT,
+            next_backup_root=override if override else _DEMO_BACKUP_ROOT,
+            database_path="",
+            config_path="",
+            log_file="",
+            exports_dir="",
+            artwork_dir="",
+        )
+
+    def set_backup_root(self, path: str | None) -> None:
+        """演示: 覆盖只记在内存, 但校验语义与真实后端完全一致(非法值照样抛)."""
+        raw = "" if path is None else path
+        reason = backup_root_error(raw, protected=(Path(_DEMO_BACKUP_ROOT),))
+        if reason is not None:
+            raise ValueError(reason)
+        self._backup_root_override = normalize_backup_root(raw) or None
+
     # -- 写操作(阻塞,供后台线程执行) --------------------------------------
 
     def run_backup_now(self, game_id: str) -> str:
@@ -993,6 +1035,16 @@ class DemoArchiveService:
         self._meta[game_id] = replace(self._meta[game_id], name=clean)
         # 只改展示名称: 原始名称与备份目录名保持不变.
         self._details[game_id] = replace(self._details[game_id], name=clean)
+        return self._live_summary(game_id)
+
+    def set_game_process_names(self, game_id: str, names: Sequence[str]) -> GameSummary:
+        """覆盖写入演示游戏的进程名候选(校验与真实后端同一套)."""
+        self._require_game(game_id)
+        clean = clean_process_names(names)
+        self._details[game_id] = replace(self._details[game_id], process_names=clean)
+        # 候选显示在管理窗口、也决定自动启停的匹配口径: 抬版本让打开中的界面与
+        # 真实后端一样"改完就能被下一次轮询看见"。
+        self._revision += 1
         return self._live_summary(game_id)
 
     def _remember_storage_folder(self, game_id: str) -> None:

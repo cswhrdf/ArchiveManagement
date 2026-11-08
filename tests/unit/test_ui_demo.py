@@ -958,3 +958,30 @@ def test_demo_importing_a_candidate_twice_is_refused(
         service.import_candidate(candidate.candidate_id)
 
     assert len(service.list_games()) == games_before
+
+
+def test_set_game_process_names_round_trips_and_bumps_revision(
+    service: DemoArchiveService,
+) -> None:
+    """演示后端的候选编辑: 校验口径与真实后端一致, 改动抬高数据版本."""
+    assert service.get_detail("outer-wilds").process_names == ("OuterWilds.exe",)
+    before = service.task_status("outer-wilds").revision
+
+    updated = service.set_game_process_names(
+        "outer-wilds", ["OuterWilds.exe", "demo.exe"]
+    )
+    assert updated.game_id == "outer-wilds"
+    assert service.get_detail("outer-wilds").process_names == (
+        "OuterWilds.exe",
+        "demo.exe",
+    )
+    assert service.task_status("outer-wilds").revision == before + 1
+
+    service.set_game_process_names("outer-wilds", [])
+    assert service.get_detail("outer-wilds").process_names == ()
+
+    # 归一化后相同的两条算重复; 未知游戏按后端口径报错。
+    with pytest.raises(ArchiveManagementError):
+        service.set_game_process_names("outer-wilds", ["OuterWilds.exe", "ow"])
+    with pytest.raises(ArchiveManagementError):
+        service.set_game_process_names("game-404", ["Demo"])

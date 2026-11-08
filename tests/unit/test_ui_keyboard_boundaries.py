@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import customtkinter as ctk
@@ -318,6 +319,40 @@ def test_return_key_in_a_dialog_does_nothing_without_a_primary_button(
     window.handlers["<Return>"]()  # 不该炸, 也不该按到别的按钮
 
 
+def test_return_key_in_a_dialog_presses_the_primary_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回车 = 这一屏的主操作: 窗口级 ``<Return>`` 要按下那颗主色按钮.
+
+    2026-11-07 的 macOS/Linux 覆盖率里这 3 行是靠某条 GUI 用例顺路盖到的(它得恰好在
+    那个平台上找得到主按钮); 这里直接固定行为本身, 不再依赖哪条界面跑在哪台机器上。
+    """
+    button = _WidgetStub()
+    monkeypatch.setattr(keyboard, "primary_button", lambda _window: button)
+    monkeypatch.setattr(keyboard, "ctk", SimpleNamespace(CTkButton=_WidgetStub))
+    window = _WindowStub()
+    keyboard.bind_window_keys(cast(Any, window))
+
+    window.handlers["<Return>"]()
+
+    assert button.invocations == 1, "回车没按到主按钮"
+
+
+def test_return_key_skips_a_disabled_primary_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """主按钮禁用时回车不许替它按下去(忙碌态下按回车就是把同一件事提交两次)."""
+    button = _WidgetStub(state="disabled")
+    monkeypatch.setattr(keyboard, "primary_button", lambda _window: button)
+    monkeypatch.setattr(keyboard, "ctk", SimpleNamespace(CTkButton=_WidgetStub))
+    window = _WindowStub()
+    keyboard.bind_window_keys(cast(Any, window))
+
+    window.handlers["<Return>"]()
+
+    assert button.invocations == 0, "禁用按钮被回车按到了"
+
+
 def test_attach_ignores_objects_that_are_not_ctk_widgets() -> None:
     """补丁在构造器里见到的可能是别的东西(不是 CTk 控件)→ 什么都不做."""
     keyboard._attach(object())
@@ -355,3 +390,91 @@ def test_enter_tab_chain_without_a_remembered_value_does_nothing() -> None:
     keyboard.enter_tab_chain(cast(Any, widget))
 
     assert widget._canvas.options == {}
+
+
+# ----------------------------------------------------------------- 初始定焦
+
+
+class _InputStub:
+    """输入框替身: 只需回答"有没有映射出来"(`_initial_target` 只看这一条)."""
+
+    def __init__(self, *, visible: bool) -> None:
+        self._visible = visible
+
+    def winfo_ismapped(self) -> int:
+        """1 = 已经映射在界面上; 0 = 收在折叠区里 / 建窗时还没映射."""
+        return 1 if self._visible else 0
+
+
+def _window_with(*children: object) -> Any:
+    """只摆出 ``winfo_children`` 的窗口替身(``walk`` 就靠它往下一层).
+
+    ``bind``/``after_idle`` 补空实现: ``focus_first`` 要在窗口上接 ``<Map>`` 与 ``after_idle``,
+    而用 ``__new__`` 造出来的 ``tk.Misc`` 没有解释器 —— 产品侧对这两步本来就是
+    "接不上就算了"(``suppress(tk.TclError)``)。
+    """
+    window = cast(Any, tk.Misc.__new__(tk.Misc))
+    window.winfo_children = lambda: list(children)
+    window.bind = lambda *_args, **_kwargs: "<Map>#1"
+    window.after_idle = lambda *_args, **_kwargs: None
+    return window
+
+
+def test_the_initial_focus_skips_an_input_that_is_folded_away(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """收起在折叠区里的输入框不能拿初始焦点 —— 没映射的控件定焦等于没定焦.
+
+    出处(2026-11-07): 游戏设置把「外观」「进程名候选」两节默认收起之后, 那两节里的输入框
+    在 ``walk`` 里仍然排在前面, 于是整窗连 ``<FocusIn>`` 都收不到 ——
+    ``test_every_screen_is_reachable_by_keyboard`` 报"游戏管理窗口: 窗口可见时定焦也没生效".
+    """
+    monkeypatch.setattr(keyboard, "INPUT_TYPES", (_InputStub,))
+    folded: Any = _InputStub(visible=False)
+    shown: Any = _InputStub(visible=True)
+
+    target = keyboard._initial_target(_window_with(folded, shown))
+
+    assert target is shown, "收起区里的输入框要跳过, 挑第一个看得见的"
+
+
+def test_the_initial_focus_falls_back_to_the_primary_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """一个输入框都看不见时退到主操作按钮(建窗那一刻还没映射, 只能先这样).
+
+    随后 ``<Map>`` 之后会按同一份判据再挑一次(见 ``focus_first``), 那时收起的那节仍然
+    看不见, 于是焦点留在主按钮上 —— 回车 = 这一屏的主操作, 与对话框口径一致。
+    """
+    monkeypatch.setattr(keyboard, "INPUT_TYPES", (_InputStub,))
+    button = object()
+    monkeypatch.setattr(keyboard, "primary_button", lambda _window: button)
+    folded: Any = _InputStub(visible=False)
+
+    target = keyboard._initial_target(_window_with(folded))
+
+    assert target is button
+
+
+def test_the_initial_focus_gives_up_quietly_when_nothing_can_take_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """定焦是**增强**: 没目标、目标又吃不到焦点时都安静返回(两条退路都在 ``apply`` 里).
+
+    ① 窗口里既没有输入框也没有主按钮 → ``_initial_target`` 返回 None;
+    ② 主按钮是个没有内部控件的壳 → ``focus_target`` 返回 None。
+    这两条只在 ``after_idle`` / ``<Map>`` 之后跑得到(GUI 用例里目标总是真的), 所以单测
+    直接取出挂到窗口上的那个回调手动跑一次。
+    """
+    monkeypatch.setattr(keyboard, "INPUT_TYPES", (_InputStub,))
+
+    monkeypatch.setattr(keyboard, "primary_button", lambda _window: None)
+    empty = _window_with()
+    assert keyboard.focus_first(empty) is None, "没输入框也没主按钮时没有目标"
+    cast(Callable[[], None], empty._focus_when_visible)()  # 没有目标: 不该炸
+
+    shell = object()
+    monkeypatch.setattr(keyboard, "primary_button", lambda _window: shell)
+    window = _window_with()
+    assert keyboard.focus_first(window) is shell, "挑到的是主按钮"
+    cast(Callable[[], None], window._focus_when_visible)()  # 吃不到焦点: 不该炸

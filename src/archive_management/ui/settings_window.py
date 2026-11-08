@@ -9,7 +9,8 @@
 - **游戏启停**: “按进程自动启停”开关(默认关闭)。开启后低频探测当前启用的那一款
   游戏, 观察到它运行就保持启用、观察到它退出就停用; 手动调整始终优先;
 - **快捷键**: 全局保存与创建分支的组合键, 点击按键区域即可现场录制新组合;
-- 后续计划中的设置项说明。
+- 后续计划中的设置项说明;
+- 页头右上角: 当前版本号(来自 ``packaging.package_version``, 与 ``--version`` 同一来源)。
 
 录制流程: 点击某个快捷键按钮后进入"监听输入"状态(同时通知主窗口暂停全局
 快捷键, 否则按下的组合会真的触发动作), 用户按下组合键并松开后收敛成组合键
@@ -30,6 +31,7 @@ import customtkinter as ctk
 
 from archive_management.domain import VERIFICATION_MODES, normalize_verification_mode
 from archive_management.i18n import available_locales, tr
+from archive_management.packaging import package_version
 from archive_management.services.hotkeys import (
     ACTION_CREATE_BRANCH,
     ACTION_SAVE_NOW,
@@ -38,10 +40,14 @@ from archive_management.services.hotkeys import (
     tk_token,
 )
 from archive_management.ui.dialogs import _present
+from archive_management.ui.models import StorageOverview
 from archive_management.ui.palette import Palette
-from archive_management.ui.typography import FONT_CHOICES
+from archive_management.ui.textfit import fit_path
+from archive_management.ui.typography import FONT_CHOICES, FONT_HINT
 from archive_management.ui.widgets import (
     auto_scrollbar,
+    measured_font,
+    sync_tooltip,
     track_wraplength,
     window_scaling,
 )
@@ -50,17 +56,18 @@ logger = logging.getLogger(__name__)
 
 _ToggleTheme = Callable[[], str]
 
-# 窗口固定宽度 + 边距; 高度按内容算: 说明文字会随语言换行, 写死高度会把底部的
-# 说明与"关闭"按钮裁到窗口外面(用户看不到也点不到)。
+# 窗口固定宽度 + 边距; 高度固定为"主窗口高 - 留白"(见 _refit_height), 超出的
+# 内容由滚动区滚, 页脚的"关闭"按钮永远在窗口里。
 _WINDOW_WIDTH = 480
 _WINDOW_PAD_X = 16
 _WINDOW_PAD_Y = 16
 _WINDOW_MIN_HEIGHT = 500
-# 滚动区与固定页脚之间的间距(与 _footer 的 pady 一致).
-_FOOTER_GAP = 12
 # 窗口高度最多占到"屏幕高 - 这个留白": 给系统标题栏与任务栏留位, 免得窗口
 # 在 1366x768 上比屏幕还高(底部的关闭按钮被推到屏幕外)。
 _SCREEN_MARGIN = 120
+# 设置窗比主窗口矮的这一截(P2c 反馈: 分区变多后高度跟内容长到接近整屏, 弹窗
+# 比主窗口还高、反客为主)。主窗最小高 720, 减它后设置窗约 624 起。
+_PARENT_HEIGHT_MARGIN = 96
 # 成段说明的左右内裐(单侧): 面板里的说明都按 padx=16 排版, 算可用宽度时要减掉两侧。
 _HINT_PAD = 16
 # 说明 wraplength 的下限: 这里**不能用**默认的 widgets.WRAPLENGTH_MINIMUM(240) ——
@@ -81,10 +88,16 @@ _ApplyLanguage = Callable[[str], "str | None"]
 _ApplyFontSize = Callable[[int], "str | None"]
 # 切换布尔开关(调试日志/自动启停); 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyToggle = Callable[[bool], "str | None"]
+# 保存日志滚动参数(MB 数与保留份数); 返回 None 表示成功, 否则返回失败说明.
+_ApplyLogRotation = Callable[[int, int], "str | None"]
 # 切换备份校验方式; 返回 None 表示成功, 否则返回可直接展示的失败说明.
 _ApplyVerification = Callable[[str], "str | None"]
 # 录制开始/结束的钩子(主窗口据此暂停与恢复全局快捷键).
 _CaptureHook = Callable[[], None]
+# 请求换一个备份根(主窗口弹目录选择器并走校验/写配置, 再回填窗口).
+_RequestBackupRoot = Callable[[], None]
+# 打开某个位置(注入 services.reveal, 用例换替身).
+_OpenLocation = Callable[[str], None]
 
 # 校验方式下拉里的文案键与取值一一对应(顺序即展示顺序, 默认选中最严的 sha256; 取值
 # 顺序来自 domain.entities.VERIFICATION_MODES, 免得两处各写一份).
@@ -138,18 +151,25 @@ class SettingsWindow:
         verification_parallel: int,
         on_apply_font_size: _ApplyFontSize,
         debug: bool,
+        log_max_mb: int,
+        log_backups: int,
         activation: bool,
         remember_window: bool,
         shortcuts: Mapping[str, str],
+        storage: StorageOverview,
         on_toggle_theme: _ToggleTheme,
         on_apply_language: _ApplyLanguage,
         on_apply_verification: _ApplyVerification,
         on_apply_debug: _ApplyToggle,
+        on_apply_log_rotation: _ApplyLogRotation,
         on_apply_activation: _ApplyToggle,
         on_apply_remember_window: _ApplyToggle,
         on_apply_shortcut: _ApplyShortcut,
         on_capture_start: _CaptureHook,
         on_capture_end: _CaptureHook,
+        on_change_backup_root: _RequestBackupRoot,
+        on_restore_backup_root: _RequestBackupRoot,
+        on_open_location: _OpenLocation,
     ) -> None:
         """构造设置窗口并绑定主题、语言、开关、校验方式与快捷键回调."""
         self._parent = parent
@@ -162,6 +182,8 @@ class SettingsWindow:
         self._verification_parallel = verification_parallel
         self._on_apply_font_size = on_apply_font_size
         self._debug = debug
+        self._log_max_mb = log_max_mb
+        self._log_backups = log_backups
         self._activation = activation
         self._remember_window = remember_window
         self._shortcuts: dict[str, str] = dict(shortcuts)
@@ -169,11 +191,18 @@ class SettingsWindow:
         self._on_apply_language = on_apply_language
         self._on_apply_verification = on_apply_verification
         self._on_apply_debug = on_apply_debug
+        self._on_apply_log_rotation = on_apply_log_rotation
         self._on_apply_activation = on_apply_activation
         self._on_apply_remember_window = on_apply_remember_window
         self._on_apply_shortcut = on_apply_shortcut
         self._on_capture_start = on_capture_start
         self._on_capture_end = on_capture_end
+        self._on_change_backup_root = on_change_backup_root
+        self._on_restore_backup_root = on_restore_backup_root
+        self._on_open_location = on_open_location
+        self._storage = storage
+        # 反馈行当前的颜色档(notify_storage 切换, restyle 换主题时按它重新着色)。
+        self._storage_error_tone = "danger"
         # 下拉框里显示的是语言自己的名字(中文写中文、英文写 English), 因此需要文案到
         # locale 的映射; 值来自资源目录, 新增语言不用改这里。
         self._locales: dict[str, str] = {
@@ -214,8 +243,8 @@ class SettingsWindow:
         )
         self._body.grid(row=0, column=0, sticky="nsew")
         self._body.grid_columnconfigure(0, weight=1)
-        # 内容装得下就不立滚动条: 窗口高度按内容算, 恰好放下时右侧那条拖不动的滑块
-        # 只是噪声(与主页列表/定时窗口同一条规则)。
+        # 定高矮于内容后滚动条基本常驻; auto_scrollbar 仍留"恰好装得下就收起"
+        # 的规则(内容极短时拖不动的滑块只是噪声, 与主页列表/定时窗口同一条)。
         auto_scrollbar(self._body)
 
         self._title_label = ctk.CTkLabel(
@@ -227,6 +256,28 @@ class SettingsWindow:
         )
         self._title_label.grid(row=0, column=0, sticky="w", pady=(0, 12))
 
+        # 版本号与标题同一行、贴右列(column 1 无 weight, 标题列占满剩余宽度):
+        # 来源是 packaging 的单一版本常量, 命令行 --version 与这里永远一致。
+        # 字号取提示档、颜色取 text_hint —— 它是元信息, 不该和标题抢视觉。
+        self._version_label = ctk.CTkLabel(
+            self._body,
+            text=tr("settings.version", version=package_version()),
+            anchor="e",
+            font=ctk.CTkFont(size=FONT_HINT),
+            text_color=palette.text_hint,
+        )
+        # 版本号与标题同一行、贴右上角。用 place 叠加而不是再开一列: 窗口宽度是
+        # 固定的 _WINDOW_WIDTH, 但滚动区内容按 grid 协商请求宽度 —— 第二列会把
+        # "标题行"的请求宽度顶宽, 整个设置窗口跟着被撑开(2026-11-01 实测)。
+        # place 不参与宽度协商, 贴的是滚动内容区的右缘, 不贡献任何宽度。
+        # y=3 是手调的基线偏移: 标题 16px 加粗、版本 11px, 顶对齐再下移 3px
+        # 恰好两档字号行高差的一半, 视觉上与标题居中。
+        self._version_label.place(relx=1.0, y=3, anchor="ne")
+
+        # 分区按重要性排(P2c): 存储位置是唯一既展示又可改"数据落在哪"的分区,
+        # 放最上; 创建顺序即 Tab 顺序, 所以它也第一个建。面板整块抽成独立方法:
+        # 塞在 _build 里会把它顶过 xenon 的 B 档上限(2026-11-03 拆出)。
+        self._build_storage_panel()
         self._appearance_panel = ctk.CTkFrame(
             self._body,
             fg_color=palette.panel,
@@ -234,7 +285,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._appearance_panel.grid(row=1, column=0, sticky="ew")
+        self._appearance_panel.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self._appearance_panel.grid_columnconfigure(0, weight=1)
         self._appearance_title = ctk.CTkLabel(
             self._appearance_panel,
@@ -337,7 +388,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._language_panel.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self._language_panel.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         self._language_panel.grid_columnconfigure(0, weight=1)
         self._language_title = ctk.CTkLabel(
             self._language_panel,
@@ -394,7 +445,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._logging_panel.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self._logging_panel.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         self._logging_panel.grid_columnconfigure(0, weight=1)
         self._logging_title = ctk.CTkLabel(
             self._logging_panel,
@@ -430,7 +481,7 @@ class SettingsWindow:
             text_color=palette.danger,
         )
         self._debug_error.grid(
-            row=1, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
+            row=1, column=0, columnspan=2, padx=16, pady=(2, 0), sticky="ew"
         )
         self._track_hint(
             self._logging_panel,
@@ -439,6 +490,92 @@ class SettingsWindow:
         )
         self._set_transient_line(self._debug_error, "")
 
+        # 日志滚动的两个数字(单文件上限与保留份数): 两行"名字 + 输入框", 回车或失焦
+        # 提交; 校验与落盘都在主窗口那一侧, 这里只把值送过去, 失败时把输入框拨回
+        # 实际生效的值 —— 界面显示的一套不能与配置里的另一套脱节。
+        # 两行收进默认折叠的"滚动详情"块(P2c 反馈): 平时日志分区只剩开关一行。
+        self._log_details_btn = ctk.CTkButton(
+            self._logging_panel,
+            text=tr("settings.log_details_show"),
+            command=self._toggle_log_details,
+            width=104,
+            height=26,
+            corner_radius=8,
+            fg_color=palette.raised,
+            hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            border_width=1,
+            border_color=palette.border,
+            font=ctk.CTkFont(size=11),
+        )
+        self._log_details_btn.grid(row=2, column=0, padx=16, pady=(2, 16), sticky="w")
+        self._log_details = ctk.CTkFrame(self._logging_panel, fg_color="transparent")
+        self._log_details.grid(row=3, column=0, columnspan=2, sticky="ew")
+        # 标签列吸收剩余宽度、输入框保持默认宽贴右内边距(与主题按钮/语言下拉/
+        # 快捷键行同一套: 左边文字+空白, 右边控件区; 行占满但控件不拉伸)。
+        self._log_details.grid_columnconfigure(0, weight=1)
+        self._log_details_open = False
+        self._log_mb_label = ctk.CTkLabel(
+            self._log_details,
+            text=tr("settings.log_max_mb"),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        self._log_mb_label.grid(row=0, column=0, padx=16, pady=(0, 8), sticky="w")
+        self._log_mb_entry = ctk.CTkEntry(
+            self._log_details,
+            width=140,
+            justify="right",
+            fg_color=palette.input_bg,
+            border_color=palette.input_border,
+            text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+        )
+        self._log_mb_entry.insert(0, str(self._log_max_mb))
+        self._log_mb_entry.grid(row=0, column=1, padx=16, pady=(0, 8), sticky="e")
+        self._log_backups_label = ctk.CTkLabel(
+            self._log_details,
+            text=tr("settings.log_backups"),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        self._log_backups_label.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="w")
+        self._log_backups_entry = ctk.CTkEntry(
+            self._log_details,
+            width=140,
+            justify="right",
+            fg_color=palette.input_bg,
+            border_color=palette.input_border,
+            text_color=palette.text_body,
+            font=ctk.CTkFont(size=12),
+        )
+        self._log_backups_entry.insert(0, str(self._log_backups))
+        self._log_backups_entry.grid(row=1, column=1, padx=16, pady=(0, 16), sticky="e")
+        for entry in (self._log_mb_entry, self._log_backups_entry):
+            entry.bind("<Return>", self._on_log_entry_submit)
+            entry.bind("<FocusOut>", self._on_log_entry_submit)
+        # 默认折叠(与存储位置的详情块同一交互)。
+        self._log_details.grid_remove()
+        self._log_error = ctk.CTkLabel(
+            self._logging_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.danger,
+        )
+        self._log_error.grid(
+            row=4, column=0, columnspan=2, padx=16, pady=(2, 16), sticky="ew"
+        )
+        self._track_hint(
+            self._logging_panel,
+            self._log_error,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
+        self._set_transient_line(self._log_error, "")
+
         self._activation_panel = ctk.CTkFrame(
             self._body,
             fg_color=palette.panel,
@@ -446,7 +583,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._activation_panel.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self._activation_panel.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         self._activation_panel.grid_columnconfigure(0, weight=1)
         self._activation_title = ctk.CTkLabel(
             self._activation_panel,
@@ -502,7 +639,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._verification_panel.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        self._verification_panel.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         self._verification_panel.grid_columnconfigure(0, weight=1)
         self._verification_title = ctk.CTkLabel(
             self._verification_panel,
@@ -557,7 +694,7 @@ class SettingsWindow:
             border_width=1,
             border_color=palette.border,
         )
-        self._shortcut_panel.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        self._shortcut_panel.grid(row=7, column=0, sticky="ew", pady=(10, 0))
         self._shortcut_panel.grid_columnconfigure(0, weight=1)
         self._shortcut_title = ctk.CTkLabel(
             self._shortcut_panel,
@@ -654,27 +791,12 @@ class SettingsWindow:
             initial=_WIDE_INITIAL_WRAPLENGTH,
         )
 
-        # 说明与关闭按钮在一个**固定页脚**里: 内容再长也只滚动上面的面板区,
-        # 这两样永远留在窗口里可读可点(评审时定的)。
+        # 关闭按钮在一个**固定页脚**里: 内容再长也只滚动上面的面板区, 它永远
+        # 留在窗口里可点(评审时定的)。页脚左下的指引说明 2026-11-04 删除:
+        # 存储位置已是一级分区并排在最上, "见存储位置分区"的指引没有存在理由。
         self._footer = ctk.CTkFrame(self._container, fg_color=palette.background)
         self._footer.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         self._footer.grid_columnconfigure(0, weight=1)
-        self._note_label = ctk.CTkLabel(
-            self._footer,
-            text=tr("settings.note"),
-            anchor="w",
-            justify="left",
-            font=ctk.CTkFont(size=12),
-            text_color=palette.text_hint,
-        )
-        self._note_label.grid(row=0, column=0, sticky="ew")
-        # 页脚这一格没有 padx, 因此左右内衬是 0。
-        self._track_hint(
-            self._footer,
-            self._note_label,
-            initial=_NOTE_INITIAL_WRAPLENGTH,
-            pad=0,
-        )
 
         self._close_btn = ctk.CTkButton(
             self._footer,
@@ -702,6 +824,321 @@ class SettingsWindow:
         self._refit_height()
         # 常驻窗口不接窗口级的 Esc/回车/定焦: 那三件事是对话框的约定(见 _present)。
         _present(self._parent, window, modal=False)
+
+    def _build_storage_panel(self) -> None:
+        """存储位置分区(首个分区): 备份根可改, 其余位置收在默认折叠的详情块里."""
+        palette = self._palette
+
+        # 存储位置: 只有备份目录可以改(经目录选择器, 重启生效), 其余位置只读
+        # + "打开位置"。路径值全部经 _refit_storage_paths 按列宽重裁(中间省略号
+        # + 悬停完整路径): 窗口宽度固定, 但列宽仍随文案语言变, 不能写死预算。
+        self._storage_panel = ctk.CTkFrame(
+            self._body,
+            fg_color=palette.panel,
+            corner_radius=10,
+            border_width=1,
+            border_color=palette.border,
+        )
+        self._storage_panel.grid(row=1, column=0, sticky="ew")
+        self._storage_panel.grid_columnconfigure(1, weight=1)
+        self._storage_title = ctk.CTkLabel(
+            self._storage_panel,
+            text=tr("settings.storage"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_primary,
+        )
+        self._storage_title.grid(
+            row=0, column=0, columnspan=3, padx=16, pady=(16, 6), sticky="w"
+        )
+        self._storage_hint = ctk.CTkLabel(
+            self._storage_panel,
+            text=tr("settings.storage_hint"),
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        self._storage_hint.grid(
+            row=1, column=0, columnspan=3, padx=16, pady=(0, 8), sticky="ew"
+        )
+        self._track_hint(
+            self._storage_panel,
+            self._storage_hint,
+            initial=_NOTE_INITIAL_WRAPLENGTH,
+        )
+
+        # 备份目录块: 名字 + 两个动作按钮(点完会发生什么写在按钮上)。
+        self._backup_label = ctk.CTkLabel(
+            self._storage_panel,
+            text=tr("settings.backup_root"),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=palette.text_body,
+        )
+        self._backup_label.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="w")
+        self._backup_change_btn = ctk.CTkButton(
+            self._storage_panel,
+            text=tr("settings.change_backup_root"),
+            command=self._on_change_backup_root,
+            width=104,
+            height=28,
+            corner_radius=8,
+            fg_color=palette.raised,
+            hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            border_width=1,
+            border_color=palette.border,
+            font=ctk.CTkFont(size=12),
+        )
+        self._backup_change_btn.grid(row=2, column=1, pady=(0, 8), sticky="e")
+        self._backup_restore_btn = ctk.CTkButton(
+            self._storage_panel,
+            text=tr("settings.restore_backup_root"),
+            command=self._on_restore_backup_root,
+            width=112,
+            height=28,
+            corner_radius=8,
+            fg_color=palette.raised,
+            hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            border_width=1,
+            border_color=palette.border,
+            font=ctk.CTkFont(size=12),
+        )
+        self._backup_restore_btn.grid(row=2, column=2, padx=16, pady=(0, 8), sticky="e")
+        # 当前生效值(整个面板宽度): refresh_storage 会随总览重填并重裁。
+        self._backup_value = ctk.CTkLabel(
+            self._storage_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_body,
+        )
+        self._backup_value.grid(
+            row=3, column=0, columnspan=3, padx=16, pady=(0, 2), sticky="ew"
+        )
+        # "重启后: ..."只在改了位置还没重启时出现(平时一个像素都不占)。
+        self._backup_next = ctk.CTkLabel(
+            self._storage_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.accent,
+        )
+        self._backup_next.grid(
+            row=4, column=0, columnspan=3, padx=16, pady=(0, 2), sticky="ew"
+        )
+        self._track_hint(
+            self._storage_panel,
+            self._backup_next,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
+        # 改位置的结果反馈(成功/失败共用一行, 颜色区分; 平时收起)。
+        self._storage_error = ctk.CTkLabel(
+            self._storage_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.danger,
+        )
+        self._storage_error.grid(
+            row=5, column=0, columnspan=3, padx=16, pady=(2, 8), sticky="ew"
+        )
+        self._track_hint(
+            self._storage_panel,
+            self._storage_error,
+            initial=_WIDE_INITIAL_WRAPLENGTH,
+        )
+        self._set_transient_line(self._storage_error, "")
+
+        # 只读位置块: 每行"名字 | 值 | 打开位置"。值为空的行(演示后端/未注入
+        # 内置路径)在下面的推导式里就滤掉, 不摆空占位。整块默认折叠(P2c 反馈:
+        # 五行路径细节不是每次进设置页都要看的), 由"位置详情"按钮展开。
+        self._storage_values: dict[str, tuple[ctk.CTkLabel, str]] = {}
+        # 名字标签与"打开位置"按钮留住引用: 切主题时要跟着重绘。
+        self._storage_names: list[ctk.CTkLabel] = []
+        self._storage_open_buttons: list[ctk.CTkButton] = []
+        self._storage_details_btn = ctk.CTkButton(
+            self._storage_panel,
+            text=tr("settings.storage_details_show"),
+            command=self._toggle_storage_details,
+            width=104,
+            height=26,
+            corner_radius=8,
+            fg_color=palette.raised,
+            hover_color=palette.item_hover,
+            text_color=palette.text_body,
+            border_width=1,
+            border_color=palette.border,
+            font=ctk.CTkFont(size=11),
+        )
+        self._storage_details_btn.grid(
+            row=6, column=0, padx=16, pady=(2, 16), sticky="w"
+        )
+        # 行收进内嵌框架: 折叠 = 整块 grid_remove(一处收放全部行, 不可见控件
+        # Tab 也会自动跳过), 框架透明、内衬自己管, 视觉与直接摆在面板里一致。
+        self._storage_details = ctk.CTkFrame(
+            self._storage_panel, fg_color="transparent"
+        )
+        self._storage_details.grid(row=7, column=0, columnspan=3, sticky="ew")
+        self._storage_details.grid_columnconfigure(1, weight=1)
+        self._storage_details_open = False
+        fields = [
+            (key, value) for key, value in self._readonly_storage_fields() if value
+        ]
+        last_key = fields[-1][0] if fields else None
+        for row, (key, value) in enumerate(fields):
+            name = ctk.CTkLabel(
+                self._storage_details,
+                text=tr(key),
+                anchor="w",
+                font=ctk.CTkFont(size=12),
+                text_color=palette.text_body,
+            )
+            value_label = ctk.CTkLabel(
+                self._storage_details,
+                text="",
+                anchor="w",
+                justify="left",
+                font=ctk.CTkFont(size=11),
+                text_color=palette.text_muted,
+            )
+            open_btn = ctk.CTkButton(
+                self._storage_details,
+                text=tr("settings.open_location"),
+                command=lambda path=value: self._on_open_location(path),
+                width=88,
+                height=26,
+                corner_radius=8,
+                fg_color=palette.raised,
+                hover_color=palette.item_hover,
+                text_color=palette.text_body,
+                border_width=1,
+                border_color=palette.border,
+                font=ctk.CTkFont(size=11),
+            )
+            bottom = 16 if key == last_key else 6
+            name.grid(row=row, column=0, padx=16, pady=(0, bottom), sticky="w")
+            value_label.grid(row=row, column=1, pady=(0, bottom), sticky="ew")
+            open_btn.grid(row=row, column=2, padx=16, pady=(0, bottom), sticky="e")
+            self._storage_names.append(name)
+            self._storage_open_buttons.append(open_btn)
+            self._storage_values[key] = (value_label, value)
+        # 默认折叠: 折叠期值标签量不到宽度, _refit_storage_paths 会跳过它们,
+        # 展开时由 _toggle_storage_details 补一次重裁。
+        self._storage_details.grid_remove()
+        # 路径重裁绑定一次: <Configure> 反复触发也只会重算, 不会重复挂事件。
+        self._refit_storage_paths()
+        self._storage_panel.bind(
+            "<Configure>", lambda _event: self._refit_storage_paths(), add="+"
+        )
+        # "重启后"行的初始有无跟着总览走: 改了还没重启时一打开窗口就要看见。
+        self._set_transient_line(
+            self._backup_next,
+            tr("settings.backup_root_next", path=self._storage.next_backup_root)
+            if self._storage.restart_pending
+            else "",
+        )
+
+    # -- 存储位置 -----------------------------------------------------------
+
+    def _readonly_storage_fields(self) -> tuple[tuple[str, str], ...]:
+        """只读位置行的(文案键, 当前值)序列; 顺序即展示顺序."""
+        storage = self._storage
+        return (
+            ("settings.storage_database", storage.database_path),
+            ("settings.storage_config", storage.config_path),
+            ("settings.storage_log", storage.log_file),
+            ("settings.storage_exports", storage.exports_dir),
+            ("settings.storage_artwork", storage.artwork_dir),
+        )
+
+    def _refit_storage_paths(self) -> None:
+        """按各值标签的实得宽度重裁全部路径(中间省略号 + 悬停完整路径).
+
+        窗口宽度固定, 但"名字列 + 按钮列"的宽度会随文案语言变, 预算不能用
+        常量; 值标签被 grid 拉伸(sticky ew / columnspan), 自身宽度与文本无关,
+        拿它当预算来源才稳。宽度还没量出来(<=1)时跳过 —— 首帧之后的
+        ``<Configure>`` 会再触发一次补裁。
+        """
+        try:
+            targets: list[tuple[ctk.CTkLabel, str]] = [
+                (self._backup_value, self._storage.backup_root),
+                *[(label, value) for label, value in self._storage_values.values()],
+            ]
+            for label, value in targets:
+                width = int(label.winfo_width())
+                if width <= 1:
+                    continue
+                font = measured_font(label.cget("font"), label)
+                shown = fit_path(value, font, width)
+                label.configure(text=shown)
+                sync_tooltip(label, full=value, shown=shown)
+        except tk.TclError:  # pragma: no cover - 面板已在销毁中
+            return
+        # 构造期还没有页脚(_footer 在快捷键面板之后才建), 这时收高度会 AttributeError;
+        # 首帧 <Configure> 还会再触发一次, 高度不会漏算。
+        if getattr(self, "_footer", None) is not None:
+            self._refit_height()
+
+    def refresh_storage(self, storage: StorageOverview) -> None:
+        """按新总览重填备份目录块(改完位置后的回填; 只读行不随会话变)."""
+        self._storage = storage
+        self._refit_storage_paths()
+        # "重启后"只在改了还没重启时占一行: 平时当前值就在上一行, 再抄一遍
+        # 下次值只是噪声(状态由这行的存在与否表达, 按钮文字只写动作)。
+        self._set_transient_line(
+            self._backup_next,
+            tr("settings.backup_root_next", path=storage.next_backup_root)
+            if storage.restart_pending
+            else "",
+        )
+
+    def _toggle_storage_details(self) -> None:
+        """展开/收起五个只读位置行(默认收起: 路径细节不是每次都要看的)."""
+        self._storage_details_open = not self._storage_details_open
+        if self._storage_details_open:
+            self._storage_details.grid()
+            self._storage_details_btn.configure(
+                text=tr("settings.storage_details_hide")
+            )
+            # 展开后按钮不再是分区收尾, 底部留白交给详情块自己收。
+            self._storage_details_btn.grid_configure(pady=(2, 4))
+            # 折叠期值标签量不到宽度被跳过, 展开后必须补一次重裁。
+            self._window.update_idletasks()
+            self._refit_storage_paths()
+        else:
+            self._storage_details.grid_remove()
+            self._storage_details_btn.configure(
+                text=tr("settings.storage_details_show")
+            )
+            self._storage_details_btn.grid_configure(pady=(2, 16))
+        self._refit_height()
+
+    def _toggle_log_details(self) -> None:
+        """展开/收起日志滚动参数两行(默认收起: 平时只看开关)."""
+        self._log_details_open = not self._log_details_open
+        if self._log_details_open:
+            self._log_details.grid()
+            self._log_details_btn.configure(text=tr("settings.log_details_hide"))
+            self._log_details_btn.grid_configure(pady=(2, 4))
+        else:
+            self._log_details.grid_remove()
+            self._log_details_btn.configure(text=tr("settings.log_details_show"))
+            self._log_details_btn.grid_configure(pady=(2, 16))
+        self._refit_height()
+
+    def notify_storage(self, message: str, *, error: bool = False) -> None:
+        """显示改位置的反馈(成功为强调色, 失败为危险色; 空文案整行收起)."""
+        self._storage_error_tone = "danger" if error else "accent"
+        self._storage_error.configure(
+            text_color=getattr(self._palette, self._storage_error_tone)
+        )
+        self._set_transient_line(self._storage_error, message)
 
     def _track_hint(
         self,
@@ -745,37 +1182,28 @@ class SettingsWindow:
             label.grid_remove()
 
     def _refit_height(self) -> None:
-        """按当前内容重算窗口高度(说明换行变了行数就变了).
+        """窗口高度固定为"主窗口高 - 一截留白", 不跟内容长高; 超出内容交给滚动区.
 
-        宽度写死, 高度只能按**实际内容**算: 说明文字会随语言与可用宽度换行, 写死高度会把
-        底部的说明与“关闭”按钮裁到窗口外面(评审时定的)。装不下时夹到屏幕可用高度以内,
-        滚动区自己滚, 那两样留在固定页脚里(1366x768 上底部按钮被屏幕下沿切掉过)。
+        高度跟内容长会一路长到接近整屏, 弹窗比主窗口还高、反客为主(P2c 反馈)。
+        定高矮一截后内容必然溢出, 由滚动区接管, 页脚"关闭"按钮永远在窗口里。
+        屏高上限与最小高度只作兜底: 小屏夹取; 主窗未映射时 winfo_height 是 1,
+        夹取后落到最小高度。
         """
         try:
             self._window.update_idletasks()
-            content_height = (
-                int(self._body.winfo_reqheight())
-                + int(self._footer.winfo_reqheight())
-                + _FOOTER_GAP
-                + _WINDOW_PAD_Y * 2
-            )
-            # ``available`` 是"屏高 - 安全边距": 它来自 ``winfo_screenheight()``(**物理**
-            # 像素), 而 ``content_height`` 与写进 geometry 的都是**逻辑**像素(125% 的屏上
-            # 物理 = 逻辑 x 1.25)—— 两边必须换到同一套, 否则高 DPI 的矮屏上窗口会比屏幕
-            # 还高(2026-10-02 实测: 768 高的屏上 648 逻辑 = 810 物理 > 768, 底部按钮被屏幕
-            # 下沿切掉)。
-            #
-            # 但**不**据此把窗口压到"刚好等于内容高度": 主体是 ``sticky="nsew"`` 的滚动区,
-            # 比内容略高的那点全被它吸收(底部说明与关闭按钮照旧贴在窗口下沿), 而"刚好等高"
-            # 会让滚动条在临界点上闪进闪出, 进而把说明文字的换行宽度推来推去(2026-10-02
-            # 实测: 刚好等高的那版让两条说明被判成"被硬裁")。
+            # ``available`` 是"屏高 - 安全边距": 它来自 ``winfo_screenheight()``
+            # (**物理**像素), 而 ``winfo_height()`` 与写进 geometry 的都是**逻辑**
+            # 像素(125% 的屏上物理 = 逻辑 x 1.25)—— 屏高必须换到逻辑再夹, 主窗
+            # 高天然就是逻辑, 不用换(2026-10-02 实测: 不换算时高 DPI 矮屏上窗口
+            # 会比屏幕还高, 底部按钮被屏幕下沿切掉)。
             available = round(
                 (int(self._parent.winfo_screenheight()) - _SCREEN_MARGIN)
                 / window_scaling(self._window)
             )
-            self._window.geometry(
-                f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, min(content_height, available))}"
+            capped = min(
+                int(self._parent.winfo_height()) - _PARENT_HEIGHT_MARGIN, available
             )
+            self._window.geometry(f"{_WINDOW_WIDTH}x{max(_WINDOW_MIN_HEIGHT, capped)}")
         except tk.TclError:  # 窗口已销毁: 延后的量宽可能晚于关闭
             return
 
@@ -895,6 +1323,45 @@ class SettingsWindow:
         self._set_transient_line(self._debug_error, "")
         self._refit_height()
 
+    def _on_log_entry_submit(self, _event: object | None = None) -> None:
+        """回车或失焦时提交日志滚动参数; 值没动就放行, 不落多余的盘.
+
+        两个输入框一起读: "改了上限顺手改份数"是常态, 一行一行分开报反而烦人。
+        非整数在这里拦(输入框的口径), 范围则交给主窗口 —— 它是保存口径的唯一权威,
+        直接调用后端的其他入口也要拦得住。
+        """
+        raw_mb = self._log_mb_entry.get().strip()
+        raw_backups = self._log_backups_entry.get().strip()
+        if raw_mb == str(self._log_max_mb) and raw_backups == str(self._log_backups):
+            return
+        try:
+            max_mb = int(raw_mb)
+            backup_count = int(raw_backups)
+        except ValueError:
+            self._show_log_error(tr("settings.log_rotation_number"))
+            return
+        error = self._on_apply_log_rotation(max_mb, backup_count)
+        if error is not None:
+            self._show_log_error(error)
+            return
+        # 成功后同步窗口里的副本: 它是"拨回生效值"的依据, 不更新会在失败回滚时
+        # 把已经改成功的旧值写回去(界面与配置脱节, 恰是这套交互要防的事).
+        self._log_max_mb = max_mb
+        self._log_backups = backup_count
+        self._set_transient_line(self._log_error, "")
+        self._refit_height()
+
+    def _show_log_error(self, message: str) -> None:
+        """写一条日志参数的错误行, 并把两个输入框拨回实际生效的值."""
+        self._set_transient_line(
+            self._log_error, tr("settings.log_rotation_failed", reason=message)
+        )
+        self._log_mb_entry.delete(0, "end")
+        self._log_mb_entry.insert(0, str(self._log_max_mb))
+        self._log_backups_entry.delete(0, "end")
+        self._log_backups_entry.insert(0, str(self._log_backups))
+        self._refit_height()
+
     def _set_activation_switch(self, enabled: bool) -> None:
         """把开关拨到指定状态(不触发 ``command``, 所以失败回滚不会递归)."""
         if enabled:
@@ -963,6 +1430,7 @@ class SettingsWindow:
         self._body.configure(fg_color=palette.background)
         self._footer.configure(fg_color=palette.background)
         for panel in (
+            self._storage_panel,
             self._appearance_panel,
             self._language_panel,
             self._logging_panel,
@@ -978,16 +1446,25 @@ class SettingsWindow:
             (self._logging_title, palette.text_primary),
             (self._activation_title, palette.text_primary),
             (self._verification_title, palette.text_primary),
+            (self._storage_title, palette.text_primary),
+            (self._storage_hint, palette.text_muted),
+            (self._backup_label, palette.text_body),
+            (self._backup_value, palette.text_body),
+            (self._backup_next, palette.accent),
+            (self._storage_error, getattr(palette, self._storage_error_tone)),
             (self._shortcut_title, palette.text_primary),
             (self._font_label, palette.text_body),
             (self._verification_status, palette.text_muted),
             (self._remember_error, palette.danger),
             (self._language_error, palette.danger),
             (self._debug_error, palette.danger),
+            (self._log_error, palette.danger),
+            (self._log_mb_label, palette.text_body),
+            (self._log_backups_label, palette.text_body),
             (self._activation_error, palette.danger),
             (self._capture_status, palette.accent),
             (self._shortcut_error, palette.danger),
-            (self._note_label, palette.text_hint),
+            (self._version_label, palette.text_hint),
         ):
             label.configure(text_color=color)
         self._toggle_btn.configure(
@@ -1011,10 +1488,37 @@ class SettingsWindow:
         # 下拉框也要一起重绘: 它们漏在这里时, 切主题后同一个窗口里会留下旧底色.
         for box in (self._font_box, self._language_box, self._verification_box):
             _paint_combo(box, palette)
+        # 日志参数的两个输入框同样要重绘: 漏掉时会留上一套主题的底色与边框.
+        for entry in (self._log_mb_entry, self._log_backups_entry):
+            entry.configure(
+                fg_color=palette.input_bg,
+                border_color=palette.input_border,
+                text_color=palette.text_body,
+            )
         # 快捷键行的动作名也是文字控件, 漏在重绘表外时它会留着**旧主题**的正文色
         # (浅色主题的深灰文字落在深色面板上, 就是一条几乎看不见的淡灰字)。
         for label in self._shortcut_labels:
             label.configure(text_color=palette.text_body)
+        # 存储位置分区: 名字用正文色、值用提示色、动作按钮与关闭按钮同一套描边。
+        for label in self._storage_names:
+            label.configure(text_color=palette.text_body)
+        for label, _value in self._storage_values.values():
+            label.configure(text_color=palette.text_muted)
+        for button in (
+            self._backup_change_btn,
+            self._backup_restore_btn,
+            self._storage_details_btn,
+            self._log_details_btn,
+            *self._storage_open_buttons,
+        ):
+            button.configure(
+                fg_color=palette.raised,
+                hover_color=palette.item_hover,
+                text_color=palette.text_body,
+                border_color=palette.border,
+            )
+        # 换主题后字体度量不变, 但省略号是按像素算的: 重裁一遍不吃亏。
+        self._refit_storage_paths()
         self._close_btn.configure(
             fg_color=palette.raised,
             hover_color=palette.item_hover,

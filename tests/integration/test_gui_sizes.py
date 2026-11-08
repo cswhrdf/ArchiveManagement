@@ -930,6 +930,10 @@ def test_the_manage_window_hugs_its_content() -> None:
     Windows runner 上窗口最终 648 而**那一刻**读到的请求只有 580(没把页脚与外边距算进去),
     本机(125% 缩放)上两者相等。所以上限写成"请求 + 页脚 + 间距 + 上下内边距": 本机必然
     满足, CI 上也能满足, 而"窗口比内容多出一大截"(老的 440 下限就是这种)照样会被拦下。
+
+    2026-11-07 补上下限的另一半: 矮屏 runner(屏高 768)上窗口会被**屏幕线**夹到 648, 而
+    内容请求是 660 —— 窗口比请求矮 12 像素是设计行为(见 manage_window._fit_window_height
+    的"绝不出屏")。下限因此取 min(请求, 屏幕可用) - 8, 不再直接拿请求当基准。
     """
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     try:
@@ -965,8 +969,17 @@ def test_the_manage_window_hugs_its_content() -> None:
                 + round(manage_mod._FOOTER_GAP * scale)
                 + round(manage_mod._WINDOW_PAD_Y * 2 * scale)
             )
-            assert requested - 8 <= height <= requested + chrome + 8, (
-                f"窗口高度应当贴着内容: 实测 {height}, 窗口请求 {requested}, "
+            # 下限要看**屏幕线**在不在起作用(2026-11-07 的 macOS/Windows CI: 实测 648、
+            # 请求 660 —— runner 屏高 768, 可用 = 768 - _SCREEN_MARGIN = 648, 窗口按设计
+            # 停在屏幕线上, 于是比内容请求**矮** 12 像素)。只写"请求 - 8"会把这种正确行为
+            # 判红, 所以下限取"请求与可用高度里的小的那个"。
+            available = round(
+                (int(window.winfo_screenheight()) - manage_mod._SCREEN_MARGIN) / scale
+            )
+            lower = min(round(requested / scale), available) - 8
+            assert lower <= height <= requested + chrome + 8, (
+                f"窗口高度应当贴着内容(且不超过屏幕线): 实测 {height}, "
+                f"窗口请求 {requested}, 屏幕可用 {available}, "
                 f"页脚与内边距 {chrome}(页脚 {footer})"
             )
             button_bottom = int(manage._footer.winfo_y()) + int(
@@ -1030,11 +1043,18 @@ def _assert_centered(parent: Any, window: Any, *, tolerance: int = 12) -> None:
         f"父窗口 {parent.winfo_width()}x{parent.winfo_height()} "
         f"@{parent.winfo_rootx()},{parent.winfo_rooty()}"
     )
-    vertical_limit = max(
-        tolerance, (parent.winfo_height() - window.winfo_height()) // 2
-    )
+    ideal = (parent.winfo_height() - window.winfo_height()) / 2
     assert abs(dx) <= tolerance, f"横向{hint}"
-    assert abs(dy) <= vertical_limit, f"纵向{hint}"
+    if ideal >= 0:
+        # 父窗口比弹窗高: 居中或(理想偏移只有十几像素时)贴父窗口上沿都算过。
+        assert abs(dy) <= max(tolerance, ideal), f"纵向{hint}"
+    else:
+        # 弹窗比父窗口**还高**: 居中在物理上做不到, 唯一可行的摆法是"与父窗口上沿对齐",
+        # 那时的偏移恰好是 ``|ideal|``。2026-11-07 的 macOS CI 就是这一幕: 弹窗 600x850
+        # (游戏设置多了"进程名候选"一节, 内容长高了)、父窗口 1024x720, 理想偏移 -65,
+        # 实测贴上沿 ⇒ dy = +65。原来只按 ``max(tolerance, ideal)`` 放宽, 负的理想值被
+        # 忽略, 于是 65 > 12 判红 —— 允差仍是十几像素, 真偏了几百像素照样拦得住。
+        assert abs(dy) <= tolerance or abs(dy - abs(ideal)) <= tolerance, f"纵向{hint}"
 
 
 def test_the_first_dialog_of_a_cold_start_is_centered(

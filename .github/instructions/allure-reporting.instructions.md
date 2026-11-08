@@ -13,17 +13,17 @@ description: '本仓库 Allure 报告体系的用法与不变式: 配置的唯�
 
 ## 1. 全景：一次运行里，报告是怎么拼出来的
 
-| 角色                                                                         | 产出                                                                                                                                          | 谁消费                 |
-| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| `tests/conftest.py`                                                          | 每条结果的四层标签 + 严重等级 + `env`/`os`/`平台` 参数                                                                                        | 环境维度、质量门、分类 |
-| 分片 pytest（三个平台各 3 片）                                               | `allure-results/` → 产物 `allure-results-<镜像名>-<片号>`                                                                                     | `pytest-report`        |
-| `create_allure_quality.py`（quality 作业，3 组：core / platform / analysis） | `allure-results-quality` / `-quality-platform-<os>` / `-analysis`                                                                             | 汇总作业               |
-| `create_allure_visual.py`（quality 作业）                                    | `allure-results-visual`                                                                                                                       | 汇总作业               |
-| 性能基准 / 安全用例（quality / security 作业）                               | `allure-results-performance` / `allure-results-security-<os>`                                                                                 | 汇总作业               |
-| `create_allure_coverage.py`（`pytest-report`，逐平台）                       | `allure-results-coverage-<平台显示名>`                                                                                                        | 汇总作业               |
-| `create_allure_smoke.py`（打包作业，2026-10-27 起）                         | `allure-results-smoke-windows`（逐条判据，**条件期望**：只在打包真的跑了的运行里要求）                                                       | 汇总作业               |
-| `merge_allure_results.py`（`pytest-report`）                                 | 合并后的 `allure-results` + `allure-manifest.json` → 产物 `allure-resources-<镜像名>`（只含历史 + 清单）与 `allure-report-<镜像名>`（tar.gz） | 人；下一轮取历史       |
-| `allure-summary`                                                             | `allure-resources-final`（`.allure/history.jsonl`）+ `allure-report-final`（单个 tar.gz）                                                     | 人                     |
+| 角色                                                                                   | 产出                                                                                                                                          | 谁消费                  |
+| -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `tests/conftest.py`                                                                    | 每条结果的四层标签 + 严重等级 + `env`/`os`/`平台` 参数                                                                                        | 环境维度、质量门、分类  |
+| 分片 pytest（三个平台各 3 片）                                                         | `allure-results/` → 产物 `allure-results-<镜像名>-<片号>`                                                                                     | `pytest-report`         |
+| `create_allure_quality.py`（quality 作业，3 组：core / platform / analysis）           | `allure-results-quality` / `-quality-platform-<os>` / `-analysis`                                                                             | 汇总作业                |
+| `create_allure_visual.py`（quality 作业）                                              | `allure-results-visual`                                                                                                                       | 汇总作业                |
+| 性能基准 / 安全用例（quality / security 作业）                                         | `allure-results-performance` / `allure-results-security-<os>`                                                                                 | 汇总作业                |
+| `create_allure_coverage.py`（`pytest-report`，逐平台）                                 | `allure-results-coverage-<平台显示名>`                                                                                                        | 汇总作业                |
+| `create_allure_smoke.py`（打包作业的两个构建作业，2026-10-27 起；2026-11-01 起两平台） | `allure-results-smoke-windows` / `allure-results-smoke-linux`（逐条判据，**条件期望**：只在打包真的跑了的运行里按平台要求）                   | 汇总作业                |
+| `merge_allure_results.py`（`pytest-report`）                                           | 合并后的 `allure-results` + `allure-manifest.json` → 产物 `allure-resources-<镜像名>`（只含历史 + 清单）与 `allure-report-<镜像名>`（tar.gz） | 人；下一轮取历史        |
+| `allure-summary`                                                                       | `allure-resources-final`（`.allure/history.jsonl`）+ `allure-report-final`（单个 tar.gz）                                                     | 人；publish-report 作业 |
 
 一条硬边界：
 
@@ -31,7 +31,7 @@ description: '本仓库 Allure 报告体系的用法与不变式: 配置的唯�
 
 ## 2. 配置的唯一真相：`allurerc.mjs`
 
-CI 与本地都只跑 `allure generate allure-results --output allure-report`，**不传 `--config`** —— CLI 从 cwd 读这份配置。以前的写法是每个作业临时写一份 `.allure/allurerc.json` 并把历史设置重复三遍，那三处已删除：**重复的配置就是会漂移的配置**。
+CI 与本地都只跑 `allure generate allure-results --output allure-report --clean`（逐平台那份另加 `--config allurerc.per-platform.mjs`），**不写临时配置** —— CLI 从 cwd 读这份配置。以前的写法是每个作业临时写一份 `.allure/allurerc.json` 并把历史设置重复三遍，那三处已删除：**重复的配置就是会漂移的配置**。`--clean` 不是可选项（2026-11-08 补上）：生成器**不刷新**已存在的输出目录，目录里有上一份的残留时它只打一句 warning 就混着用 —— 旧静态资源的哈希名与新清单对不上时，详情页会随机打不开，而报告本身看着是好的（2026-11-07 的 CI 日志里已经出现过那句 warning）。
 
 - **必须在仓库根执行**：换目录 CLI 找不到配置，环境维度**静默**退回 default（报告照样生成、作业照样绿），由 `verify_allure_report.py` 判"报告不完整"。
 - **只有 `allurerc.js/mjs/ts/mts/cts` 这类可执行配置支持 `environments`**；声明式 `allurerc.json/yaml` 不支持（官方 README 明确说明），这也是当初合并成一份 `.mjs` 的原因。
@@ -41,7 +41,7 @@ CI 与本地都只跑 `allure generate allure-results --output allure-report`，
 | 键                                               | 作用                                            | 改动时要留意                                                                                                                                                                                                                                |
 | ------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name` / `port`                                  | 报告标题 / 本地默认端口                         | 无守卫                                                                                                                                                                                                                                      |
-| `historyPath` / `appendHistory` / `historyLimit` | 历史趋势（`.allure/history.jsonl`，上限 40 条） | 由 `test_report_config_keeps_the_history_settings` 钉住"必须留在配置里"                                                                                                                                                                     |
+| `historyPath` / `appendHistory` / `historyLimit` | 历史趋势（`.allure/history.jsonl`，上限 **15** 条） | 由 `test_report_config_keeps_the_history_settings` 钉住"必须留在配置里"与上限值：报告体积 ≈ 用例数 × 这个数（每条用例的趋势链内联在它自己的结果文件里），而 Pages 站点上限 1 GB 按解压后算 |
 | `variables`                                      | 报告**顶部**的稳定事实                          | 只写跨运行不变的；每次运行会变的（SHA/分支/时间）走 `environment.properties` 与总账                                                                                                                                                         |
 | `allowedEnvironments`                            | 环境 id 白名单（启动期校验）                    | 必须**恰好等于** `environments` 的键集合：少列一个 `allure generate` 直接 Internal Error（3.18.0 原文：`environment id "common" is not listed in allowedEnvironments`）。守卫 `test_report_config_declares_every_environment_id_as_allowed` |
 | `globalAttachments`                              | 报告首页「全局附件」                            | 只放"挂不上任何用例"的东西；已有结论项的东西别重复挂（让报告 zip 翻倍）                                                                                                                                                                     |
@@ -98,13 +98,15 @@ pytestmark = [
 - **归属靠 `env` 标签**：`create_allure_coverage.py` 的平台由 `--platform` 给出（主机的 `platform.system()` 会把三平台结论全标成 Linux）。守卫 `test_coverage_item_platform_comes_from_the_flag`。
 - **脚本产物不许带 `framework=pytest`**：那是 allure-pytest 给真实用例写的标签，质量门用它区分"用例"与"汇总项"。守卫 `test_quality_gate_asks_every_platform_for_real_tests`（断言四个 `create_allure_*` 里不出现 `"framework"`）。
 - **产物冒烟的结论项产在打包作业里**（`create_allure_smoke.py`）：执行方是 `smoke_packaged.py`（它落 `smoke-report.json`，失败也写），writer 只做转换——`env` 标签取报告 JSON 里的平台显示名、身份由"产物标识 + 判据标识"拼成（改显示名不断历史、改标识断趋势）、退出码恒 0（门禁是 `smoke_packaged.py` 的退出码）。守卫 `tests/unit/test_report_smoke_items.py`。
-- **每条结论都要有人负责**：`scripts/allure_catalog.py` 逐族列出"应该有哪一条结论、由哪个上游作业产生、由哪条规则判定"，并在运行总账的「证据核对」里逐项标"已收到 / 缺失"，缺失项另写一条 `broken` 并打 `::warning::`。**加一条结论就要同时加进清单**，双向同步由 `test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions` 钉住。例外有两族：按需一族（作业崩溃现场）不进"应有"；冒烟一族是**条件期望**（`expected_items` 的 `smoke_platforms`，CI 按 `needs.windows-package.result` 传值），不适用时整族不出现、不报假缺失——守卫 `test_smoke_expectation_follows_the_declared_platforms`。
+- **耗时追踪也是结论项，且是"从用例上搬过去的"**（`scripts/create_allure_profile.py`，2026-11-07 起）：`tests/profile_trace.py` 先把 trace 与摘要挂在标记用例上（那只是运输），汇总作业在生成报告**之前**把它们搬成一条按平台归环境的 `archive-management.profile`，并把 Top self time 内联进描述；搬完后源用例上的这两条附件引用会删掉 —— 报告里只出现一次。它是**按需产出**（`GATE_ON_DEMAND`）：只有开追踪的平台（默认 Linux）才有这一项，缺了不算缺失。守卫 `tests/unit/test_report_profile.py`。
+- **每条结论都要有人负责**：`scripts/allure_catalog.py` 逐族列出"应该有哪一条结论、由哪个上游作业产生、由哪条规则判定"，并在运行总账的「证据核对」里逐项标"已收到 / 缺失"，缺失项另写一条 `broken` 并打 `::warning::`。**加一条结论就要同时加进清单**，双向同步由 `test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions` 钉住。例外有两族：按需一族（作业崩溃现场）不进"应有"；冒烟一族是**条件期望**（`expected_items` 的 `smoke_platforms`，CI 按 `needs.package.result` 传值），不适用时整族不出现、不报假缺失——守卫 `test_smoke_expectation_follows_the_declared_platforms`。
 
 ## 6. 附件与体积：能挂，但不能把报告拖死
 
 - **失败现场只在失败时留证，且留证失败不许改变用例结果**（`tests/crash_capture.py` 的整段 try）。
 - **dump 用 Allure 不认识的媒体类型**（`application/octet-stream`）：用 `attachment_type` 里认识的类型时，上兆字节的 dump 一打开就把页面卡死。守卫在 `tests/unit/test_crash_capture.py`：断言 dump 的媒体类型不以 `text/`、`image/` 开头。
 - **必须有上限**：dump ≤ 25 MiB（超限只留落点与大小）、截图 ≤ 3 张、每用例只留一份（`StashKey`）。
+- **耗时追踪只挂显式标记的那一条**（`tests/profile_trace.py`，2026-11-06 起）：只有 `@pytest.mark.profile` 的用例才跑 viztracer，且**只在一个平台开**（默认 Linux，`ARCHIVE_PROFILE_TRACE=1` 可临时覆盖）。参数固定为 `min_duration=1000`（只留 ≥1 ms 的帧）——默认配置下一个 1.2 s 的模块能写 148 MB，过滤后 ≈7 MB；超过 20 MiB 则**不挂 trace**、只挂 Top-N self time 摘要。trace 的媒体类型必须是 `application/octet-stream`（原因同 dump），摘要用 `text`。**它最终不在用例上**：汇总作业里 `scripts/create_allure_profile.py` 把这两条附件搬成 `archive-management.profile` 结论项（2026-11-07，用户定的口径：它衡量"这一轮哪几个函数最费时"，与那条用例的断言无关，按用例找反而更难找）。
 - **给字符串媒体类型的附件补真实后缀**：allure 只在拿到枚举时才从枚举推后缀，否则文件会存成 `<uuid>-attachment.attach`。
 - **`globalAttachments` 里的可选物要"按文件在不在"收**（`existsSync(...) ? [...] : []`）：一份永远挂在首页的空"失败现场"只会让人以为可能崩过。守卫 `test_diagnostics_report_lands_in_the_allure_config`、`test_global_attachment_matches_what_the_summary_writes`。
 - **豁免清单是"人工写、机器列"的**：`allure-coverage-exclusions.md` 逐条列出 `# pragma: no cover` / `no branch` 与 `# platform: ...` 两类标记的位置与原因（数据直接来自源码，由 `create_allure_summary.py` 生成）。写标记时记两条：**原因要回答"这一行为什么到不了/不用测"**，别重复平台名或标记类别（`仅 windows — 原因: winreg 仅 Windows 提供` 这种同义反复等于没写）；**连续、同文件、同平台、同原因的多行会在清单里折叠成一条行号区间**（`…:162-163`），但**逐行标记仍然必需** —— 折叠只改呈现，每一行还是要各自排除（少标一行，它在别的平台就是永久缺口）。守卫 `test_consecutive_identical_platform_markers_collapse_into_one_line`。
@@ -128,7 +130,7 @@ run: echo "::error::质量门未通过 …" && exit 1
 
 ## 8. 历史趋势：链条比数据更脆
 
-趋势靠"取上一轮的 `allure-resources-*` 产物里的 `.allure/history.jsonl` 再追加"。三件事必须一起盯着：
+趋势靠"取上一轮的 `allure-resources-*` 产物里的 `.allure/history.jsonl` 再追加"；2026-11-02 起第一来源是 **Pages 站点根的 `history.jsonl.gz`**（`publish-report` 每轮把历史上的 gzip 放上站点，不会像 artifact 那样 90 天过期；明文那份 400 MB 量级，压完不到 20 MB，站点上限 1 GB），artifact 降级路径与取舍见 `docs/testing-ci.md` 第 2 节。三件事必须一起盯着：
 
 - **基线只问"有没有产物"，不问那一轮成败**：只认成功运行时，连续失败期（如 macOS Tk 崩溃那几天）会没有任何一轮被消费，基线冻结在更早的成功运行上；恰逢键形状变过，就每轮都按旧形状"修"，趋势永远接不上。取消/没跑到上传的运行自然被跳过。
 - **取回时要认两种打包布局**：artifact 内的路径取决于上传侧 `path` 的形状 —— 只列**一个**文件时它落在压缩包**根部**，列多个路径才保留 `.allure/` 前缀。两个恢复步骤都要对 `.previous-allure-resources/.allure/history.jsonl` 与 `.previous-allure-resources/history.jsonl` 依次尝试，都找不到就 `::error::` + `exit 1`（静默跳过 = 每轮把趋势清零重来，2026-10-05 实测）。守卫 `test_history_restore_accepts_both_artifact_layouts`。
@@ -139,7 +141,7 @@ run: echo "::error::质量门未通过 …" && exit 1
 - **合并脚本逐片报文件数**，缺片只跳过不报错（那时更需要一份报告来看"哪一片没结果"），但**后面的步骤要按缺片跳过**：`collect_coverage_data.py --expect-shards` 逐片点数、缺片非 0 退出、末尾让作业红。别让 `coverage xml` 自己合并剩下的数据并执行 `fail_under` —— 它会把"少了一份数据"说成"覆盖率掉了"（2026-09-30：Windows 被判 89.99% 未达标）。守卫 `test_ci_judges_the_coverage_only_on_complete_shard_data`、`test_the_report_job_only_judges_missing_pieces`。
 - **只匹配到一个产物时 `download-artifact` 不建"以产物名命名的子目录"**：单片平台（macOS）必须把 `path` 直接写成那个分片目录名（矩阵字段 `download_path`），多片平台才写 `.`。踩过：macOS 的 12689 个结果文件摊在工作区根，合并脚本按分片目录找、一个都匹配不到，该平台的结论与覆盖率全程没进报告。守卫 `test_single_shard_platform_downloads_into_its_own_shard_directory`。
 - **`--manifest` 是"少一片"的唯一判据**：环境、通过率、格式自检、原生质量门都看不出"三片只合并进一两片"。清单由 `merge_allure_results.py` 写、随 `allure-resources-*` 上传、由 `verify_allure_report.py --manifest "allure-manifests/*.json"` 与最终条数对齐。守卫 `test_ci_records_shard_counts_in_a_manifest`。
-- **生成前自检，自检不过不发布**：`verify_allure_report.py` 校验详情目录、索引引用的文件、附件、环境 widget、条数；报告目录**不存在**视为"本次没有结果、未生成报告"（退出 0），其余缺资源即退 1。发布（`allure-report.tar.gz`）挂在"出 zip 那次自检成功"上，且**不再发布报告目录本身**。守卫 `test_ci_publishes_only_verified_report`。
+- **生成前自检，"打不开"才不发布**：`verify_allure_report.py` 校验详情目录、索引引用的文件、附件、环境 widget、条数；报告目录**不存在**视为"本次没有结果、未生成报告"（退出 0），其余任何问题即退 1（门禁照红）。但打包（`--archive` 出 `allure-report.tar.gz`）只看**结构层**（入口资源/索引/详情/分组引用——"打不打得开"）：内容性问题（缺平台用例、清单对不上、default 环境）照样打包上传——报告正是用来看"哪里缺了"的（2026-11-01 定），且**不再发布报告目录本身**。守卫 `test_ci_publishes_only_openable_report`。push 轮的站点发布同一口径：`allure-summary` 用 `archive-present` 步骤清点归档在不在、透传成 `report_archived`，`publish-report` 作业判 `true` 才部署到 GitHub Pages（守卫 `test_the_push_runs_publish_the_report_to_pages`）。
 - **`default` 环境里不许有结果**：生成端没读到配置时*所有*结果都会进 `default`（由"报告里只有 default 环境"那条拦下）；只个别几条进 `default` 则是**它们没带 `env` 标签**的信号（上面那条 `skip` 成因就是这么表现的：逐平台用例数少几条、汇总报告里同身份的两份还被生成器并掉，索引比结果文件少 1）。检查由 `default_environment_problems()` 做，报错会点名用例（`结果名 (id)`）。守卫 `test_results_that_lost_their_environment_label_are_named`、`test_results_without_an_environment_are_left_alone`。
 - **产物名不许改**：`allure-resources-<镜像名>` / `allure-report-<镜像名>` / `coverage-<镜像名>` 里的名字代表"哪个平台的产物"，不是生成机器；改名会让历史曲线清零。
 - **别用 `--alluredir` 之外的东西表达归属**：报告目录、`.allure/`、`allure-results*/` 都在 `.gitignore` 里，本地跑出来的产物不入库。
@@ -173,11 +175,12 @@ CI 红、报告缺块、或者“本地根本不复现的那种失败”来了�
 
 | 你改了                                             | 必须一起改                                                                                                                                                                                                                                                                           |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 报告的发布方式（artifact / Pages 站点）            | `ci.yml` 的 `publish-report` 作业与 `allure-summary` 的 `report_archived` output（守卫 `test_the_push_runs_publish_the_report_to_pages`）、`_UV_FREE_JOBS` 登记（`test_test_config`）、`docs/testing-ci.md` 第 2 节（Pages 那条与额度那条）                                          |
 | 新增/删除一个平台                                  | `environments` 四个键、`allowedEnvironments`、`qualityGate.environmentsTested`（id）、CI 三个矩阵、汇总作业 `--expect-platforms`（显示名）、`test_report_structure` 里的期望集合                                                                                                     |
 | 覆盖率门槛                                         | `pyproject.toml` 的 `fail_under`、`create_allure_summary.COVERAGE_THRESHOLD`（守卫 `test_coverage_fail_under_matches_pyproject`）、`allurerc.mjs` 的 `variables.覆盖率门槛`（**这处没有守卫**：注释里写的"守卫会核对"只覆盖前面两处，改门槛要手动跟上）                              |
 | 片数                                               | CI 矩阵、`--shard-count` / `--shard-index`、`--expect-shards`、报告作业矩阵的 `expect_shards`（`test_ci_shard_count_matches_the_matrix`）                                                                                                                                            |
-| 新增一条结论项                                     | `scripts/allure_catalog.py` 的清单（`test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions`）+ 产生它的上游作业 + 运行总账里的一节；若是**条件适用**的一族（如产物冒烟），还要接上 CI 的条件取值（汇总作业按上游作业的 result 推导）与 `expected_items` 的参数 |
-| 新增一个 `allure generate` / `quality-gate` 调用点 | 那个作业要先装 Node 与 CLI（`test_every_job_that_drives_the_allure_cli_installs_it`）；只含一个平台就用 `allurerc.per-platform.mjs`                                                                                                                                                  |
+| 新增一条结论项                                     | `scripts/allure_catalog.py` 的清单（`test_the_catalog_is_in_sync_with_the_scripts_that_write_conclusions`）+ 产生它的上游作业 + 运行总账里的一节；若是**条件适用**的一族（如产物冒烟），还要接上 CI 的条件取值（汇总作业按上游作业的 result 推导）与 `expected_items` 的参数         |
+| 新增一个 `allure generate` / `quality-gate` 调用点 | 那个作业要先装 Node 与 CLI（`test_every_job_that_drives_the_allure_cli_installs_it`）；只含一个平台就用 `allurerc.per-platform.mjs`；**一律带 `--clean`**（守卫 `test_per_platform_reports_skip_the_native_gate` 钉着两处 `generate`）                                                                  |
 | 改分类规则 / 环境 id                               | `allurerc.mjs`、守卫里的期望集合、`tests/tk_guard.py` 的症状清单（`test_report_config_categorises_the_known_environment_problems`）                                                                                                                                                  |
 | 改视觉回归的画面或 `FROZEN_NOW`                    | `tests/visual-baselines/` 的基线图（必须重采）与那里的 README 表；重采只能用**包含这次改动的那一轮** CI 的 `visual-baselines-candidates`—— 两张主页图上带着 `FROZEN_NOW` 那一天的日期，拿旧一轮的产物一上来就红（守卫 `test_the_capture_pins_the_clock_so_baselines_stop_drifting`） |
 

@@ -154,6 +154,32 @@ class VerificationSettings(BaseModel):
 MAX_WINDOW_VALUE = 20000
 
 
+class StorageSettings(BaseModel):
+    """存储位置配置.
+
+    范围红线(P2b 拍板): 只允许覆盖**备份根**, 数据库/配置/日志/缓存/封面一律
+    留在内置位置 —— 跟着搬会造成"配置在新目录、锁在旧目录"的状态分裂。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 备份根目录覆盖(None = 内置位置 data_dir/backups)。改完**重启才生效**:
+    # 当前会话的备份/恢复/导出服务在启动时已按旧位置注入, 这也是不提供"运行中
+    # 切换"的原因。只存绝对路径: 相对路径与其他非法值会在逐字段修复里落回默认。
+    backup_root: str | None = None
+
+    @field_validator("backup_root")
+    @classmethod
+    def _validate_backup_root(cls, value: str | None) -> str | None:
+        """空串一律当 None(界面"清空输入 = 恢复内置位置"与手改清空同一语义)."""
+        if value is None or not value.strip():
+            return None
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise ValueError(f"backup_root 必须是绝对路径: {value}")
+        return str(path)
+
+
 class WindowSettings(BaseModel):
     """主窗口上次关闭时的尺寸与位置: 关窗时写入, 下次打开照它摆.
 
@@ -198,6 +224,8 @@ class AppConfig(BaseModel):
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
     # 上次关闭时的窗口尺寸与位置(默认全空 = 没记过, 用设计尺寸打开)。
     window: WindowSettings = Field(default_factory=WindowSettings)
+    # 存储位置(目前只有备份根覆盖; 详见 StorageSettings 的范围红线)。
+    storage: StorageSettings = Field(default_factory=StorageSettings)
 
     @field_validator("language")
     @classmethod

@@ -14,12 +14,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from archive_management.config import (
+    AppConfig,
     ConfigLoad,
     load_or_repair_config,
     save_config,
 )
 from archive_management.infrastructure.database import Database
-from archive_management.infrastructure.paths import ApplicationPaths
+from archive_management.infrastructure.paths import (
+    ApplicationPaths,
+    effective_paths,
+)
 from archive_management.logging_config import configure_from_settings
 from archive_management.packaging import APP_DISPLAY_NAME, package_version
 from archive_management.services import single_instance
@@ -117,21 +121,51 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(package_version())
         return 0
 
-    paths = ApplicationPaths.default(override_root=getattr(args, "root", None)).ensure()
+    root_arg = getattr(args, "root", None)
+    base = ApplicationPaths.default(override_root=root_arg).ensure()
     verbose = bool(getattr(args, "verbose", False))
     command = args.command
     if command is None:
         command = default_command()
+    # --root 显式给定时备份根跟随 --root(便携模式整体收敛), 配置里的覆盖被压制。
+    override_root_used = root_arg is not None
     if command == "init":
         # --force 不再需要: 配置内容非法时一律自动还原为默认值。
-        return _run_init(paths, verbose=verbose)
+        return _run_init(base, override_root_used=override_root_used, verbose=verbose)
     if command == "doctor":
-        return _run_doctor(paths, verbose=verbose)
+        return _run_doctor(base, override_root_used=override_root_used, verbose=verbose)
     if command == "gui":
         # ``smoke`` 只有写明 ``gui`` 子命令时才有(默认命令补出来的那次没有) → getattr.
-        return _run_gui(paths, smoke=getattr(args, "smoke", None), verbose=verbose)
+        return _run_gui(
+            base,
+            override_root_used=override_root_used,
+            smoke=getattr(args, "smoke", None),
+            verbose=verbose,
+        )
     parser.error(f"未知命令: {command}")  # pragma: no cover - 子命令已校验
     return 1  # pragma: no cover - 上面不返回
+
+
+def _session_paths(
+    base: ApplicationPaths, config: AppConfig, *, override_root_used: bool
+) -> ApplicationPaths:
+    """两步构造的统一入口: 基础 paths 建好并读出配置后, 算出本次会话生效的集合.
+
+    优先级: ``--root`` 显式给定(备份根跟随 --root) > ``storage.backup_root``
+    (配置覆盖, 见 :func:`effective_paths`) > 内置 ``data_dir/backups``。
+    """
+    if override_root_used:
+        return base
+    return effective_paths(base, config)
+
+
+def _backup_root_source(config: AppConfig, *, override_root_used: bool) -> str:
+    """备份根在 doctor 报告里的来源标签."""
+    if override_root_used:
+        return "跟随 --root"
+    if config.storage.backup_root is not None:
+        return "配置覆盖"
+    return "内置位置"
 
 
 def _lenient_console() -> None:
@@ -184,8 +218,11 @@ def _start_logging(paths: ApplicationPaths, *, verbose: bool) -> ConfigLoad:
     return loaded
 
 
-def _run_init(paths: ApplicationPaths, *, verbose: bool) -> int:
-    loaded = _start_logging(paths, verbose=verbose)
+def _run_init(
+    base: ApplicationPaths, *, override_root_used: bool, verbose: bool
+) -> int:
+    loaded = _start_logging(base, verbose=verbose)
+    paths = _session_paths(base, loaded.config, override_root_used=override_root_used)
     save_config(loaded.config, paths.config_path)
 
     database = Database(paths.database_path)
@@ -214,8 +251,11 @@ def _run_init(paths: ApplicationPaths, *, verbose: bool) -> int:
     return 0
 
 
-def _run_doctor(paths: ApplicationPaths, *, verbose: bool) -> int:
-    loaded = _start_logging(paths, verbose=verbose)
+def _run_doctor(
+    base: ApplicationPaths, *, override_root_used: bool, verbose: bool
+) -> int:
+    loaded = _start_logging(base, verbose=verbose)
+    paths = _session_paths(base, loaded.config, override_root_used=override_root_used)
     family = current_platform()
     registry_note = "可用" if has_windows_registry(family) else "不适用"
     _report(f"应用   : {APP_DISPLAY_NAME} {package_version()}")
@@ -223,12 +263,18 @@ def _run_doctor(paths: ApplicationPaths, *, verbose: bool) -> int:
     _report(f"配置目录: {paths.config_dir}")
     _report(f"数据目录: {paths.data_dir}")
     _report(f"日志目录: {paths.log_dir}")
-    _report(f"备份根  : {paths.backup_root}")
+    _report(
+        f"备份根  : {paths.backup_root} "
+        f"({_backup_root_source(loaded.config, override_root_used=override_root_used)})"
+    )
 
     if loaded.reset:
         _report(f"配置   : 内容非法, 已还原为默认值(原文件: {loaded.backup})")
     else:
-        _report(f"配置   : 格式 v{loaded.config.version}, 主题 {loaded.config.theme}")
+        _report(
+            f"配置   : 格式 v{loaded.config.version}, "
+            f"主题 {loaded.config.theme}(界面启动时生效)"
+        )
 
     try:
         database = Database(paths.database_path)
@@ -241,7 +287,13 @@ def _run_doctor(paths: ApplicationPaths, *, verbose: bool) -> int:
     return 0
 
 
-def _run_gui(paths: ApplicationPaths, *, smoke: float | None, verbose: bool) -> int:
+def _run_gui(
+    base: ApplicationPaths,
+    *,
+    override_root_used: bool,
+    smoke: float | None,
+    verbose: bool,
+) -> int:
     """启动图形界面;无图形环境或缺少 tkinter 时给出清晰错误.
 
     **打包版同一时间只允许开一个**(见 :mod:`archive_management.services.single_instance`):
@@ -258,22 +310,46 @@ def _run_gui(paths: ApplicationPaths, *, smoke: float | None, verbose: bool) -> 
     这里。``ARCHIVE_MANAGEMENT_ALLOW_MULTI=1`` 是诊断用的逃生门。
     """
     if not is_packaged() or single_instance.multi_instance_allowed():
-        return _start_gui(paths, smoke=smoke, verbose=verbose)
-    lock = single_instance.InstanceLock(single_instance.lock_path(paths))
+        return _start_gui(
+            base,
+            override_root_used=override_root_used,
+            smoke=smoke,
+            verbose=verbose,
+        )
+    lock = single_instance.InstanceLock(single_instance.lock_path(base))
     if not lock.acquire():
-        _hand_over_to_running_instance(paths, lock)
+        _hand_over_to_running_instance(base, lock)
         return single_instance.ALREADY_RUNNING_EXIT
     try:
-        return _start_gui(paths, smoke=smoke, verbose=verbose)
+        return _start_gui(
+            base,
+            override_root_used=override_root_used,
+            smoke=smoke,
+            verbose=verbose,
+        )
     finally:
         lock.release()
 
 
-def _start_gui(paths: ApplicationPaths, *, smoke: float | None, verbose: bool) -> int:
-    """真的去起窗口(异常一律收敛成"起不来"的返回码)."""
+def _start_gui(
+    base: ApplicationPaths,
+    *,
+    override_root_used: bool,
+    smoke: float | None,
+    verbose: bool,
+) -> int:
+    """真的去起窗口(异常一律收敛成"起不来"的返回码).
+
+    两步构造在这里完成: ``run_gui`` 信任收到的 paths 已是生效值, 不再重复应用
+    配置覆盖(它内部读配置只为装配日志与主题)。
+    """
     try:
         from archive_management.ui.main_window import run_gui
 
+        loaded = load_or_repair_config(base.config_path)
+        paths = _session_paths(
+            base, loaded.config, override_root_used=override_root_used
+        )
         return run_gui(
             smoke_seconds=smoke,
             display_name=APP_DISPLAY_NAME,

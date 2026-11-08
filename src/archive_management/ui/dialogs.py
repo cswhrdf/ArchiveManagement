@@ -262,7 +262,13 @@ def _clamp_to_comfort_line(
         )
 
 
-def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) -> None:
+def _present(
+    parent: ctk.CTk,
+    window: ctk.CTkToplevel,
+    *,
+    modal: bool = True,
+    clamp: bool | None = None,
+) -> None:
     """显示对话框前的收尾: 键盘接线 + 居中 + 收进舒适线, 且不让它先在屏幕左上角闪一下.
 
     键盘那几件(Esc = 取消、回车 = 主操作、初始焦点、按钮进 Tab 链)都在这里接完,
@@ -273,6 +279,12 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     (用户的意图是"退出快捷键录制"), 按回车会触发"切换主题"那颗主色按钮, 而且
     一打开就把焦点定在"界面字号"下拉框上(键盘动不了的下拉框)。窗口本身仍然由
     :func:`~archive_management.ui.keyboard.remember_palette` 的同一条路径取色。
+
+    ``clamp``: 舒适线夹取(把正文区收矮到屏幕的某个比例以内)单独一个开关, **默认跟随
+    ``modal``**(不传就是以前的语义, 既有调用点行为不变)。游戏设置窗口是抓取式的(要
+    Esc/回车/初始焦点), 但它自己按"屏高 - 安全边距"定高并让正文滚, 两套夹取叠在一起时
+    后者会把已经定好的窗口收矮 —— 实测窗口因此比内容高 110 像素(2026-11-07 的 Linux CI)。
+    所以它传 ``clamp=False``: 键盘接线与定焦照旧, 只是不夹。
 
     原实现是"``geometry("+0+0")`` → ``update()``(窗口真的出现在左上角) → 再挪到目标
     位置", 所以每次弹窗都会先闪一下左上角再跳过去(用户实测很多次)。两步测量现在都放在
@@ -288,10 +300,13 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     一次" —— 仍有一次小位移, 但不会再从屏幕左上角跳过来。
     """
     # 接线放在最前面: 下面几步只是摆位置, 而窗口一旦可见用户就可能已经在按 Esc。
+    clamp = modal if clamp is None else clamp
     if modal:
         bind_window_keys(window)
+    if clamp:
         # 舒适线只对**模态弹窗**约定(见 docs/testing-ui.md): 常驻工作窗口有自己的最小
-        # 尺寸, 屏幕再矮也不该把它们压矮(见 test_gui_sizes 的"工作窗口只守硬线")。
+        # 尺寸, 屏幕再矮也不该把它们压矮(见 test_gui_sizes 的"工作窗口只守硬线");
+        # 而按屏幕线自己定高的窗口(游戏设置)传 ``clamp=False``。
         _clamp_to_comfort_line(window)
     window.withdraw()
     # 宿主被强制置顶时跟着置顶(2026-10-30 用户报"窗口强制置顶后下拉框看不见"; 对话框同病:
@@ -315,7 +330,7 @@ def _present(parent: ctk.CTk, window: ctk.CTkToplevel, *, modal: bool = True) ->
     transparent = _set_alpha(window, 0.0)
     window.deiconify()
     window.update_idletasks()
-    if modal:
+    if clamp:
         # 映射之后尺寸才定下来(窗口管理器与 CTk 都会在这中间改尺寸): 再收一次 —— 夹取同时看
         # **实测高度与请求高度**(取大者, 见 _clamp_to_comfort_line: 无窗口管理器的 X11 上
         # 实测值会晚一拍), 否则"请求高度刚好在舒适线内、实际多出几个像素"的对话框仍会越线。

@@ -30,7 +30,8 @@ from archive_management.exceptions import PlatformIntegrationError
 PLATFORM_DATA_FORMAT_VERSION = 1
 
 # 本期支持的平台标识(与 domain.discovery.DiscoverySource 的前四项一致):
-# 只有 steam 有真正的适配器实现, 其余平台走"暂不支持"的降级路径。
+# steam 与 epic 有真正的适配器实现(epic 只到存档路径推断), 其余平台走"暂不支持"
+# 的降级路径。
 PlatformId = Literal["steam", "epic", "gog", "ubisoft"]
 PLATFORM_IDS: tuple[PlatformId, ...] = ("steam", "epic", "gog", "ubisoft")
 

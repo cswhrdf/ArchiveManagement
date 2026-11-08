@@ -70,6 +70,7 @@ import pytest
 import crash_capture
 import durations
 import gui_support
+import profile_trace
 import sharding
 import timeout_guard
 import tk_guard
@@ -666,6 +667,17 @@ def _cluster_shared_ui_sessions(items: list[pytest.Item]) -> None:
 
 
 @pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """给打了 ``@pytest.mark.profile`` 的用例开始追踪(见 ``tests/profile_trace.py``).
+
+    收尾不能放在 ``pytest_runtest_protocol`` 的 ``finally`` 里: 那时 allure-pytest 已经把这条
+    结果关了, 附件会拿到 ``KeyError: None``(2026-11-06 实测)。改成在 teardown 的报告阶段
+    收尾——那一步结果还开着, 与 ``crash_capture`` 挂 dump 的时机一致。
+    """
+    item.stash[profile_trace.TRACE_KEY] = profile_trace.start(item)
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_timeout_set_timer(item: pytest.Item, settings: Any) -> bool | None:
     """超时也要留下现场(见 ``tests/timeout_guard.py``).
 
@@ -724,6 +736,9 @@ def pytest_runtest_makereport(
         if extra is not None:
             report.outcome = "failed"
             report.longrepr = _leak_message(report.nodeid, extra)
+    if call.when == "teardown":
+        # 耗时追踪的收尾放在这里: 此刻 allure 的结果还没关, 附件才挂得上(见 pytest_runtest_setup).
+        profile_trace.finish(item.stash.get(profile_trace.TRACE_KEY, None))
     return report
 
 

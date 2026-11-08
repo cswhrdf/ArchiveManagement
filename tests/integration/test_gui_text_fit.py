@@ -10,6 +10,10 @@
 截断也是打了标记的)。
 
 两档宽度: 1366(设计尺寸) 与 1024(主窗口最小尺寸, 布局的硬下限)。
+
+**两种语言**: 中文与英文各量一遍(见 ``LOCALES``)。英文文案普遍长一倍以上, 而"中文放得
+下"不代表"英文放得下" —— 2026-11-07 加英文档时当场找出两处只有英文才会发生的硬裁
+(右侧"当前节点"那行没进裁剪表、位置行内衬把 chip 宽度写死)。
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ except Exception as exc:  # pragma: no cover - 取决于运行环境
     pytest.skip(f"GUI 依赖不可用: {exc}", allow_module_level=True)
 
 from archive_management.domain.home import HomeFilter, HomeLayout
+from archive_management.i18n import DEFAULT_LOCALE
 from archive_management.services.hotkeys import (
     GlobalHotkeyService,
     UnavailableBackend,
@@ -57,6 +62,11 @@ pytestmark = [
 # 桌面比 1366 窄时第一档会被窗口管理器压回去 —— 用例会把**实测**宽度写进判据标签
 # (不再假装测过 1366), 裁剪逻辑本身的两档由 tests/unit/test_textfit.py 守着。
 WIDTHS = ((1366, 820), (1024, 720))
+#: 两种界面语言都量。英文文案普遍比中文长(实测 `discovery.hint` 112 字 → 261 字,
+#: 按钮「立即备份」→「Backup now」), 而"中文下放得下"不代表"英文下放得下" ——
+#: 2026-11-07 之前这套判据只在 zh-CN 下跑过, 等于英文用户看到的裁剪从没人量。
+#: 语言是构建时就定稿的(见 ``_rebuild_ui``), 所以每种语言各建一个界面, 不是中途切。
+LOCALES = ("zh-CN", "en")
 # 长内容: 真实世界里出现过的长名称(中英混排) + 很深的安装路径.
 _LONG_NAME = (
     "Kaiju Princess 2: Poochi Q ASMR - A Magic Ticket That Grants Any Desire - "
@@ -251,9 +261,21 @@ def _assert_areas(app: ArchiveApp, areas: list[tuple[str, Any, bool]]) -> None:
     assert not problems, hint
 
 
-@pytest.fixture
-def app(monkeypatch: pytest.MonkeyPatch) -> ArchiveApp:
+@pytest.fixture(params=LOCALES)
+def app(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> ArchiveApp:
+    """按 ``request.param`` 的语言建一个界面.
+
+    语言必须在**建完之后**换: ``ArchiveApp`` 启动时会按配置里的语言再调一次
+    ``set_locale``(没有配置就是默认的 zh-CN), 事先设好的会被它盖掉 —— 2026-11-07 实测
+    "建之前 ``set_locale('en')``" 出来的仍是整屏中文(判据于是在英文档上空转)。所以走
+    产品自己的切换路径 ``_on_language_change``: 它会 ``_rebuild_ui`` 重建整棵树, 而文案
+    是构建时定稿的, 换语言只能重建。
+    """
     application: ArchiveApp = gui_app(_new_app, _LongTextService())
+    if request.param != DEFAULT_LOCALE:
+        assert application._on_language_change(request.param) is None, (
+            f"切到 {request.param} 失败"
+        )
     _pump(application)
     return application
 

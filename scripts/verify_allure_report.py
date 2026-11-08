@@ -24,6 +24,8 @@
    (详见 :func:`platform_test_problems`; pytest 作业传自己那个平台, 汇总作业传三个平台);
 7. ``--archive`` 额外把报告打成单个 ``<报告目录>.tar.gz``(交给系统的 ``tar`` 做): 单个文件
    发布不会出现"整个目录被悄悄丢掉"的静默损坏, 并打印条目数与 SHA256 便于人工核对.
+   打包的闸门只有"打不打得开"(第 1-3 条): 内容性问题(缺平台用例、清单对不上)照样
+   打包 —— 那种报告才是最需要有人打开看的, 拦下来反而拿不到证据(2026-11-01 定).
 
 报告目录不存在视为"本次没有结果, 未生成报告"(退出码 0); 其余情况缺资源即退出码 1.
 
@@ -89,6 +91,11 @@ class ReportFacts:
     tests_by_environment: tuple[tuple[str, int, int], ...] = ()
     # 各平台分片作业自报的产物清单; 没传 ``--manifest`` 时为空。
     manifests: tuple[ManifestFacts, ...] = ()
+    # "报告打不打得开"那一层的问题(入口资源/结果索引/用例详情/分组引用), 同时也在
+    # ``problems`` 里 —— 单独成一份是为了让 ``--archive`` 只按这一层决定打不打包:
+    # 其余问题(缺平台用例、清单对不上、结果落 default 环境)属于"记录的内容"有缺,
+    # 不拦打包(2026-11-01 定: 报告正是用来看"哪里缺了"的, 打得开就该有地方看)。
+    openable_problems: tuple[str, ...] = ()
 
 
 def load_object(path: Path) -> JsonObject | None:
@@ -573,15 +580,19 @@ def verify_report(
     """
     if not report_dir.is_dir():
         return None, []
-    problems = static_problems(report_dir)
     expected = indexed_result_ids(report_dir)
+    # "打不打得开"那一层单独收集(入口资源/索引/详情/分组引用): 它决定 ``--archive``
+    # 会不会打包(见 :func:`main`)。内容性问题照样进 problems(门禁照红), 只是不拦
+    # 打包 —— 内容有缺的报告才是最需要有人打开看的。
+    openable = list(static_problems(report_dir))
     if expected is None:
-        problems.append("无法解析 test-results.json 的结果索引(byId)")
+        openable.append("无法解析 test-results.json 的结果索引(byId)")
         expected = set()
-    problems.extend(missing_detail_problems(report_dir, expected))
-    problems.extend(
+    openable.extend(missing_detail_problems(report_dir, expected))
+    openable.extend(
         group_reference_problems(report_dir, expected, grouped_result_ids(report_dir))
     )
+    problems = list(openable)
     problems.extend(environment_problems(report_dir))
     problems.extend(default_environment_problems(report_dir))
     counts = platform_test_counts(report_dir, expected_platforms)
@@ -610,6 +621,7 @@ def verify_report(
             (name, tests, summaries) for name, (tests, summaries) in counts.items()
         ),
         manifests=manifests,
+        openable_problems=tuple(openable),
     )
     return facts, problems
 
@@ -722,7 +734,10 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--archive",
         action="store_true",
-        help="校验通过后把报告打包成 <报告目录>.tar.gz",
+        help=(
+            "把报告打包成 <报告目录>.tar.gz; 只要“打得开”(入口/详情齐全)就打包, "
+            "内容性问题(如缺平台用例)不拦打包"
+        ),
     )
     parser.add_argument(
         "--expect-platforms",
@@ -765,16 +780,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"报告目录不存在, 视为本次没有结果, 跳过校验: {report_dir}")
         return 0
     report_facts(facts, report_dir)
-    if problems:
-        for problem in problems:
-            print(f"报告资源不完整: {problem}", file=sys.stderr)
-        return 1
-    if args.archive:
+    if args.archive and not facts.openable_problems:
+        # 打包的闸门只有"打不打得开"这一层: 内容性问题(缺平台用例、
+        # 清单对不上、default 环境)照样打包并随产物上传发布 —— 那种轮次的报告才是
+        # 最需要有人打开看的; "打不开"的报告不打包, 上传侧(if-no-files-found: ignore)
+        # 与 Pages 发布(挂在"归档在不在"上)都会自然跳过(2026-11-01 定的口径)。
         archive = report_dir.parent / f"{report_dir.name}.tar.gz"
         entries, digest = package_report(report_dir, archive)
         size_mib = archive.stat().st_size / (1024 * 1024)
         print(f"已打包: {archive} ({entries} 个条目, {size_mib:.1f} MiB)")
         print(f"SHA256: {digest}")
+    if problems:
+        for problem in problems:
+            print(f"报告资源不完整: {problem}", file=sys.stderr)
+        return 1
     print("报告资源完整: 用例详情可正常打开")
     return 0
 

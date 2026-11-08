@@ -841,3 +841,15 @@ def test_helper_report_lets_managed_errors_through(tmp_path: Path) -> None:
 
     with pytest.raises(ArchiveManagementError, match="回调要求中止"):
         restore_mod._report(broken, 0.5, "恢复中")
+
+
+def test_target_problem_protects_the_effective_backup_root(tmp_path: Path) -> None:
+    """恢复写回的保护名单用生效根(两步构造后的覆盖根), 而不是内置根."""
+    effective = (tmp_path / "moved" / "backups").resolve()
+    reason = _target_problem(str(effective / "game1"), "directory", True, effective)
+    assert reason == "protected"
+
+    # 内置根不再是保护对象: 备份已经不写在那里, 把原始存档指到旧位置不该被误拦。
+    builtin = tmp_path / "data" / "backups"
+    problem = _target_problem(str(builtin / "game1"), "directory", True, effective)
+    assert problem is None

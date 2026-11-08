@@ -322,3 +322,22 @@ def test_platform_game_needs_an_app_id(tmp_path: Path) -> None:
     candidate = GameCandidate(name="Hades", install_dir=str(tmp_path), source="steam")
 
     assert _platform_game(candidate) is None
+
+
+def test_set_game_process_names_round_trips(tmp_path: Path) -> None:
+    """游戏设置里手动增删的候选经后端清洗后覆盖写入, 详情页原样带回."""
+    service = _service(tmp_path)
+    game_id = service.add_game("Demo").game_id
+
+    updated = service.set_game_process_names(game_id, ["Demo", "DemoLauncher.exe"])
+    assert updated.name == "Demo"
+    assert service.get_detail(game_id).process_names == ("Demo", "DemoLauncher.exe")
+
+    service.set_game_process_names(game_id, ["DemoLauncher.exe"])
+    assert service.get_detail(game_id).process_names == ("DemoLauncher.exe",)
+
+    # 校验失败原样报错(两个后端同一套判定), 未知游戏也拦下。
+    with pytest.raises(ArchiveManagementError):
+        service.set_game_process_names(game_id, ["a,b"])
+    with pytest.raises(ArchiveManagementError):
+        service.set_game_process_names("game-404", ["Demo"])

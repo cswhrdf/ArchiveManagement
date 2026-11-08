@@ -45,6 +45,8 @@ from archive_management.services.processes import (
 
 DELETE_ACTION = "game.delete"
 ENABLE_ACTION = "game.set_enabled"
+# 游戏设置里手动增删进程名候选: 改识别名单这件事要能从日志里看出来。
+PROCESS_ACTION = "game.set_process_names"
 RELEASE_ACTION = "discovery.candidates_released"
 # 自动启停的每一次判断都记审计(基础操作): 默认不落盘, 打开调试日志后才写,
 # 排查"为什么没跟着切"时这份记录就是全部依据。
@@ -113,6 +115,29 @@ def set_enabled(
     if manual:
         _record_manual(database, game_id, enabled)
     return EnableResult(game=updated, replaced=replaced)
+
+
+def set_process_names(database: Database, game_id: int, names: Sequence[str]) -> Game:
+    """覆盖写入一款游戏的进程名候选(游戏设置里手动增删后的落库入口).
+
+    校验(空名/含逗号/归一化后过短/重复/超上限)在界面层统一完成
+    (:func:`archive_management.ui.models.clean_process_names`), 两个后端共用
+    同一套判定与文案; 这里只负责落库与审计。写入是**完整覆盖**而不是增量:
+    界面先按当前名单加减出新的全集再提交。
+    """
+    game = _require_game(database, game_id)
+    repository = GameRepository(database)
+    repository.set_process_names(game_id, names)
+    updated = repository.get(game_id)
+    if updated is None:  # pragma: no cover - 刚写入的行必然可读
+        raise ArchiveManagementError(f"未知游戏: {game_id}")
+    log_action(
+        PROCESS_ACTION,
+        game_id=game_id,
+        name=game.name,
+        names=list(names),
+    )
+    return updated
 
 
 def active_game(database: Database) -> Game | None:

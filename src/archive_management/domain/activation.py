@@ -141,11 +141,13 @@ def process_names(game: Game) -> tuple[str, ...]:
     """返回用于匹配进程名的候选名称.
 
     界面上的名字可能是译名(中文), 与进程名对不上; 录入时识别到的原始名称
-    (``Stardew Valley``) 正好补上这一层。两者都交给
+    (``Stardew Valley``)与从安装目录播种的候选名(``game.process_names``, 见
+    :func:`~archive_management.services.processes.install_process_candidates`)
+    依次补上这一层。全部交给
     :func:`~archive_management.domain.process_names.name_needles` 归一化后再匹配,
     太短或全是非 ASCII 的名字会被它丢掉。
     """
-    names = (game.name.strip(), game.original_name.strip())
+    names = (game.name.strip(), game.original_name.strip(), *game.process_names)
     return tuple(dict.fromkeys(name for name in names if name))
 
 

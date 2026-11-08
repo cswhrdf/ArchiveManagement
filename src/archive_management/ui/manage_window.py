@@ -1,8 +1,8 @@
 """管理游戏与存档位置窗口.
 
-一个模态浮层: 上半部管理游戏信息(重命名/删除; 启停已抽到详情页页头的
-开关, 2026-10-20), 下半部管理该
-游戏的"原始存档位置"(添加目录/文件、设为主位置、重新验证、编辑路径、
+一个模态浮层: 上半部管理游戏信息(重命名/删除; 启停已抽到详情页页头的开关,
+2026-10-20; 进程名候选 2026-11-05 起也在这里增删), 下半部管理该游戏的
+"原始存档位置"(添加目录/文件、设为主位置、重新验证、编辑路径、
 删除记录), 并提供"删除原始存档位置": 把磁盘上的原目录移入
 系统回收站(需输入游戏名称确认, 不会永久删除)。界面明确区分原始位置与
 由应用管理的备份目录, 避免误操作。
@@ -20,6 +20,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from archive_management.domain import ArtworkKind, GameAction, PathKind, action_allowed
+from archive_management.domain.process_names import MAX_PROCESS_NAMES
 from archive_management.exceptions import ArchiveManagementError, ArtworkImageError
 from archive_management.i18n import tr
 from archive_management.ui.backend import ArchiveService
@@ -43,6 +44,7 @@ from archive_management.ui.widgets import (
     fit_label,
     paint_button_state,
     paint_button_style,
+    scaled_px,
     track_fit,
     window_scaling,
 )
@@ -78,8 +80,12 @@ _TITLE_TEXT_LINES = 2
 
 _WINDOW_WIDTH = 600
 _WINDOW_PAD_Y = 16
-# 位置行里“路径那一列”要让开的宽度: 类型标签 56 + 左侧 10 + 右侧 8 + 路径自己的右内边距 8.
-_ROW_TEXT_INSET = 56 + 10 + 8 + 8
+#: 位置行里 chip 的默认宽度(设计值, 逻辑像素): 它只是个**起点** —— 译文比它长时
+#: CTkLabel 会自己长大(实测 2026-11-07: 英文 "Main dir" 把它撑到 61)。
+_ROW_CHIP_WIDTH = 56
+# 位置行里"路径那一列"除 chip 之外要让开的宽度: 左侧 10 + chip 右侧 8 + 路径自己的右内边距 8.
+# **chip 自身的宽度不在这里**: 它随译文长度变, 只能到现场量(见 _build_row 的 inset 函数).
+_ROW_TEXT_INSET = 10 + 8 + 8
 # 窗口打开时的初始高度: 实际高度随后按内容算(见 _fit_window_height), 所以它只是一个
 # 合理的起点 —— 不再当内容的下限用(否则位置少的时候底部会空出一大块)。
 _WINDOW_MIN_HEIGHT = 440
@@ -102,6 +108,9 @@ _ARTWORK_PREVIEW_SIZE: dict[ArtworkKind, tuple[int, int]] = {
 _ARTWORK_LABEL_WIDTH = 44
 _ARTWORK_BUTTON_WIDTH = 96
 _ARTWORK_RESET_WIDTH = 88
+# "展开/收起"那枚开关按钮的宽度: 最长的一句是"收起进程名候选"(7 个汉字, 11 号字下≈77px),
+# 再留出左右内边距。两个开关取同一个宽, 堆在同一列才看得出是一条竖线。
+_FOLD_BUTTON_WIDTH = 116
 
 
 class ManageGameWindow:
@@ -131,6 +140,11 @@ class ManageGameWindow:
         self._backup_location = backup_location
         self._on_change = on_change
         self._items: list[LocationItem] = []
+        # 进程名候选(自动启停的识别名单): refresh 时从 get_detail 重读.
+        self._process_names: tuple[str, ...] = ()
+        self._process_buttons: list[ctk.CTkButton] = []
+        self._process_entry: ctk.CTkEntry | None = None
+        self._process_add_btn: ctk.CTkButton | None = None
         self._selected: str | None = None
         self._rows: dict[str, list[ctk.CTkBaseClass]] = {}
         # 鼠标悬停的那一行位置: 与主页卡片/详情页备份卡片同一套反馈.
@@ -241,6 +255,47 @@ class ManageGameWindow:
         )
         self._schedule_state.grid(row=3, column=0, sticky="w", pady=(2, 6))
 
+        # 「进程名候选」一节: 自动启停靠这份名单认出游戏进程(导入时自动播种)。
+        # 译名与进程名对不上时, 这里是用户唯一的补救入口 —— 带开关的小标题 + 说明第一行就是
+        # "这里能改", 名单本身默认收起来(与上一节同一条理由: 先让常用的一屏能看全)。
+        process_head = ctk.CTkFrame(container, fg_color="transparent")
+        process_head.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        process_head.grid_columnconfigure(0, weight=1)
+        process_heading = ctk.CTkLabel(
+            process_head,
+            text=tr("manage.process_title"),
+            anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=palette.text_body,
+        )
+        process_heading.grid(row=0, column=0, sticky="w")
+        self._process_toggle = self._fold_button(
+            process_head, "process", self._toggle_process
+        )
+        self._process_toggle.grid(row=0, column=1, sticky="e")
+
+        process_body = ctk.CTkFrame(container, fg_color="transparent")
+        process_body.grid(row=5, column=0, sticky="ew")
+        process_body.grid_columnconfigure(0, weight=1)
+        self._process_body = process_body
+        process_hint = ctk.CTkLabel(
+            process_body,
+            text=tr("manage.process_hint"),
+            anchor="w",
+            wraplength=540,
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color=palette.text_muted,
+        )
+        process_hint.grid(row=0, column=0, sticky="w", pady=(2, 6))
+        self._process_panel = ctk.CTkFrame(
+            process_body, fg_color=palette.panel, corner_radius=10
+        )
+        self._process_panel.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self._process_panel.grid_columnconfigure(0, weight=1)
+        self._process_open = False
+        process_body.grid_remove()
+
         locations_title = ctk.CTkLabel(
             container,
             text=tr("manage.locations_title"),
@@ -248,7 +303,7 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_body,
         )
-        locations_title.grid(row=4, column=0, sticky="w", pady=(0, 6))
+        locations_title.grid(row=6, column=0, sticky="w", pady=(0, 6))
 
         self._list_scroll = ctk.CTkScrollableFrame(
             container,
@@ -256,7 +311,7 @@ class ManageGameWindow:
             corner_radius=10,
             height=_LIST_MIN_HEIGHT,
         )
-        self._list_scroll.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        self._list_scroll.grid(row=7, column=0, sticky="ew", pady=(0, 8))
         self._list_scroll.grid_columnconfigure(0, weight=1)
         auto_scrollbar(self._list_scroll)
 
@@ -271,11 +326,11 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=11),
             text_color=palette.text_muted,
         )
-        note.grid(row=6, column=0, sticky="w", pady=(0, 8))
+        note.grid(row=8, column=0, sticky="w", pady=(0, 8))
         attach_tooltip(note, tr("manage.backup_note_tip", path=self._backup_location))
 
         action_bar = ctk.CTkFrame(container, fg_color="transparent")
-        action_bar.grid(row=7, column=0, sticky="w")
+        action_bar.grid(row=9, column=0, sticky="w")
         self._location_buttons: list[ctk.CTkButton] = []
         # 两行两组: 第一行是"新增(主操作, 强调色) + 管理现有位置", 第二行只放破坏性的
         # "删除"。六个按钮挤一行时总宽(96+96+108+92+92+80 = 564)已经等于容器可用宽度,
@@ -303,7 +358,7 @@ class ManageGameWindow:
         self._location_buttons.append(remove)
 
         danger_bar = ctk.CTkFrame(container, fg_color="transparent")
-        danger_bar.grid(row=8, column=0, sticky="w", pady=(8, 0))
+        danger_bar.grid(row=10, column=0, sticky="w", pady=(8, 0))
         self._delete_origin_btn = self._make_button(
             danger_bar,
             tr("loc.delete_origin"),
@@ -343,7 +398,7 @@ class ManageGameWindow:
         palette = self._palette
         section = ctk.CTkFrame(container, fg_color=palette.panel, corner_radius=10)
         section.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-        section.grid_columnconfigure(2, weight=1)
+        section.grid_columnconfigure(0, weight=1)
         heading = ctk.CTkLabel(
             section,
             text=tr("manage.appearance_title"),
@@ -351,9 +406,23 @@ class ManageGameWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=palette.text_body,
         )
-        heading.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 6))
-        for index, kind in enumerate(_ARTWORK_KINDS, start=1):
-            self._build_artwork_row(section, kind, row=index)
+        heading.grid(row=0, column=0, sticky="w", padx=12, pady=(12, 6))
+        self._artwork_toggle = self._fold_button(
+            section, "appearance", self._toggle_artwork
+        )
+        self._artwork_toggle.grid(
+            row=0, column=1, sticky="e", padx=(0, 12), pady=(12, 6)
+        )
+        # 两行内容装在自己的块里, 默认收起来(见 _toggle_artwork: 窗口高 850px, 而改封面/图标
+        # 是低频操作 —— 收起来之后"定时备份 + 进程名候选 + 存档位置"一屏能看全)。
+        body = ctk.CTkFrame(section, fg_color="transparent")
+        body.grid(row=1, column=0, columnspan=2, sticky="ew")
+        body.grid_columnconfigure(2, weight=1)
+        self._artwork_body = body
+        for index, kind in enumerate(_ARTWORK_KINDS):
+            self._build_artwork_row(body, kind, row=index)
+        self._artwork_open = False
+        body.grid_remove()
 
     def _build_artwork_row(
         self, section: ctk.CTkFrame, kind: ArtworkKind, *, row: int
@@ -522,6 +591,30 @@ class ManageGameWindow:
         self._fit_window_height()
         self._on_change()
 
+    def _fold_button(
+        self, parent: ctk.CTkBaseClass, key: str, command: Callable[[], None]
+    ) -> ctk.CTkButton:
+        """建一枚"展开/收起"开关(文字写的是点下去会发生什么, 与设置窗口的详情块同一套).
+
+        ``key`` 拼出两条文案(``manage.<key>_show`` / ``_hide``): 状态由文字自己表达,
+        不再另放一枚"已收起"的标签(那是同一件事说两遍)。
+        """
+        return self._make_button(
+            parent, tr(f"manage.{key}_show"), command, width=_FOLD_BUTTON_WIDTH
+        )
+
+    def _toggle_artwork(self) -> None:
+        """展开/收起"外观"那一节(默认收起, 见 :meth:`_build_artwork_section`)."""
+        self._artwork_open = not self._artwork_open
+        if self._artwork_open:
+            self._artwork_body.grid()
+            self._artwork_toggle.configure(text=tr("manage.appearance_hide"))
+        else:
+            self._artwork_body.grid_remove()
+            self._artwork_toggle.configure(text=tr("manage.appearance_show"))
+        # 内容高矮变了, 窗口要跟着重新量一次(否则收起之后底下空出一大块).
+        self._fit_window_height()
+
     def _make_button(
         self,
         parent: ctk.CTkBaseClass,
@@ -599,6 +692,9 @@ class ManageGameWindow:
         # 「外观」那一节也归在“改游戏信息”里: 归档后与重命名/启停同一档置灰。
         for choose, _reset in self._artwork_buttons.values():
             choose.configure(state="disabled")
+        # 「进程名候选」的归档置灰不在这里做: 面板控件随 refresh 重建, 而本方法
+        # 在建窗时先于 refresh 运行 —— 渲染时按 _archived 起始就置灰(见
+        # _render_process_names), 免得留一段永远空转的兜底循环。
         self._paint_buttons()
 
     def _blocked(self, action: GameAction) -> bool:
@@ -623,13 +719,17 @@ class ManageGameWindow:
         )
 
     def refresh(self) -> None:
-        """从后端重载存档位置列表并重绘."""
+        """从后端重载存档位置与进程名候选并重绘."""
         self._items = self._backend.list_locations(self._game_id)
+        self._process_names = tuple(
+            self._backend.get_detail(self._game_id).process_names
+        )
         if self._selected is not None and not any(
             item.location_id == self._selected for item in self._items
         ):
             self._selected = None
         self._rebuild_rows()
+        self._render_process_names()
         self._fit_list_height()
         self._fit_window_height()
 
@@ -686,7 +786,13 @@ class ManageGameWindow:
             min(round(int(self._window.winfo_reqheight()) / scale), available),
         )
         self._window.geometry(f"{_WINDOW_WIDTH}x{height}")
-        _present(self._parent, self._window)
+        # ``clamp=False``: 键盘接线与初始定焦照旧(抓取式窗口该有的), 只是不再走对话框的
+        # 舒适线夹取 —— 那一步会把正文区收矮, 而且跑在高度已经定下来之后, 于是窗口比内容
+        # 高出 100 多像素。2026-11-07 的 Linux CI 实测: 本函数定高 874, 夹取把正文从 770 收到
+        # 696(整窗请求变成 764), test_the_manage_window_hugs_its_content 因此报 "874 > 840"。
+        # 本窗口自己的夹取(屏高 - _SCREEN_MARGIN)已经保证不出屏; 也不能整体改 modal=False:
+        # 那会连初始定焦一起省掉, 重新映射之后就没有人再把焦点放回去了(macOS/Linux 实测)。
+        _present(self._parent, self._window, clamp=False)
 
     def _body_content_height(self) -> int:
         """正文内容想要多高(**物理**像素): 数滚动区画布里排出来的那一块.
@@ -697,6 +803,154 @@ class ManageGameWindow:
         canvas = getattr(self._body, "_parent_canvas", None)
         box = None if canvas is None else canvas.bbox("all")
         return 0 if box is None else int(box[3]) - int(box[1])
+
+    # -- 进程名候选 ---------------------------------------------------------
+
+    def _toggle_process(self) -> None:
+        """展开/收起"进程名候选"那一节(默认收起, 见 :meth:`_build`)."""
+        self._process_open = not self._process_open
+        if self._process_open:
+            self._process_body.grid()
+            self._process_toggle.configure(text=tr("manage.process_hide"))
+        else:
+            self._process_body.grid_remove()
+            self._process_toggle.configure(text=tr("manage.process_show"))
+        self._fit_window_height()
+
+    def _render_process_names(self) -> None:
+        """重绘候选区: 每行一个名字 + 移除按钮, 末行是输入框 + 添加按钮.
+
+        名单整体重绘而不是增删单行: 候选至多 MAX_PROCESS_NAMES 行, 重建的成本
+        可忽略, 也不用维护"移除后行号错位"这类簿记(与位置列表同一套做法)。
+        """
+        palette = self._palette
+        for child in self._process_panel.winfo_children():
+            child.destroy()
+        self._process_buttons = []
+        names = self._process_names
+        row_index = 0
+        if not names:
+            empty = ctk.CTkLabel(
+                self._process_panel,
+                text=tr("manage.process_empty"),
+                anchor="w",
+                justify="left",
+                wraplength=440,
+                font=ctk.CTkFont(size=11),
+                text_color=palette.text_muted,
+            )
+            empty.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 0))
+            row_index = 1
+        for name in names:
+            row = ctk.CTkFrame(self._process_panel, fg_color="transparent")
+            row.grid(row=row_index, column=0, sticky="ew", padx=12, pady=(6, 0))
+            row.grid_columnconfigure(0, weight=1)
+            label = ctk.CTkLabel(
+                row,
+                text=name,
+                anchor="w",
+                font=ctk.CTkFont(size=12),
+                text_color=palette.text_body,
+            )
+            label.grid(row=0, column=0, sticky="w")
+            # 名字通常不长, 但安装目录名可以做得很长: 跟随行宽裁剪, 悬停看全文。
+            track_fit(row, label, (name,), inset=8)
+            remove = self._make_button(
+                row,
+                tr("manage.process_remove"),
+                partial(self._on_remove_process_name, name),
+                width=72,
+                # 危险色: 回调名带 remove 的动作按配色判据必须穿危险色(与"删除位置
+                # 记录"同一档 —— 移除播种来的候选同样丢的是用户拿不回来的名单项)。
+                danger=True,
+            )
+            remove.grid(row=0, column=1, padx=(8, 0))
+            self._process_buttons.append(remove)
+            if self._archived:
+                remove.configure(state="disabled")
+                # 单颗重绘而不是全量 _paint_buttons: 注册表里还留着上一轮重建时
+                # 已销毁的按钮(位置列表同一情况, 见 _rebuild_rows 只走 _paint_rows)。
+                paint_button_state(remove, palette, self._buttons[remove])
+            row_index += 1
+        add_row = ctk.CTkFrame(self._process_panel, fg_color="transparent")
+        add_row.grid(row=row_index, column=0, sticky="ew", padx=12, pady=(10, 12))
+        add_row.grid_columnconfigure(0, weight=1)
+        entry = ctk.CTkEntry(
+            add_row,
+            fg_color=palette.input_bg,
+            border_color=palette.input_border,
+            text_color=palette.text_body,
+            placeholder_text=tr("manage.process_placeholder"),
+        )
+        entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        # add="+": 不顶掉控件自己对这些键的处理(与 ui.keyboard 同一条规矩)。
+        entry.bind("<Return>", lambda _event: self._on_add_process_name(), add="+")
+        entry.bind(
+            "<KeyRelease>", lambda _event: self._refresh_process_add_state(), add="+"
+        )
+        self._process_entry = entry
+        self._process_add_btn = self._make_button(
+            add_row,
+            tr("manage.process_add"),
+            self._on_add_process_name,
+            width=72,
+            primary=True,
+        )
+        self._process_add_btn.grid(row=0, column=1)
+        if self._archived:
+            entry.configure(state="disabled")
+        self._refresh_process_add_state()
+
+    def _refresh_process_add_state(self) -> None:
+        """「添加」按钮的可用性: 有字、未到上限、未归档(与标签编辑对话框同口径)."""
+        entry = self._process_entry
+        button = self._process_add_btn
+        if entry is None or button is None:  # pragma: no cover - 建窗后必然存在
+            return
+        usable = (
+            bool(entry.get().strip())
+            and len(self._process_names) < MAX_PROCESS_NAMES
+            and not self._archived
+        )
+        button.configure(state="normal" if usable else "disabled")
+        # 同上: 只重绘这一颗, 注册表里的旧按钮可能已随上一轮重建销毁。
+        paint_button_state(button, self._palette, self._buttons[button])
+
+    def _on_add_process_name(self) -> None:
+        """把输入框里的名字追加进候选名单(后端校验失败时把原因亮给用户)."""
+        if self._blocked("process_names"):
+            return
+        entry = self._process_entry
+        if entry is None:  # pragma: no cover - 建窗后必然存在
+            return
+        raw = entry.get().strip()
+        if not raw:
+            return
+        try:
+            self._backend.set_game_process_names(
+                self._game_id, [*self._process_names, raw]
+            )
+        except ArchiveManagementError as exc:
+            self._show_error(exc)
+            return
+        entry.delete(0, "end")
+        self.refresh()
+        self._on_change()
+
+    def _on_remove_process_name(self, name: str) -> None:
+        """从候选名单里移除一个名字(其余原样保留)."""
+        if self._blocked("process_names"):
+            return
+        try:
+            self._backend.set_game_process_names(
+                self._game_id,
+                [kept for kept in self._process_names if kept != name],
+            )
+        except ArchiveManagementError as exc:  # pragma: no cover - 移除只交子集
+            self._show_error(exc)
+            return
+        self.refresh()
+        self._on_change()
 
     def _rebuild_rows(self) -> None:
         for child in self._list_scroll.winfo_children():
@@ -731,7 +985,7 @@ class ManageGameWindow:
         chip = ctk.CTkLabel(
             row,
             text=_chip_text(item.path_kind, primary=item.is_primary),
-            width=56,
+            width=_ROW_CHIP_WIDTH,
             corner_radius=RADIUS_LG,
             font=ctk.CTkFont(size=11),
             fg_color=palette.accent_soft,
@@ -750,7 +1004,24 @@ class ManageGameWindow:
         title.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(8, 0))
         # 路径可以很长: 按行内剩下的宽度**中间省略**(尾部是目录名, 比盘符值得留),
         # 否则会被行硬切 —— 它自己是 pack/grid 到左边、宽度随文字变的, 不能拿来当依据。
-        track_fit(row, title, (title_text,), path=True, inset=_ROW_TEXT_INSET)
+        # 预算是"行宽 - chip 宽 - 固定内衬", 而 chip 那一截必须**量**: 译文更长时它自己
+        # 会长大(英文 "Main dir" 56 → 61), 按设计值写死就会让预算多出那一截, 路径尾部被
+        # Tk 静默切掉几个像素(2026-11-07 实测 5px)。
+        # 用 ``winfo_reqwidth()`` 而不是 ``winfo_width()``: 后者要等布局跑完, 而本函数第一
+        # 次被调时(POSTER/列表刚建)chip 还是 0/1 宽 —— Linux 与 macOS 上因此算出一个偏大
+        # 的预算(实测 504 vs 454)且之后不再有 ``<Configure>`` 来纠正, 裁剪后的文字反而比
+        # 标签宽(2026-11-07 CI 三平台都红)。请求宽度是"文字 + 内衬", 建控件时就有了。
+        # ``track_fit`` 的 inset 支持函数, 返回值按**物理**像素算(见它的说明)。
+        track_fit(
+            row,
+            title,
+            (title_text,),
+            path=True,
+            inset=lambda: (
+                max(chip.winfo_reqwidth(), scaled_px(row, _ROW_CHIP_WIDTH))
+                + scaled_px(row, _ROW_TEXT_INSET)
+            ),
+        )
 
         note = ctk.CTkLabel(
             row,

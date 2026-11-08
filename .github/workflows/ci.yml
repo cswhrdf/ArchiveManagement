@@ -28,7 +28,7 @@ on:
 # 实例; 纯文档改动那一轮更少 —— 被跳过的作业不占 runner)。
 # 按 ref 分组, 所以 PR、dev、main 各管各的; 始终保留最新一次提交的结论。
 # 注意 `always()` 的语义是“即使被取消也返回 true”: 取消后就不该再启动的作业要用
-# `always() && !cancelled()` 表达(见 pytest-report / allure-summary 的作业条件),
+# `always() && !cancelled()` 表达(见 pytest-report / allure-summary / publish-report 的作业条件),
 # 否则被取代的那一轮照样会把报告合并、生成、上传跑一遍。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -783,10 +783,12 @@ jobs:
           path: job-diagnostics/
           if-no-files-found: error
 
-  windows-package:
+  package:
     # 打包门禁: **合入 main 的 PR** 在 CI 的检查都过了之后, 才拿这个 PR 的合并预览提交去构建。
     # 「用例绿」与「能编 + 产物能起」是两件事 —— 后者只有真跑一次 PyInstaller 才知道, 而它最容易
     # 悄悄坏(资源没进包、spec 少一行、隐藏导入失效), 等到发布那一刻才发现就晚了。
+    # 一次调用出**两个平台**(2026-11-01 起, 作业也从 windows-package 改名 package):
+    # release-build.yml 里 Windows 与 Linux 两个作业并行, 这边一个 `uses:` 等两份都绿。
     # 为什么用 `uses:` 调 release-build.yml 而不在这里抄一遍构建步骤: 构建只有一处定义, 门禁这条路
     # 与发布那条路(release.yml 的 build 作业调的也是同一份)跑的是同一份步骤, 不会各自漂移。
     # **调的是"只读的构建"那一份, 不是 release.yml**(2026-10-17 实测): 嵌套工作流的权限是**逐作业
@@ -803,7 +805,7 @@ jobs:
     # 汇总报告。报告链的红(覆盖率门槛、原生质量门)由它们自己的必需检查兜住, 不再挡打包的墙钟;
     # 而这里的前置(quality/pytest/security)红了 => 本作业被跳过(default needs 语义) =>
     # packaging-gate 判红, 合入照样被拦。
-    name: 打包 Windows 产物 (仅合入 main 的 PR)
+    name: 打包 Windows 与 Linux 产物 (仅合入 main 的 PR)
     needs: [changes, quality, pytest, security]
     if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && needs.changes.outputs.should_run == 'true' }}
     uses: ./.github/workflows/release-build.yml
@@ -817,9 +819,10 @@ jobs:
     # 给分支保护用的**必需检查**: 恒有一份结论(跳过也是结论), 所以它不会停在 pending。
     # 三种情况: ① 纯文档改动 ⇒ 不需要编译, 绿; ② 不是合入 main 的 PR ⇒ 不在这条门禁范围内, 绿;
     # ③ 合入 main 的 PR ⇒ 上面那个作业必须真的成功(被跳过也算不成功 —— 那意味着前置检查红了,
-    # 那时本来就该拦住合入)。
+    # 那时本来就该拦住合入)。`package` 一次调 release-build.yml 建两个平台, 它的结果就是
+    # "Windows 与 Linux 都编出来且产物冒烟通过"。
     name: CI required packaging status
-    needs: [changes, windows-package]
+    needs: [changes, package]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -829,7 +832,7 @@ jobs:
           SHOULD_RUN: ${{ needs.changes.outputs.should_run }}
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-          PACKAGE_RESULT: ${{ needs.windows-package.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           if [ "$SHOULD_RUN" != "true" ]; then
             echo "纯文档改动: 本轮不需要编译, 打包门禁按通过计。"
@@ -856,6 +859,12 @@ jobs:
     # 作业与历史回填都照旧读它们 —— 历史也按平台各一条, 改名会把累计曲线清零。
     name: 合并测试报告 (${{ matrix.platform }})
     needs: [changes, pytest]
+    # 历史基线的第一来源是 Pages 站点(见 Fetch previous Allure history from the
+    # Pages site): pages: read 只用来查"站点开没开、地址是什么", 不给写。
+    permissions:
+      contents: read
+      actions: read
+      pages: read
     # 分片作业失败也要出报告: 报告正是用来看"哪一片挂了"的。
     # 但**被取代的运行不必再出报告**: 这一条要用 `!cancelled()` 表达, 不能只写 `always()`
     # —— `always()` 连“整轮被取消”也返回 true, 那样旧的那一轮会在取消后照样启动本作业
@@ -1082,8 +1091,62 @@ jobs:
           echo "::error::覆盖率数据不全(缺片): 本轮不判覆盖率门槛。请到本平台的分片作业里看哪一片没上传产物。"
           exit 1
 
+      - name: Fetch previous Allure history from the Pages site
+        id: pages-history
+        # 历史基线的第一来源是 Pages 站点而不是 artifact: artifact 有 90 天寿命,
+        # 开发节奏放缓后"上一轮"可能已在窗口外, 趋势静默从零开始; 站点是发布作业每轮
+        # 整体重部署的快照, 永远停在"最近一次部署的那一轮"(publish-report 把
+        # history.jsonl 放在站点根)。取不到(Pages 未启用/首次部署前/网络)时
+        # core.warning 后返回, 下面的 artifact 老路照走 —— 降级是正常路径, 不是故障。
+        # PR 轮同样先走这里: 站点公开只读, fork 的降级 token 查不到 Pages 配置时
+        # 正好落回 artifact。
+        # 方法名是 `repos.getPages`(读一个 GitHub Pages 站点), **不是** `repos.getPagesInfo`:
+        # 后者是旧版 `@octokit/rest` 的名字, 在 github-script 里会抛
+        # "is not a function" —— 那种 TypeError 会被下面的 catch 当成"站点取不到",
+        # 于是永远静默降级(2026-11-07 实测: 站点上其实有 history.jsonl, 一轮也没读过)。
+        # **站点上那份是 gzip 过的**(history.jsonl.gz): 未压缩的已经到 400 MB 量级(40 条
+        # 快照 × 每轮几千条用例的记录), 而压完不到 20 MB —— 站点容量(1 GB)与每轮那 4 次
+        # 下载(3 个平台报告作业 + 汇总)都差一个数量级以上。Pages 对 application/octet-stream
+        # 不做传输压缩, 所以这里自己解(发布侧见 publish-report 的 Unpack the report for Pages)。
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let site;
+            try {
+              site = await github.rest.repos.getPages({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+            } catch (error) {
+              core.warning(`查不到 Pages 配置(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl.gz`;
+            let body;
+            try {
+              const response = await fetch(target, { redirect: "follow" });
+              if (!response.ok) {
+                core.warning(`站点上没有 history.jsonl.gz(HTTP ${response.status}): 历史基线改走 artifact 老路`);
+                return;
+              }
+              const { gunzipSync } = require("zlib");
+              body = gunzipSync(Buffer.from(await response.arrayBuffer())).toString("utf8");
+              JSON.parse(body.split("\n", 1)[0]);
+            } catch (error) {
+              core.warning(`读取 Pages 历史失败(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const { mkdir, writeFile } = require("fs/promises");
+            await mkdir(".allure", { recursive: true });
+            await writeFile(".allure/history.jsonl", body, "utf8");
+            core.setOutput("fetched", "true");
+            core.notice(`历史基线来自 Pages: ${target}`);
+
       - name: Resolve previous run with Allure history
         id: prev-run
+        # 只在 Pages 没给出历史时才查 artifact(Pages 命中时这一步白跑还会把趋势
+        # 锚到更旧的一轮上)。
+        if: steps.pages-history.outputs.fetched != 'true'
         # 基线**不要求**那一轮是 success(2026-10-05 教训): 只认成功运行时, 连续失败的
         # 时期(如 macOS Tk 崩溃那几天)没有任何一轮被消费, 基线会冻结在更早的成功运行上
         # —— 恰逢历史键的形状变了(environments 多出一段), 于是每轮都按旧形状"修",
@@ -1125,7 +1188,7 @@ jobs:
             }
 
       - name: Download previous Allure history
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         uses: actions/download-artifact@v7
         with:
           name: allure-resources-${{ matrix.os }}
@@ -1139,7 +1202,7 @@ jobs:
         # allure-manifest.json)才会保留 .allure/ 前缀。两种布局都认 —— 2026-10-05 实测:
         # 汇总作业的上传侧从多路径改成单路径后, 下一轮的 cp 在两种布局里都只找得到其中
         # 一种, 于是 final 历史链悄悄断掉(每轮清零重来)。找不到时响亮报错而不是静默跳过。
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         shell: bash
         run: |
           mkdir -p .allure
@@ -1175,12 +1238,16 @@ jobs:
         # 但这里用 **allurerc.per-platform.mjs**: 3.20.0 起 `generate` 也会执行质量门, 而
         # `environmentsTested` 只在汇总那份报告里成立 —— 本作业只合并**一个平台**的结果,
         # 用主配置生成会以退 1 收场(实测)。那份配置从主配置继承, 只摘掉 qualityGate。
+        #
+        # `--clean` 不是可选项(2026-11-08): 生成器**不刷新**已存在的输出目录, 目录里有
+        # 上一份报告的残留时它只打一句 warning 就混着用 —— 旧静态资源的哈希名与新清单
+        # 对不上时, 详情页会随机打不开, 而报告本身看着是好的。
         if: always()
         shell: bash
         run: |
           mkdir -p .allure
           if [ -n "$(find allure-results -type f -print -quit 2>/dev/null)" ]; then
-            allure generate allure-results --output allure-report --config allurerc.per-platform.mjs
+            allure generate allure-results --output allure-report --clean --config allurerc.per-platform.mjs
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi
@@ -1226,8 +1293,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Allure report
-        # 自检不通过时不上传报告: 宁可让作业红着, 也不要把"打不开详情"的报告发出去。
-        if: always() && steps.verify-report.outcome == 'success'
+        # 归档在就传: 自检脚本"打不开"(入口/详情缺失)时根本不打包, 这里自然跳过;
+        # 内容性失败(缺平台用例、清单对不上)照样传 —— 报告正是用来看"哪里缺了"的,
+        # 拦下来反而拿不到证据(2026-11-01 起与 Pages 发布同一口径)。
+        if: always() && !cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-${{ matrix.os }}
@@ -1342,30 +1411,40 @@ jobs:
           if-no-files-found: error
 
   allure-summary:
-    # 只生成一份汇总报告并作为 artifact 上传（2026-10-06 起不再发布到 GitHub Pages）:
-    # 站点发布用的 pages / id-token 权限、github-pages 环境与三个发布步骤一并删除,
-    # 报告的可达性交给 `allure-report-final` 产物。
+    # 汇总一份报告作为 `allure-report-final` 产物上传, 并把"报告归档在不在"透传出去 ——
+    # push 轮由末尾的 `publish-report` 作业把这份产物发布到 GitHub Pages(2026-11-01 恢复;
+    # 2026-10-06 曾整体移除站点发布, 恢复时没有塞回本作业: pages/id-token 权限只给那个
+    # 不 checkout、不跑仓库脚本的小作业, fork PR 也碰不到发布路径)。
     name: Allure 汇总报告
-    needs: [changes, quality, pytest-report, security, windows-package]
+    needs: [changes, quality, pytest-report, security, package]
     # 同上: 依赖作业失败/跳过也要汇总(结论各管各的), 但整轮被取消就不启动。
     if: always() && !cancelled() && needs.changes.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    # `report_archived` 只回答"报告归档打出来没有"(自检脚本判"打得开"才会打包), 不回答
+    # "自检过没过": 内容性失败(缺平台用例、门禁判红)轮次的报告照样上传、照样发布 ——
+    # 失败轮的报告恰恰是最该能打开看的(2026-11-01 起发布闸门是"打得开"而非"全通过")。
+    outputs:
+      report_archived: ${{ steps.archive-present.outputs.present }}
     # allure-resources-<平台> 现在由 pytest-report 上传, 所以汇总必须等它 —— 否则下载
     # 时产物还没传完, 汇总报告会静默地少掉各平台的测试结果。这份清单要与"产出 Allure
     # 结果的作业"一致(tests/unit/test_sharding.py 会核对)。
     # 平台专属检查、静态分析与性能基准现在都跑在 pytest 的片 0 与 quality 作业里, 所以清单里
     # 不再有 quality-platform / analysis / performance: 它们要出的产物都由这两个作业上传,
     # 等它们跑完即可。
-    # windows-package(2026-10-27 重排): 打包作业里的构建后冒烟会上传
-    # `allure-results-smoke-windows`, 靠下面的 `pattern: allure-results-*` 一并收进汇总报告
+    # package(2026-10-27 重排, 2026-11-01 起一次建两平台): 打包作业里的构建后冒烟会上传
+    # `allure-results-smoke-windows` 与 `allure-results-smoke-linux`, 靠下面的
+    # `pattern: allure-results-*` 一并收进汇总报告
     # —— 不等它就会在它传完之前去下载, 报告静默少一节。被跳过的 need 不拦 `always()` 作业:
     # 测试红 / 非门禁路径 / 纯文档的轮次里它就是 skipped, 汇总照常出报告, 冒烟那一族按
     # 条件期望处理(见后面调 create_allure_summary.py 的那一步)。
     # 这个作业只跑仓库自己的脚本(不跑 PR 里的代码), 权限与顶层一致即可:
-    # `contents: read`(checkout 要它) + `actions: read`(取本轮的产物)。
+    # `contents: read`(checkout 要它) + `actions: read`(取本轮的产物);
+    # 另加 `pages: read`: 历史基线的第一来源是 Pages 站点(见 Fetch previous Allure
+    # history from the Pages site), 只用来查站点开没开、地址是什么。
     permissions:
       contents: read
       actions: read
+      pages: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -1400,7 +1479,7 @@ jobs:
           key: npm-allure-3-linux
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -1476,12 +1555,52 @@ jobs:
           # 各平台的产物同名, 分开存放才能各自出现在汇总报告里(不能被后写的覆盖).
           merge-multiple: false
 
+      - name: Fetch previous Allure history from the Pages site
+        id: pages-history
+        # 与逐平台作业同一条链路(见 pytest-report 里那段说明, 包括方法名为什么是
+        # `repos.getPages` 而不是 `repos.getPagesInfo`)。final 报告的趋势也一样吃这份基线 ——
+        # 两处取的是同一个 URL, 站点永远停在最近一次部署的那一轮。
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let site;
+            try {
+              site = await github.rest.repos.getPages({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+            } catch (error) {
+              core.warning(`查不到 Pages 配置(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const target = `${site.data.html_url.replace(/\/+$/, "")}/history.jsonl.gz`;
+            let body;
+            try {
+              const response = await fetch(target, { redirect: "follow" });
+              if (!response.ok) {
+                core.warning(`站点上没有 history.jsonl.gz(HTTP ${response.status}): 历史基线改走 artifact 老路`);
+                return;
+              }
+              const { gunzipSync } = require("zlib");
+              body = gunzipSync(Buffer.from(await response.arrayBuffer())).toString("utf8");
+              JSON.parse(body.split("\n", 1)[0]);
+            } catch (error) {
+              core.warning(`读取 Pages 历史失败(${error.message}): 历史基线改走 artifact 老路`);
+              return;
+            }
+            const { mkdir, writeFile } = require("fs/promises");
+            await mkdir(".allure", { recursive: true });
+            await writeFile(".allure/history.jsonl", body, "utf8");
+            core.setOutput("fetched", "true");
+            core.notice(`历史基线来自 Pages: ${target}`);
+
       - name: Resolve previous run with Allure history
         id: prev-run
         # 与逐平台作业同一条理由: 基线不问成败, 只看那一轮是否真的传了产物 ——
         # 只认成功运行会把链条冻结在旧基线上(连续失败时期 + 键形状变更 = 历史永远
         # 接不上), 详见 pytest-report 作业里那段说明。
-        if: always()
+        # Pages 已给出历史时不再查 artifact: 查了也只是把基线锚到更旧的一轮上。
+        if: always() && steps.pages-history.outputs.fetched != 'true'
         uses: actions/github-script@v9
         env:
           ARTIFACT_NAME: allure-resources-final
@@ -1518,7 +1637,7 @@ jobs:
             }
 
       - name: Download previous Allure history
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         uses: actions/download-artifact@v7
         with:
           name: allure-resources-final
@@ -1532,7 +1651,7 @@ jobs:
         # 按带前缀的路径去 cp, 每轮都失败, 修复步骤跟着"读入 0 份", 最终报告的历史
         # 每轮清零。找不到时响亮报错: 这一步的前一步刚确认过产物存在, 拷不出来只能是
         # 布局变了, 不能让"趋势从零开始"再静默发生一次。
-        if: steps.prev-run.outputs.run_id != ''
+        if: steps.pages-history.outputs.fetched != 'true' && steps.prev-run.outputs.run_id != ''
         shell: bash
         run: |
           mkdir -p .allure
@@ -1594,6 +1713,17 @@ jobs:
           fi
           echo "没有可用的 allure-results, 跳过质量门校验" | tee allure-quality-gate.txt
 
+      - name: Attach the profile trace to Allure
+        # 把 `@pytest.mark.profile` 的耗时追踪从用例上搬成一条独立结论项(按平台归环境),
+        # 并把 Top self time 摘要内联进描述(用户 2026-11-07: 挂在用例上要先知道是哪条用例
+        # 才找得到, 而它衡量的是"这一轮哪几个函数最费时", 与那条用例的断言无关)。
+        # 必须排在下面的汇总之前: 运行总账的 ② 产物清单是按 `archive-management.` 前缀
+        # 列结果与附件的, 晚了那一轮就看不到它。没有 trace 的平台(按设计只有 Linux 追踪)
+        # 什么都不写, 只打一行 ::notice:: —— 它在清单里是按需产出, 缺了不算缺失。
+        if: always()
+        shell: bash
+        run: uv run python scripts/create_allure_profile.py --results allure-results
+
       - name: Summarize performance and security into Allure
         # `--expect-platforms` 与 allurerc.mjs 的 `environmentsTested`、以及下面
         # "Check every platform contributed tests" 的取值必须是同一个集合: 它决定运行总账末节
@@ -1601,12 +1731,14 @@ jobs:
         # (而不是安静地少一节)。守卫把这个列表与配置/矩阵钉在一起。
         # `--expect-smoke-platforms` 是**条件期望**(2026-10-27): 产物冒烟只在"打包真的跑了"的
         # 运行里才应该有 —— 打包门禁只在合入 main 的 PR 上执行, 无条件要求会让 push 到 dev、
-        # 测试红了被跳过的 PR 每轮都报一条假缺失。取值由 needs.windows-package.result 推出:
+        # 测试红了被跳过的 PR 每轮都报一条假缺失。取值由 needs.package.result 推出:
         # success / failure 都要求数(失败=冒烟红或构建红, 两种都该在报告里看得见缺了什么),
-        # skipped / cancelled(前置红了、不是这条路径、纯文档)传空 = 不适用。
+        # skipped / cancelled(前置红了、不是这条路径、纯文档)传空 = 不适用。平台清单
+        # Windows,Linux 与 release-build.yml 两个作业各自的结论目录一一对应 —— 冒烟在哪个
+        # 平台上跑了, 那个平台就该有数(写漏一个, 报告按缺失点名; 写多一个, 永远报假缺失)。
         if: always()
         env:
-          SMOKE_EXPECTED: ${{ (needs.windows-package.result == 'success' || needs.windows-package.result == 'failure') && 'Windows' || '' }}
+          SMOKE_EXPECTED: ${{ (needs.package.result == 'success' || needs.package.result == 'failure') && 'Windows,Linux' || '' }}
         shell: bash
         run: |
           mkdir -p allure-results
@@ -1639,12 +1771,15 @@ jobs:
 
       - name: Generate final Allure report
         # 同 pytest 作业: 历史与环境设置都在仓库根的 allurerc.mjs 里。
+        # `--clean` 的理由同上一步(生成器不刷新已存在的输出目录): 这一处是最先踩到的
+        # —— 2026-11-07 的 CI 日志里已经有 "The output directory ... is not empty"
+        # 这句 warning, 只是那一轮产物恰好对得上, 没红。
         if: always()
         shell: bash
         run: |
           mkdir -p .allure
           if [ -n "$(ls -A allure-results)" ]; then
-            allure generate allure-results --output allure-report
+            allure generate allure-results --output allure-report --clean
           else
             echo "没有可用的 allure-results, 跳过报告生成"
           fi
@@ -1686,16 +1821,30 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload final Allure report
-        # 报告不再发布到 GitHub Pages(2026-10-06): 想浏览时下载这份 `allure-report-final` 产物
-        # (单个 tar.gz, `archive: false` 不再多套一层 zip)。自检不通过时不上传: 宁可让作业红着,
-        # 也不给出"打不开详情"的报告。
-        if: always() && steps.verify-report.outcome == 'success'
+        # 报告作为 `allure-report-final` 产物上传(单个 tar.gz); push 轮的站点发布由
+        # `publish-report` 作业下载这一份去部署。归档在就传: 自检脚本"打不开"时根本
+        # 不打包(这里自然跳过), 内容性失败照样传 —— 失败轮的报告恰恰是最该能打开看的
+        # (与 pytest-report 那份同一口径)。
+        # 不能用 `archive: false` 直传原文件(2026-11-01 实测): 那个模式下 upload-artifact
+        # 拿**文件名**当产物名、`name` 输入被静默忽略 —— 产物实际叫 allure-report.tar.gz,
+        # 发布作业按 `allure-report-final` 去下就是 "Artifact not found"。tar.gz 本身已是
+        # 压缩格式, 外层 zip 容器给 0 级(只存储), 免得白压一遍。
+        if: always() && !cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: allure-report-final
           path: allure-report.tar.gz
-          archive: false # 不打包，直接上传原始文件
+          compression-level: 0
           if-no-files-found: ignore
+
+      - name: Record whether the report archive exists
+        # 发布闸门的事实来源: 归档文件在(= 自检判过"打得开"并打了包)才算有能发布的报告。
+        # 不用 upload 步骤的 outcome —— 归档不在时 upload-artifact 对 0 文件照样 success
+        # (if-no-files-found: ignore), 会把发布作业骗进一次注定红的下载。
+        id: archive-present
+        if: always() && !cancelled()
+        shell: bash
+        run: echo "present=$([ -f allure-report.tar.gz ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Collect failure diagnostics
         id: diagnostics
@@ -1737,3 +1886,133 @@ jobs:
         run: |
           echo "::error::质量门未通过 或 有平台没有合并进用例结果 —— 见上面的逐平台条数与报告首页「全局附件」的运行总账"
           exit 1
+
+  publish-report:
+    # 把这一轮的汇总报告发布到 GitHub Pages(2026-11-01 恢复; 2026-10-06 曾随"报告只作
+    # artifact"的整改一起移除)。独立成小作业而不是塞回 `allure-summary`, 三条理由:
+    # ① 权限最小化 —— pages / id-token 只给这个"不 checkout、不跑仓库脚本、只用官方
+    #    action"的作业, 汇总作业(装着 uv 与 npm 环境)保持只读;
+    # ② fork PR 拿不到 pages:write(PR 事件的 GITHUB_TOKEN 会被降级), 条件里排除掉
+    #    pull_request, 否则 fork 上的每轮 PR 会多一条恒红的检查;
+    # ③ 站点是全局独占资源 —— 顶层 concurrency 按 ref 分组拦不住 dev 与 main 同时部署,
+    #    作业级并发组把两路串起来并取消旧的, 站点永远停在"最新完成的那一轮"。
+    name: 发布报告到 Pages
+    needs: [allure-summary]
+    # 两个闸门: 只 push 轮发布; `report_archived` 为 true(自检判"打得开"并打了包)才部署。
+    # 除此之外不看任何结论 —— 门禁判红、缺平台用例这类"记录的内容"失败不拦发布:
+    # 那种轮次的报告才是最该能打开看的(2026-11-01 定的口径)。
+    if: always() && !cancelled() && github.event_name == 'push' && needs.allure-summary.outputs.report_archived == 'true'
+    runs-on: ubuntu-latest
+    # 作业级权限是覆盖语义: 这里不 checkout, 但下载本轮产物要 actions: read。
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      # 第一次部署成功用第一份; 第一次失败、重试成功时第一份是空的, 回落到第二份
+      # (失败的那次 action 走不到 setOutput, 所以 `||` 是必需的, 不是保险)。
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url }}
+    steps:
+      - name: Download the final Allure report
+        # 汇总作业上传的那份单个 tar.gz(闸门在作业条件里: 归档不在整个作业都不会启动);
+        # 下不来就是上传侧出了问题 —— 响亮失败, 不部署半份或旧份。注意 download-artifact
+        # 没有"找不到就算了"的开关(那是 upload 侧的 if-no-files-found, 写在这里只会得到
+        # 一句 "Unexpected input(s)" 告警), 按名字找不到它本来就失败 —— 正是这里要的。
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-report-final
+          path: report-archive
+
+      - name: Download the final Allure history
+        # 站点是历史基线的"永久"落脚点: 下一轮两个报告作业优先从站点根取回这份文件
+        # (见 pytest-report / allure-summary 的 Fetch previous Allure history from
+        # the Pages site)。能走到本作业说明归档在, generate 一定追加过历史 —— 这个
+        # 产物必然存在, 下不来就是上传侧出了问题, 响亮失败而不是部署一个让下一轮
+        # 接不上基线的站点。
+        uses: actions/download-artifact@v7
+        with:
+          name: allure-resources-final
+          path: final-resources
+
+      - name: Unpack the report for Pages
+        # tar 里就是整站: 解到干净的 site/ 作为站点根, 后面 upload-pages-artifact 上传的
+        # 就是这个目录。
+        shell: bash
+        run: |
+          mkdir -p site
+          tar -xzf report-archive/allure-report.tar.gz --strip-components=1 -C site
+          # 历史文件放进站点根, 但是**压缩过的**(history.jsonl.gz, 与取数侧的 URL 一致):
+          # 未压缩那份已经 400 MB 量级(40 条快照 × 每轮几千条用例的记录, 含失败用例的
+          # statusDetails), 而站点总容量上限是 1 GB; gzip -9 之后不到 20 MB, 每轮那 4 次
+          # 下载(3 个平台报告作业 + 汇总)也一起掉到原来的 1/20。Pages 对
+          # application/octet-stream 不做传输压缩, 所以只能自己压。两种 artifact 布局都认
+          # (与报告作业的恢复步骤同一个实测结论: 单文件上传时 history.jsonl 落在压缩包根部)。
+          for candidate in \
+            final-resources/.allure/history.jsonl \
+            final-resources/history.jsonl
+          do
+            if [ -f "${candidate}" ]; then
+              gzip -9 -c "${candidate}" > site/history.jsonl.gz
+              exit 0
+            fi
+          done
+          echo "::error::allure-resources-final 里找不到 history.jsonl —— 站点是下一轮历史基线的来源, 缺了它趋势就要从零开始。请对照 'Upload final Allure resources' 的 path 列表。"
+          exit 1
+
+      - name: Check the site fits the Pages size limit
+        # Pages 的站点上限是 **1 GB, 且按解压后的静态文件算**(不是上传那个 tar.gz 的大小),
+        # 而报告体积几乎正比于"用例数 × historyLimit": Allure 3 把每条用例的趋势链内联进
+        # 它自己的结果文件(实测 2026-11-07: 9655 条 × 40 轮 = 484 MB 的 data/test-results,
+        # 占整站 611 MB 的 79%)。historyLimit 已降到 15(≈ 350 MB), 这里再兜一道 ——
+        # 真撞上限时 deploy-pages 的报错很难读, 提前一轮红比那时候才发现好。
+        # 阈值留两倍余量: 用例数翻倍才会碰到它。
+        shell: bash
+        run: |
+          mb=$(( $(du -sb site | cut -f1) / 1048576 ))
+          echo "站点体积: ${mb} MB(Pages 上限 1024 MB, 告警线 700 MB)"
+          if [ "${mb}" -gt 700 ]; then
+            echo "::error::站点体积 ${mb} MB 已越过 700 MB —— 报告体积 ≈ 用例数 × historyLimit。先看是不是用例数涨了, 再考虑降 historyLimit(见 allurerc.mjs)或改成只发布趋势页。"
+            exit 1
+          fi
+
+      - name: Upload the report as a Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        # 前提(只能手动设置一次): 仓库 Settings → Pages 的 Source 选 "GitHub Actions"。
+        # deploy-pages 走 OIDC(id-token)换站点写权限 —— 上面权限里那一条的由来。
+        #
+        # **第一次失败不判红, 留给下一步重试一次**(2026-11-08): deploy-pages 卡在 Pages
+        # 服务端排队时会撞上它自己的 600s 内部上限, 2026-11-07 实测一次 618s 才退 ——
+        # 那一次把整轮 CI 判成了失败。而「站点没更新」比「这一轮红」更难发现: 站点是下一轮
+        # 历史基线的**第一来源**(见 pytest-report 的 Fetch previous Allure history from the
+        # Pages site), 部署没成功时这一轮的趋势点会**永久缺失** —— 下一轮命中站点就
+        # 不再走 artifact 降级, 少了的那一点补不回来。所以这里不写「continue-on-error 了事」
+        # (那只是让作业变绿, 站点照样停在上一轮), 而是重试一次; 第二次仍失败就让作业红。
+        # deploy-pages 是幂等的(它重新读已上传好的 pages artifact), 重试不会留下半份站点。
+        id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Wait before retrying the Pages deployment
+        # deploy-pages 那 600s 是**服务端排队**耗掉的, 立刻重试多半还排在同一队尾 ——
+        # 隔 60s 让服务端的上一个部署落定, 顺带把「第一次为什么失败」写进运行日志。
+        if: steps.deployment.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::warning::第一次部署 Pages 失败(多半是排队超过 deploy-pages 的 600s 内部上限), 60s 后重试一次"
+          sleep 60
+
+      - name: Retry the Pages deployment once
+        # 这一步**不带** continue-on-error: 两次都失败就是真的发布不了(权限/配额/站点
+        # 配置), 该红就红 —— 静默地把站点停在上一轮才是这里最贵的故障。
+        if: steps.deployment.outcome == 'failure'
+        id: deployment-retry
+        uses: actions/deploy-pages@v5

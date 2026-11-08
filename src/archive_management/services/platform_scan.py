@@ -382,12 +382,40 @@ class SteamInstall:
     library: Path
 
 
+@dataclass(frozen=True)
+class EpicItem:
+    """一份 Epic 安装清单(``*.item``)的解析结果.
+
+    Epic 按 AppName(平台自己的游戏标识, 通常是一段 GUID 文本)组织数据: 安装
+    清单的文件名就是它, 启动器的云存档缓存目录名也是它 —— 这是把云存档缓存
+    对应到具体游戏的唯一本机桥梁。个别清单没写 ``AppName`` 字段, 此时留空、
+    不丢条目: 本地探测照常可用, 由使用方决定怎么降级(平台适配器会跳过它)。
+    """
+
+    app_name: str
+    name: str
+    install_dir: Path
+    manifest: Path
+
+
 def read_text(path: Path) -> str | None:
     """读取文本文件; 不存在或不可读时返回 None."""
     try:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+
+
+def read_json_object(path: Path) -> dict[str, object] | None:
+    """读取一个 JSON 对象文件; 缺失、损坏或不是对象时返回 None."""
+    text = read_text(path)
+    if text is None:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def registry_source_available(roots: ScanRoots, source: str) -> bool:
@@ -501,6 +529,60 @@ def read_steam_installs(roots: ScanRoots) -> list[SteamInstall]:
     return installs
 
 
+def epic_manifest_dirs(roots: ScanRoots) -> list[Path]:
+    """返回 Epic 的清单目录(Windows/macOS; Linux 无官方启动器, 为空).
+
+    Linux 上该平台的 Epic 游戏通常来自 Heroic 等第三方客户端, 因此这个来源在
+    Linux 上明确为空, 缺口交给监控目录。
+    """
+    base = ("EpicGamesLauncher", "Data", "Manifests")
+    if roots.platform == "windows":
+        return [roots.program_data.joinpath("Epic", *base)]
+    if roots.platform == "macos":
+        return [
+            roots.shared_root.joinpath("Epic Games", *base),
+            roots.local_app_data.joinpath("Epic", *base),
+        ]
+    logger.debug("Epic 启动器没有 Linux 版本, 该来源请改用监控目录")
+    return []
+
+
+def read_epic_items(roots: ScanRoots) -> list[EpicItem]:
+    """读取本机所有 Epic 安装清单, 返回可用的记录.
+
+    这是 Epic 安装清单的**唯一**解析入口: 本地游戏探测、平台适配器与云存档缓存
+    解析(:mod:`archive_management.services.epic_cloud`)都从这里取, 不写第二遍
+    JSON 解析。清单缺失、损坏或缺 ``DisplayName``/``InstallLocation`` 时跳过该条,
+    不影响其它游戏。
+    """
+    items: list[EpicItem] = []
+    for manifest_dir in epic_manifest_dirs(roots):
+        if not manifest_dir.is_dir():
+            continue
+        for path in sorted(manifest_dir.glob("*.item")):
+            parsed = _parse_epic_item(path)
+            if parsed is not None:
+                items.append(parsed)
+    return items
+
+
+def _parse_epic_item(path: Path) -> EpicItem | None:
+    """解析一份 ``*.item`` 安装清单; 缺必要字段或损坏时返回 None."""
+    data = read_json_object(path)
+    if data is None:
+        return None
+    name = str(data.get("DisplayName") or "").strip()
+    location = str(data.get("InstallLocation") or "").strip()
+    if not name or not location:
+        return None
+    return EpicItem(
+        app_name=str(data.get("AppName") or "").strip(),
+        name=name,
+        install_dir=Path(location),
+        manifest=path,
+    )
+
+
 class LocalGameScanner:
     """从平台清单、注册表与监控目录中发现已安装游戏.
 
@@ -568,11 +650,6 @@ class LocalGameScanner:
             health=path_health(normalized),
         )
 
-    @staticmethod
-    def _read_text(path: Path) -> str | None:
-        """读取文本文件; 不存在或不可读时返回 None(见模块级 :func:`read_text`)."""
-        return read_text(path)
-
     # ------------------------------------------------------------------- Steam
 
     def _steam(self) -> list[GameCandidate]:
@@ -601,66 +678,22 @@ class LocalGameScanner:
     # -------------------------------------------------------------------- Epic
 
     def _epic(self) -> list[GameCandidate]:
-        """从 Epic Games 启动器的清单目录读取已安装游戏(Windows/macOS)."""
-        candidates: list[GameCandidate] = []
-        for manifest_dir in self._epic_manifest_dirs():
-            if manifest_dir.is_dir():
-                candidates.extend(self._epic_manifests(manifest_dir))
-        return candidates
+        """从 Epic Games 启动器的安装清单读取已安装游戏(Windows/macOS).
 
-    def _epic_manifest_dirs(self) -> list[Path]:
-        """返回 Epic 的清单目录.
-
-        Linux 上没有官方 Epic 启动器(该平台的 Epic 游戏通常来自 Heroic 等
-        第三方客户端), 因此这个来源在 Linux 上明确为空, 缺口交给监控目录。
+        解析在模块级的 :func:`read_epic_items` 里, 平台适配器与云存档缓存解析
+        复用同一份实现; 这里只把记录翻译成本地探测的候选模型。
         """
-        base = ("EpicGamesLauncher", "Data", "Manifests")
-        if self._roots.platform == "windows":
-            return [self._roots.program_data.joinpath("Epic", *base)]
-        if self._roots.platform == "macos":
-            return [
-                self._roots.shared_root.joinpath("Epic Games", *base),
-                self._roots.local_app_data.joinpath("Epic", *base),
-            ]
-        logger.debug("Epic 启动器没有 Linux 版本, 该来源请改用监控目录")
-        return []
-
-    def _epic_manifests(self, manifest_dir: Path) -> list[GameCandidate]:
-        """解析一个清单目录下的 ``*.item`` 文件."""
-        candidates: list[GameCandidate] = []
-        for item in sorted(manifest_dir.glob("*.item")):
-            data = self._read_json(item)
-            if data is None:
-                continue
-            name = str(data.get("DisplayName") or "").strip()
-            location = str(data.get("InstallLocation") or "").strip()
-            if not name or not location:
-                continue
-            candidates.append(
-                self._candidate(
-                    name,
-                    Path(location),
-                    source=SOURCE_EPIC,
-                    confidence="high",
-                    reason_code=REASON_EPIC_MANIFEST,
-                    detail=item.name,
-                )
+        return [
+            self._candidate(
+                item.name,
+                item.install_dir,
+                source=SOURCE_EPIC,
+                confidence="high",
+                reason_code=REASON_EPIC_MANIFEST,
+                detail=item.manifest.name,
             )
-        return candidates
-
-    @staticmethod
-    def _read_json(path: Path) -> dict[str, object] | None:
-        """读取 JSON 对象; 缺失或损坏时返回 None."""
-        text = LocalGameScanner._read_text(path)
-        if text is None:
-            return None
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(data, dict):
-            return None
-        return {str(key): value for key, value in data.items()}
+            for item in read_epic_items(self._roots)
+        ]
 
     # --------------------------------------------------------------------- GOG
 

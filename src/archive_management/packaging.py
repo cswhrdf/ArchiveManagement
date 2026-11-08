@@ -10,7 +10,7 @@ APP_ID = "archive-management"
 APP_NAME = "ArchiveManagement"
 APP_DISPLAY_NAME = "存档管理工具"
 ORG_NAME = "cswhrdf"
-__version__ = "0.0.2"
+__version__ = "0.1.0"
 
 
 def package_version() -> str:

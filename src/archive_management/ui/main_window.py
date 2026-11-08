@@ -17,7 +17,7 @@ import tkinter as tk
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import customtkinter as ctk
 from PIL import Image
@@ -30,6 +30,7 @@ from archive_management.config import (
     AppConfig,
     ConfigLoad,
     HotkeySettings,
+    ThemeName,
     WindowSettings,
     load_or_repair_config,
     save_config,
@@ -52,7 +53,7 @@ from archive_management.exceptions import (
 )
 from archive_management.i18n import DEFAULT_LOCALE, set_locale, tr
 from archive_management.infrastructure.paths import ApplicationPaths
-from archive_management.logging_config import apply_debug
+from archive_management.logging_config import apply_debug, apply_rotation
 from archive_management.services import icon_assets, single_instance
 from archive_management.services.audit import log_action
 from archive_management.services.hotkeys import (
@@ -66,6 +67,7 @@ from archive_management.services.hotkeys import (
     parse_accelerator,
 )
 from archive_management.services.naming import game_slug
+from archive_management.services.reveal import reveal_in_file_manager
 from archive_management.ui.backend import ArchiveService
 from archive_management.ui.dialogs import (
     ask_branch_name,
@@ -107,10 +109,11 @@ from archive_management.ui.models import (
     import_prompt,
     import_strategies,
     size_label,
+    storage_error_text,
     timeline_order,
 )
 from archive_management.ui.palette import DEFAULT_THEME, Palette
-from archive_management.ui.pickers import pick_file, pick_save_file
+from archive_management.ui.pickers import pick_directory, pick_file, pick_save_file
 from archive_management.ui.rendering import host_image
 from archive_management.ui.schedule_window import ScheduleWindow
 from archive_management.ui.settings_window import SettingsWindow
@@ -312,6 +315,10 @@ _SELECTED_PANEL_WIDTH = 333
 _SELECTED_TEXT_INSET = 32
 # 面板里"文件摘要"那一行的上限行数(它可能是一条很长的备注, 见 sel.digest)。
 _SELECTED_FILES_LINES = 2
+# "当前节点/非当前节点"那一行的上限行数: 它是一整句话, 英文比中文长一倍
+# ("Current node: later backups and branches continue from here" 实测 318px, 面板只给
+# 301), 封顶一行就只能整句截掉 —— 两行才容得下且版面不会抽出太多。
+_SELECTED_STATE_LINES = 2
 # 卡片副标题的左右内边距(见 _build_backup_card 的 padx=12).
 _CARD_DETAIL_INSET = 24
 # 当前节点标记: 后续备份/分支都从这个节点继续(图里画在小字那一行, 卡片上写在标题前).
@@ -407,8 +414,8 @@ class ArchiveApp(ctk.CTk):
         self._detail_name = ""
         self._detail_subtitle = ""
         self._refit_job: str | None = None
-        # 右侧面板三行的**完整**文本(名称/元信息/摘要): 同样要在宽度变化后重裁。
-        self._selected_texts: tuple[str, str, str] = ("", "", "")
+        # 右侧面板四行的**完整**文本(名称/元信息/摘要/当前节点): 同样要在宽度变化后重裁。
+        self._selected_texts: tuple[str, str, str, str] = ("", "", "", "")
         # 消息轮询任务的 id(destroy() 里要撤掉, 见那里的说明)。
         self._poll_job: str | None = None
 
@@ -441,11 +448,22 @@ class ArchiveApp(ctk.CTk):
         )
         # 只读一次配置: 语言、快捷键与"配置被还原过"的提示都从同一份结果出发。
         loaded = self._load_config()
+        # 主题同样来自这份配置: 用户在设置里切过 light/dark 就按它启动。默认 system
+        # 解析成深色 —— 这个配置项在本功能之前从未被读过(界面一直固定深色), 沿用它
+        # 保证升级后行为不跳变; 设置里一动开关就会写成具体值。后端也同步一份,
+        # ``current_theme`` 的读数才与界面一致。
+        self._theme = self._startup_theme(loaded.config.theme)
+        ctk.set_appearance_mode(self._theme)
+        self.p = Palette.for_theme(self._theme)
+        self.backend.set_theme(self._theme)
         # 语言要在构造界面之前生效: 所有文案都是构建时取的.
         self._language = self._apply_language(loaded.config.language)
         self._shortcuts = self._shortcuts_from(loaded)
         # 调试日志开关来自同一份配置(默认关闭): 设置窗口展示的与生效的要是同一个值.
         self._debug = loaded.config.logging.debug
+        # 日志滚动的两个数字(设置窗口两行输入的初值; 修改即写回并即时生效).
+        self._log_max_mb = self._mb_from(loaded.config.logging.max_bytes)
+        self._log_backups = loaded.config.logging.backup_count
         # 界面字号(px 口径的基准字号, 1rem): 要在建界面**之前**生效, 因此先把缩放
         # 装到 CTkFont 上 —— 之后所有字体都按它换算。
         install_font_scaling()
@@ -565,6 +583,34 @@ class ArchiveApp(ctk.CTk):
         shortcuts[ACTION_SAVE_NOW] = loaded.config.hotkeys.save
         shortcuts[ACTION_CREATE_BRANCH] = loaded.config.hotkeys.branch
         return shortcuts
+
+    @staticmethod
+    def _startup_theme(configured: str) -> str:
+        """把配置里的主题解析成界面实际使用的二值主题.
+
+        ``system`` 沿用深色: 这个配置项在主题落盘功能之前从未被读过, 界面一直
+        固定深色; 真正"跟随系统"需要三平台各自的系统主题探测, 复杂度配不上收益,
+        不做(要做得另立计划)。
+        """
+        return "light" if configured == "light" else "dark"
+
+    @staticmethod
+    def _mb_from(max_bytes: int) -> int:
+        """把配置里的字节上限换算成设置界面展示的 MB 数(至少 1)."""
+        return max(1, max_bytes // (1024 * 1024))
+
+    def _save_theme(self, theme: str) -> None:
+        """把主题写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        # 界面主题是二值(light/dark); system 只出现在从未写过的默认配置里。
+        # cast 只是给 mypy 收窄类型, 值本身来自 set_theme 的二值返回.
+        config.theme = cast(ThemeName, theme)
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存主题失败: %s", exc)
 
     def _save_language(self, locale: str) -> None:
         """把界面语言写回配置文件(没有配置路径时只保存在内存里)."""
@@ -720,6 +766,38 @@ class ArchiveApp(ctk.CTk):
                 else "settings.debug_switched_off"
             ),
         )
+        return None
+
+    def _save_log_rotation(self, max_mb: int, backup_count: int) -> None:
+        """把日志滚动参数写回配置文件(没有配置路径时只保存在内存里)."""
+        if self._paths is None:
+            return
+        config = load_or_repair_config(self._paths.config_path).config
+        config.logging.max_bytes = max_mb * 1024 * 1024
+        config.logging.backup_count = backup_count
+        try:
+            save_config(config, self._paths.config_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存日志滚动参数失败: %s", exc)
+
+    def _on_log_rotation_change(self, max_mb: int, backup_count: int) -> str | None:
+        """改日志滚动参数: 即时生效 + 写回配置; 返回 None 表示成功.
+
+        即时生效靠现场改已挂载处理器的上限与份数(不重开日志文件, 见
+        ``logging_config.apply_rotation``); 已滚出来的旧文件不因此被清掉, 多出的
+        份数到下一次滚动才收敛(标准库行为), 反馈文案不承诺"立刻清理"。
+        范围校验在这里兜底: 设置窗口拦一遍, 这一侧才是保存口径的唯一权威。
+        """
+        if not 1 <= max_mb <= 1024:
+            return tr("settings.log_rotation_range_mb")
+        if not 0 <= backup_count <= 20:
+            return tr("settings.log_rotation_range_backups")
+        apply_rotation(max_mb * 1024 * 1024, backup_count)
+        self._log_max_mb = max_mb
+        self._log_backups = backup_count
+        self._save_log_rotation(max_mb, backup_count)
+        log_action("ui.switch_log_rotation", max_mb=max_mb, backups=backup_count)
+        self._feedback(FeedbackKind.INFO, tr("settings.log_rotation_switched"))
         return None
 
     def _save_activation(self, enabled: bool) -> None:
@@ -1732,23 +1810,28 @@ class ArchiveApp(ctk.CTk):
         width = label.winfo_width()
         return width if width > 1 else scaled_px(label, fallback)
 
-    def _set_selected_texts(self, name: str, meta: str, files: str) -> None:
-        """写下右侧面板三行的**完整**文本, 再按当前宽度裁一次."""
-        self._selected_texts = (name, meta, files)
+    def _set_selected_texts(self, name: str, meta: str, files: str, state: str) -> None:
+        """写下右侧面板四行的**完整**文本, 再按当前宽度裁一次."""
+        self._selected_texts = (name, meta, files, state)
         self._fit_selected_text()
 
     def _fit_selected_text(self) -> None:
-        """把右侧面板的三行文字裁进面板宽度里(与详情页头部同一条纪律).
+        """把右侧面板的四行文字裁进面板宽度里(与详情页头部同一条纪律).
 
         面板宽度固定(所以这里不像头部那样必须等 ``<Configure>``), 但**超长备份名只有
         这一处能读全** —— 从前它直接被 Tk 硬裁且不补省略号, 用户看到的是半句话;
         现在裁掉的部分补省略号, 完整内容挂在悬停提示上(``fit_label`` 一并做了)。
+
+        第四行("当前节点/非当前节点")是 2026-11-07 补进裁剪表的: 它从前只 ``configure(text)``
+        不参与裁剪, 中文恰好放得下所以就没人发现 —— 英文那句 318px 比标签的 301px 宽,
+        尾部被 Tk 硬裁且不补省略号(是在 ``test_gui_text_fit`` 加了英文档之后才露出来的)。
         """
-        name, meta, files = self._selected_texts
+        name, meta, files, state = self._selected_texts
         rows = (
             (self._selected_name, name, 1),
             (self._selected_meta, meta, 1),
             (self._selected_files, files, _SELECTED_FILES_LINES),
+            (self._selected_state, state, _SELECTED_STATE_LINES),
         )
         for label, text, lines in rows:
             # 预算取**标签自己**的宽度(与详情页头部 :meth:`_set_detail_names` 同一条纪律):
@@ -1941,6 +2024,13 @@ class ArchiveApp(ctk.CTk):
             # 当前游戏已被删除(例如在别处删除后由轮询触发的重载): 整体回到空状态.
             self._show_empty_list()
             return
+        # 启用态可能刚被自动启停在后台改写(名字与归档态同理): 页头那对"状态词 +
+        # 启停按钮"与图标位色调都取自 self._game, 不跟着重读就会一直停在旧文案上
+        # (2026-11-05 用户反馈: 游戏启动后详情页看不出已启用)。
+        self._game = next(
+            (game for game in games if game.game_id == self._game_id), None
+        )
+        self._sync_enable_control()
         self._render_list()
         detail = self.backend.get_detail(self._game_id)
         self._render_hero(detail)
@@ -2270,8 +2360,7 @@ class ArchiveApp(ctk.CTk):
 
     def _render_selected(self, item: BackupItem | None) -> None:
         if item is None:
-            self._set_selected_texts(tr("sel.none"), tr("sel.hint"), "")
-            self._selected_state.configure(text="")
+            self._set_selected_texts(tr("sel.none"), tr("sel.hint"), "", "")
             self._restore_btn.configure(state="disabled")
             self._branch_btn.configure(state="disabled")
             self._rename_btn.configure(state="disabled")
@@ -2282,9 +2371,7 @@ class ArchiveApp(ctk.CTk):
             item.display_title,
             f"{item.created_label}  ·  {item.branch_label}",
             item.sub or tr("sel.digest", size=item.size_label),
-        )
-        self._selected_state.configure(
-            text=(
+            (
                 tr("sel.current")
                 if item.is_current
                 else tr(
@@ -2292,7 +2379,7 @@ class ArchiveApp(ctk.CTk):
                     size=item.size_label,
                     button=tr("action.restore"),
                 )
-            )
+            ),
         )
         self._update_actions()
 
@@ -2970,6 +3057,8 @@ class ArchiveApp(ctk.CTk):
         """切换浅/深主题并返回生效主题名(供设置窗口刷新按钮文案)."""
         next_theme = "light" if self._theme == "dark" else "dark"
         self._theme = self.backend.set_theme(next_theme)
+        # 落盘: 主题要跨启动生效(2026-11-02 前只改内存, config.theme 是没人读的死配置).
+        self._save_theme(self._theme)
         ctk.set_appearance_mode(self._theme)
         self.p = Palette.for_theme(self._theme)
         self.configure(fg_color=self.p.background)
@@ -3203,19 +3292,68 @@ class ArchiveApp(ctk.CTk):
             verification_mode=self._verification_mode,
             verification_parallel=self._verification_parallel,
             debug=self._debug,
+            log_max_mb=self._log_max_mb,
+            log_backups=self._log_backups,
             activation=self._activation,
             remember_window=self._remember_window,
             shortcuts=self._shortcuts,
+            storage=self.backend.storage_overview(),
             on_toggle_theme=self._on_toggle_theme,
             on_apply_language=self._on_language_change,
             on_apply_font_size=self._on_font_size_change,
             on_apply_verification=self._on_verification_change,
             on_apply_debug=self._on_debug_change,
+            on_apply_log_rotation=self._on_log_rotation_change,
             on_apply_activation=self._on_activation_change,
             on_apply_remember_window=self._on_remember_window_change,
             on_apply_shortcut=self._apply_shortcut,
             on_capture_start=self._hotkeys.suspend,
             on_capture_end=self._hotkeys.resume,
+            on_change_backup_root=self._change_backup_root,
+            on_restore_backup_root=self._restore_backup_root,
+            on_open_location=reveal_in_file_manager,
+        )
+
+    def _change_backup_root(self) -> None:
+        """设置窗口"更改位置": 弹目录选择器, 选完走同一条应用链路."""
+        overview = self.backend.storage_overview()
+        picked = pick_directory(
+            title=tr("settings.change_backup_root"),
+            start_from=overview.next_backup_root,
+        )
+        if not picked:
+            return  # 取消选择: 不动配置, 也不用提示打断用户
+        self._apply_backup_root(picked)
+
+    def _restore_backup_root(self) -> None:
+        """设置窗口"使用默认位置": 清掉配置里的覆盖(空输入即恢复内置)."""
+        self._apply_backup_root("")
+
+    def _apply_backup_root(self, raw: str) -> None:
+        """校验并写入新的备份根覆盖, 回填设置窗口; 失败原因就地显示在分区里.
+
+        后端只改配置(服务仍按旧位置跑), 因此成功后只回填总览与"重启后"提示,
+        不去动当前会话的任何路径 —— 运行中切换会把正在写的备份与界面显示的根
+        拆到两个目录, 这正是 P2b 明确不做的事。
+        """
+        window = self._active_window
+        if not isinstance(window, SettingsWindow):
+            return
+        try:
+            self.backend.set_backup_root(raw)
+        except ValueError as exc:
+            window.notify_storage(
+                tr(
+                    "settings.storage_failed",
+                    reason=storage_error_text(str(exc)),
+                ),
+                error=True,
+            )
+            return
+        restored = not raw.strip()
+        window.refresh_storage(self.backend.storage_overview())
+        window.notify_storage(
+            tr("settings.storage_restored" if restored else "settings.storage_saved")
         )
 
     def _apply_shortcut(self, action: str, accelerator: str) -> str | None:
@@ -3546,10 +3684,10 @@ class ArchiveApp(ctk.CTk):
             self._messages.put(("activation", ""))
 
     def _finish_activation(self) -> None:
-        """处理自动启停的轮询结果(主线程): 记账、回填分页, 只在真切换时提示.
+        """处理自动启停的轮询结果(主线程): 记账、回填分页, 真切换时立即刷新.
 
-        列表与详情不用在这里重读: 切换会抬高后端的数据版本号, 下一次
-        :meth:`_refresh_task` 自己会重载。
+        版本号轮询(空闲时 500ms 一拍)最终也会把列表与详情带新, 但用户盯着页面
+        的这一刻就该看到状态切换 —— 真切换时当前页立刻重读一遍, 不等下一拍。
         """
         outcome, self._activation_run = self._activation_run, None
         self._activation_busy = False
@@ -3558,6 +3696,13 @@ class ArchiveApp(ctk.CTk):
         self._track_activation_interval(outcome)
         self._home_page.refresh_activation(outcome, enabled=self._activation)
         self._report_activation(outcome)
+        if outcome.changed:
+            # 主页重读面板数据(卡片徽章/启停按钮, 保留筛选与页码); 详情页走完整
+            # 重载, 页头状态词与概要区一起换新。
+            if self._page is AppPage.HOME:
+                self._home_page.refresh_artwork()
+            else:
+                self._reload_data()
 
     def _track_activation_interval(self, outcome: ActivationOutcome) -> None:
         """队列是否非空决定下一轮的间隔档位(空队列回最快档; 见 activation_delay)."""
@@ -3669,11 +3814,17 @@ def run_gui(
     """
     from archive_management.config import load_or_repair_config
     from archive_management.infrastructure.database import Database
+    from archive_management.infrastructure.paths import effective_paths
     from archive_management.logging_config import configure_from_settings
     from archive_management.ui.sql_backend import SqlArchiveService
 
-    paths = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
-    loaded = load_or_repair_config(paths.config_path)
+    # 两步构造: 自建 paths 时(没有调用方给)还要按配置里的 storage.backup_root
+    # 覆盖备份根; 调用方(app._start_gui)传入的已经是生效值, 再套一次也幂等。
+    # base 始终留着"内置"那套引用: 设置页"存储位置"分区靠它展示各位置与
+    # "下次启动"的内置备份根(它们不随备份根覆盖移动)。
+    base = ApplicationPaths.default().ensure() if paths is None else paths.ensure()
+    loaded = load_or_repair_config(base.config_path)
+    paths = effective_paths(base, loaded.config)
     configure_from_settings(paths.log_dir, loaded.config.logging, verbose=verbose)
     if loaded.reset:
         logger.warning("配置文件内容非法, 已还原为默认值: %s", loaded.backup)
@@ -3692,9 +3843,11 @@ def run_gui(
     backend: ArchiveService = SqlArchiveService(
         database,
         backup_root=paths.backup_root,
+        exports_dir=paths.exports_dir,
         cache_dir=paths.cache_dir,
         artwork_dir=paths.artwork_dir,
         config_path=paths.config_path,
+        builtin_paths=base,
     )
     app = ArchiveApp(
         backend,

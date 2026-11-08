@@ -131,7 +131,13 @@ _SEARCH_DEBOUNCE_MS = 300
 # 同一个行宽下, 表头对齐最多迭代几轮(表头几何变化不会触发滚动区的 Configure, 得主动再量一轮).
 # 轮数按**数据行的实测宽度**记账: 行宽一变(滚动条出现/收起、窗口缩放、名称重裁)就是新的一轮
 # 几何, 已算好的内边距全部作废, 得重新给满 —— 见 ``HomePage._rearm_alignment``。
-_ALIGN_MAX_ATTEMPTS = 4
+#
+# 2026-11-07 从 4 提到 24: 满载(双片并行 + 覆盖率追踪)时前几轮量到的往往是**还没落定的**
+# 几何 —— 读完偏移、改完内边距, 真正的布局要等下一轮事件循环才到, 于是"改了几轮却没收敛"
+# 就把预算用光了, 此后 ``_sync_job`` 是 None, 再没有事件来纠正(现场: 六列整体差一个固定量
+# 14/16/22/27/33/65px, 用例等 3s 也等不来)。按 60ms 一轮算 24 轮 ≈ 1.4s, 足够跨过最坏时序;
+# 打转的保护仍是"同一行宽"与"到顶就停手"两道闸, 不是靠这个数字小。
+_ALIGN_MAX_ATTEMPTS = 24
 # 名称重裁在"宽度还没测量出来"时最多重试几轮. 各平台的布局时序不同: Linux/macOS
 # 上首次同步时行内标签可能还没被布局(``winfo_width()`` 是 1), 而之后再没有 Configure
 # 事件来补救 —— 不重试就会一直停在兜底宽度的短文本上。
@@ -272,6 +278,9 @@ class HomePage:
         self._head_pads: tuple[int, int] = (_HEAD_LEFT_PAD, _TABLE_SIDE_PAD)
         # 表头对齐已经调过几轮(收敛后就归零; 行宽一变就重新计数, 见 _rearm_alignment).
         self._align_attempts = 0
+        # 上一轮是否已经量到"完全对齐". 要**连续两轮**读到 0/0 才算数: 满载时单次读数可能是
+        # 还没落定的旧几何(见 _align_table_header).
+        self._align_confirmed = False
         # 上一轮对齐时的行宽(滚动区里数据行真正能用的宽度): 它变了就说明表头的内边距该重算
         # (0 = 还没量到). 见 _rearm_alignment.
         self._aligned_row_width = 0
@@ -1031,6 +1040,7 @@ class HomePage:
         # 列表重建后悬停状态失效: 不清掉会指向已销毁的卡片.
         self._hover = None
         self._align_attempts = 0
+        self._align_confirmed = False
         self._aligned_row_width = 0
         self._refit_attempts = 0
         self._poster_name_blocks = []
@@ -1166,12 +1176,15 @@ class HomePage:
         换来的是不必再新增一个只在真窗口里才有意义的方法。
 
         打转的保护没丢: 同一个行宽下, 对齐自己排出来的下一轮照样计入预算(见
-        :meth:`_align_table_header`), 所以最坏只会调满 4 轮停手, 不会自激。
+        :meth:`_align_table_header`), 所以最坏只会调满 ``_ALIGN_MAX_ATTEMPTS`` 轮停手, 不会自激。
         """
         width = self._row_viewport()
         if width != self._aligned_row_width:
             self._aligned_row_width = width
             self._align_attempts = 0
+            # 行宽变了就是新的一份几何: 上一份几何上的"已对齐"结论作废(否则下一轮读到的
+            # 旧 0/0 会被当成确认过的读数直接收工).
+            self._align_confirmed = False
 
     def _relayout_posters(self, width: int) -> None:
         """按给定宽度重算每行张数, 变了就重新摆放卡片(启动首屏与窗口缩放都会用到)."""
@@ -1351,26 +1364,48 @@ class HomePage:
         偏移后**一次算准**新的左右内边距(几何对两边都是线性的), 不会来回抖。
 
         轮数上限是防打转的闸, 按**行宽**记账(:meth:`_rearm_alignment`): 同一个行宽下最多
-        再调 ``_ALIGN_MAX_ATTEMPTS`` 轮, 行宽一变就重新给满。
+        调 ``_ALIGN_MAX_ATTEMPTS`` 轮, 行宽一变就重新给满。
+
+        **这一轮算不出新内边距也要再排一轮复核**(2026-11-07): 满载时量到的可能是还没落定的
+        几何 —— 内边距按旧读数算出来与当前一致, 而真正的布局要等下一轮才到。以前这种情况直接
+        收工, 表头就永久停在旧内边距上(六列整体差一个固定量, 用例等 3s 也没人来纠正)。
+        "读到同一个偏移就停"同样不行: 那恰好就是满载时的样子。所以停手只按轮数, 不按读数。
+
+        **量不到、读到 0 也都不能当收工**(2026-11-07 第二轮, 全量分片里又咬了一次):
+        现场 dump 是 ``_align_attempts=0``、``_head_pads=(22, 66)``、名称列对上了而**固定列
+        那一块整体差 33px** —— 也就是有一轮量到的是"还没重新摆"的旧几何(0/0), 按它归零就等于
+        收工, 真正的布局 60ms 后才到, 此后没有事件再来叫我们(行宽没变、标签宽度没变)。所以:
+        ① 量不到(行正在重建/尚未 map)也要排一轮, 计入同一份轮数预算;
+        ② 读到 0/0 要**连续两轮**才算对齐, 单次读数只算"也许", 再复核一轮。
         """
         offset = self._header_offset()
         if offset is None:
+            if self._align_attempts < _ALIGN_MAX_ATTEMPTS:
+                self._align_attempts += 1
+                self._schedule_list_sync()
             return
         off_left, off_right = offset
         if off_left == 0 and off_right == 0:
-            self._align_attempts = 0
+            if self._align_confirmed:
+                self._align_attempts = 0
+                self._align_confirmed = False
+                return
+            self._align_confirmed = True
+            if self._align_attempts < _ALIGN_MAX_ATTEMPTS:
+                self._align_attempts += 1
+                self._schedule_list_sync()
             return
+        self._align_confirmed = False
         if self._align_attempts >= _ALIGN_MAX_ATTEMPTS:
             return  # 同一个行宽下调了几轮还不齐就不再折腾(窗口极窄等边界情况)
+        self._align_attempts += 1
         left, right = self._head_pads
         # 左边距变化会**整体平移**表头内容, 所以右边距要把这部分再补回来.
         pads = (max(0, left - off_left), max(0, right + off_right - off_left))
-        if pads == self._head_pads:
-            return  # 已经调到边上了(不能再挪), 就此停手
-        self._align_attempts += 1
-        self._head_pads = pads
-        self._head.grid_configure(padx=pads)
-        # 表头自己的几何变化不会再触发滚动区的 Configure, 所以主动再量一轮.
+        if pads != self._head_pads:
+            self._head_pads = pads
+            self._head.grid_configure(padx=pads)
+        # 表头自己的几何变化不会再触发滚动区的 Configure, 所以主动再量一轮(改没改都量)。
         self._schedule_list_sync()
 
     def _refit_row_names(self) -> None:
@@ -1556,19 +1591,30 @@ class HomePage:
             meta_font,
             scaled_px(badge, _POSTER_TEXT_WIDTH),
         )
+        activity_font = ctk.CTkFont(size=11)
+        activity_text = (
+            tr("home.activity", stamp=item.activity_label)
+            if item.activity_label
+            else tr("home.activity_none")
+        )
         activity = ctk.CTkLabel(
             card,
-            text=(
-                tr("home.activity", stamp=item.activity_label)
-                if item.activity_label
-                else tr("home.activity_none")
-            ),
+            text=activity_text,
             anchor="w",
-            font=ctk.CTkFont(size=11),
+            font=activity_font,
             text_color=palette.text_muted,
         )
         activity.grid(
             row=3, column=0, sticky="ew", padx=10, pady=_POSTER_ACTIVITY_PAD_Y
+        )
+        # 活动时间那一行也要裁: 中文"最近活动 2026/01/02 09:40"放得下, 英文
+        # "Last activity 2026/11/07 11:05" 比卡片内宽多 10px —— 之前它没走 fit_label,
+        # 于是被 Tk 硬裁且不补省略号(2026-11-07 加英文档的裁剪用例在 Linux 上抓到)。
+        fit_label(
+            activity,
+            activity_text,
+            activity_font,
+            scaled_px(activity, _POSTER_TEXT_WIDTH),
         )
         self._fit_poster_height(
             card,

@@ -145,6 +145,10 @@ class _WidgetStub:
         """屏幕高度."""
         return 1000
 
+    def winfo_height(self) -> int:
+        """窗口高度(设置窗定高要读主窗高)."""
+        return 900
+
     def cget(self, option: str) -> object:
         """读一个选项(面板重绘只读 ``state``)."""
         assert option == "state"

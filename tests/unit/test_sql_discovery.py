@@ -10,7 +10,9 @@ from typing import cast
 
 import pytest
 
+import archive_management.application.discovery as discovery_mod
 import archive_management.ui.sql_backend as sql_mod
+import helpers
 from archive_management.domain import (
     GameCandidate,
     PlatformGame,
@@ -25,6 +27,7 @@ from archive_management.infrastructure.repository import (
     GameRepository,
 )
 from archive_management.services.game_names import name_cache_at
+from archive_management.services.scheduler import BackupScheduler, ManualBackend
 
 # 一张最小的 PNG 文件头(封面缓存只认文件头就能判定可用).
 from sql_support import (
@@ -164,6 +167,58 @@ def test_import_candidate_writes_the_confirmed_save_paths(tmp_path: Path) -> Non
         item.path: item.source for item in service.list_locations(summary.game_id)
     }
     assert sources == {str(save): "steam", str(extra): "manual"}
+
+
+def test_import_candidate_seeds_process_names_from_the_install_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """导入时从安装目录播种进程候选(目录名 + 最大主程序 exe): 译名对不上也能识别启动."""
+    monkeypatch.setattr(discovery_mod, "current_platform", lambda: "windows")
+    service, _game_id, database = _steam_service(tmp_path)
+    install = tmp_path / "Games" / "Oddsparks"
+    install.mkdir(parents=True)
+    (install / "OddsparksGame.exe").write_bytes(b"x" * 40)
+    (install / "UnityCrashHandler64.exe").write_bytes(b"x" * 60)
+    candidate, _created = CandidateRepository(database).upsert(
+        GameCandidate(name="ODD SPARKS", install_dir=str(install), source="epic")
+    )
+    assert candidate.id is not None
+
+    summary = service.import_candidate(str(candidate.id))
+
+    game = GameRepository(database).get(int(summary.game_id))
+    assert game is not None
+    assert game.process_names == ("Oddsparks", "OddsparksGame.exe")
+
+
+def test_scan_can_be_limited_to_the_injected_roots(tmp_path: Path) -> None:
+    """注入 ``roots`` 后只在那套目录里发现: 用例不再依赖开发机上的真实平台清单."""
+    fake = tmp_path / "fake-env"
+    install = fake / "Games" / "Celeste"
+    install.mkdir(parents=True)
+    helpers.write_epic_item(helpers.epic_tree(fake), "EpicCeleste", "Celeste", install)
+    database = Database(tmp_path / "injected.db")
+    database.migrate()
+    service = sql_mod.SqlArchiveService(
+        database,
+        backup_root=tmp_path / "backups",
+        scheduler=BackupScheduler(backend=ManualBackend()),
+        roots=helpers.scan_roots(fake),
+    )
+
+    report = service.scan_candidates()
+
+    assert report.total == 1, f"只应看到注入根目录里的那一条: {report}"
+    assert [item.name for item in service.list_candidates()] == ["Celeste"]
+    # 云清单来源也沿用同一套根目录: 在注入的 Steam 树里放一份清单就能解析出候选.
+    steam = helpers.steam_tree(fake)
+    helpers.write_steam_manifest(steam, "753640", "Outer Wilds", "OuterWilds")
+    helpers.write_remotecache(steam, "753640", {"OuterWilds/Saves/a.sav": 2})
+    source = service._save_candidate_source("steam")
+    assert [item.relative_path for item in source.candidates("753640")] == [
+        "OuterWilds/Saves"
+    ]
 
 
 def test_monitored_directories_crud(tmp_path: Path) -> None:

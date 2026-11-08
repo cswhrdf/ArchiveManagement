@@ -17,6 +17,7 @@ import pytest
 from archive_management.config import DEFAULT_LOG_MAX_BYTES, LoggingSettings
 from archive_management.logging_config import (
     apply_debug,
+    apply_rotation,
     configure_from_settings,
     configure_logging,
 )
@@ -317,6 +318,29 @@ def test_apply_debug_changes_the_levels_without_rebuilding_handlers(
         assert list(root.handlers) == handlers
         assert [handler.level for handler in handlers] == [logging.INFO] * 2
         assert root.level == logging.INFO
+    finally:
+        _detach_handlers()
+
+
+def test_apply_rotation_updates_the_file_handler_without_rebuilding_it(
+    tmp_path: Path,
+) -> None:
+    """设置里改日志滚动参数立即生效: 只改已挂载处理器的上限与份数, 不重开日志文件."""
+    configure_from_settings(tmp_path / "logs", LoggingSettings())
+    try:
+        root = logging.getLogger("archive_management")
+        handlers = list(root.handlers)
+        file_handler = next(
+            handler for handler in handlers if isinstance(handler, RotatingFileHandler)
+        )
+        assert file_handler.maxBytes == DEFAULT_LOG_MAX_BYTES
+        assert file_handler.backupCount == 5
+
+        apply_rotation(200 * 1024 * 1024, 7)
+
+        assert list(root.handlers) == handlers
+        assert file_handler.maxBytes == 200 * 1024 * 1024
+        assert file_handler.backupCount == 7
     finally:
         _detach_handlers()
 

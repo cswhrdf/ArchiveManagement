@@ -67,6 +67,8 @@ def test_settings_changes_without_a_config_path_stay_in_memory() -> None:
     app._save_debug(True)
     app._save_activation(True)
     app._save_font_size(20)
+    app._save_theme("light")
+    app._save_log_rotation(50, 3)
     app._save_shortcuts()
 
     # 没有任何配置路径: 写回口只改内存态, 不写文件也不报错。
@@ -409,6 +411,8 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         verification_mode=app._verification_mode,
         verification_parallel=app._verification_parallel,
         debug=app._debug,
+        log_max_mb=app._log_max_mb,
+        log_backups=app._log_backups,
         activation=app._activation,
         remember_window=app._remember_window,
         shortcuts=app._shortcuts,
@@ -417,11 +421,16 @@ def _settings_window(app: ArchiveApp, applied: list[tuple[str, str]]) -> Any:
         on_apply_font_size=app._on_font_size_change,
         on_apply_verification=app._on_verification_change,
         on_apply_debug=app._on_debug_change,
+        on_apply_log_rotation=app._on_log_rotation_change,
         on_apply_activation=app._on_activation_change,
         on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=apply,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
 
 
@@ -429,6 +438,33 @@ def _press(window: Any, keysym: str, keycode: int) -> None:
     """模拟按下并松开一个键(录制只依赖 keysym/keycode)."""
     window._on_key_press(SimpleNamespace(keysym=keysym, keycode=keycode))
     window._on_key_release(SimpleNamespace(keysym=keysym, keycode=keycode))
+
+
+def test_settings_window_shows_the_app_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """设置页右上角显示当前版本号(单一来源: packaging.package_version), 且不撑宽窗口."""
+    from archive_management.packaging import package_version
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.settings_window import _WINDOW_WIDTH
+
+    _patch_dialogs(monkeypatch)
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+
+    # 文案经 i18n 组装, 但版本号必须来自 packaging 的单一来源(与 --version 一致).
+    shown = window._version_label.cget("text")
+    assert shown == tr("settings.version", version=package_version()), shown
+    assert package_version() in shown
+    # 位置: place 叠加贴滚动内容区的右上(relx=1.0 + ne 锚) —— 不能再开 grid 列,
+    # 那会把标题行的请求宽度顶宽、整个窗口被撑开(2026-11-01 实测后撤回改的).
+    info = window._version_label.place_info()
+    assert float(info["relx"]) == 1.0, "版本号要贴内容区右缘"
+    assert info["anchor"] == "ne", "版本号以右上角锚定"
+    # 宽度守卫: 版本号不参与宽度协商, 窗口宽度保持固定值.
+    assert _wait_for(app, lambda: window._window.winfo_width() > 1), "窗口未布局"
+    assert window._window.winfo_width() == _WINDOW_WIDTH, "版本号把设置窗口撑宽了"
 
 
 def test_settings_window_holds_theme_and_hotkey_shortcuts(
@@ -518,8 +554,8 @@ def test_settings_window_fits_its_content(
 
     文字会随语言换行, 写死高度时"关闭"按钮会被推到窗口外面 —— 用户看不到也点不到
     (2026-10 实测: 面板还带成段说明时中文要 630px、英文要 644px)。成段说明与各
-    面板的"当前状态"行移出后, 常驻的多行文字只剩校验面板的并发数说明与页脚说明
-    (语言/调试/启停的错误行平时整行收起, 没有可量的宽度).
+    面板的"当前状态"行移出后, 常驻的多行文字只剩校验面板的并发数说明(语言/调试/
+    启停的错误行平时整行收起, 页脚指引说明 2026-11-04 已删, 没有可量的宽度).
     """
     from archive_management.ui.demo_backend import DemoArchiveService
 
@@ -528,52 +564,59 @@ def test_settings_window_fits_its_content(
     _pump(app)
     window = _settings_window(app, [])
     # 窗口要先真的被映射/布局, 下面的尺寸才有意义(winfo_width 在未布局时是 1).
-    assert _wait_for(app, lambda: window._note_label.winfo_width() > 1), "窗口未布局"
+    assert _wait_for(app, lambda: window._close_btn.winfo_width() > 1), "窗口未布局"
 
     frame = window._window
     frame.update_idletasks()
     bottom = frame.winfo_rooty() + frame.winfo_height()
-    for name, widget in (
-        ("说明", window._note_label),
-        ("关闭按钮", window._close_btn),
-    ):
+    for name, widget in (("关闭按钮", window._close_btn),):
         edge = widget.winfo_rooty() + widget.winfo_height()
         hint = f"{name}被推出窗口: {edge} > {bottom}"
         assert edge <= bottom, hint
-    for name, label in (
-        ("校验并发数说明", window._verification_status),
-        ("页脚说明", window._note_label),
-    ):
+    for name, label in (("校验并发数说明", window._verification_status),):
         cut = label.winfo_reqwidth() - label.winfo_width()
         hint = f"{name}被裁掉 {cut}px(换行宽度超过了可用宽度)"
         assert cut <= 1, hint
 
 
-def test_settings_window_scrollbar_only_when_the_content_overflows(
+def test_settings_window_height_is_fixed_below_the_main_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """屏幕够高(窗口按内容定高)时不该立着一条拖不动的滚动条(评审时定的).
+    """窗口高度固定为"主窗高 - 留白", 不跟内容长高; 超出的内容由滚动区接管.
 
-    窗口没映射时 ``winfo_ismapped()`` 恒为 0(假绿), 因此先等到窗口真的在屏幕上,
-    再断言滚动条与“内容是否溢出”一致。
+    高度跟内容长会一路长到接近整屏, 弹窗反客为主(P2c 反馈)。定高矮一截后内容
+    必然溢出, 滚动条要立起来; 展开/收起详情块也不再改变窗口高度。
     """
     from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.settings_window import (
+        _PARENT_HEIGHT_MARGIN,
+        _WINDOW_MIN_HEIGHT,
+    )
 
     _patch_dialogs(monkeypatch)
     app = gui_app(_new_app, DemoArchiveService(delay=0))
     _pump(app)
-    # 把屏幕报得很高: 窗口高度会等于内容高度, 滚动区刚好装下.
+    # 屏幕报得很高也一样定高: 不再"屏够高就按内容定高".
     monkeypatch.setattr(app, "winfo_screenheight", lambda: 4000)
     window = _settings_window(app, [])
     assert _wait_for(app, lambda: window._window.winfo_ismapped()), "窗口未映射"
 
+    expected = max(_WINDOW_MIN_HEIGHT, app.winfo_height() - _PARENT_HEIGHT_MARGIN)
+    assert window._window.winfo_height() == expected, (
+        f"设置窗高 {window._window.winfo_height()} 应为主窗高 {app.winfo_height()}"
+        f" - {_PARENT_HEIGHT_MARGIN}"
+    )
     canvas = window._body._parent_canvas
     region = canvas.bbox("all")
     content = 0 if region is None else int(region[3]) - int(region[1])
-    assert scrollbar_needed(content, int(canvas.winfo_height())) is False
-    assert _wait_for(app, lambda: not window._body._scrollbar.winfo_ismapped()), (
-        "内容装得下却仍立着滚动条"
+    assert scrollbar_needed(content, int(canvas.winfo_height())) is True
+    assert _wait_for(app, lambda: window._body._scrollbar.winfo_ismapped()), (
+        "内容溢出却没有滚动条"
     )
+    # 高度不跟内容走: 展开详情块不该把窗口顶高.
+    window._storage_details_btn.invoke()
+    _pump(app)
+    assert window._window.winfo_height() == expected, "折叠块展开不该把窗口顶高"
 
 
 def test_settings_window_scrollbar_appears_when_the_content_does_not_fit(
@@ -694,6 +737,122 @@ def test_custom_hotkey_is_persisted_and_reloaded(tmp_path: Path) -> None:
     assert reloaded._shortcuts[ACTION_SAVE_NOW] == DEFAULT_SAVE_ACCELERATOR
 
 
+def test_theme_toggle_is_persisted_and_restored(tmp_path: Path) -> None:
+    """主题切换写入配置文件, 下次启动按它启动(此前 config.theme 是没人读的死配置)."""
+    from archive_management.config import load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    app = gui_app(
+        _new_app,
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        paths=paths,
+    )
+    try:
+        _pump(app)
+        # 默认 system 解析为深色: 这个配置项在落盘功能之前从未被读过, 沿用旧观感.
+        assert app._theme == "dark"
+        assert app._on_toggle_theme() == "light"
+        assert load_config(paths.config_path).theme == "light"
+    finally:
+        app.destroy()
+
+    reloaded = build_with_retry(
+        _new_app,
+        DemoArchiveService(delay=0),
+        hotkeys=GlobalHotkeyService(backend=_RecordingBackend()),
+        paths=paths,
+    )
+    assert reloaded._theme == "light"
+    # 后端读数与界面一致: current_theme 不许再回退到固定深色.
+    assert reloaded.backend.current_theme() == "light"
+
+
+def test_log_rotation_entries_apply_and_revert() -> None:
+    """日志滚动两行输入: 值没动不提交; 非整数在窗口侧拦; 主窗口拒绝时拨回生效值."""
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = _settings_window(app, [])
+    applied: list[tuple[int, int]] = []
+
+    def apply(max_mb: int, count: int) -> str | None:
+        applied.append((max_mb, count))
+        return None
+
+    window._on_apply_log_rotation = apply
+
+    # ① 值没变: 回车/失焦都不触发一次多余的落盘.
+    window._on_log_entry_submit()
+    assert applied == []
+
+    # ② 合法修改: 送主窗口, 错误行保持整行收起, 窗口副本跟着前进.
+    window._log_mb_entry.delete(0, "end")
+    window._log_mb_entry.insert(0, "200")
+    window._on_log_entry_submit()
+    _pump(app)
+    assert applied == [(200, 5)]
+    assert window._log_error.winfo_manager() == ""
+
+    # ③ 非整数: 窗口侧拦下不送主窗口, 输入框拨回生效值并说明原因.
+    window._log_mb_entry.delete(0, "end")
+    window._log_mb_entry.insert(0, "abc")
+    window._on_log_entry_submit()
+    _pump(app)
+    assert applied == [(200, 5)]
+    assert window._log_mb_entry.get() == "200"
+    assert tr("settings.log_rotation_number") in window._log_error.cget("text")
+
+    # ④ 主窗口拒绝(如超范围): 原因进错误行, 两个输入框都拨回实际生效的值.
+    window._on_apply_log_rotation = lambda _max_mb, _count: "超出范围"
+    window._log_backups_entry.delete(0, "end")
+    window._log_backups_entry.insert(0, "99")
+    window._on_log_entry_submit()
+    _pump(app)
+    assert "超出范围" in window._log_error.cget("text")
+    assert window._log_backups_entry.get() == "5"
+    assert window._log_mb_entry.get() == "200"
+
+
+def test_log_rotation_change_rejects_out_of_range_and_persists(
+    tmp_path: Path,
+) -> None:
+    """主窗口的日志滚动口径: 范围外只回原因不动配置, 范围内即时生效并落盘.
+
+    设置窗口侧的拦截(见上一个用例)只是第一道; 这里的范围校验才是保存口径的
+    唯一权威 —— 两道都过才写配置与处理器。
+    """
+    from archive_management.config import load_config
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    paths = ApplicationPaths.default(override_root=tmp_path).ensure()
+    app = gui_app(_new_app, DemoArchiveService(delay=0), paths=paths)
+    _pump(app)
+    try:
+        # ① 范围外: 原因文案原样回给设置窗口, 配置一个字段都不动.
+        assert app._on_log_rotation_change(0, 5) == tr("settings.log_rotation_range_mb")
+        assert app._on_log_rotation_change(100, 21) == tr(
+            "settings.log_rotation_range_backups"
+        )
+        unchanged = load_config(paths.config_path)
+        assert unchanged.logging.max_bytes == 100 * 1024 * 1024
+        assert unchanged.logging.backup_count == 5
+
+        # ② 范围内: 即时生效(主窗口口径更新; 处理器属性那一半由 test_audit 的
+        # apply_rotation 用例钉住 —— GUI 测试环境不装配日志, 这里不重复搭) + 写回配置.
+        assert app._on_log_rotation_change(200, 7) is None
+        assert app._log_max_mb == 200
+        assert app._log_backups == 7
+        saved = load_config(paths.config_path)
+        assert saved.logging.max_bytes == 200 * 1024 * 1024
+        assert saved.logging.backup_count == 7
+        _pump(app)
+    finally:
+        app.destroy()
+
+
 def test_invalid_config_entries_are_repaired_on_startup(tmp_path: Path) -> None:
     """启动时只写坏一项: 剔除那一项并提示用户, 而不是把整份配置都冲掉."""
     from archive_management.config import load_config
@@ -799,6 +958,8 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         verification_mode="sha256",
         verification_parallel=2,
         debug=True,
+        log_max_mb=100,
+        log_backups=5,
         activation=True,
         remember_window=True,
         shortcuts=app._shortcuts,
@@ -807,11 +968,16 @@ def test_settings_window_skips_unchanged_values_and_rolls_failures_back() -> Non
         on_apply_font_size=fail_font,
         on_apply_verification=fail_verification,
         on_apply_debug=fail_debug,
+        on_apply_log_rotation=lambda _max_mb, _count: None,
         on_apply_activation=fail_activation,
         on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda action, accelerator: None,
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
     try:
         # ① 语言: 不认识的值与"当前语言"都不写回; 换一种语言则回调报错 → 显示原因.
@@ -930,6 +1096,8 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         verification_mode="sha256",
         verification_parallel=2,
         debug=False,
+        log_max_mb=100,
+        log_backups=5,
         activation=False,
         remember_window=True,
         shortcuts=app._shortcuts,
@@ -938,11 +1106,16 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         on_apply_font_size=lambda _size: None,
         on_apply_verification=lambda _mode: None,
         on_apply_debug=lambda _enabled: None,
+        on_apply_log_rotation=lambda _max_mb, _count: None,
         on_apply_activation=lambda _enabled: None,
         on_apply_remember_window=lambda _enabled: None,
         on_apply_shortcut=lambda _action, _accelerator: "快捷键被占用",
         on_capture_start=lambda: None,
         on_capture_end=lambda: None,
+        storage=app.backend.storage_overview(),
+        on_change_backup_root=lambda: None,
+        on_restore_backup_root=lambda: None,
+        on_open_location=lambda _path: None,
     )
     try:
         # ① 字号: 回调返回 None 表示成功, 下拉停在新值上。
@@ -979,6 +1152,187 @@ def test_settings_window_keeps_a_successful_font_and_reports_a_failed_shortcut()
         assert window._verification_status.cget("text") == tr(
             "settings.verification_parallel", parallel=2
         )
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_settings_storage_panel_wires_locations_and_pending_restart() -> None:
+    """存储位置分区: 只读行带"打开位置"接线, 动作按钮触发注入回调, 待重启提示随回填翻转."""
+    from dataclasses import replace
+
+    from archive_management.ui.demo_backend import DemoArchiveService
+    from archive_management.ui.models import StorageOverview
+    from archive_management.ui.settings_window import SettingsWindow
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    builtin = "D:/AppData/Demo/data/backups"
+    storage = StorageOverview(
+        backup_root=builtin,
+        next_backup_root=builtin,
+        database_path="D:/AppData/Demo/data/archive-management.db",
+        config_path="D:/AppData/Demo/config/config.json",
+        log_file="D:/AppData/Demo/logs/app.log",
+        exports_dir="D:/AppData/Demo/data/exports",
+        artwork_dir="D:/AppData/Demo/data/artwork",
+    )
+    opened: list[str] = []
+    requested: list[str] = []
+    window = SettingsWindow(
+        app,
+        palette=app.p,
+        theme=app._theme,
+        language=app._language,
+        base_font_px=16,
+        verification_mode="sha256",
+        verification_parallel=2,
+        debug=False,
+        log_max_mb=100,
+        log_backups=5,
+        activation=False,
+        remember_window=True,
+        shortcuts=app._shortcuts,
+        on_toggle_theme=lambda: app._theme,
+        on_apply_language=lambda _locale: None,
+        on_apply_font_size=lambda _size: None,
+        on_apply_verification=lambda _mode: None,
+        on_apply_debug=lambda _enabled: None,
+        on_apply_log_rotation=lambda _max_mb, _count: None,
+        on_apply_activation=lambda _enabled: None,
+        on_apply_remember_window=lambda _enabled: None,
+        on_apply_shortcut=lambda _action, _accelerator: None,
+        on_capture_start=lambda: None,
+        on_capture_end=lambda: None,
+        storage=storage,
+        on_change_backup_root=lambda: requested.append("change"),
+        on_restore_backup_root=lambda: requested.append("restore"),
+        on_open_location=opened.append,
+    )
+    try:
+        # ⓪ 两个详情块默认折叠(P2c): 常开的只有主路径, 细节点开才占高度;
+        #    按钮文字写"点击后会发生什么", 点开/收起各验一次。
+        assert window._storage_details.winfo_manager() == "", "位置详情默认应收起"
+        assert window._log_details.winfo_manager() == "", "滚动详情默认应收起"
+        assert window._storage_details_btn.cget("text") == tr(
+            "settings.storage_details_show"
+        )
+        window._storage_details_btn.invoke()
+        assert window._storage_details.winfo_manager() != "", "点开后位置详情要占回"
+        assert window._storage_details_btn.cget("text") == tr(
+            "settings.storage_details_hide"
+        )
+        window._log_details_btn.invoke()
+        assert window._log_details.winfo_manager() != "", "点开后滚动详情要占回"
+        assert window._log_mb_entry.get() == "100", "展开后输入框仍带初值"
+        #    展开后两行与其他分区同款: 标签在左、输入框保持默认宽贴右内边距,
+        #    中间留白(先等窗口真的布局, 否则宽度断言会拿请求宽空转)。
+        assert _wait_for(app, lambda: window._log_details.winfo_width() > 300), (
+            "滚动详情未布局"
+        )
+        right_gap = (
+            window._log_details.winfo_width()
+            - window._log_mb_entry.winfo_x()
+            - window._log_mb_entry.winfo_width()
+        )
+        assert right_gap <= 20, f"滚动详情输入框要贴住右内边距(右缘留白 {right_gap}px)"
+        assert window._log_mb_entry.winfo_width() <= 200, (
+            "输入框保持默认宽度贴右, 不拉伸撑满"
+        )
+        # 收得回去才算真折叠(两块各自验一次)。
+        window._storage_details_btn.invoke()
+        assert window._storage_details.winfo_manager() == ""
+        window._log_details_btn.invoke()
+        assert window._log_details.winfo_manager() == ""
+        # ① 只读位置行: 五个内置位置都展示, 值原样挂在行上(显示时会按宽度重裁)。
+        keys = list(window._storage_values)
+        assert keys == [
+            "settings.storage_database",
+            "settings.storage_config",
+            "settings.storage_log",
+            "settings.storage_exports",
+            "settings.storage_artwork",
+        ], "只读行的顺序即展示顺序, 不能随便插行"
+        assert window._storage_values["settings.storage_log"][1] == (storage.log_file)
+        # ② "打开位置"把该行的值交给注入的回调(打开的是日志所在目录那一路径本身,
+        #    回退到最近已存在父目录是 reveal 服务的事)。
+        window._storage_open_buttons[2].invoke()
+        assert opened == [storage.log_file]
+        # ③ 两个动作按钮只触发回调: 校验/写配置/回填都在主窗口的应用链路里。
+        window._backup_change_btn.invoke()
+        window._backup_restore_btn.invoke()
+        assert requested == ["change", "restore"]
+        # ④ 平时没有"重启后"行(状态由行的有无表达); 改了还没重启才出现。
+        assert window._backup_next.winfo_manager() == "", "未改动时提示行应收起"
+        pending = replace(storage, next_backup_root="E:/NewBackups")
+        window.refresh_storage(pending)
+        assert window._backup_next.cget("text") == tr(
+            "settings.backup_root_next", path="E:/NewBackups"
+        )
+        assert window._backup_next.winfo_manager() != ""
+        # 恢复默认后(两口径重合)提示行重新收起。
+        window.refresh_storage(storage)
+        assert window._backup_next.winfo_manager() == ""
+        # ⑤ 反馈行: 失败文案显示(颜色由语义色守卫族盯着, 这里只管内容与收起)。
+        window.notify_storage("无法更改备份位置", error=True)
+        assert window._storage_error.cget("text") == "无法更改备份位置"
+        window.notify_storage("")
+        assert window._storage_error.winfo_manager() == ""
+    finally:
+        window.close()
+        app.destroy()
+
+
+def test_change_and_restore_backup_root_flow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """主窗口应用链路: 选目录→写配置→回填+成功反馈; 取消静默; 拒绝给原因; 无窗口不抛."""
+    from archive_management.ui import main_window as main_window_module
+    from archive_management.ui.demo_backend import DemoArchiveService
+
+    app = gui_app(_new_app, DemoArchiveService(delay=0))
+    _pump(app)
+    window = app._open_settings()
+    app._active_window = window
+    try:
+        # ① 目录选择器被取消: 静默返回, 不写任何反馈(两条说明行都还收着)。
+        monkeypatch.setattr(main_window_module, "pick_directory", lambda **_kw: None)
+        app._change_backup_root()
+        assert window._storage_error.winfo_manager() == ""
+        assert window._backup_next.winfo_manager() == ""
+
+        # ② 选了合法目录: 覆盖写入, 总览回填, "重启后"行出现, 反馈是保存成功。
+        chosen = str(tmp_path / "new-backups")
+        monkeypatch.setattr(main_window_module, "pick_directory", lambda **_kw: chosen)
+        app._change_backup_root()
+        overview = app.backend.storage_overview()
+        assert overview.restart_pending
+        assert Path(overview.next_backup_root) == (tmp_path / "new-backups").resolve()
+        assert window._backup_next.cget("text") == tr(
+            "settings.backup_root_next", path=overview.next_backup_root
+        )
+        assert window._storage_error.cget("text") == tr("settings.storage_saved")
+
+        # ③ 恢复默认: 反馈换恢复文案, 待重启提示重新收起。
+        app._restore_backup_root()
+        assert window._storage_error.cget("text") == tr("settings.storage_restored")
+        assert window._backup_next.winfo_manager() == ""
+        assert app.backend.storage_overview().restart_pending is False
+
+        # ④ 后端拒绝(带原因代码): 原因翻译进反馈行, 配置不被改动。
+        def refuse(_raw: str) -> None:
+            raise ValueError("not_writable")
+
+        monkeypatch.setattr(app.backend, "set_backup_root", refuse)
+        app._restore_backup_root()
+        assert window._storage_error.cget("text") == tr(
+            "settings.storage_failed",
+            reason=tr("settings.storage_err_not_writable"),
+        )
+
+        # ⑤ 设置窗口不在(理论上点不到): 早退, 不抛异常。
+        app._active_window = None
+        app._restore_backup_root()  # 不抛即通过
     finally:
         window.close()
         app.destroy()

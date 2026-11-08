@@ -40,7 +40,11 @@ from archive_management.application.locations import (
     remove_save_location,
 )
 from archive_management.application.restore import RestorePlan, RestoreService
-from archive_management.config import load_or_repair_config
+from archive_management.application.storage import (
+    backup_root_error,
+    normalize_backup_root,
+)
+from archive_management.config import load_or_repair_config, save_config
 from archive_management.domain import (
     DEFAULT_KEEP_AUTO,
     PLATFORM_IDS,
@@ -68,6 +72,7 @@ from archive_management.exceptions import (
 )
 from archive_management.i18n import current_locale, tr
 from archive_management.infrastructure.database import Database
+from archive_management.infrastructure.paths import ApplicationPaths
 from archive_management.infrastructure.repository import (
     BackupRepository,
     CandidateRepository,
@@ -76,6 +81,7 @@ from archive_management.infrastructure.repository import (
     SaveLocationRepository,
     ScheduledJobRepository,
 )
+from archive_management.logging_config import LOG_FILENAME
 from archive_management.services.artwork import (
     ArtworkCache,
     UserArtworkStore,
@@ -87,6 +93,7 @@ from archive_management.services.artwork import (
     square_icon,
 )
 from archive_management.services.audit import log_action, redacted_path
+from archive_management.services.epic_cloud import EpicCloudSource
 from archive_management.services.exclusions import load_exclusions
 from archive_management.services.export_format import ARCHIVE_SUFFIX
 from archive_management.services.game_names import (
@@ -107,7 +114,11 @@ from archive_management.services.platform_adapters import (
     adapter_for,
     default_adapters,
 )
-from archive_management.services.platform_scan import default_roots, path_health
+from archive_management.services.platform_scan import (
+    ScanRoots,
+    default_roots,
+    path_health,
+)
 from archive_management.services.processes import ProcessNameProvider
 from archive_management.services.scheduler import (
     BackupScheduler,
@@ -130,8 +141,10 @@ from archive_management.ui.models import (
     SavePathSuggestion,
     ScanSummary,
     ScheduleItem,
+    StorageOverview,
     TaskStatus,
     clean_game_name,
+    clean_process_names,
     delete_result_text,
     format_moment,
     home_board,
@@ -248,12 +261,12 @@ def _platform_game(candidate: GameCandidate) -> PlatformGame | None:
     """把探测结果包装成平台数据模型(解析不出平台游戏标识时返回 ``None``)."""
     if candidate.source not in PLATFORM_IDS:
         return None
-    app_id = discovery_cases.candidate_app_id(candidate)
+    app_id = discovery_cases.candidate_platform_id(candidate)
     if app_id is None:
         return None
     return PlatformGame(
         platform=candidate.source,
-        game_id=str(app_id),
+        game_id=app_id,
         name=candidate.name,
         install_dir=candidate.install_dir,
     )
@@ -321,9 +334,11 @@ class SqlArchiveService:
         cache_dir: Path | None = None,
         save_source: SaveCandidateSource | None = None,
         adapters: Mapping[PlatformId, PlatformAdapter] | None = None,
+        roots: ScanRoots | None = None,
         name_fetcher: NameFetcher | None = None,
         process_provider: ProcessNameProvider | None = None,
         config_path: Path | None = None,
+        builtin_paths: ApplicationPaths | None = None,
     ) -> None:
         """绑定数据库、备份根目录、调度器与缓存目录(后两者默认惰性创建).
 
@@ -335,7 +350,12 @@ class SqlArchiveService:
         它**不在这里创建**, 只在真的要写出告别包时创建。``artwork_dir`` 是**用户自己
         指定**的封面/图标落点, 同样省略时取备份目录旁边(生产里是
         :attr:`ApplicationPaths.artwork_dir`) —— 它与 ``cache_dir`` 分开: 缓存可以
-        整体清理, 用户挑的图不能。
+        整体清理, 用户挑的图不能。``builtin_paths`` 是**内置**应用路径(不随
+        ``storage.backup_root`` 覆盖移动), 设置页"存储位置"分区靠它展示各位置与
+        "下次启动"的内置备份根; 省略时总览里的位置字段为空、下次启动按当前根算。
+        ``roots`` 是平台探测使用的根目录: 省略时按当前环境推导(生产); 用例传入一套
+        指向临时目录的根目录就能把"发现"限制在那套目录里 —— 否则 ``scan_candidates``
+        会读开发机上真实的 Steam/Epic 清单, 同一条用例在两台机器上的口径就不同。
         """
         self._database = database
         self._backup_root = backup_root
@@ -380,6 +400,10 @@ class SqlArchiveService:
         self._cache_dir = cache_dir
         self._save_source = save_source
         self._adapters = adapters
+        self._roots = roots
+        self._builtin_paths = builtin_paths
+        # config_path 也留字段引用: 存储位置分区要反复读它(改备份根写的就是这份配置)。
+        self._config_path = config_path
         self._name_fetcher = name_fetcher
         self._process_provider = process_provider
         self._names_lock = threading.Lock()
@@ -461,6 +485,7 @@ class SqlArchiveService:
             next_backup_label=_stamp_or_empty(next_run),
             next_backup_paused=next_paused,
             game_enabled=game.enabled,
+            process_names=tuple(game.process_names),
             original_name=game.original_name or game.name,
             storage_folder=game.storage_key,
         )
@@ -515,6 +540,14 @@ class SqlArchiveService:
         updated = game.model_copy(update={"name": clean, "localized_name": ""})
         self._games.update(updated)
         log_action("game.rename", game_id=game.id, name=clean)
+        return self._summary(updated)
+
+    def set_game_process_names(self, game_id: str, names: Sequence[str]) -> GameSummary:
+        """覆盖写入游戏的进程名候选(游戏设置里手动增删的入口)."""
+        _game, gid = self._game_ref(game_id)
+        clean = clean_process_names(names)
+        updated = games_cases.set_process_names(self._database, gid, clean)
+        self._touch()
         return self._summary(updated)
 
     def delete_export_path(self, game_id: str) -> str:
@@ -877,6 +910,76 @@ class SqlArchiveService:
         log_action("ui.set_theme", basic=True, theme=self._theme)
         return self._theme
 
+    # -- 存储位置 -----------------------------------------------------------
+
+    def storage_overview(self) -> StorageOverview:
+        """返回存储位置总览: 当前生效根 + 配置里写定的"下次启动"根."""
+        override: str | None = None
+        if self._config_path is not None:
+            override = load_or_repair_config(
+                self._config_path
+            ).config.storage.backup_root
+        builtin = self._builtin_paths
+        if override is not None:
+            next_root = override
+        elif builtin is not None:
+            next_root = str(builtin.backup_root)
+        else:
+            next_root = str(self._backup_root)
+        return StorageOverview(
+            backup_root=str(self._backup_root),
+            next_backup_root=next_root,
+            database_path=(str(builtin.database_path) if builtin is not None else ""),
+            config_path=str(builtin.config_path) if builtin is not None else "",
+            log_file=(
+                str(builtin.log_dir / LOG_FILENAME) if builtin is not None else ""
+            ),
+            exports_dir=str(builtin.exports_dir) if builtin is not None else "",
+            artwork_dir=str(builtin.artwork_dir) if builtin is not None else "",
+        )
+
+    def set_backup_root(self, path: str | None) -> None:
+        """写入备份根覆盖(空串或 None = 恢复内置位置); 非法时抛带原因代码的 ValueError.
+
+        只改配置并审计: 当前会话的服务(快照/备份/导出)已按旧位置注入, 新位置
+        **重启后生效** —— 运行中切换会把"正在写的备份"与"界面显示的根"拆到两
+        个目录, 这正是 P2b 明确不做的事。
+        """
+        raw = "" if path is None else path
+        protected: tuple[Path, ...] = (self._backup_root,)
+        if self._builtin_paths is not None:
+            protected = (
+                self._builtin_paths.data_dir,
+                self._builtin_paths.backup_root,
+                self._backup_root,
+            )
+        reason = backup_root_error(
+            raw,
+            protected=protected,
+            save_paths=tuple(self._locations.list_all_paths()),
+        )
+        if reason is not None:
+            log_action(
+                "storage.set_backup_root_rejected",
+                target=redacted_path(raw),
+                reason=reason,
+            )
+            raise ValueError(reason)
+        if self._config_path is None:
+            # 没有配置文件可写(未注入 config_path 的测试场景): 明确报错而不是
+            # 静默"成功", 否则界面会告诉用户"已保存"而磁盘上什么都没变。
+            raise ValueError("no_config")
+        config = load_or_repair_config(self._config_path).config
+        normalized = normalize_backup_root(raw)
+        config.storage.backup_root = normalized or None
+        save_config(config, self._config_path)
+        log_action(
+            "storage.set_backup_root",
+            target=redacted_path(normalized),
+            restored=normalized == "",
+        )
+        self._touch()
+
     # -- 本地游戏探测与监控目录 -------------------------------------------
 
     def list_monitored_directories(self) -> list[MonitoredDirItem]:
@@ -921,7 +1024,7 @@ class SqlArchiveService:
         排除清单(`resources/excluded-games.json`)的候选会被默认标记为"已忽略"。
         """
         report = discovery_cases.scan_library(
-            self._database, exclusions=load_exclusions()
+            self._database, roots=self._roots, exclusions=load_exclusions()
         )
         # 扫描完就顺手补一次译名(后台线程 + 走缓存): 探测结果页要直接显示译名.
         self.prefetch_names()
@@ -1002,7 +1105,10 @@ class SqlArchiveService:
         if adapter is None or not adapter.supports_save_paths:
             return {}
         report = candidate_cases.suggest_candidates(
-            self._database, game.id, self._save_candidate_source(), platform=game.origin
+            self._database,
+            game.id,
+            self._save_candidate_source(game.origin),
+            platform=game.origin,
         )
         stored: dict[str, int] = {}
         for item in report.candidates:
@@ -1010,11 +1116,14 @@ class SqlArchiveService:
                 stored[normalize_path(item.path)] = item.id
         return stored
 
-    def _save_candidate_source(self) -> SaveCandidateSource:
-        """存档候选来源: 未注入时读本机公开的 Steam 云同步清单."""
+    def _save_candidate_source(self, platform: str) -> SaveCandidateSource:
+        """存档候选来源: 未注入时按平台读本机清单, 注入的替身优先(测试)."""
         if self._save_source is not None:
             return self._save_source
-        return SteamCloudSource(default_roots())
+        roots = self._roots if self._roots is not None else default_roots()
+        if platform == "epic":
+            return EpicCloudSource(roots)
+        return SteamCloudSource(roots)
 
     def set_candidate_ignored(self, candidate_id: str, ignored: bool) -> CandidateItem:
         """把候选标记为"已忽略"或恢复为"待处理"."""
@@ -1100,7 +1209,9 @@ class SqlArchiveService:
         适配器表在第一次真正需要时才构造(要读本机注册表与安装目录)。
         """
         if self._adapters is None:
-            self._adapters = default_adapters(default_roots())
+            self._adapters = default_adapters(
+                self._roots if self._roots is not None else default_roots()
+            )
         return adapter_for(self._adapters, platform)
 
     # -- 游戏译名 -----------------------------------------------------------

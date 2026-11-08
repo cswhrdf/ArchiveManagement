@@ -651,13 +651,22 @@ def test_no_external_program_is_executed_in_the_source_tree() -> None:
         "os.spawn",
         "shell=True",
     )
+    # 唯一豁免: reveal 服务是"打开位置"按钮的落点, 起进程就是它的职责 —— 固定
+    # 程序名 + 路径参数、无 shell, 行为由替身用例盯着(注入 subprocess.run/
+    # os.startfile 断言收到的命令)。豁免按"模块 + 令牌"窄配: reveal 里的
+    # `os.system(` 一样会挂红灯, 别的模块更不许顺手往这张表里加。
+    allowed: dict[str, tuple[str, ...]] = {
+        "archive_management/services/reveal.py": ("subprocess.",),
+    }
     offenders: list[str] = []
     for module in sorted(source_root.rglob("*.py")):
         text = module.read_text(encoding="utf-8")
+        rel = module.relative_to(source_root).as_posix()
+        waived = allowed.get(rel, ())
         offenders.extend(
-            f"{module.relative_to(source_root)}: {token}"
+            f"{rel}: {token}"
             for token in banned
-            if token in text
+            if token in text and token not in waived
         )
 
     assert offenders == [], f"源码里出现执行外部程序的入口: {offenders}"

@@ -38,6 +38,7 @@ from allure_pytest.utils import allure_name
 import ci_workflow
 import conftest
 import gui_support
+import profile_trace
 import tk_guard
 from archive_management.services.platforms import PLATFORM_LABELS
 
@@ -64,13 +65,14 @@ _DEFAULT_SUITES = ("tests/unit", "tests/integration")
 # 只在 CI 执行的测试类别: 目录名与 -m 标记名一致.
 _CI_ONLY_SUITES = ("performance", "security")
 # 不碰 uv 的作业(它们只用 runner 自带的工具与官方 action: 下产物、路径过滤、上传)。
-# 2026-10-06: 报告不再发布 Pages, 但 PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
+# 2026-10-06: 报告一度不再发布 Pages(2026-11-01 恢复, 见下面的 `publish-report`), 同日
+# PR 侧新增了两个轻量门禁作业 —— `changes` 只跑
 # `dorny/paths-filter`、`required-check` 只 `echo` 一行, 都不需要 Python 环境, 所以
 # 按这条登记; 列表不会自己变长: 守卫会反向检查"登记了的作业真的一条 uv 命令都没有"。
 # 2026-10-17 又添一个: release.yml 的 `publish`(只下产物 + `gh release`, 同样不装 Python 环境)。
 # 2026-10-30 再添一个: release.yml 的 `classify`(定版)—— scripts/release_bump.py 只用
 # 标准库, runner 自带的 python3 + git 就够, 装一套 uv 环境反而引入 sync 开销。
-# 打包门禁那个 `windows-package` 不在这里登记 —— 它是**纯转调作业**(只有一条 `uses:`、自己没有
+# 打包门禁那个 `package` 不在这里登记 —— 它是**纯转调作业**(只有一条 `uses:`、自己没有
 # 步骤), 由 :func:`_calls_another_workflow` 自动豁免; 真正装环境、跑命令的是它调用的
 # release-build.yml(那份工作流照旧走完整的分组检查)。
 _UV_FREE_JOBS: set[str] = {
@@ -82,6 +84,9 @@ _UV_FREE_JOBS: set[str] = {
     # 2026-11-01: ci.yml 的 `release-hint`(PR 阶段的发版提示) —— 与 classify 同一理由:
     # release_bump.py / release_hint.py 只用标准库, 装一套 uv 环境是纯开销。
     "release-hint",
+    # 2026-11-01: ci.yml 的 `publish-report`(报告发布到 GitHub Pages) —— 只下产物、解包、
+    # 两个官方 action, 一行 Python 都不跑, 装一套 uv 环境是纯开销。
+    "publish-report",
     # 2026-10-31: dev 快照档的两个作业(只跑 gh / git / runner 自带的 python3 —— 版本号与
     # CI 前置都是脚本算的, 装一套 uv 环境反而是纯开销)。
     "prepare",
@@ -286,7 +291,7 @@ def _without_comments(text: str) -> str:
 def _calls_another_workflow(job_body: str) -> bool:
     """作业是否只是**转调**另一份工作流(``uses: ./.github/workflows/*.yml``), 自己没有步骤.
 
-    这类作业(如 `ci.yml` 的 `windows-package`、`release.yml` 的 `build`)一行命令都不跑: 命令、
+    这类作业(如 `ci.yml` 的 `package`、`release.yml` 的 `build`)一行命令都不跑: 命令、
     依赖分组与 `UV_NO_SYNC` 全在被调用的那一份工作流里 —— 那份自己也在这个循环里, 所以这里跳过
     不算放水。反向自查也在这一处: 转调作业里不许出现 `steps:` 或 `run:`(GitHub 同样不允许两者共存)。
     """
@@ -628,6 +633,8 @@ class _ProbeItem:
         self.funcargs: dict[str, object] = {}
         self.module = None
         self.fspath = Path("tests/unit/test_probe.py")
+        # 收尾钩子会读 item.stash 取耗时追踪句柄(真实实现是 pytest.Stash, 这里用 dict 顶替).
+        self.stash: dict[object, object] = {}
 
     def get_closest_marker(self, name: str) -> None:
         return None
@@ -819,6 +826,14 @@ def test_report_config_keeps_the_history_settings() -> None:
 
     assert 'historyPath: "./.allure/history.jsonl"' in config
     assert "appendHistory: true" in config
+    # 条数上限决定**报告体积**(2026-11-07 实测: 9655 条结果 x 40 轮 = 484 MB 的
+    # data/test-results, 占整站 611 MB 的 79% —— 每条用例的 history 内联在自己的结果
+    # 文件里; Pages 站点上限 1 GB 是按解压后算的)。降到 15 轮后约 350 MB。
+    hint = (
+        "historyLimit 调大之前先量一遍站点体积(报告体积 ≈ 用例数 x 这个数): "
+        " 40 轮时整站已到 611 MB, 离 Pages 的 1 GB 上限只剩四成余量"
+    )
+    assert re.search(r"historyLimit:\s*15,", config), hint
 
 
 def _allowed_environment_ids() -> list[str]:
@@ -1060,7 +1075,7 @@ def test_a_test_that_leaves_threads_behind_is_marked_failed(
     )
 
     hook = conftest.pytest_runtest_makereport(
-        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid)),
+        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid, stash={})),
         call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
     )
     report = cast(pytest.TestReport, _reported(hook, _report(nodeid, "teardown")))
@@ -1085,13 +1100,56 @@ def test_a_test_that_cleans_up_is_not_marked_failed(
     )
 
     hook = conftest.pytest_runtest_makereport(
-        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid)),
+        item=cast(pytest.Item, SimpleNamespace(nodeid=nodeid, stash={})),
         call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
     )
     report = cast(pytest.TestReport, _reported(hook, _report(nodeid, "teardown")))
 
     assert report.outcome == "passed"
     assert report.longrepr is None
+
+
+def test_the_trace_handle_is_opened_at_setup_and_closed_at_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """耗时追踪的收尾必须落在 teardown 的**报告阶段**.
+
+    2026-11-06 实测: 收尾写在 ``pytest_runtest_protocol`` 的 ``finally`` 里时, allure 已经把
+    这条结果关了, 挂附件只会拿到 ``KeyError: None``(trace 整个丢掉, 报告里只剩摘要)。这里
+    钉住接线: setup 把句柄存进 ``item.stash``, 只在 teardown 的报告阶段取出来收尾。
+    """
+    nodeid = "tests/unit/test_x.py::test_traced"
+    handle = object()
+    opened: list[object] = []
+    closed: list[object] = []
+
+    def record_start(item: object) -> object:
+        opened.append(item)
+        return handle
+
+    monkeypatch.setattr(profile_trace, "start", record_start)
+    monkeypatch.setattr(profile_trace, "finish", closed.append)
+    item = SimpleNamespace(nodeid=nodeid, stash={})
+
+    conftest.pytest_runtest_setup(cast(pytest.Item, item))
+    assert item.stash[profile_trace.TRACE_KEY] is handle, "setup 后要存住句柄"
+
+    for when in ("setup", "call"):
+        hook = conftest.pytest_runtest_makereport(
+            item=cast(pytest.Item, item),
+            call=cast(pytest.CallInfo[Any], SimpleNamespace(when=when)),
+        )
+        _reported(hook, _report(nodeid, when))
+    assert closed == [], "用例还在跑的时候不许收尾"
+
+    hook = conftest.pytest_runtest_makereport(
+        item=cast(pytest.Item, item),
+        call=cast(pytest.CallInfo[Any], SimpleNamespace(when="teardown")),
+    )
+    _reported(hook, _report(nodeid, "teardown"))
+
+    assert opened == [item], "setup 时只开一次"
+    assert closed == [handle], "teardown 的报告阶段要拿同一个句柄收尾"
 
 
 def test_a_clean_session_is_not_touched(

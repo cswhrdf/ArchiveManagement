@@ -91,6 +91,8 @@ def _row_to_game(row: sqlite3.Row) -> Game:
         storage_key=str(row["storage_key"] or ""),
         origin=str(row["origin"] or "manual"),
         tags=_split_tags(row["tags"]),
+        # v16 起的进程名候选: 同为逗号拼接存储(播种前已过滤含逗号的名字), 复用拆分.
+        process_names=_split_tags(row["process_names"]),
         archived=_as_bool(row["archived"]),
         last_activity_at=_parse_dt(row["last_activity_at"]),
     )
@@ -163,7 +165,8 @@ class GameRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT id, name, steam_app_id, platform, enabled, created_at,"
-                " original_name, localized_name, storage_key, origin, tags, archived,"
+                " original_name, localized_name, storage_key, origin, tags,"
+                " process_names, archived,"
                 " last_activity_at FROM games ORDER BY created_at, id"
             ).fetchall()
         return [_row_to_game(row) for row in rows]
@@ -173,7 +176,8 @@ class GameRepository:
         with self._database.connect() as connection:
             row = connection.execute(
                 "SELECT id, name, steam_app_id, platform, enabled, created_at,"
-                " original_name, localized_name, storage_key, origin, tags, archived,"
+                " original_name, localized_name, storage_key, origin, tags,"
+                " process_names, archived,"
                 " last_activity_at FROM games WHERE id = ?",
                 (game_id,),
             ).fetchone()
@@ -186,8 +190,9 @@ class GameRepository:
         with self._database.session() as connection:
             cursor = connection.execute(
                 "INSERT INTO games (name, steam_app_id, platform, enabled, created_at,"
-                " original_name, localized_name, storage_key, origin, tags, archived,"
-                " last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " original_name, localized_name, storage_key, origin, tags,"
+                " process_names, archived,"
+                " last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     game.name,
                     game.steam_app_id,
@@ -199,6 +204,7 @@ class GameRepository:
                     game.storage_key,
                     game.origin,
                     _join_tags(game.tags),
+                    _join_tags(game.process_names),
                     int(game.archived),
                     _dt_text(game.last_activity_at) or created_at,
                 ),
@@ -218,6 +224,7 @@ class GameRepository:
             storage_key=game.storage_key,
             origin=game.origin,
             tags=game.tags,
+            process_names=game.process_names,
             archived=game.archived,
             last_activity_at=_parse_dt(_dt_text(game.last_activity_at) or created_at),
         )
@@ -227,8 +234,9 @@ class GameRepository:
 
         只更新名称/Steam/平台/启用状态/译名记录: ``original_name`` 与
         ``storage_key`` 记录的是"首次录入的名称"与"磁盘上实际使用的目录",
-        重命名不得改写; ``localized_name`` 跟着一起写, 让"名字是谁写的"能跟着
-        名字一起变(用户改名时调用方负责清空它)。
+        重命名不得改写; ``process_names``(进程名候选)只在插入时与
+        :meth:`set_process_names` 里写入; ``localized_name`` 跟着一起写, 让
+        "名字是谁写的"能跟着名字一起变(用户改名时调用方负责清空它)。
         """
         if game.id is None:
             raise ValueError("更新游戏需要 id")
@@ -246,6 +254,18 @@ class GameRepository:
                 ),
             )
         return game
+
+    def set_process_names(self, game_id: int, names: Sequence[str]) -> None:
+        """覆盖写入该游戏的进程名候选(逗号拼接, 与插入时同一存储格式).
+
+        候选有两个来源: 导入时的自动播种(随 :meth:`add` 插入)与游戏设置里的
+        手动增删(走这里) —— 后者是完整覆盖, 调用方先按当前名单加减出新的全集。
+        """
+        with self._database.session() as connection:
+            connection.execute(
+                "UPDATE games SET process_names = ? WHERE id = ?",
+                (_join_tags(names), game_id),
+            )
 
     def ensure_storage_key(self, game_id: int, key: str) -> str:
         """写入并返回该游戏在备份根下的目录名(已有取值时不再改写).
@@ -410,6 +430,16 @@ class SaveLocationRepository:
                 "SELECT DISTINCT game_id FROM save_locations"
             ).fetchall()
         return {int(row["game_id"]) for row in rows}
+
+    def list_all_paths(self) -> list[str]:
+        """返回库里登记过的全部存档位置路径(改备份根前的"重合"校验用).
+
+        新备份根若与任何一条原始存档位置相同, "备份绝不写进原始目录"的保护就
+        会失效, 因此设置页改位置时要把这张清单交给校验(见 application.storage)。
+        """
+        with self._database.connect() as connection:
+            rows = connection.execute("SELECT path FROM save_locations").fetchall()
+        return [str(row["path"]) for row in rows]
 
     def get(self, location_id: int) -> SaveLocation | None:
         """按 id 返回单个存档位置; 不存在返回 None."""
@@ -1509,7 +1539,8 @@ class HomeRepository:
                 for row in connection.execute(
                     "SELECT id, name, steam_app_id, platform, enabled, created_at,"
                     " original_name, localized_name, storage_key, origin, tags,"
-                    " archived, last_activity_at FROM games ORDER BY name, id"
+                    " process_names, archived, last_activity_at FROM games"
+                    " ORDER BY name, id"
                 ).fetchall()
             ]
             paths: dict[int, list[tuple[str, str]]] = {}

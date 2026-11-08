@@ -351,7 +351,7 @@ def test_every_expected_conclusion_names_a_live_script_and_an_upstream_job() -> 
     def uploads_artifacts(job_name: str, jobs: dict[str, str]) -> bool:
         """这个作业(或它转调的本地工作流)真的在传产物吗.
 
-        纯转调作业(``uses: ./.github/workflows/*.yml``, 如打包门禁的 ``windows-package``)
+        纯转调作业(``uses: ./.github/workflows/*.yml``, 如打包门禁的 ``package``)
         自己没有步骤, 上传发生在被调的那份里 —— 顺着 ``uses:`` 找过去再看, 否则清单里登记
         它就会永远误报"不上传任何产物"。
         """
@@ -467,13 +467,14 @@ def test_smoke_expectation_follows_the_declared_platforms() -> None:
         "没传 smoke 平台时这一族不该出现 —— 门禁没跑的运行报缺失就是假警报"
     )
 
-    items = catalog.expected_items(platforms, scripts, ("Windows",))
+    items = catalog.expected_items(platforms, scripts, ("Windows", "Linux"))
     smoke = [item for item in items if item.producer.key == "smoke"]
     assert [(item.identity, item.environment) for item in smoke] == [
-        ("archive-management.smoke.", "Windows")
-    ], "传了才要求, 且按传入的平台展开(冒烟将来扩平台时改的就是这份清单)"
+        ("archive-management.smoke.", "Windows"),
+        ("archive-management.smoke.", "Linux"),
+    ], "传了才要求, 且按传入的平台展开(冒烟的平台清单改了就同步这份期望)"
     # 传了冒烟平台, 别的族不受影响(条件只作用于这一族)。
-    assert len(items) == len(absent) + 1
+    assert len(items) == len(absent) + 2
 
 
 def test_missing_conclusions_are_loud_in_the_ledger_and_as_broken_items(
@@ -657,3 +658,43 @@ def test_the_capture_pins_the_clock_so_baselines_stop_drifting(
     monkeypatch.setattr(module, "_capture_screens", lambda *_args: ([], [], {}))
     assert module.capture_screens(tmp_path, ModuleType("grab")) == ([], [], {})
     assert entered == ["in", "out"], "整段拍摄都要在固定时钟里跑(建窗口 + 拍每一张)"
+
+
+#: 画面名在脚本里就是**字面量**(``"08-游戏设置-默认折叠态"``): 不带冒号是它与那些
+#: "跳过原因"(``"08-11: 演示数据里没有游戏..."``)唯一可靠的区别。
+_SCREEN_LITERAL = re.compile(r'"(\d{2}-[^"\n:]+)"')
+_BASELINE_ROW = re.compile(r"`(\d{2}-[^`\n]+)\.png`")
+
+
+def test_every_captured_screen_is_documented_and_nameable() -> None:
+    """脚本拍的画面与 README 的表必须一一对上, 编号还要连续.
+
+    这三处是**手写多份**的: 脚本里的名字、`visual-baselines/README.md` 的表、目录里的
+    PNG。少写一处不会让任何东西变红, 只会静默降级 —— 报告里出现"无基线(已产出候选)"
+    却没人知道那张图在守什么, 或者新画面根本没进表。所以直接从源码里抽名字字面量,
+    与 README 的表格逐字比(基线图本身**不**要求存在: 新画面要等一轮 CI 才采得到)。
+    """
+    source = (_REPO_ROOT / "scripts" / "create_allure_visual.py").read_text(
+        encoding="utf-8"
+    )
+    captured = set(_SCREEN_LITERAL.findall(source))
+    readme = (_REPO_ROOT / "tests" / "visual-baselines" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    documented = set(_BASELINE_ROW.findall(readme))
+
+    assert captured == documented, (
+        "脚本与 README 的画面清单不一致: 只写在脚本里="
+        f"{sorted(captured - documented)}, 只写在 README 里="
+        f"{sorted(documented - captured)}"
+    )
+    numbers = sorted(name[:2] for name in captured)
+    assert numbers == [f"{index + 1:02d}" for index in range(len(numbers))], (
+        f"编号要连着排(报告里的先后就是它): {numbers}"
+    )
+    baselines = {
+        path.stem for path in (_REPO_ROOT / "tests" / "visual-baselines").glob("*.png")
+    }
+    assert baselines <= captured, (
+        f"目录里躺着脚本已经不拍的基线图: {sorted(baselines - captured)}"
+    )

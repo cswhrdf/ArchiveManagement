@@ -18,9 +18,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from archive_management.domain.activation import NameOwnership
 from archive_management.domain.process_names import (
+    MAX_PROCESS_NAMES,
+    MIN_NAME_LENGTH,
     name_needles,
     names_match,
     normalize_name,
@@ -149,6 +152,62 @@ def probe_processes(
     return ProcessProbe(checked=True, running=bool(matches), matches=tuple(matches))
 
 
+# 播种时的截断上限沿用 domain.process_names 的 MAX_PROCESS_NAMES: 候选越多, 跨游戏
+# 撞针(NameOwnership"共享即弃")把现有判断挤掉的风险越大 —— 5 个足够覆盖
+# "目录名 + 主程序 + 常见启动变体"。上限与游戏设置里的手动编辑共用(见 v16 设计)。
+
+# 已知的辅助程序前缀(归一化后匹配): 崩溃处理器/上报器不是游戏本体, 却常年挂在
+# 进程表里, 把它们当候选只会制造误报.
+_HELPER_EXECUTABLE_PREFIXES = ("unitycrashhandler", "crashreportclient")
+
+
+def _executable_size(path: Path) -> int:
+    """返回可执行的大小; 取不到时给 -1(排序仍成立, 拿不到大小的排最后)."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return -1
+
+
+def _is_main_executable(name: str) -> bool:
+    """过滤当不了进程候选的名字: 含逗号(存不进拼接列)、归一化后过短、辅助程序."""
+    if "," in name:
+        return False
+    normalized = normalize_name(name)
+    if len(normalized) < MIN_NAME_LENGTH:
+        return False
+    return not normalized.startswith(_HELPER_EXECUTABLE_PREFIXES)
+
+
+def install_process_candidates(install_dir: Path, platform: str) -> tuple[str, ...]:
+    """从安装目录一次性派生进程名候选(导入发现候选建游戏时播种).
+
+    组成: 安装目录名(全平台) + 顶层可执行名(Windows 是 ``*.exe``, macOS 是
+    ``*.app``; Linux 没有可靠的扩展名约定, 只取目录名)。可执行按**大小降序**排、
+    再截到上限 —— 主程序几乎总是比同目录的附带工具大, 超出上限时优先留下它。
+    目录不存在/不可读时只剩目录名: 播种是尽力而为, 路径健康由发现层另行判定,
+    这里不报错也不猜。含逗号与归一化后过短的名字在上游就被丢弃, 保证落库的
+    逗号拼接存储(见 infrastructure.schema 的 v16)不丢信息。
+    """
+    names: list[str] = []
+    dirname = install_dir.name.strip()
+    if dirname and "," not in dirname:
+        names.append(dirname)
+    pattern = {"windows": "*.exe", "macos": "*.app"}.get(platform)
+    if pattern is not None and install_dir.is_dir():
+        entries = sorted(
+            (
+                entry
+                for entry in install_dir.glob(pattern)
+                if _is_main_executable(entry.name)
+            ),
+            key=_executable_size,
+            reverse=True,
+        )
+        names.extend(entry.name for entry in entries)
+    return tuple(dict.fromkeys(names))[:MAX_PROCESS_NAMES]
+
+
 def psutil_process_names() -> Iterable[str]:
     """用 psutil 枚举当前进程名(惰性导入)."""
     import psutil
@@ -167,6 +226,7 @@ __all__ = [
     "GameProbe",
     "ProcessNameProvider",
     "ProcessProbe",
+    "install_process_candidates",
     "probe_game_process",
     "probe_games",
     "probe_processes",

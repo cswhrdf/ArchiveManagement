@@ -33,8 +33,14 @@ pytestmark = [
 ]
 
 
-def test_ci_publishes_only_verified_report() -> None:
-    """CI 必须先自检报告再发布, 并且发布单个 zip(整目录被静默丢掉的情况不会再出现)."""
+def test_ci_publishes_only_openable_report() -> None:
+    """CI 上传/发布报告的闸门是"打得开"(入口/详情齐全), 而不是"自检全通过".
+
+    打包闸门在脚本里(``--archive`` 只看结构层), CI 侧两份上传与 Pages 发布跟着
+    "归档在不在"走: 内容性失败(缺平台用例、清单对不上)轮次的报告照样上传发布 ——
+    报告正是用来看"哪里缺了/哪里红了"的, 拦下来反而拿不到证据(2026-11-01 定).
+    发布单个归档(整目录被静默丢掉的情况不会再出现).
+    """
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     # 只看命令行: 注释里也会指路到这个脚本(例如说明 zip 里的目录结构), 那是文档而不是门禁。
     code = "\n".join(
@@ -43,7 +49,6 @@ def test_ci_publishes_only_verified_report() -> None:
     verifications = code.count("scripts/verify_allure_report.py")
 
     assert verifications >= 3, "两个作业的结构自检 + 汇总作业的平台用例检查"
-    # 发布 zip 的前提是**出 zip 的那次自检**通过: 两个作业各一份。
     commands = [
         line.strip()
         for line in code.splitlines()
@@ -52,11 +57,20 @@ def test_ci_publishes_only_verified_report() -> None:
     assert len(commands) == verifications, "自检点数量与命令数量对不上"
     archive_checks = [command for command in commands if "--archive" in command]
     assert len(archive_checks) == 2, "pytest 与汇总作业各出一份归档报告"
-    # 挂在"出 zip 的那次自检通过"上的地方就是两份 `Upload ... Allure report`
-    # (2026-10-06 移除 Pages 发布后少了"解开发布"那一步)。
-    # 只数命令行(注释里也会引这句话当说明), 所以先把注释剥掉再数。
-    gated = code.count("steps.verify-report.outcome == 'success'")
-    assert gated == len(archive_checks), f"自检与归档挂钩的地方对不上: {gated}"
+    # 上传不再挂"自检通过"(2026-11-01 改口径): 打包闸门在脚本里("打得开"才打包),
+    # 上传跟着归档走 —— 内容性失败的轮次照样有报告可下, 那才是最需要看的证据;
+    # "打不开"的报告脚本根本不打包, if-no-files-found: ignore 会让上传自然跳过。
+    assert "steps.verify-report.outcome == 'success'" not in code, (
+        "上传不该再挂自检结论(挂的是归档在不在)"
+    )
+    for upload_name in ("Upload Allure report", "Upload final Allure report"):
+        marker = f"name: {upload_name}"
+        start = code.index(marker)
+        end = code.find("- name:", start)
+        block = code[start:] if end == -1 else code[start:end]
+        assert "if: always() && !cancelled()" in block, (
+            f"{upload_name} 要“归档在就传”: 依赖作业红/自检内容性失败都不拦上传"
+        )
     assert workflow.count("path: allure-report.tar.gz") == len(archive_checks)
     assert "path: allure-report/" not in workflow, "报告目录不再直接发布"
     # 平台用例检查: pytest 作业的报告传矩阵里的平台(报告作业固定跑在 Ubuntu 上,
@@ -235,12 +249,17 @@ def test_per_platform_reports_skip_the_native_gate() -> None:
 
     assert 'from "./allurerc.mjs"' in config, "设置只有一处真相: 从主配置继承"
     assert "qualityGate" in config, "它要说明自己摘掉的是什么"
+    # `--clean` 与配置文件一起钉(2026-11-08): 生成器**不刷新**已存在的输出目录, 目录里
+    # 有上一份的残留时它只打一句 warning 就混着用 —— 两处 generate 缺了它, 详情页会
+    # 随机打不开而报告看着是好的(2026-11-07 的 CI 日志里已经出现过那句 warning)。
     assert (
-        "allure generate allure-results --output allure-report "
+        "allure generate allure-results --output allure-report --clean "
         "--config allurerc.per-platform.mjs" in workflow
-    )
+    ), "逐平台那份要 --clean + 不带质量门的配置"
     # 汇总作业那句仍不带 --config: 它要用主配置里的门。
-    assert "allure generate allure-results --output allure-report\n" in workflow
+    assert (
+        "allure generate allure-results --output allure-report --clean\n" in workflow
+    ), "汇总那份要 --clean + 主配置(它本来就是跑门的地方)"
 
 
 def test_native_quality_gate_is_configured_and_pinned() -> None:
@@ -924,57 +943,140 @@ def test_report_jobs_do_not_start_for_a_superseded_run() -> None:
         assert "!cancelled()" in condition, f"{job} 在整轮被取消后仍会启动"
 
 
-def test_the_pages_deploy_is_gone_and_the_report_is_an_artifact() -> None:
-    """报告只作为 `allure-report-final` 产物存在: 不再发布到 GitHub Pages(2026-10-06).
+def test_the_push_runs_publish_the_report_to_pages() -> None:
+    """push 轮把"打得开"的汇总报告发布到 GitHub Pages; PR 轮不发布(2026-11-01 恢复).
 
-    删干净比"留一半"重要 —— 站点发布涉及三处彼此耦合的配置, 漏一处就会留下把没通过自检的
-    报告发出去的路径, 或者让 forks 上的 PR 拿到一条恒红的检查:
-    ① 三个发布步骤(`Unpack the report for Pages` / `Upload the report as a Pages artifact` /
-       `Deploy to GitHub Pages`)都不在了;
-    ② `pages: write` / `id-token: write` 权限与 `github-pages` 环境一起删掉 —— 顶层只给
-       `contents: read` / `actions: read`, 作业级权限**覆盖**顶层, 所以这里要显式写回
-       `contents: read`(漏了它 checkout 直接失败)与 `actions: read`(取本轮产物);
-    ③ 报告仍要作为产物上传(自检通过后才上传), 想浏览的人下它。
+    发布闸门是"归档在不在"(自检脚本判"打得开"才打包), 不是"自检全通过": 门禁判红、
+    缺平台用例这类"记录的内容"失败不拦发布 —— 那种轮次的报告才是最该能打开看的.
+    2026-10-06 移除站点发布时的教训: 发布涉及三处彼此耦合的配置, 漏一处就会把
+    打不开的报告发出去, 或让 fork 上的 PR 拿到一条恒红的检查。恢复时发布放进独立
+    小作业 ``publish-report``(不 checkout、不跑仓库脚本 —— 权限才敢给到 pages),
+    三处都在这里钉住:
+    ① 条件(只 push 轮、归档在才发、被取消的轮次不部署);
+    ② 权限与站点独占(pages/id-token 覆盖式补齐, 作业级并发组互斥 dev 与 main 两路);
+    ③ 发布链四步齐备 —— 任何一步缺失都是"站点不更新"这种没有任何用例会红的静默故障。
     """
     workflow = ci_workflow.workflow_text()
-    job = ci_workflow.job_block(workflow, "allure-summary")
-    # 只看真正生效的行: 注释里正拿 "github-pages" 当反面说明(与本仓库其它守卫同一个口径
+    assert "publish-report" in ci_workflow.jobs(workflow), (
+        "发布要有自己的小作业(权限最小化), 而不是塞回汇总作业"
+    )
+    condition = ci_workflow.job_condition(workflow, "publish-report")
+    assert "always()" in condition, (
+        "依赖作业「红」(门禁结论)不拦发布 —— 失败轮的报告最该能看"
+    )
+    assert "!cancelled()" in condition, "被取消的轮次不要再启动部署"
+    assert "github.event_name == 'push'" in condition, (
+        "PR 轮不发布: fork 的 PR 拿不到 pages:write, 不排除就是一条恒红的检查"
+    )
+    assert "needs.allure-summary.outputs.report_archived == 'true'" in condition, (
+        "只发“归档在”(= 自检判过打得开)的报告 —— 闸门在结构层, 不在内容层"
+    )
+
+    job = ci_workflow.job_block(workflow, "publish-report")
+    # 只看真正生效的行: 注释里正拿 "github-pages" 当说明(与本仓库其它守卫同一个口径
     # —— 注释是文档, 不是配置)。
     code = "\n".join(
         line for line in job.splitlines() if not line.strip().startswith("#")
     )
     header = code.split("steps:", 1)[0]
-
-    for gone in (
-        "Deploy to GitHub Pages",
-        "Unpack the report for Pages",
-        "actions/upload-pages-artifact",
-        "actions/deploy-pages",
-    ):
-        assert gone not in code, f"发布已经移除, 不该还留着 {gone}"
-    assert "pages: write" not in header, "发布用的权限要一起删掉"
-    assert "id-token: write" not in header, "发布用的 OIDC 权限要一起删掉"
-    assert "github-pages" not in code, "发布用的 environment 也要一起删掉"
-    assert "environment:" not in header, (
-        "站点用的 environment 只能挂作业级, 删发布就该一起删"
+    for granted in ("pages: write", "id-token: write", "actions: read"):
+        assert granted in header, (
+            f"发布要 {granted}(作业级权限是覆盖语义: 缺了就是拿不到)"
+        )
+    assert "group: pages" in header, (
+        "站点是全局独占: dev 与 main 的部署要靠作业级并发组互斥(顶层按 ref 分组拦不住)"
     )
+    assert "github-pages" in header, "deploy-pages 要挂 github-pages 环境"
+    for step in (
+        "Download the final Allure report",
+        "Download the final Allure history",
+        "Unpack the report for Pages",
+        "Upload the report as a Pages artifact",
+        "Deploy to GitHub Pages",
+    ):
+        assert f"name: {step}" in job, f"发布链缺了 {step}"
+    assert "actions/upload-pages-artifact@" in code, "Pages 产物要用官方 action 打"
+    assert "actions/deploy-pages@" in code, "部署要用官方 action(OIDC 换写权限)"
+    # 部署要能**重试一次**(2026-11-08): deploy-pages 卡在 Pages 服务端排队时会撞上
+    # 它自己的 600s 内部上限(2026-11-07 实测一次 618s 才退, 那一轮整轮被判红)。
+    # 直接 continue-on-error 了事会把"站点没更新"变成静默故障 —— 站点是下一轮历史
+    # 基线的第一来源, 少一次部署就是**永久少一个趋势点**(下一轮命中站点就不再走
+    # artifact 降级)。所以口径是: 第一次失败 ⇒ 等一会儿 ⇒ 再部署一次, 两次都失败才红。
+    assert code.count("uses: actions/deploy-pages@") == 2, (
+        "部署失败要重试一次: 只写一次时, 600s 排队超时会直接变成整轮失败"
+    )
+    assert "name: Wait before retrying the Pages deployment" in job, (
+        "重试前要等一下: 600s 是服务端排队耗掉的, 立刻重试多半还排在同一队尾"
+    )
+    deploy_at = code.index("name: Deploy to GitHub Pages")
+    retry_at = code.index("name: Retry the Pages deployment once")
+    first_attempt = code[deploy_at:retry_at]
+    retry_attempt = code[retry_at:]
+    assert "continue-on-error: true" in first_attempt, (
+        "第一次部署失败不直接判红 —— 留给下一步重试"
+    )
+    assert "continue-on-error" not in retry_attempt, (
+        "重试那次不能再吞掉失败: 两次都失败就是真的发布不了, 该红就红"
+    )
+    assert "if: steps.deployment.outcome == 'failure'" in retry_attempt, (
+        "重试只在第一次真的失败时才跑(continue-on-error 之后要靠 outcome 判)"
+    )
+    assert "sleep 60" in code, "重试之间要隔一会儿"
+    assert "steps.deployment-retry.outputs.page_url" in header, (
+        "environment.url 要回落到重试那次的 page_url: 第一次失败时它拿不到输出"
+    )
+    assert "name: allure-report-final" in code, "发布的就是汇总作业上传的那份产物"
+    assert "name: allure-resources-final" in code, (
+        "站点同时要带历史文件(下一轮基线的来源, 见 test_ci_history 的 Pages 优先守卫)"
+    )
+    assert (
+        "tar -xzf report-archive/allure-report.tar.gz --strip-components=1 -C site"
+        in code
+    ), "归档带 allure-report/ 顶层目录, 解包时要剥掉它, 让 index.html 落在 Pages 根目录"
+    assert "if-no-files-found" not in code, (
+        "download-artifact 没有这个输入(它是 upload 侧的开关): 写了只有一句"
+        " Unexpected input(s) 告警, 拦不住任何东西"
+    )
+    assert "actions/checkout" not in code, "这个作业不碰仓库代码, 权限才敢给到 pages"
+
+    # 汇总侧: 发布闸门的事实来源是"归档在不在" —— archive-present 清点 tar.gz 文件
+    # 本身(upload 步骤的 outcome 对 0 文件也是 success, 骗不得), 报告本体仍照常
+    # 生成、自检、上传 —— 产物是第一公民, 站点只是它的一个镜像。
+    summary = ci_workflow.job_block(workflow, "allure-summary")
+    summary_code = "\n".join(
+        line for line in summary.splitlines() if not line.strip().startswith("#")
+    )
+    assert "report_archived: ${{ steps.archive-present.outputs.present }}" in (
+        summary_code
+    ), "汇总作业要把“归档在不在”透传成 output, 发布作业才知道有没有能部署的报告"
+    assert (
+        'echo "present=$([ -f allure-report.tar.gz ] && echo true || echo false)"'
+        in (summary_code)
+    ), "archive-present 要清点归档文件本身, 而不是转述 upload 的结论"
 
     assert ci_workflow.needs_of(workflow, "allure-summary") == {
         "changes",
         "quality",
         "pytest-report",
         "security",
-        "windows-package",
+        "package",
     }, (
         "汇总要等齐三批产物(报告还没传完就开始合并会静默少一部分), 也要等打包 —— "
         "构建后冒烟的结论产物由它上传, 不等就会拿到半份"
     )
-    assert "Generate final Allure report" in code, "汇总本身还在这里"
-    assert "name: allure-report-final" in code, "报告仍要作为产物上传"
-    assert "allure-report.tar.gz" in code, "上传的是自检通过后打好的那个归档"
-    assert "steps.verify-report.outcome == 'success'" in code, "没通过自检的报告不上传"
-    assert "contents: read" in header, "作业级权限是覆盖: 漏了它 checkout 会失败"
-    assert "actions: read" in header, "取本轮的产物要它"
+    assert "Generate final Allure report" in summary_code, "汇总本身还在这里"
+    assert "name: allure-report-final" in summary_code, "报告仍要作为产物上传"
+    assert "allure-report.tar.gz" in summary_code, "上传的是自检打过包的那个归档"
+    assert "archive: false" not in summary_code, (
+        "archive: false 模式下 upload-artifact 拿文件名当产物名、name 输入被忽略"
+        " —— 产物实际叫 allure-report.tar.gz, 发布侧按注册名去下就是 Artifact not found"
+        "(2026-11-01 实测)"
+    )
+    assert "Verify final Allure report" in summary_code, (
+        "自检还在原地: 打不打包由它判(“打得开”才打包), 退出码照旧管门禁"
+    )
+    assert "contents: read" in summary_code, "作业级权限是覆盖: 漏了它 checkout 会失败"
+    assert "actions: read" in summary_code, "取本轮的产物要它"
 
 
 def test_report_artifacts_do_not_duplicate_the_whole_result_set() -> None:
@@ -1327,52 +1429,31 @@ def test_pr_coauthor_gate_checks_contributors_and_template_has_merge_slot() -> N
     )
 
 
-def test_the_dev_branch_is_recreated_without_touching_an_existing_one() -> None:
-    """合并时 `dev` 被自动删除 → main 每前进一格就补一个; 但**只补不挪**.
+def test_nothing_recreates_dev_because_merges_no_longer_delete_it() -> None:
+    """合并策略改成"不删来源分支"(用户 2026-11-05 改的设置)之后, 补 dev 的那份流水线已删除.
 
-    背景(用户 2026-10-31): 仓库设置开着"合并后删除来源分支", 而 `dev` 正是 PR 的来源分支 ——
-    `dev -> main` 一合入, 开发分支当场消失, 只能手工重建。
+    原 `ensure-dev.yml` 只有一个职责: `dev -> main` 合入时 `dev` 被自动删掉了, 于是 main 每前进
+    一格就补一个。设置关掉之后它**永远不会触发**; 而比死代码更糟的是它带着一套已经失效的前提 ——
+    文件头、`docs/development.md`、`AGENTS.md` 的工作流清单都在复述"仓库开着合并后删除来源分支",
+    下次谁读都会照着一个不存在的缺口去查。
 
-    落点是一份**独立工作流**而不是挂在现成的两条上, 三条理由都要钉住:
-    ① `ci.yml` 顶层只读(PR 那次运行会执行 PR 里的代码), 不能为它开写权限;
-    ② `release.yml` 的 push 档带 `paths-ignore`, **纯文档合入不跑** —— 而那种合入同样会删掉
-       dev, 挂在那里就会留下"改个文档就再没有 dev"的静默缺口, 所以这份工作流**不许**有
-       `paths-ignore`;
-    ③ 与 `release.yml` 的分工: 它重建的是**合并提交**, bump 提交由 classify 快进过去
-       (`test_the_release_workflow_bumps_the_patch_version_by_default` 钉着那一句)。
-
-    最后一条是安全红线: 只看"在不在", **绝不移动/重置已存在的 dev** —— 别的机器上可能正
-    有人在上面干活。
+    回退点: 整份文件留在 git 历史里(`git show <sha>:.github/workflows/ensure-dev.yml`)。真要重新
+    打开"合并后删除来源分支", 捞回那份流水线之前得先改掉这条守卫 —— 它是故意留在路上的。
     """
     path = _REPO_ROOT / ".github" / "workflows" / "ensure-dev.yml"
-    assert path.is_file(), "缺少 .github/workflows/ensure-dev.yml"
-    text = path.read_text(encoding="utf-8")
-    # 只看真正生效的行: 这份工作流的注释里就写着"**故意不写 paths-ignore**", 不剥注释的话
-    # 那条反向断言会被它自己喂红(2026-10-31 实测踩到, 同一类坑这个仓库已经记录过多次)。
-    head = _without_comments(text.split("\njobs:", 1)[0])
-
-    assert re.search(r"^  push:\n    branches: \[main\]$", head, re.MULTILINE), (
-        "只在 main 前进时补分支"
-    )
-    assert "paths-ignore" not in head, (
-        "纯文档合入同样会删掉 dev: 这份工作流不许按路径过滤"
-    )
-    assert "workflow_dispatch:" in head, "要留手动入口(dev 被手工删掉时能补)"
-    assert re.search(r"^permissions:\n  contents: read$", head, re.MULTILINE), (
-        "顶层保持只读, 写权限只给重建那个作业"
+    assert not path.exists(), (
+        "合并已不删来源分支: 补 dev 的流水线是死代码, 要加回来先确认仓库设置又变了"
     )
 
-    ensure = _without_comments(ci_workflow.job_block(text, "ensure"))
-    assert re.search(
-        r"^    permissions:\n      contents: write$", ensure, re.MULTILINE
-    ), "创建分支需要写权限, 且只给这个作业"
-    assert "repos/$GITHUB_REPOSITORY/branches/dev" in ensure, (
-        "先探测 dev 在不在 —— 存在时什么都不做"
-    )
-    assert "git/refs" in ensure, "只在缺失时创建(git refs 的 POST)"
-    for forbidden in ("-X PATCH", "-X DELETE", "--force", "force=true"):
-        hint = f"绝不许用 {forbidden}: dev 上可能正有别人没推完的提交"
-        assert forbidden not in ensure, hint
+    doc = (_REPO_ROOT / "docs" / "development.md").read_text(encoding="utf-8")
+    hint = "合并策略已改成不删来源分支: 文档要写明 dev 合入后仍在, 免得下次又去找补分支的流水线"
+    assert "合并后不再删除来源分支" in doc, hint
+    hint = "文档里提到这份流水线时必须是'已删除'的口径, 否则读起来像是它还在跑"
+    assert "ensure-dev.yml" in doc, hint
+    assert "已删除" in doc, hint
+
+    agents = (_REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "ensure-dev" not in agents, "工作流清单只列活着的工作流, 这份已经删了"
 
 
 def test_the_release_workflow_only_publishes_from_main() -> None:
@@ -1702,18 +1783,18 @@ def test_the_packaging_gate_gates_pull_requests_into_main() -> None:
     跑过三平台全量)。
     """
     text = ci_workflow.workflow_text()
-    block = ci_workflow.job_block(text, "windows-package")
+    block = ci_workflow.job_block(text, "package")
 
     assert "uses: ./.github/workflows/release-build.yml" in block, (
         "构建只留一处定义: 门禁与发布跑同一份步骤, 不会各自漂移"
     )
-    assert ci_workflow.needs_of(text, "windows-package") == {
+    assert ci_workflow.needs_of(text, "package") == {
         "changes",
         "quality",
         "pytest",
         "security",
     }, "门禁要等齐产出结论的核心作业(报告链翻转成等打包, 不再挡打包)"
-    condition = ci_workflow.job_condition(text, "windows-package")
+    condition = ci_workflow.job_condition(text, "package")
     assert "github.event_name == 'pull_request'" in condition
     hint = "只给合入 main 的 PR 付这份编译成本"
     assert "github.base_ref == 'main'" in condition, hint
@@ -1753,9 +1834,10 @@ def test_the_packaging_gate_path_never_holds_write_permission() -> None:
         "version_override",
         "version",
         "label",
+        "linux_label",
     }, hint
     gate = _without_comments(
-        ci_workflow.job_block(ci_workflow.workflow_text(), "windows-package")
+        ci_workflow.job_block(ci_workflow.workflow_text(), "package")
     )
     assert "contents: write" not in gate, "调用方也不能为了跑门禁去要写权限"
     assert "permissions:" not in gate, "门禁用顶层那份只读权限就够了"
@@ -1844,14 +1926,14 @@ def test_the_packaging_gate_always_reports_a_conclusion() -> None:
     """必需检查必须是"总会报结论"的作业 —— 被跳过的必需检查会永久停在 pending.
 
     三种情况各一条出口(纯文档改动 / 非 main 的 PR / 编译成功), 其余判红; **"上游红了导致这个
-    作业被跳过"也判红**(`needs.windows-package.result` 那时是 `skipped`)。这条与 `required-check`
+    作业被跳过"也判红**(`needs.package.result` 那时是 `skipped`)。这条与 `required-check`
     是同一条理由: 分支保护里的必需检查不能由一个会被条件跳过的作业兼任。
     """
     text = ci_workflow.workflow_text()
 
     assert ci_workflow.needs_of(text, "packaging-gate") == {
         "changes",
-        "windows-package",
+        "package",
     }
     assert ci_workflow.job_condition(text, "packaging-gate") == "always()"
 
@@ -1867,84 +1949,271 @@ def test_the_build_smokes_the_packages_it_produced() -> None:
 
     顺序本身就是不变式: 冒烟必须在 ``Build the onefile package`` 之后(那时才有
     产物可冒)、在 ``Prepare the release file`` 之前(跑不起来的包不该被打包上传成"看起来能发"
-    的样子)。判据是退出码 + 侧效应, 全在 ``scripts/smoke_packaged.py`` 里(工作流只负责
-    调用); 门禁档(ci.yml 的 windows-package)与发布档(release.yml)共用这一步, 两个入口
-    同时被它覆盖。
+    的样子)。**两个构建作业各管各的产物**(Windows 的 build / Linux 的 build-linux), 所以
+    逐作业检查 —— 整文件取首处会漏掉"Linux 作业里少了哪一步"这类单边退化。判据是退出码 +
+    侧效应, 全在 ``scripts/smoke_packaged.py`` 里(工作流只负责调用); 门禁档(ci.yml 的
+    package)与发布档(release.yml)共用这一步, 两个入口同时被它覆盖。
     """
     build = ci_workflow.RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
     smoke = "- name: Smoke test the built packages"
-    assert smoke in build, "构建作业里必须有产物冒烟这一步"
-    smoke_at = build.index(smoke)
-    assert smoke_at > build.index("Build the onefile package"), (
-        "冒烟必须在构建之后(不然没有产物可冒)"
-    )
-    assert smoke_at < build.index("Prepare the release file"), (
-        "冒烟必须在拷 release/ 之前(跑不起来的包不上传)"
-    )
-    step = build.split(smoke, 1)[1].split("- name:", 1)[0]
-    assert "scripts/smoke_packaged.py" in step, "判据只在脚本里一处定义, 工作流只调用"
-    assert "--report smoke-report.json" in step, (
-        "冒烟步要把逐条判据落成 JSON, 下一步才有东西可转(只给退出码, 报告里看不出哪条红)"
+    for job in ("build", "build-linux"):
+        block = ci_workflow.job_block(build, job)
+        assert smoke in block, f"{job} 作业里必须有产物冒烟这一步"
+        smoke_at = block.index(smoke)
+        assert smoke_at > block.index("Build the onefile package"), (
+            f"{job}: 冒烟必须在构建之后(不然没有产物可冒)"
+        )
+        assert smoke_at < block.index("Prepare the release file"), (
+            f"{job}: 冒烟必须在拷 release/ 之前(跑不起来的包不上传)"
+        )
+        step = block.split(smoke, 1)[1].split("- name:", 1)[0]
+        assert "scripts/smoke_packaged.py" in step, (
+            f"{job}: 判据只在脚本里一处定义, 工作流只调用"
+        )
+        assert "--report smoke-report.json" in step, (
+            f"{job}: 冒烟步要把逐条判据落成 JSON, 下一步才有东西可转"
+            "(只给退出码, 报告里看不出哪条红)"
+        )
+    # Linux 作业的冒烟必须包在 xvfb-run 里: GUI 两条判据要显示, 而 runner 上没有桌面。
+    linux = ci_workflow.job_block(build, "build-linux")
+    linux_smoke = linux.split(smoke, 1)[1].split("- name:", 1)[0]
+    assert "xvfb-run" in linux_smoke, (
+        "build-linux 的冒烟要由 xvfb-run 提供显示(裸跑时 GUI 判据必红)"
     )
 
 
 def test_the_packaging_smoke_results_reach_the_final_report() -> None:
     """构建后冒烟的结论要一路进汇总报告: 落 JSON → 转结果项 → 上传 → 汇总收走 → 条件期望.
 
-    四个环节各钉一点, 断一个报告里就只剩一个看不见的退出码:
-    ① release-build 在冒烟步之后把 JSON 转成 Allure 结果并上传(两步都 ``always()``: 冒烟红的
-       时候结论更要进报告; 上传 ``ignore``: 冒烟没跑时"该有而没有"由汇总的条件期望点名,
-       不在这里叠一个误导性的红);
-    ② 产物名 ``allure-results-smoke-windows`` 匹配汇总作业的 ``pattern: allure-results-*``
-       (自动收走), 但**不**匹配每平台报告作业的 ``allure-results-<os>-*`` —— 否则冒烟结论会
-       被错并进单平台报告;
-    ③ 汇总作业 ``needs`` 里有 windows-package(不等它就会在它传完之前去下载, 静默少一节);
-    ④ 条件期望从 ``needs.windows-package.result`` 推出来: 只有打包真的跑了(success/failure)
-       才要求数, 被跳过传空 —— 写死 "Windows" 的话, push 到 dev 的每一轮都会报假缺失。
+    五个环节各钉一点, 断一个报告里就只剩一个看不见的退出码:
+    ① release-build 的**两个**构建作业在冒烟步之后各把 JSON 转成 Allure 结果并上传(两步都
+       ``always()``: 冒烟红的时候结论更要进报告; 上传 ``ignore``: 冒烟没跑时"该有而没有"由
+       汇总的条件期望点名, 不在这里叠一个误导性的红);
+    ② 产物名 ``allure-results-smoke-windows`` / ``allure-results-smoke-linux`` 匹配汇总作业的
+       ``pattern: allure-results-*``(自动收走), 但**不**匹配每平台报告作业的
+       ``allure-results-<os>-*`` —— 否则冒烟结论会被错并进单平台报告;
+    ③ 汇总作业 ``needs`` 里有 package(不等它就会在它传完之前去下载, 静默少一节);
+    ④ 条件期望从 ``needs.package.result`` 推出来: 只有打包真的跑了(success/failure)才要求数,
+       被跳过传空 —— 写死平台清单的话, push 到 dev 的每一轮都会报假缺失。
     """
     build = ci_workflow.RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
-    smoke_at = build.index("- name: Smoke test the built packages")
-    writer_at = build.index("- name: Write smoke results into Allure")
-    upload_at = build.index("- name: Upload smoke Allure results")
-    assert smoke_at < writer_at < upload_at, (
-        "转结论与上传必须紧跟冒烟步(先有 JSON 才能转, 转完才有东西可传)"
-    )
-    assert upload_at < build.index("- name: Prepare the release file"), (
-        "冒烟结论的上传排在打 release/ 之前 —— 与冒烟本身同一个理由, 跑不起来的包不该"
-        '被上传成"看起来能发"的样子'
-    )
-    writer = build.split("- name: Write smoke results into Allure", 1)[1]
-    writer_step = writer.split("\n      - name:", 1)[0]
-    assert "if: always()" in writer_step, (
-        "冒烟红了也要把结论转出来, 不能默认 success() 跳过"
-    )
-    assert "create_allure_smoke.py" in writer_step, "转换只留一处定义, 工作流只调用"
+    smoke = "- name: Smoke test the built packages"
+    for job, artifact in (
+        ("build", "allure-results-smoke-windows"),
+        ("build-linux", "allure-results-smoke-linux"),
+    ):
+        block = ci_workflow.job_block(build, job)
+        smoke_at = block.index(smoke)
+        writer_at = block.index("- name: Write smoke results into Allure")
+        upload_at = block.index("- name: Upload smoke Allure results")
+        assert smoke_at < writer_at < upload_at, (
+            f"{job}: 转结论与上传必须紧跟冒烟步(先有 JSON 才能转, 转完才有东西可传)"
+        )
+        assert upload_at < block.index("- name: Prepare the release file"), (
+            f"{job}: 冒烟结论的上传排在打 release/ 之前 —— 与冒烟本身同一个理由, "
+            '跑不起来的包不该被上传成"看起来能发"的样子'
+        )
+        writer = block.split("- name: Write smoke results into Allure", 1)[1]
+        writer_step = writer.split("\n      - name:", 1)[0]
+        assert "if: always()" in writer_step, (
+            f"{job}: 冒烟红了也要把结论转出来, 不能默认 success() 跳过"
+        )
+        assert "create_allure_smoke.py" in writer_step, (
+            f"{job}: 转换只留一处定义, 工作流只调用"
+        )
+        assert f"--results-dir {artifact}" in writer_step, (
+            f"{job}: 转出的结果要落进 {artifact}, 与上传步的产物名对上"
+        )
 
-    artifact = "allure-results-smoke-windows"
-    upload_step = build.split("- name: Upload smoke Allure results", 1)[1]
-    upload_step = upload_step.split("\n      - name:", 1)[0]
-    assert "if: always()" in upload_step, "冒烟红/构建红时也要试着传(没有就 ignore)"
-    assert f"name: {artifact}" in upload_step
-    assert "if-no-files-found: ignore" in upload_step, (
-        '构建更早红掉时没有结论可传是预期内的, 不该在这里叠一个"没文件"的红'
-    )
-    assert not any(
-        artifact.startswith(f"allure-results-{os_name}-")
-        for os_name in ci_workflow.OS_PLATFORMS
-    ), (
-        f"{artifact} 会撞上每平台报告作业的下载 pattern(allure-results-<os>-*), "
-        "冒烟结论会被错并进单平台报告 —— 换一个不带的平台段"
-    )
+        upload_step = block.split("- name: Upload smoke Allure results", 1)[1]
+        upload_step = upload_step.split("\n      - name:", 1)[0]
+        assert "if: always()" in upload_step, (
+            f"{job}: 冒烟红/构建红时也要试着传(没有就 ignore)"
+        )
+        assert f"name: {artifact}" in upload_step
+        assert "if-no-files-found: ignore" in upload_step, (
+            f'{job}: 构建更早红掉时没有结论可传是预期内的, 不该在这里叠一个"没文件"的红'
+        )
+        assert not any(
+            artifact.startswith(f"allure-results-{os_name}-")
+            for os_name in ci_workflow.OS_PLATFORMS
+        ), (
+            f"{artifact} 会撞上每平台报告作业的下载 pattern(allure-results-<os>-*), "
+            "冒烟结论会被错并进单平台报告 —— 换一个不带的平台段"
+        )
 
     workflow = ci_workflow.workflow_text()
     summary = ci_workflow.job_block(workflow, "allure-summary")
-    assert "windows-package" in ci_workflow.needs_of(workflow, "allure-summary"), (
+    assert "package" in ci_workflow.needs_of(workflow, "allure-summary"), (
         "汇总不等打包就可能在它传完之前去下载, 冒烟那一节静默缺失"
     )
     assert "pattern: allure-results-*" in summary, "产物名要被这份 pattern 收走"
-    assert "needs.windows-package.result" in summary, (
+    assert "needs.package.result" in summary, (
         "条件期望必须从打包作业的结果推出, 不能写死"
+    )
+    assert "'Windows,Linux'" in summary, (
+        "条件期望的平台清单要与两个构建作业一一对应 —— 少一个报假绿, 多一个永远报假缺失"
     )
     assert '--expect-smoke-platforms "$SMOKE_EXPECTED"' in summary, (
         "期望平台要经变量传入(空 = 不适用), 写死会让非门禁运行每轮报假缺失"
     )
+
+
+def test_the_linux_package_bundles_a_tk_that_can_render_cjk() -> None:
+    """Linux 包里的 Tk 必须画得出汉字 —— 这是"能编"遮得住、"能用"遮不住的那类问题.
+
+    uv 托管的 CPython(python-build-standalone)自带的 Tcl/Tk 在 X11 上只走核心位图字体,
+    没有 fontconfig/FreeType(2026-10-02 实测, 完整记录在 ci.yml 视觉回归作业的注释里):
+    直接打包的话, 产物"能起"但界面是中文却一个汉字都画不出来, 而产物冒烟只看日志与退出码,
+    拦不住这种"能起但没法用"。所以 build-linux 要钉住整条换 Tk 的配方: 发行版 python3-tk
+    的 ``_tkinter`` 链着走 Xft/fontconfig 的发行版 libtk8.6, 构建步把它放到 PYTHONPATH 最
+    前面, PyInstaller 分析到的就是它、连同发行版 Tk/Tcl 的库与脚本一起冻结进包。
+    """
+    build = ci_workflow.RELEASE_BUILD_WORKFLOW.read_text(encoding="utf-8")
+    linux = ci_workflow.job_block(build, "build-linux")
+    windows = ci_workflow.job_block(build, "build")
+
+    # runner 钉死: 发行版 _tkinter 的 ABI 必须与冻结的解释器(uv 的 3.12)同小版本 ——
+    # ubuntu-24.04 的系统 Python 是 3.12; 换镜像=换配方, 这条断言跟着换。
+    hint = (
+        "build-linux 的 runner 要钉 ubuntu-24.04: 发行版 _tkinter(cp312)与 uv 的 3.12 匹配, "
+        "ubuntu-latest 漂移或换老镜像都会让换 Tk 的配方静默失效"
+    )
+    assert "runs-on: ubuntu-24.04" in linux, hint
+
+    apt_step = linux.split(
+        "- name: Install Xvfb, a CJK font, and the distro Tk 8.6", 1
+    )[1]
+    apt_step = apt_step.split("\n      - name:", 1)[0]
+    for package in ("xvfb", "fonts-noto-cjk", "python3-tk", "tcl8.6", "tk8.6"):
+        hint = (
+            f"apt 步要装 {package}: 显示(Xvfb)/CJK 字形/走 Xft-fontconfig 的发行版 Tk"
+        )
+        assert package in apt_step, hint
+    assert "tk-xft" in apt_step, "发行版 _tkinter 要拷出来留给构建步换上去"
+
+    build_step = linux.split("- name: Build the onefile package", 1)[1]
+    build_step = build_step.split("\n      - name:", 1)[0]
+    hint = "构建步必须把发行版 _tkinter 放到 PYTHONPATH 最前面(不然冻进包的是画不出汉字的那份 Tk)"
+    assert "PYTHONPATH: ${{ runner.temp }}/tk-xft" in build_step, hint
+    # 构建步要套 xvfb-run: PyInstaller 的 hook-pynput 靠 import 这个包来收集后端, 没有
+    # DISPLAY 时 pynput 一 import 就抛错, 两个 X11 后端(键盘/鼠标)不会进包 —— 装到用户
+    # 机器上就是"全局快捷键永远不可用", 而冒烟只把它记成一条 WARNING。
+    assert "xvfb-run -a uv run pyinstaller" in build_step, (
+        "Linux 构建步要包在 xvfb-run 里: 否则 pynput 的 X11 后端不会被收集, "
+        "产物里的全局快捷键永远不可用"
+    )
+    # 只认生效行(带冒号的 YAML 键): 注释里也写着这两个名字, 拿裸名字断言会被注释喂绿。
+    build_code = "\n".join(
+        line for line in build_step.splitlines() if not line.strip().startswith("#")
+    )
+    for variable in ("TCL_LIBRARY:", "TK_LIBRARY:"):
+        hint = (
+            f"{variable[:-1]} 要指到发行版的 Tcl/Tk 脚本库 —— "
+            "少了它冻结产物起不来(tk.tcl 找不到)"
+        )
+        assert variable in build_code, hint
+
+    # 冒烟步不能带换 Tk 的环境: 冒的是冻结后的产物, 环境必须与用户机器一致(包里那份 Tk
+    # 就是唯一该被用到的那份)。注释里拿它当反面说明不算数, 只看生效行。
+    smoke_step = linux.split("- name: Smoke test the built packages", 1)[1]
+    smoke_step = smoke_step.split("\n      - name:", 1)[0]
+    code = "\n".join(
+        line for line in smoke_step.splitlines() if not line.strip().startswith("#")
+    )
+    assert "PYTHONPATH" not in code, "冒烟步不能带 PYTHONPATH(要按用户环境冒冻结产物)"
+
+    # 产物打成 tar.gz: 浏览器下载裸二进制会丢可执行位。
+    prepare = linux.split("- name: Prepare the release file", 1)[1]
+    prepare = prepare.split("\n      - name:", 1)[0]
+    hint = "Linux 产物要打 tar.gz(保留可执行位), 名字固定 ArchiveManagement-linux-x64.tar.gz"
+    assert "tar -czf release/ArchiveManagement-linux-x64.tar.gz" in prepare, hint
+
+    # label 公式与 Windows 作业逐字一致: 两作业并行各算各的, 公式漂移会让发布作业按 Windows
+    # 的 label 去下 Linux 的产物(下不到, 发布直接红)。
+    formula = "label=$safe_ref-build-${{ github.run_number }}"
+    assert linux.count(formula) == 1, "Linux 作业要且只要算一次 label"
+    assert windows.count(formula) == 1, (
+        "两个构建作业的 label 公式必须一致 —— 并行各算各的, 漂移会让发布页下不到 Linux 产物"
+    )
+
+
+def test_the_release_publishes_both_platform_packages() -> None:
+    """发布页要挂**两个平台**的包: 两个下载步各下各的, create 用 release/* 收走整目录.
+
+    构建作业有两个、产物名不同, 发布作业就得下两次(Windows 按 `label`、Linux 按
+    `linux_label` —— 两作业并行各算各的, 公式被守卫钉成一致); 两份都落进 `release/` 后
+    `gh release create release/*` 一次收走。少下哪一份, 用户就在发布页看不到那个平台的包,
+    而构建是绿的 —— 这种"发布页静默缺包"没有任何一步会失败。
+    """
+    release = ci_workflow.RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    publish = ci_workflow.job_block(release, "publish")
+    assert "Download the build artifacts" in publish
+    assert "needs.build.outputs.label }}-windows-x64" in publish, (
+        "Windows 产物按构建作业传出的 label 下载"
+    )
+    assert "Download the Linux build artifacts" in publish, (
+        "Linux 产物要单独一个下载步(产物名不同, 不能用 pattern 一把收)"
+    )
+    assert "needs.build.outputs.linux_label }}-linux-x64" in publish, (
+        "Linux 产物按 build-linux 自己算的 label 下载"
+    )
+    create = publish.split("gh release create", 1)[1]
+    assert "release/*" in create, (
+        "两份产物都进 release/, create 用 glob 收走 —— 少一份用户就下不到"
+    )
+
+    dev = ci_workflow.DEV_RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    for suffix, label in (("-windows-x64", "label"), ("-linux-x64", "linux_label")):
+        assert f"needs.build.outputs.{label} }}}}{suffix}" in dev, (
+            f"dev 快照同样要下两平台的产物({suffix})"
+        )
+    assert "release/*" in dev, "dev 快照的 create 同样按目录收走两份产物"
+
+
+def test_the_pr_template_carries_the_download_guide_for_release_notes() -> None:
+    """发布说明的下载指引有模板可抄: 每个系统的**当版**直链放在 PR 模板的「本次变更」注释里.
+
+    「本次变更」会被原样取作 Release 正文(取文到下一个二级标题为止), 所以指引模板放在
+    那一节的注释里、发起者抄出去只改版本号。链接必须写**当版**地址
+    (releases/download/vX.Y.Z/...): "最新版"直链(releases/latest/download/...)留给 README ——
+    发布页正文里的它会在下一个版本发出后指向别的文件, 而那段说明描述的已不是"当前版本
+    该下哪个", 语义就漂了。守卫要防的正是有人"顺手统一"成 latest。
+    """
+    template = (_REPO_ROOT / ".github" / "pull_request_template.md").read_text(
+        encoding="utf-8"
+    )
+    notes = template.split("## 本次变更", 1)[1].split("\n## ", 1)[0]
+    for name in ("ArchiveManagement.exe", "ArchiveManagement-linux-x64.tar.gz"):
+        hint = f"下载指引模板要带 {name} 的当版直链(发起者只改版本号)"
+        assert (
+            f"(https://github.com/cswhrdf/ArchiveManagement/releases/download/vX.Y.Z/{name})"
+            in notes
+        ), hint
+    assert "glibc" in notes, (
+        "Linux 那行要写清 glibc 地板, 用户才知道自己的发行版在不在支持范围"
+    )
+    assert "releases/latest/download" not in notes, (
+        "发布说明里的链接要写当版地址: latest 直链会随下一个版本漂移"
+    )
+
+
+def test_the_readme_points_each_platform_at_the_latest_package() -> None:
+    """README 给每个支持的系统一条指向最新发布包的直链 —— 用户不该去发布页猜哪个文件是谁的.
+
+    与 PR 模板那份分工: README 用 `releases/latest/download/...`(永远指向最新正式版,
+    README 是活文档、随仓库更新), 发布说明用当版地址(它是快照, 不该跟着漂)。
+    """
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "## 下载安装" in readme, "README 要有「下载安装」一节"
+    table = readme.split("## 下载安装", 1)[1].split("\n## ", 1)[0]
+    for name in ("ArchiveManagement.exe", "ArchiveManagement-linux-x64.tar.gz"):
+        hint = f"{name} 要有 releases/latest/download 直链(始终指向最新正式版)"
+        assert (
+            f"(https://github.com/cswhrdf/ArchiveManagement/releases/latest/download/{name})"
+            in table
+        ), hint
+    for keyword in ("Ubuntu 24.04", "glibc", "桌面环境"):
+        assert keyword in table, (
+            f"Linux 那行要写清支持口径({keyword}): 老发行版或无桌面的机器下了也起不来"
+        )

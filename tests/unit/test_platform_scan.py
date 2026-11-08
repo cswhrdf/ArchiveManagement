@@ -27,6 +27,8 @@ from archive_management.services.platform_scan import (
     default_roots,
     parse_vdf_pairs,
     path_health,
+    read_epic_items,
+    read_json_object,
     read_steam_installs,
     registry_paths,
     steam_libraries,
@@ -214,6 +216,42 @@ def test_epic_manifests_are_discovered_and_broken_files_skipped(
     assert [item.name for item in candidates] == ["Celeste"]
     assert candidates[0].reason_code == "epic_manifest"
     assert candidates[0].detail == "celeste.item"
+
+
+def test_epic_items_expose_the_app_name_used_for_the_cloud_cache(
+    tmp_path: Path,
+) -> None:
+    """安装清单解析出 AppName 供云存档缓存定位; 缺这个字段时留空但不丢整条."""
+    manifests = (
+        tmp_path / "ProgramData" / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+    )
+    manifests.mkdir(parents=True)
+    (manifests / "EpicCeleste.item").write_text(
+        json.dumps(
+            {
+                "DisplayName": "Celeste",
+                "InstallLocation": str(tmp_path / "Games" / "Celeste"),
+                "AppName": "EpicCeleste",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (manifests / "OldStyle.item").write_text(
+        json.dumps(
+            {
+                "DisplayName": "Old Style",
+                "InstallLocation": str(tmp_path / "Games" / "OldStyle"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    items = read_epic_items(_roots(tmp_path))
+
+    assert [(item.name, item.app_name, item.manifest.name) for item in items] == [
+        ("Celeste", "EpicCeleste", "EpicCeleste.item"),
+        ("Old Style", "", "OldStyle.item"),
+    ]
 
 
 # --------------------------------------------------------------- 注册表来源
@@ -595,9 +633,12 @@ def test_read_json_returns_none_for_a_missing_or_non_object_file(
     """JSON 读不出来或顶层不是对象时返回 None(该来源整条跳过)."""
     listed = tmp_path / "list.item"
     listed.write_text("[1, 2]", encoding="utf-8")
+    broken = tmp_path / "broken.item"
+    broken.write_text("{not json", encoding="utf-8")
 
-    assert LocalGameScanner._read_json(tmp_path / "gone.item") is None
-    assert LocalGameScanner._read_json(listed) is None
+    assert read_json_object(tmp_path / "gone.item") is None
+    assert read_json_object(listed) is None
+    assert read_json_object(broken) is None
 
 
 def test_gog_entries_without_a_path_are_skipped(tmp_path: Path) -> None:
